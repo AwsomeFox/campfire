@@ -1,6 +1,6 @@
 import {
   Archmage13aAdapter,
-  createHomebrewRuleSystemAdapter,
+  tryCreateHomebrewRuleSystemAdapter,
   Dnd5eAdapter,
   DND5E_ADAPTER_ID,
   HomebrewMechanicsProfile,
@@ -18,9 +18,9 @@ import {
   listRuleSystemAdapters,
   NEUTRAL_ACTION_ECONOMY,
   NEUTRAL_HP_MODEL,
-  previewMechanicsProfileMigration,
   ruleSystemAdapter,
   type OsrMechanicsProfile,
+  type RuleSystemAdapter,
 } from '@campfire/schema';
 
 /**
@@ -32,6 +32,18 @@ import {
  * area explicitly called out for this issue — that NONE of this changes behavior for an
  * existing built-in system.
  */
+
+
+/**
+ * Non-null wrapper for the tests that pass a known-good profile. Resolution's own entry point
+ * returns null for a profile that fails validation (a malformed persisted row must not throw on
+ * a hot read path), so every call site here that expects an adapter says so explicitly.
+ */
+function mustCreateHomebrewAdapter(profile: unknown): RuleSystemAdapter {
+  const adapter = tryCreateHomebrewRuleSystemAdapter(profile);
+  if (!adapter) throw new Error('expected a valid homebrew profile to build an adapter');
+  return adapter;
+}
 
 const validHomebrewProfile: HomebrewMechanicsProfile = {
   slug: 'my-pirate-hack',
@@ -84,15 +96,15 @@ describe('HomebrewMechanicsProfile — runtime validation (issue #1502)', () => 
   });
 });
 
-describe('createHomebrewRuleSystemAdapter — the widened factory (issue #1502)', () => {
+describe('tryCreateHomebrewRuleSystemAdapter — the widened factory (issue #1502)', () => {
   it('builds a complete RuleSystemAdapter from a validated profile', () => {
-    const adapter = createHomebrewRuleSystemAdapter(validHomebrewProfile);
+    const adapter = mustCreateHomebrewAdapter(validHomebrewProfile);
     expect(adapter.id).toBe('my-pirate-hack');
     expect(adapter.label).toBe('Pirate Hack');
   });
 
   it('drives initiative from the profile (group mode, no DEX mod)', () => {
-    const adapter = createHomebrewRuleSystemAdapter(validHomebrewProfile);
+    const adapter = mustCreateHomebrewAdapter(validHomebrewProfile);
     expect(initiativeModelForAdapter(adapter)).toEqual({ mode: 'group', usesDexModifier: false });
     expect(adapter.initiativeModifier({ DEX: 18 })).toBe(0);
     expect(adapter.initiativeDie).toBe(6);
@@ -107,37 +119,37 @@ describe('createHomebrewRuleSystemAdapter — the widened factory (issue #1502)'
       abilityTable: 'bx-banded',
       abilityCap: 3,
     };
-    const adapter = createHomebrewRuleSystemAdapter(individualProfile);
+    const adapter = mustCreateHomebrewAdapter(individualProfile);
     expect(initiativeModelForAdapter(adapter)).toEqual({ mode: 'individual', usesDexModifier: true });
     expect(adapter.initiativeModifier({ DEX: 16 })).toBe(2); // bx-banded: 16 -> +2
   });
 
   it('drives its OWN condition vocabulary when the profile declares one', () => {
-    const adapter = createHomebrewRuleSystemAdapter(validHomebrewProfile);
+    const adapter = mustCreateHomebrewAdapter(validHomebrewProfile);
     expect(adapter.conditions).toEqual(['Soaked', 'Becalmed', 'Cursed']);
     expect(adapter.conditions).not.toEqual(OSR_CONDITIONS);
   });
 
   it('falls back to the shared OSR_CONDITIONS list when the profile omits conditions', () => {
     const { conditions: _conditions, ...withoutConditions } = validHomebrewProfile;
-    const adapter = createHomebrewRuleSystemAdapter(withoutConditions);
+    const adapter = mustCreateHomebrewAdapter(withoutConditions);
     expect(adapter.conditions).toEqual(OSR_CONDITIONS);
   });
 
   it('drives action economy toward the honest NEUTRAL default — never 5e or PF2e slots', () => {
-    const adapter = createHomebrewRuleSystemAdapter(validHomebrewProfile);
+    const adapter = mustCreateHomebrewAdapter(validHomebrewProfile);
     expect(actionEconomyForAdapter(adapter)).toEqual(NEUTRAL_ACTION_ECONOMY);
     expect(actionEconomyForAdapter(adapter).slots.map((s) => s.key)).toEqual(['action']);
   });
 
   it('never carries 5e death saves or massive-damage-instant-death for a homebrew system', () => {
-    const adapter = createHomebrewRuleSystemAdapter(validHomebrewProfile);
+    const adapter = mustCreateHomebrewAdapter(validHomebrewProfile);
     expect(hasDeathSavesForAdapter(adapter)).toBe(false);
     expect(hpModelForAdapter(adapter)).toEqual(NEUTRAL_HP_MODEL);
   });
 
   it('rejects an invalid raw profile rather than silently building a partial adapter', () => {
-    expect(() => createHomebrewRuleSystemAdapter({ ...validHomebrewProfile, acMode: 'bogus' })).toThrow();
+    expect(tryCreateHomebrewRuleSystemAdapter({ ...validHomebrewProfile, acMode: 'bogus' })).toBeNull();
   });
 });
 
@@ -191,30 +203,9 @@ describe('isRegisteredRuleSystemSlug (issue #1502)', () => {
   });
 });
 
-describe('previewMechanicsProfileMigration — reusing the migration-preview diff over profile objects (issue #1502)', () => {
-  it('lists mechanics changes between a stored profile and an edited version of itself', () => {
-    const edited: OsrMechanicsProfile = { ...validHomebrewProfile, acMode: 'descending', acAnchor: 9, initiativeMode: 'individual', initiativeUsesDexMod: true };
-    const preview = previewMechanicsProfileMigration(validHomebrewProfile, edited);
-    expect(preview.fromSlug).toBe('my-pirate-hack');
-    expect(preview.toSlug).toBe('my-pirate-hack');
-    expect(preview.changes.some((c) => c.includes('AC convention'))).toBe(true);
-    expect(preview.changes.some((c) => c.includes('Initiative'))).toBe(true);
-  });
-
-  it('reports no changes when the profile is diffed against an identical copy', () => {
-    const preview = previewMechanicsProfileMigration(validHomebrewProfile, { ...validHomebrewProfile });
-    expect(preview.changes).toEqual(['No mechanics changes — profiles are identical.']);
-  });
-
-  it('detects a condition-vocabulary change', () => {
-    const preview = previewMechanicsProfileMigration(validHomebrewProfile, { ...validHomebrewProfile, conditions: ['Soaked'] });
-    expect(preview.changes.some((c) => c.includes('Conditions'))).toBe(true);
-  });
-});
-
 describe('Parity — a factory-produced homebrew adapter behaves like every other registered adapter (issue #1502)', () => {
   it('satisfies the same death-save/grid-distance/initiative/action-economy expectations as listRuleSystemAdapters() members', () => {
-    const homebrewAdapter = createHomebrewRuleSystemAdapter(validHomebrewProfile);
+    const homebrewAdapter = mustCreateHomebrewAdapter(validHomebrewProfile);
     const allAdapters = [...listRuleSystemAdapters(), homebrewAdapter];
     for (const adapter of allAdapters) {
       const hasDeathSaves = hasDeathSavesForAdapter(adapter);
@@ -254,16 +245,6 @@ describe('#1502 review — resolution and diff hardening', () => {
     expect(initiativeModelForAdapter(adapter).mode).toBe('group');
   });
 
-  it('reports a re-split save list as a change instead of comparing joined strings', () => {
-    // `from.saves.join() !== to.saves.join()` cannot see this: both sides join to
-    // 'Grit,Sea Legs'. A homebrew author supplies `saves` as free text, so splitting one
-    // category into two is a real mechanics change a DM must see before committing.
-    const merged: HomebrewMechanicsProfile = { ...validHomebrewProfile, saves: ['Grit,Sea Legs'] };
-    const preview = previewMechanicsProfileMigration(merged, validHomebrewProfile);
-    expect(preview.changes.some((c) => c.includes('Save categories'))).toBe(true);
-    expect(preview.changes).not.toEqual(['No mechanics changes — profiles are identical.']);
-  });
-
   it('treats a MALFORMED stored profile as no profile at all rather than applying it', () => {
     // The server reads this column with an unchecked JSON.parse, so a row from an older
     // version, a restored backup, a hand repair, or an untrusted export document reaches
@@ -285,9 +266,4 @@ describe('#1502 review — resolution and diff hardening', () => {
     }
   });
 
-  it('reports a re-split condition list as a change too', () => {
-    const merged: HomebrewMechanicsProfile = { ...validHomebrewProfile, conditions: ['Soaked,Becalmed,Cursed'] };
-    const preview = previewMechanicsProfileMigration(merged, validHomebrewProfile);
-    expect(preview.changes.some((c) => c.includes('Conditions'))).toBe(true);
-  });
 });

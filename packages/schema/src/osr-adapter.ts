@@ -328,10 +328,11 @@ export interface OsrMigrationPreview {
  * the "from" and "to" are the same slug's profile before/after the edit).
  */
 /**
- * Element-wise list comparison. NOT `a.join() === b.join()`: a homebrew profile supplies its
- * own `saves` / `conditions` vocabulary as free text (issue #1502), so `['poison,death']` and
- * `['poison', 'death']` join to the same string and a real re-split of a save category would
- * be reported as "no change" in the migration preview a DM reads before committing.
+ * Element-wise list comparison. NOT `a.join() === b.join()`, which cannot tell
+ * `['poison,death']` from `['poison', 'death']` — a real re-split of a save or condition
+ * category would read as "no change" in the migration preview a DM sees before committing.
+ * The built-in vocabularies never take that shape, so this is correctness rather than a live
+ * bug; it costs three lines and removes the class.
  */
 function sameStringList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, i) => value === b[i]);
@@ -369,18 +370,6 @@ function diffMechanicsProfiles(from: OsrMechanicsProfile, to: OsrMechanicsProfil
 export function previewOsrMigration(fromSlug: string, toSlug: string): OsrMigrationPreview {
   const from = osrMechanicsProfile(fromSlug);
   const to = osrMechanicsProfile(toSlug);
-  return { fromSlug: from.slug, toSlug: to.slug, from, to, changes: diffMechanicsProfiles(from, to) };
-}
-
-/**
- * Same diff, over two arbitrary mechanics profile OBJECTS rather than two registry slugs
- * (issue #1502) — the seam a homebrew campaign's "you edited your rules, here's what shifts"
- * preview needs when comparing its OWN stored profile before/after an in-place edit, which
- * {@link previewOsrMigration}'s slug-keyed lookup cannot express (both sides would resolve to
- * the same registered slug). Reuses the exact same change-detection {@link previewOsrMigration}
- * uses, so the two never drift.
- */
-export function previewMechanicsProfileMigration(from: OsrMechanicsProfile, to: OsrMechanicsProfile): OsrMigrationPreview {
   return { fromSlug: from.slug, toSlug: to.slug, from, to, changes: diffMechanicsProfiles(from, to) };
 }
 
@@ -548,17 +537,6 @@ export const HomebrewMechanicsProfile = z
   })
   .strict();
 export type HomebrewMechanicsProfile = z.infer<typeof HomebrewMechanicsProfile>;
-
-/**
- * Validate an arbitrary (persisted, uploaded, or hand-authored) profile and build its
- * RuleSystemAdapter (issue #1502) — the widened, runtime-checked entry point onto the exact
- * same factory the six built-in OSR variants already use. Throws a ZodError (out-of-enum
- * strategy value, missing field, wrong type) rather than silently accepting malformed input.
- */
-export function createHomebrewRuleSystemAdapter(rawProfile: unknown): RuleSystemAdapter {
-  const profile = HomebrewMechanicsProfile.parse(rawProfile);
-  return createOsrVariantAdapter(profile);
-}
 
 /**
  * Non-throwing sibling for RESOLUTION (review). `ruleSystemAdapter` runs on hot read paths —
