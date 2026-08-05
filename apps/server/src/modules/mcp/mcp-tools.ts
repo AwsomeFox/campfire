@@ -1333,7 +1333,7 @@ export class McpToolsService {
         // band (#43) and fog-hidden token positions nulled (#40). Omitting the
         // role defaulted to full-DM view, leaking both to any player-scoped PAT.
         const role = await this.access.requireMember(user, row.campaignId);
-        return this.encounters.getWithCombatantsOrThrow(encounterId as number, role);
+        return this.encounters.getWithCombatantsOrThrow(encounterId as number, role, user.id);
       },
     );
 
