@@ -39,6 +39,7 @@ import {
   DifficultyBand,
   EncounterShape,
   EncounterUpdate,
+  EncounterEndTurn,
   EncounterNextTurn,
   EncounterPreviewRequest,
   EncounterCommit,
@@ -4749,22 +4750,16 @@ export class McpToolsService {
       'End the CURRENT combatant\'s turn (issue #413). The DM may always end it; a player may end the turn of their ' +
         'OWN active character when the campaign allows player advancement (dmControlsTurns=false). The server validates ' +
         'ownership + that it is actually that combatant\'s turn, serializes advancement, resolves start/end-of-turn ' +
-        'effects, and guards against double-advance: pass expectedCurrentCombatantId (the combatant you believe is ' +
+        'effects. Pass idempotencyKey (a stable id minted once for this ONE advance, reused verbatim on every retry) so ' +
+        'retrying after a timeout replays the original result instead of advancing twice. ' +
+        'It also guards against double-advance: pass expectedCurrentCombatantId (the combatant you believe is ' +
         'acting) and a 409 is returned if the turn already moved on. When the campaign requires DM confirmation a ' +
         'player end-turn is staged (409); the DM then advances it directly (a DM end-turn / next-turn is the confirmation).',
-      {
-        encounterId: Id.describe('Encounter id'),
-        expectedCurrentCombatantId: Id.nullable().optional().describe('Double-advance guard: the combatant you believe currently has the turn'),
-      },
-      async ({ encounterId, expectedCurrentCombatantId }) => {
+      { encounterId: Id.describe('Encounter id'), ...EncounterEndTurn.shape },
+      async ({ encounterId, ...body }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
-        return this.encounters.endTurn(
-          encounterId as number,
-          { expectedCurrentCombatantId: expectedCurrentCombatantId as number | null | undefined },
-          user,
-          role,
-        );
+        return this.encounters.endTurn(encounterId as number, body as EncounterEndTurn, user, role);
       },
     );
 
