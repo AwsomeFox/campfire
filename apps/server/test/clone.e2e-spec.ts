@@ -1,4 +1,7 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { combatants } from '../src/db/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 const TINY_PNG = Buffer.from(
@@ -124,6 +127,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       .send({ kind: 'npc', npcId, hpMax: 10 });
     expect(npcCombatant.status).toBe(201);
     expect(npcCombatant.body.npcDispositionSnapshot).toBe('hostile');
+    const npcDuplicate = await dmAgent
+      .post(`/api/v1/encounters/${encRes.body.id}/combatants`)
+      .send({ kind: 'npc', name: 'Bartender Echo', hpMax: 10, duplicateOfCombatantId: npcCombatant.body.id });
+    expect(npcDuplicate.status).toBe(201);
 
     await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/notes`)
@@ -320,7 +327,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(clonedRemote.portraitUrl).toBe('https://images.example.test/remote-voice.png');
 
       // Encounters copied with combatants (Hero + Remote Voice were auto-added on
-      // encounter create, so there are 4). The character combatant's characterId
+      // encounter create, so there are 5). The character combatant's characterId
       // must be remapped to the cloned character. Location/quest/session links
       // (issue #864) must also remap into the clone — never keep the source
       // campaign's ids.
@@ -333,7 +340,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(encDetail.body.locationId).not.toBe(locationId);
       expect(encDetail.body.questId).not.toBe(questId);
       expect(encDetail.body.sessionId).not.toBe(sessionId);
-      expect(encDetail.body.combatants.length).toBe(4);
+      expect(encDetail.body.combatants.length).toBe(5);
       // Issue #548: cloned encounters are fresh prep, not a snapshot of live combat.
       expect(encDetail.body.status).toBe('preparing');
       expect(encDetail.body.round).toBe(0);
@@ -350,6 +357,11 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       const bartender = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Bartender');
       expect(bartender).toBeDefined();
       expect(bartender.npcDispositionSnapshot).toBeNull();
+      const bartenderEcho = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Bartender Echo');
+      expect(bartenderEcho).toBeDefined();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const clonedDuplicate = await db.select().from(combatants).where(eq(combatants.id, bartenderEcho.id)).get();
+      expect(clonedDuplicate?.npcIdentitySourceId).toBe(clonedNpcs.body[0].id);
       const hero = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Hero');
       expect(hero.kind).toBe('character');
       expect(hero.characterId).toBe(clonedHero.id);
@@ -361,6 +373,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       const cloneStart = await dmAgent.post(`/api/v1/encounters/${encDetail.body.id}/start`);
       expect(cloneStart.status).toBe(201);
       expect(cloneStart.body.combatants.find((c: { name: string }) => c.name === 'Bartender').npcDispositionSnapshot).toBe('hostile');
+      expect(cloneStart.body.combatants.find((c: { name: string }) => c.name === 'Bartender Echo').npcDispositionSnapshot).toBe('hostile');
       const difficultyAtStart = await dmAgent.get(`/api/v1/encounters/${encDetail.body.id}/difficulty`);
       expect(difficultyAtStart.status).toBe(200);
       expect((await dmAgent.patch(`/api/v1/npcs/${clonedNpcs.body[0].id}`).send({ disposition: 'friendly' })).status).toBe(200);

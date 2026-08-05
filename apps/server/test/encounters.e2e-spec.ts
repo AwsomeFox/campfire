@@ -3466,6 +3466,14 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect((await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm)).status).toBe(201);
     const hiddenRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
     expect(JSON.stringify(hiddenRolls.body)).not.toMatch(/Traitor/);
+    const hiddenQuickRoll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/quick-roll`)
+      .set(dm)
+      .send({ combatantId: duplicateId, actionName: 'Hidden strike', kind: 'to-hit', expr: '+5', mode: 'flat' });
+    expect(hiddenQuickRoll.status).toBe(201);
+    expect(hiddenQuickRoll.body.roll).toMatchObject({ label: expect.stringContaining(UNKNOWN_COMBATANT_LABEL) });
+    const hiddenQuickRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(JSON.stringify(hiddenQuickRolls.body)).not.toMatch(/Traitor/);
     const mixedIdentity = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants`)
       .set(dm)

@@ -6178,7 +6178,7 @@ export class EncountersService {
     // Fresh-prep encounters (including campaign clones) deliberately have no
     // historical allegiance. Capture the linked NPC's current disposition exactly
     // when play starts, so a later NPC edit cannot rewrite the finished fight's XP.
-    const npcIds = [...new Set(rows.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+    const npcIds = [...new Set(rows.flatMap((row) => row.kind === 'npc' ? [row.npcId, row.npcIdentitySourceId].filter((id): id is number => id !== null) : []))];
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
       const npcDispositionById = new Map(
@@ -6194,7 +6194,7 @@ export class EncountersService {
       for (const [npcId, disposition] of npcDispositionById) {
         tx.update(combatants)
           .set({ npcDispositionSnapshot: disposition })
-          .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npcId)))
+          .where(and(eq(combatants.encounterId, encounterId), or(eq(combatants.npcId, npcId), eq(combatants.npcIdentitySourceId, npcId))))
           .run();
       }
 
@@ -8299,14 +8299,16 @@ export class EncountersService {
 
     // Redact hidden NPC or hidden encounter identity in campaign-wide dice rolls log (issue #1850 / review finding)
     let isActorHidden = false;
+    let npcIdentityId: number | null = null;
     if (encounter.hidden) {
       isActorHidden = true;
     } else if (combatantRow) {
-      if (combatantRow.kind === 'npc' && combatantRow.npcId !== null) {
+      npcIdentityId = combatantRow.npcIdentitySourceId ?? combatantRow.npcId;
+      if (combatantRow.kind === 'npc' && npcIdentityId !== null) {
         const [npc] = await this.db
           .select({ hidden: npcs.hidden })
           .from(npcs)
-          .where(and(eq(npcs.id, combatantRow.npcId), eq(npcs.campaignId, encounter.campaignId)))
+          .where(and(eq(npcs.id, npcIdentityId), eq(npcs.campaignId, encounter.campaignId)))
           .limit(1);
         if (npc?.hidden) {
           isActorHidden = true;
@@ -8376,6 +8378,10 @@ export class EncountersService {
         label: diceLabel,
         actor: diceActor,
         natural20: isNat20 ? 1 : 0,
+        encounterId,
+        ...(combatantRow?.kind === 'npc' && npcIdentityId !== null
+          ? { npcId: npcIdentityId }
+          : {}),
       },
       user,
     );
