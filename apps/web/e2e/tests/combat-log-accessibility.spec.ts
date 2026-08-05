@@ -208,31 +208,28 @@ test.describe('combat log accessibility — remote clients', () => {
       expect(afterDamage.join(' ')).not.toContain('9 of 10');
       expect(afterDamage.join(' ')).not.toContain('hit points');
 
-      // An unrelated encounter update refetches the same event list. The event ID cursor
-      // must suppress both duplicate combat-log speech and the former HP-diff speech.
-      // Wait for the actual `/events` GET response (not merely the request firing) so the
-      // refetch this test exists to cover has genuinely round-tripped before we look for a
-      // duplicate announcement — a request-start counter proves the app asked, not that the
-      // server answered and the client had data to (mis)render.
-      const eventsResponsePromise = viewerPage.waitForResponse(
-        (response) =>
-          response.request().method() === 'GET' &&
-          response.url().endsWith(`/encounters/${fixture.encounterId}/events`),
-      );
-      const refreshed = await dmPage.request.patch(`/api/v1/encounters/${fixture.encounterId}`, { data: { gridSnap: false } });
-      expect(refreshed.ok()).toBe(true);
-      await eventsResponsePromise;
-      const stableCount = await stableFilteredAnnouncementCount(viewerPage, (message) =>
-        message.includes('Outcome: took 1 damage'),
-      );
-      expect(stableCount).toBe(1);
-
+      // A later encounter update triggers a genuinely new `/events` fetch. `RunSessionPage`
+      // sends `If-None-Match` keyed on the last-seen event id, so an update that appends NO
+      // new event (e.g. an unrelated `gridSnap` toggle) 304s — the cached array keeps its
+      // exact object reference, the announcer effect's dependency never changes, and the
+      // effect simply never reruns, so no duplicate could ever appear regardless of whether
+      // the ID-cursor logic itself is sound. That would make this guard pass trivially.
+      // Use the condition PATCH below (already required for the next assertion) instead: it
+      // appends a real new event, forcing a 200 response with a brand-new array reference —
+      // the announcer effect reruns over the FULL history including the already-announced
+      // damage event, and only the ID cursor stops it from re-announcing that old entry.
       const conditioned = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
         { data: { addConditions: ['Prone'] } },
       );
       expect(conditioned.ok()).toBe(true);
       await waitForAnnouncement(viewerPage, 'Outcome: gained Prone');
+      const stableDamageCount = await stableFilteredAnnouncementCount(viewerPage, (message) =>
+        message.includes('Outcome: took 1 damage'),
+      );
+      expect(stableDamageCount).toBe(1);
+      const proneCount = (await announcements(viewerPage)).filter((message) => message.includes('Outcome: gained Prone'));
+      expect(proneCount).toHaveLength(1);
 
       const announcementCountBeforeTurn = (await announcements(viewerPage)).length;
       const turned = await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/next-turn`);
