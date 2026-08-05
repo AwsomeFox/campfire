@@ -26,25 +26,21 @@ interface PlayerVitalsHeaderProps {
  * resolution the server uses in getTurnWorkspace (encounters.service.ts) EXACTLY:
  * the combatant's add-time snapshot, or — full stop — the caller-supplied adapter
  * default. Deliberately does NOT fall through to the character sheet's live speed
- * when the snapshot is null (round 4 review finding on PR #1980, applied here too):
- * `combatant.speed === null` is ambiguous between "predates the column" and "the
- * character had no speed set at add time" (the common case — Character.speed
- * defaults to null), and a live-character fallback would show a DIFFERENT number
- * here than getTurnWorkspace enforces for that same ambiguous case, reintroducing
- * the exact client/server disagreement this component's precedence fix (combatant-
- * before-character) was written to close. Returns `null` — not a fabricated 0 —
- * when the campaign's adapter has no movement slot at all; the caller must not
- * render a fabricated speed for a system that doesn't have one.
+ * when the snapshot is null: `combatant.speed === null` is ambiguous between "predates the column"
+ * and "the character had no speed set at add time", and a live-character fallback would show a DIFFERENT number.
  */
 export function vitalsSpeedFor(combatant: Combatant, movementDefault: number | undefined): number | null {
-  if (combatant.speed != null) return combatant.speed;
+  const speed = (combatant as { speed?: number | null }).speed;
+  if (speed != null) return speed;
   return movementDefault ?? null;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax: _onSetHpMax, turnPulse = false, currentCombatantId, movementDefault }: PlayerVitalsHeaderProps) {
-  useTranslation();
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault }: PlayerVitalsHeaderProps) {
+  const { t } = useTranslation('encounters');
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
+  const [editingMaxFor, setEditingMaxFor] = useState<number | null>(null);
+  const [maxHpDraft, setMaxHpDraft] = useState('');
 
   if (combatants.length === 0) return null;
 
@@ -58,15 +54,23 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
     setAdjustHpFor(null);
   }
 
+  function commitMaxHp(combatantId: number) {
+    if (!maxHpDraft || maxHpDraft.includes('.') || !onSetHpMax) return;
+    const max = parseInt(maxHpDraft, 10);
+    if (!isNaN(max) && Number.isInteger(max) && max >= 1) {
+      onSetHpMax(combatantId, max);
+    }
+    setMaxHpDraft('');
+    setEditingMaxFor(null);
+  }
+
   return (
     <div className="sticky top-0 z-10 w-full mb-4">
       {combatants.map(c => {
         const char = c.characterId ? charactersById.get(c.characterId) : undefined;
         const ac = char?.ac ?? c.eac ?? c.statblock?.ac ?? '—';
         const speed = vitalsSpeedFor(c, movementDefault);
-        const spellSaveDc = (char?.stats as any)?.spellSaveDc ?? (char?.stats as any)?.spell_save_dc ?? '—';
-        const spellAttack = (char?.stats as any)?.spellAttack ?? (char?.stats as any)?.spell_attack ?? '—';
-        
+
         return (
           <Card key={c.id} className={`flex flex-col md:flex-row flex-wrap gap-4 items-center bg-neutral-900 border-b-4 border-accent p-3 shadow-md mb-2 ${turnPulse && c.id === currentCombatantId ? 'cf-turn-beat-pulse' : ''}`}>
             <div className="flex flex-col flex-1 min-w-[120px]">
@@ -81,12 +85,35 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
               <button 
                 type="button"
                 className="flex flex-col items-center cf-target-44 min-w-[44px] cursor-pointer bg-transparent border-none text-white hover:bg-neutral-800 rounded p-1"
-                onClick={() => setAdjustHpFor(adjustHpFor === c.id ? null : c.id)}
+                onClick={() => {
+                  setEditingMaxFor(null);
+                  setAdjustHpFor(adjustHpFor === c.id ? null : c.id);
+                }}
                 title="Quick HP adjust"
               >
                 <span className="text-xs text-muted">HP</span>
                 <span className="font-bold text-lg leading-none">{c.hpCurrent} / {c.hpMax}</span>
               </button>
+
+              {onSetHpMax && (
+                <button
+                  type="button"
+                  aria-label={t('encounters.vitals.editMaxHp', 'Edit max HP')}
+                  className="cf-target-44 min-w-[44px] text-xs text-muted hover:text-white p-1 rounded hover:bg-neutral-800"
+                  onClick={() => {
+                    setAdjustHpFor(null);
+                    if (editingMaxFor === c.id) {
+                      setEditingMaxFor(null);
+                    } else {
+                      setEditingMaxFor(c.id);
+                      setMaxHpDraft(String(c.hpMax));
+                    }
+                  }}
+                  title={t('encounters.vitals.editMaxHp', 'Edit max HP')}
+                >
+                  ✏️
+                </button>
+              )}
               
               <div className="w-32 hidden sm:block">
                 <HpBar current={c.hpCurrent ?? 0} max={c.hpMax ?? 1} />
@@ -114,7 +141,24 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
               </div>
             )}
 
-            <div className="flex items-center gap-4 min-w-[100px]">
+            {editingMaxFor === c.id && (
+              <div className="flex items-center gap-2 bg-neutral-800 p-2 rounded-md shadow-inner">
+                <TextInput
+                  autoFocus
+                  placeholder={t('encounters.vitals.maxHp', 'Max HP')}
+                  className="w-24 text-sm cf-target-44"
+                  value={maxHpDraft}
+                  onChange={(e) => setMaxHpDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitMaxHp(c.id);
+                    if (e.key === 'Escape') setEditingMaxFor(null);
+                  }}
+                />
+                <Btn className="cf-target-44" density="xs" onClick={() => commitMaxHp(c.id)}>{t('encounters.vitals.setMax', 'Set Max')}</Btn>
+              </div>
+            )}
+
+            <div className="flex items-center gap-4 min-w-[80px]">
               <div className="flex flex-col items-center cf-target-44 justify-center">
                 <GameIcon slug="shield" size={14} className="text-muted" />
                 <span className="font-bold">{ac}</span>
@@ -123,18 +167,6 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
                 <div className="flex flex-col items-center cf-target-44 justify-center">
                   <span className="text-xs text-muted leading-none">Speed</span>
                   <span className="font-bold">{speed}</span>
-                </div>
-              )}
-              {spellSaveDc !== '—' && (
-                <div className="flex flex-col items-center cf-target-44 justify-center hidden sm:flex">
-                  <span className="text-xs text-muted leading-none">Spell DC</span>
-                  <span className="font-bold">{spellSaveDc}</span>
-                </div>
-              )}
-              {spellAttack !== '—' && (
-                <div className="flex flex-col items-center cf-target-44 justify-center hidden sm:flex">
-                  <span className="text-xs text-muted leading-none">Spell Atk</span>
-                  <span className="font-bold">{spellAttack}</span>
                 </div>
               )}
             </div>

@@ -1,6 +1,11 @@
 {
   "encounters": {
     "title": "Encounters",
+    "vitals": {
+      "editMaxHp": "Edit max HP",
+      "maxHp": "Max HP",
+      "setMax": "Set Max"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
