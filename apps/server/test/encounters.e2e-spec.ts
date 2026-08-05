@@ -8255,14 +8255,24 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
         .post('/api/v1/campaigns')
         .set(dm)
         .send({ name: '13A Escalation Range Test', ruleSystem: 'archmage-srd' });
+      expect(camp.status).toBe(201);
       const enc = await request(server)
         .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
         .set(dm)
         .send({ name: 'Escalation Fight' });
+      expect(enc.status).toBe(201);
       await request(server).post(`/api/v1/encounters/${enc.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Orc', hpMax: 20 });
       await request(server).post(`/api/v1/encounters/${enc.body.id}/roll-initiative`).set(dm);
-      await request(server).post(`/api/v1/encounters/${enc.body.id}/start`).set(dm);
+      const started = await request(server).post(`/api/v1/encounters/${enc.body.id}/start`).set(dm);
+      expect(started.status).toBe(201);
 
+      // `POST /encounters/:id/escalation` param-parses `:id` with ParseIntPipe before
+      // ever reaching the archmage-adapter override-range check. If campaign/encounter
+      // creation above silently failed, `enc.body.id` would be `undefined` and the
+      // route would 400 from ParseIntPipe alone — the exact same status this test
+      // expects from a genuinely out-of-range override — letting a broken setup pass
+      // silently. The asserts above pin the setup to 200/201 so a 400 below can only
+      // come from the override-range check itself.
       const highRes = await request(server)
         .post(`/api/v1/encounters/${enc.body.id}/escalation`)
         .set(dm)

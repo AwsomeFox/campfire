@@ -44,12 +44,19 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
       await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
       await checkOverflow('initial load');
 
-      // Step 2: Next turn. `click()` only awaits the DOM dispatch, not the mutation
-      // round-trip + re-render, so an overflow check right after it can still measure the
-      // pre-advance layout — wait for the `/next-turn` response first (matching the settle
-      // discipline the damage/condition steps below already use).
+      // The turn-workspace actor name (TurnWorkspace.tsx: `<h2>{turn.current.name}</h2>`)
+      // is the real signal that the UI applied a turn advance — `nextTurnMut`'s onSettled
+      // only invalidates the encounter/turn queries (RunSessionPage.tsx), so the visible
+      // update lands via react-query's follow-up refetch + re-render, not the POST
+      // response itself. Waiting only on the POST response (as this test used to) can
+      // still measure the pre-advance layout if that refetch/render hasn't landed yet.
+      const actorHeading = page.getByTestId('turn-workspace').locator('h2').first();
+
+      // Step 2: Next turn. Wait for BOTH the mutation response and the actor name to
+      // actually change before checking overflow.
       const nextTurnBtn = page.getByTestId('encounter-header-next-turn');
       await expect(nextTurnBtn).toBeVisible();
+      const actorBeforeNextTurn = await actorHeading.textContent();
       const [nextTurnResponse] = await Promise.all([
         page.waitForResponse(
           (res) => res.url().includes('/next-turn') && res.request().method() === 'POST',
@@ -57,6 +64,7 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
         nextTurnBtn.click(),
       ]);
       expect(nextTurnResponse.ok(), 'next-turn click must advance the turn').toBe(true);
+      await expect(actorHeading).not.toHaveText(actorBeforeNextTurn ?? '');
       await checkOverflow('next turn');
 
       // Step 3: Damage / HP adjustment. The real control is the `hp-steppers` group
@@ -95,7 +103,9 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
       await expect(page.locator('input[id^="condition-name-"]').first()).toBeVisible();
       await checkOverflow('condition editor expanded');
 
-      // Step 5: End turn / cycle — same settle discipline as Step 2 above.
+      // Step 5: End turn / cycle — same settle discipline as Step 2 above: wait for both
+      // the mutation response and the actor name to actually change.
+      const actorBeforeEndTurn = await actorHeading.textContent();
       const [endTurnResponse] = await Promise.all([
         page.waitForResponse(
           (res) => res.url().includes('/next-turn') && res.request().method() === 'POST',
@@ -103,6 +113,7 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
         nextTurnBtn.click(),
       ]);
       expect(endTurnResponse.ok(), 'end-turn click must advance the turn').toBe(true);
+      await expect(actorHeading).not.toHaveText(actorBeforeEndTurn ?? '');
       await checkOverflow('end turn');
 
       // 320px target size assertions
