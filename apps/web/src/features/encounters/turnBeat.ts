@@ -43,3 +43,16 @@ export function detectTurnBeat(
   }
   return null;
 }
+
+/**
+ * A loaded encounter establishes a silent baseline, but a delivered SSE frame
+ * is always a real edge. If the stream wins the initial-load race, retain a
+ * generic beat until the viewer's authorized roster and turn workspace can
+ * hydrate its details.
+ */
+export function detectSseTurnBeat(
+  previous: TurnBeatSnapshot | null,
+  next: TurnBeatSnapshot,
+): TurnBeatKind | null {
+  return detectTurnBeat(previous, next) ?? (previous == null ? 'turn' : null);
+}

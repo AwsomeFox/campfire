@@ -34,7 +34,7 @@ import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
-import { detectTurnBeat, type TurnBeatSnapshot } from './turnBeat';
+import { detectSseTurnBeat, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -1223,7 +1223,7 @@ export default function RunSessionPage() {
             isYourTurn,
           };
           const previous = previousTurnBeatRef.current;
-          const kind = detectTurnBeat(previous, next);
+          const kind = detectSseTurnBeat(previous, next);
           previousTurnBeatRef.current = next;
           const tickerKind = previous?.round != null && next.round != null && next.round > previous.round
             ? 'round-wrap'

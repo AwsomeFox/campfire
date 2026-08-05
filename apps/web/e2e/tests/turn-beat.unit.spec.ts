@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { formatDocumentTitle, setDocumentTitlePrefix } from '../../src/app/routeFocus';
 import { isCampaignEvent } from '../../src/lib/useCampaignEvents';
-import { detectTurnBeat, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
+import { detectSseTurnBeat, detectTurnBeat, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
 
 const initial: TurnBeatSnapshot = {
   encounterId: 8,
@@ -17,6 +17,11 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(detectTurnBeat(null, initial)).toBeNull();
     expect(detectTurnBeat(initial, initial)).toBeNull();
     expect(turnBeatKey(initial)).toBe('8:12:1');
+  });
+
+  test('preserves an SSE edge that precedes the initial encounter baseline', () => {
+    expect(detectSseTurnBeat(null, initial)).toBe('turn');
+    expect(detectSseTurnBeat(initial, initial)).toBeNull();
   });
 
   test('detects an owned edge once per combatant and round', () => {
