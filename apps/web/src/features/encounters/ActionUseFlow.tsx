@@ -37,7 +37,7 @@ function isAllyTarget(actor: Combatant, target: Combatant): boolean {
     : target.kind === 'monster' || target.kind === 'npc';
 }
 
-function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
+export function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
   const actor = combatants.find((c) => c.id === actorId);
   if (!actor) return [];
   if (allow === 'self') return combatants.filter((c) => c.id === actorId);
@@ -55,12 +55,15 @@ export function ActionUsePanel({
   actionName,
   spec,
   combatants,
+  targetIds,
+  onToggleTarget,
   isDm,
   applyDisabled = false,
   applyGateReason,
   onDismiss,
   onApplied,
   onError,
+  onPreview,
 }: {
   encounterId: number;
   actorCombatantId: number;
@@ -69,6 +72,8 @@ export function ActionUsePanel({
   actionName: string;
   spec: ActionSpec;
   combatants: Combatant[];
+  targetIds: number[];
+  onToggleTarget: (id: number) => void;
   isDm: boolean;
   applyDisabled?: boolean;
   /**
@@ -81,12 +86,12 @@ export function ActionUsePanel({
   onDismiss: () => void;
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
+  onPreview: () => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
   const queryClient = useQueryClient();
   const [step, setStep] = useState<Step>('targets');
-  const [targetIds, setTargetIds] = useState<number[]>([]);
   const [preview, setPreview] = useState<ActionResolveResult | null>(null);
   const [commitSubmitted, setCommitSubmitted] = useState(false);
   const [isUnconfirmed, setIsUnconfirmed] = useState(false);
@@ -131,6 +136,7 @@ export function ActionUsePanel({
     onSuccess: (res) => {
       setPreview(res);
       setStep('preview');
+      onPreview();
       announce(res.resolution.playerSummary);
     },
     onError: (err) => onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })),
@@ -176,15 +182,6 @@ export function ActionUsePanel({
       }
     },
   });
-
-  function toggleTarget(id: number) {
-    setTargetIds((prev) => {
-      if (prev.includes(id)) return prev.filter((x) => x !== id);
-      const max = spec.targets.count > 0 ? spec.targets.count : 50;
-      if (prev.length >= max) return prev;
-      return [...prev, id];
-    });
-  }
 
   const canPreview = !needsTarget || targetIds.length > 0;
 
@@ -240,7 +237,7 @@ export function ActionUsePanel({
                     type="button"
                     className={targetIds.includes(c.id) ? 'tag tag-accent' : 'tag tag-neutral'}
                     aria-pressed={targetIds.includes(c.id)}
-                    onClick={() => toggleTarget(c.id)}
+                    onClick={() => onToggleTarget(c.id)}
                     style={{ minHeight: 44, minWidth: 44, cursor: 'pointer', border: 0 }}
                   >
                     {c.name}
@@ -362,4 +359,3 @@ export function ActionUsePanel({
     </div>
   );
 }
-

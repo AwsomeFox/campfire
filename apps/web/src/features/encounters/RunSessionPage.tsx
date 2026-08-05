@@ -49,7 +49,7 @@ import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { CheckRequestPanel } from './CheckRequests';
-import { ActionUsePanel } from './ActionUseFlow';
+import { ActionUsePanel, legalTargets } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { NotFoundState } from '../../components/NotFoundState';
@@ -658,6 +658,8 @@ export default function RunSessionPage() {
     actionName: string;
     spec: ActionSpec;
   } | null>(null);
+  const [actionTargetIds, setActionTargetIds] = useState<number[]>([]);
+  const [actionTargetsDeclared, setActionTargetsDeclared] = useState(false);
   const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
@@ -1621,10 +1623,24 @@ export default function RunSessionPage() {
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
       setPendingApply(null);
+      setActionTargetIds([]);
+      setActionTargetsDeclared(false);
       setPendingActionUse({ combatantId, actorName, actionIndex, actionName, spec });
     },
     [],
   );
+
+  const toggleActionTarget = useCallback((id: number) => {
+    setActionTargetIds((previous) => {
+      if (!pendingActionUse) return previous;
+      if (previous.includes(id)) return previous.filter((targetId) => targetId !== id);
+      const max = pendingActionUse.spec.targets.count > 0 ? pendingActionUse.spec.targets.count : 50;
+      return previous.length >= max ? previous : [...previous, id];
+    });
+  }, [pendingActionUse]);
+  const actionLegalTargetIds = useMemo(() => pendingActionUse
+    ? legalTargets(encounter?.combatants ?? [], pendingActionUse.combatantId, pendingActionUse.spec.targets.allow).map((combatant) => combatant.id)
+    : [], [encounter?.combatants, pendingActionUse]);
 
   const onAoeHitLayoutChange = useCallback((layout: AoeHitLayout | null) => {
     setAoeHitLayout(layout);
@@ -3519,6 +3535,7 @@ export default function RunSessionPage() {
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
+          targeting={pendingActionUse ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, onToggle: toggleActionTarget } : null}
         />
       )}
 
@@ -3780,6 +3797,9 @@ export default function RunSessionPage() {
           actionName={pendingActionUse.actionName}
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
+          targetIds={actionTargetIds}
+          onToggleTarget={toggleActionTarget}
+          onPreview={() => setActionTargetsDeclared(true)}
           isDm={isDm}
           // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
           // from `EncountersService.assertNoSafetyHold`. Threading the hold only into the
@@ -3793,12 +3813,14 @@ export default function RunSessionPage() {
           // would have allowed. The hold reaches Apply alone, via `applyGateReason`.
           applyDisabled={riskyBlocked}
           applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
-          onDismiss={() => setPendingActionUse(null)}
+          onDismiss={() => { setPendingActionUse(null); setActionTargetIds([]); setActionTargetsDeclared(false); }}
           onError={surfaceActionError}
           onApplied={(token, _policy, sourceEncounterId) => {
             if (!isCurrentCombatantUndoEncounter(sourceEncounterId, activeEncounterIdRef.current)) return;
             void invalidateEncounter(queryClient, sourceEncounterId);
             setPendingActionUse(null);
+            setActionTargetIds([]);
+            setActionTargetsDeclared(false);
             if (trashedEncounterIdsRef.current.has(sourceEncounterId)) return;
             dismissCompetingRecoveryUndos();
             setActionUndo({ token, label: pendingActionUse.actionName });
@@ -3982,6 +4004,7 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onRemove={() => setConfirmRemoveCombatantId(c.id)}
+                  targeting={pendingActionUse ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), onToggle: () => toggleActionTarget(c.id) } : null}
                 />
               ))
             )}

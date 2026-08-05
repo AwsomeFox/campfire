@@ -195,6 +195,7 @@ export type BattleMapProps = {
   castToken?: string | null;
   hpFeedbackByCombatant?: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   ruleSystem: string | null;
+  targeting?: { actorId: number; legalIds: readonly number[]; selectedIds: readonly number[]; declared: boolean; onToggle: (id: number) => void } | null;
 };
 
 export function BattleMap({
@@ -230,6 +231,7 @@ export function BattleMap({
   castToken = null,
   hpFeedbackByCombatant = new Map(),
   ruleSystem,
+  targeting = null,
 }: BattleMapProps) {
   const isCast = projection === 'cast';
   const effectiveIsDm = isCast ? false : isDm;
@@ -2323,6 +2325,24 @@ export function BattleMap({
                   );
                 })()}
 
+                {targeting && (() => {
+                  const actor = placed.find((combatant) => combatant.id === targeting.actorId);
+                  if (!actor || actor.tokenX == null || actor.tokenY == null) return null;
+                  const actorX = actor.tokenX;
+                  const actorY = actor.tokenY;
+                  return (
+                    <svg data-testid="map-target-lines" className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ pointerEvents: 'none', zIndex: 1 }}>
+                      {targeting.selectedIds.map((targetId) => {
+                        const target = placed.find((combatant) => combatant.id === targetId);
+                        if (!target || target.tokenX == null || target.tokenY == null) return null;
+                        const targetX = target.tokenX;
+                        const targetY = target.tokenY;
+                        return <line key={targetId} data-testid={`map-target-line-${targetId}`} x1={actorX} y1={actorY} x2={targetX} y2={targetY} stroke="var(--color-accent)" strokeWidth="0.45" opacity="0.6" strokeDasharray={targeting.declared ? '1.2 0.8' : undefined} vectorEffect="non-scaling-stroke" />;
+                      })}
+                    </svg>
+                  );
+                })()}
+
                 {placed.map((c) => {
                   const feedback = hpFeedbackByCombatant.get(c.id) ?? [];
                   const feedbackClass = feedback.some((event) => event.kind === 'down')
@@ -2346,7 +2366,9 @@ export function BattleMap({
                           gridType,
                         });
                   const selectedForBatch = selectedTokenIds.has(c.id);
-                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedForBatch ? ', selected' : ''}`;
+                  const legalTarget = targeting?.legalIds.includes(c.id) ?? false;
+                  const selectedTarget = targeting?.selectedIds.includes(c.id) ?? false;
+                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedTarget ? ', target selected' : selectedForBatch ? ', selected' : ''}`;
                   const hpFraction = tokenHpFraction(c);
                   const hpTone = tokenHpTone(hpFraction);
                   const arc = tokenArcGeometry(sizePx);
@@ -2380,14 +2402,15 @@ export function BattleMap({
                         left: `${left}%`,
                         top: `${top}%`,
                         // In measure/reveal mode tokens must not eat the surface drag.
-                        pointerEvents: movable ? 'auto' : 'none',
+                        pointerEvents: movable || legalTarget ? 'auto' : 'none',
                         touchAction: 'none',
                         cursor: movable ? 'grab' : 'default',
-                        opacity: isDragging ? 0.85 : 1,
-                        outline: selectedForBatch ? '3px solid var(--color-accent)' : undefined,
+                        opacity: isDragging ? 0.85 : targeting && !legalTarget ? 0.6 : 1,
+                        outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
                         zIndex: isDragging ? 10 : 2,
                       }}
                       onPointerDown={(e) => onTokenPointerDown(e, c)}
+                      onClick={() => { if (legalTarget) targeting?.onToggle(c.id); }}
                       onKeyDown={(e) => onTokenKeyDown(e, c)}
                       onFocus={(e) => {
                         setSelectedTokenId(c.id);
@@ -2411,6 +2434,7 @@ export function BattleMap({
                         >
                           {tokenInitials(c.name)}
                         </span>
+                        {selectedTarget && <span aria-hidden="true" data-testid={`map-target-crosshair-${c.id}`} style={{ position: 'absolute', inset: -7, display: 'grid', placeItems: 'center', color: 'var(--color-accent)', fontSize: Math.max(14, Math.round(sizePx * .45)), pointerEvents: 'none' }}>⌖</span>}
                         {showTokenState && hpFraction != null && hpTone != null && (
                           <svg data-testid={`map-token-hp-arc-${c.id}`} width={sizePx} height={sizePx} viewBox={`0 0 ${sizePx} ${sizePx}`}
                             aria-label={t('encounters.map.tokenDetails.hp', { state: t(`encounters.map.tokenDetails.hpStates.${hpTone}`) })}

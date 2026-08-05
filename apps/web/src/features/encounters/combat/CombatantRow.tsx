@@ -122,6 +122,7 @@ export type CombatantRowProps = {
   onRemove: () => void;
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
+  targeting?: { legal: boolean; selected: boolean; onToggle: () => void } | null;
 };
 
 export function CombatantRow({
@@ -169,6 +170,7 @@ export function CombatantRow({
   onReleaseLegendary,
   onDuplicate,
   onRemove,
+  targeting = null,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   // Issue #1746: one shared reason string for every write control this row disables while
@@ -289,6 +291,8 @@ export function CombatantRow({
       ref={rowRef}
       data-testid={`combatant-row-${combatant.id}`}
       data-current-turn={isCurrentTurn ? 'true' : undefined}
+      data-target-legal={targeting?.legal ? 'true' : undefined}
+      data-target-selected={targeting?.selected ? 'true' : undefined}
       className={`cf-hp-feedback-anchor${feedbackClass}`}
       style={{
         display: 'flex',
@@ -298,10 +302,11 @@ export function CombatantRow({
         padding: '9px 14px',
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
-        boxShadow: isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+        boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
         opacity: down ? 0.55 : 1,
         filter: down ? 'grayscale(0.75)' : 'none',
       }}
+      onClick={() => { if (targeting?.legal) targeting.onToggle(); }}
     >
       <FloatingNumbers events={hpFeedbackEvents} />
       {/* Issue #1746: single accessible reason shared by every write control this row
