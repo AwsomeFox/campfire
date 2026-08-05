@@ -1346,11 +1346,3 @@ export function CombatantRow({
     </div>
   );
 }
-
-/**
- * Collapsible statblock for a compendium-linked monster combatant (issue #56). The
- * combatant only stores a `ruleEntryId`; the entry's AC / attacks / ability scores live
- * in its `dataJson`, fetched lazily from the existing rules read path on first expand
- * and rendered with the shared StatBlock component (added by #142). Kept collapsed by
- * default so the initiative row stays scannable mid-fight.
- */

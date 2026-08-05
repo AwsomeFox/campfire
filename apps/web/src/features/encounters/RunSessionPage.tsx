@@ -482,31 +482,6 @@ function InitiativeStrip({
 }
 
 
-/**
- * 5e death-save tracker (issue #57): three success pips + three failure pips for a
- * character at 0 HP. Clicking a pip sets the count to that position (clicking the
- * highest-lit pip clears it back down), committing via onSet. Read-only unless
- * `canEditPermission`; also disabled (not unmounted) while `syncBlocked` (issue #1746).
- *
- * Roll button (issue #1462): requests one server-authoritative d20, which drives both
- * the 5e outcome and the matching shared dice-log entry.
- */
-/**
- * Death-save pips (issue #428 hit area, #1478 stability).
- *
- * MUST stay at module scope. This used to be declared inside `DeathSaveTracker`'s body,
- * which minted a NEW component type on every render of the tracker. React compares
- * element types by identity, so a fresh type meant the whole pip subtree was unmounted
- * and remounted on every re-render instead of being updated in place — the DOM nodes were
- * destroyed and rebuilt several times per second while the encounter polled.
- *
- * That cost more than churn: it dropped keyboard focus from a pip mid-interaction, and it
- * made the buttons intermittently unmeasurable — an element could pass a visibility check
- * and then be detached before its box could be read a moment later. That is exactly what
- * made `combat-mobile-target-size.spec.ts` "flaky" at phone widths (worst at 430px, where
- * the larger viewport renders more and widens the window). Hoisting the component gives it
- * a stable identity, so React reconciles the existing nodes and the pips stop churning.
- */
 /** Combat-log actor for HP/death patches (issues #620, #494). Omit self-attribution. */
 function hpLogActorId(actorCombatantId: number | undefined | null, targetCombatantId: number): number | undefined {
   if (actorCombatantId == null || actorCombatantId === targetCombatantId) return undefined;
