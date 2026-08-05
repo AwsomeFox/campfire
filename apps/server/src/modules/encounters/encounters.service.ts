@@ -3508,8 +3508,8 @@ export class EncountersService {
    * NOTHING — any member (or AI) may preview; committing is the separate write path.
    */
   async previewEncounter(campaignId: number, input: EncounterPreviewInput, _viewerRole?: Role): Promise<EncounterPreview> {
-    const adapter = await this.adapterForCampaign(campaignId);
     const ruleSystem = await this.ruleSystemForCampaign(campaignId);
+    const adapter = ruleSystemAdapter(ruleSystem);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
     const candidates = await this.loadMonsterCandidates(adapter, input.filters);
     const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
