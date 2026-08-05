@@ -5,11 +5,10 @@
  * type "2d6+3" mid-combat anymore — but the advanced expression box still lives in
  * SharedDiceLog for power users.
  *
- * Scope note: the server roll endpoint understands a single die group per expression
- * ("NdM", optional keep/drop khN/klN/dhN/dlN, optional +K). So:
- *  - A mixed pool (e.g. 2d6 + 1d8) submits one roll per die group; each lands as its
- *    own shared-log entry. The common single-group case (2d6+3, 1d20+5) is one clean
- *    roll with a server-computed total.
+ * Scope note: the server roll endpoint accepts compound expressions. A mixed pool
+ * (e.g. 2d6 + 1d8) therefore submits one shared roll and one animated result unless
+ * the composed expression reaches RollRequest's length cap, where the tray retains a
+ * safe per-group fallback.
  *  - Advantage/disadvantage submit a real keep/drop expression — "2d20kh1" / "2d20kl1"
  *    (issue #130) — so the server rolls both d20s AND computes the kept total that
  *    everyone in the shared feed sees; the tray just surfaces the same kept die.
@@ -42,9 +41,8 @@ import {
   type Pool,
   type SavedPreset,
 } from './savedRollsState';
+import { DICE_FACES, buildDiceTrayExprs, poolEntries } from './diceTrayExpressions';
 
-// Standard polyhedral faces the server accepts (see apps/server/src/common/dice.ts).
-const DICE_FACES = [4, 6, 8, 10, 12, 20, 100] as const;
 const MAX_COUNT = 20; // server's per-group cap
 const MAX_MOD = 99; // tray-side clamp; server allows up to 999 via the advanced box
 const MAX_ACTION_SCORE = 10; // Open Legend's published PC/NPC action-dice table.
@@ -75,7 +73,7 @@ const DELETE_UNDO_MS = 7000;
 
 interface DiceTrayProps {
   /** Submit one built expression; returns the persisted roll (or null on failure). */
-  onSubmitExpr: (expr: string) => Promise<DiceRoll | null>;
+  onSubmitExpr: (expr: string, label?: string) => Promise<DiceRoll | null>;
   /** Submit one native action roll; present only for attribute-dice-pool adapters. */
   onSubmitActionRoll?: (payload: ActionRollRequest) => Promise<DiceRoll | null>;
   supportsActionDice?: boolean;
@@ -87,25 +85,6 @@ interface DiceTrayProps {
 function formatMod(mod: number): string {
   if (mod === 0) return '';
   return mod > 0 ? `+${mod}` : `${mod}`;
-}
-
-function poolEntries(pool: Pool): [number, number][] {
-  return DICE_FACES.map((sides) => [sides, pool[sides] ?? 0] as [number, number]).filter(
-    ([, count]) => count > 0,
-  );
-}
-
-/**
- * Build the expression(s) to submit. Advantage -> "2d20kh1{mod}", disadvantage ->
- * "2d20kl1{mod}" (server keeps the high/low die and computes the total, issue #130).
- * Otherwise one expression per die group, with the modifier folded onto the first.
- */
-function buildExprs(pool: Pool, modifier: number, advMode: AdvMode): string[] {
-  if (advMode === 'adv') return [`2d20kh1${formatMod(modifier)}`];
-  if (advMode === 'dis') return [`2d20kl1${formatMod(modifier)}`];
-  const entries = poolEntries(pool);
-  if (entries.length === 0) return [];
-  return entries.map(([sides, count], i) => `${count}d${sides}${i === 0 ? formatMod(modifier) : ''}`);
 }
 
 /** Human-readable preview of the pending roll. */
@@ -172,6 +151,7 @@ export function DiceTray({
   const [pool, setPool] = useState<Pool>({});
   const [modifier, setModifier] = useState(0);
   const [advMode, setAdvMode] = useState<AdvMode>('flat');
+  const [pendingLabel, setPendingLabel] = useState<string | null>(null);
   const [actionAttribute, setActionAttribute] = useState<string>(OPEN_LEGEND_ATTRIBUTES[0]);
   const [actionScore, setActionScore] = useState(1);
   const [savedPresets, setSavedPresets] = useState<SavedPreset[]>(() => loadPresets(campaignId));
@@ -191,16 +171,17 @@ export function DiceTray({
   const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // --- Storage-failure notice (private mode / quota) ----------------------
-  // `storageBlocked` is a sticky flag (true once a write has failed) used to
-  // badge in-memory presets. `storageNotice` is the one-shot modal: shown once
-  // right after a failed save, then dismissed so it doesn't nag on every render.
-  // Tracked for the badge described above; not yet read directly here (kept
-  // for the `setStorageBlocked` side effect below and any future consumer).
-  const [_storageBlocked, setStorageBlocked] = useState(false);
+  // `storageNotice` is the one-shot modal: shown right after a failed save,
+  // then dismissed so it doesn't nag on every render. The saved preset's
+  // `persisted` flag remains the source of truth for its memory-only badge.
   const [storageNotice, setStorageNotice] = useState(false);
 
   useEffect(() => {
     setSavedPresets(loadPresets(campaignId));
+    // A preset label belongs to the campaign that supplied its preset. Keep the
+    // tray reusable across SPA navigation without carrying that label into the
+    // next campaign's shared log.
+    setPendingLabel(null);
   }, [campaignId]);
 
   // Cancel any pending delete timer on unmount so it never fires into a stale closure.
@@ -213,12 +194,13 @@ export function DiceTray({
   const entries = poolEntries(pool);
   const isLoneD20 = entries.length === 1 && entries[0][0] === 20 && entries[0][1] === 1;
   const advAvailable = entries.length === 0 || isLoneD20;
-  const exprs = buildExprs(pool, modifier, advMode);
+  const exprs = buildDiceTrayExprs(pool, modifier, advMode);
   const canRoll = exprs.length > 0 && !rolling;
   const canActionRoll = supportsActionDice && onSubmitActionRoll !== undefined && !rolling;
 
   const addDie = useCallback((sides: number) => {
     setFeedback(null);
+    setPendingLabel(null);
     setAdvMode('flat');
     setPool((prev) => {
       const next = Math.min((prev[sides] ?? 0) + 1, MAX_COUNT);
@@ -228,6 +210,7 @@ export function DiceTray({
 
   const removeGroup = useCallback((sides: number) => {
     setFeedback(null);
+    setPendingLabel(null);
     setPool((prev) => {
       const rest = { ...prev };
       delete rest[sides];
@@ -237,6 +220,7 @@ export function DiceTray({
 
   const decGroup = useCallback((sides: number) => {
     setFeedback(null);
+    setPendingLabel(null);
     setPool((prev) => {
       const count = (prev[sides] ?? 0) - 1;
       const rest = { ...prev };
@@ -251,16 +235,19 @@ export function DiceTray({
     setModifier(0);
     setAdvMode('flat');
     setFeedback(null);
+    setPendingLabel(null);
   }, []);
 
   const toggleAdv = useCallback((mode: Exclude<AdvMode, 'flat'>) => {
     setFeedback(null);
+    setPendingLabel(null);
     setPool({ 20: 1 }); // advantage is always a single d20
     setAdvMode((prev) => (prev === mode ? 'flat' : mode));
   }, []);
 
-  const applyPreset = useCallback((p: { pool: Pool; modifier?: number; advMode?: AdvMode }) => {
+  const applyPreset = useCallback((p: { pool: Pool; modifier?: number; advMode?: AdvMode }, label: string) => {
     setFeedback(null);
+    setPendingLabel(label);
     setPool({ ...p.pool });
     if (p.modifier !== undefined) setModifier(p.modifier);
     setAdvMode(p.advMode ?? 'flat');
@@ -290,14 +277,10 @@ export function DiceTray({
       let ok = true;
       try {
         localStorage.setItem(storageKey(campaignId), JSON.stringify(next));
-        // A successful write clears the sticky memory-only badge — storage is
-        // healthy again (e.g. the user left private mode).
-        setStorageBlocked(false);
       } catch {
         // localStorage unavailable (private mode / quota) — presets stay in-memory.
         // Mark every preset memory-only so the badge distinguishes them from disk.
         ok = false;
-        setStorageBlocked(true);
         next = markMemoryOnly(next);
       }
       setSavedPresets(next);
@@ -332,7 +315,7 @@ export function DiceTray({
         announce(t('dice.savedAnnounce', { label }));
       } else {
         // Surface the memory-only state ONCE: the preset is usable for the
-        // session but will not survive reload. The sticky `storageBlocked` flag
+        // session but will not survive reload. The preset's `persisted` flag
         // keeps the in-list badge accurate without re-popping this modal.
         setStorageNotice(true);
       }
@@ -399,10 +382,10 @@ export function DiceTray({
   }, [pendingDelete, persistPresets, announce, t]);
 
   const doRoll = useCallback(async () => {
-    const toSubmit = buildExprs(pool, modifier, advMode);
+    const toSubmit = buildDiceTrayExprs(pool, modifier, advMode);
     if (toSubmit.length === 0) return;
     if (advMode !== 'flat') {
-      const result = await onSubmitExpr(toSubmit[0]);
+      const result = await onSubmitExpr(toSubmit[0], pendingLabel ?? undefined);
       if (result) {
         // Server keeps the high/low die (2d20kh1 / kl1) and returns the kept total.
         setFeedback({
@@ -415,12 +398,15 @@ export function DiceTray({
       return;
     }
     let last: DiceRoll | null = null;
-    for (const expr of toSubmit) {
+    for (const [index, expr] of toSubmit.entries()) {
       // Sequential so multi-group rolls land in a stable order in the shared feed.
-      last = await onSubmitExpr(expr);
+      // An oversized saved pool splits into several feed entries. Keep its label
+      // on the first entry only so the remainder are not misrepresented as
+      // repeated uses of the same preset.
+      last = await onSubmitExpr(expr, index === 0 ? (pendingLabel ?? undefined) : undefined);
     }
     if (last) setFeedback({ label: last.expr, total: last.total, rolls: last.rolls, kept: last.kept });
-  }, [pool, modifier, advMode, onSubmitExpr]);
+  }, [pool, modifier, advMode, onSubmitExpr, pendingLabel, t]);
 
   const dieBtnSize = compact ? 40 : 48;
   const nameValid = draftLabel.trim().length > 0;
@@ -567,7 +553,10 @@ export function DiceTray({
         <Btn
           type="button"
           ghost
-          onClick={() => setModifier((m) => Math.max(m - 1, -MAX_MOD))}
+          onClick={() => {
+            setPendingLabel(null);
+            setModifier((m) => Math.max(m - 1, -MAX_MOD));
+          }}
           aria-label={t('dice.decreaseModifier')}
           style={{ minHeight: 36, minWidth: 40, padding: 0, fontSize: 18 }}
         >
@@ -582,7 +571,10 @@ export function DiceTray({
         <Btn
           type="button"
           ghost
-          onClick={() => setModifier((m) => Math.min(m + 1, MAX_MOD))}
+          onClick={() => {
+            setPendingLabel(null);
+            setModifier((m) => Math.min(m + 1, MAX_MOD));
+          }}
           aria-label={t('dice.increaseModifier')}
           style={{ minHeight: 36, minWidth: 40, padding: 0, fontSize: 18 }}
         >
@@ -694,7 +686,7 @@ export function DiceTray({
             key={p.labelKey}
             type="button"
             ghost
-            onClick={() => applyPreset(p)}
+            onClick={() => applyPreset(p, t(`dice.${p.labelKey}`))}
             style={{ minHeight: 32, fontSize: 11.5, padding: '0 10px' }}
           >
             {t(`dice.${p.labelKey}`)}
@@ -702,6 +694,7 @@ export function DiceTray({
         ))}
         {savedPresets.map((p) => (
           <span
+            key={p.label}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -711,7 +704,7 @@ export function DiceTray({
           >
             <button
               type="button"
-              onClick={() => applyPreset(p)}
+              onClick={() => applyPreset(p, p.label)}
               className="text-muted"
               style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11.5, padding: '6px 4px 6px 10px' }}
             >
