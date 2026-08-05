@@ -85,7 +85,11 @@ test.describe('TurnWorkspace adoption (issue #1933)', () => {
       resolve(__dirname, '../../src/features/encounters/TurnWorkspace.tsx'),
       'utf8',
     );
-    expect(code).toMatch(/const gateReason = gateReasonKey && !busy \? t\(`run\.gate\.\$\{gateReasonKey\}`\) : undefined;/);
+    // Narrow flag on purpose: the broad `busy` also covers unrelated action-economy
+    // writes, and suppressing on those would blank a standing dmControlsTurns explanation
+    // mid-save (issue #1933 review).
+    expect(code).toMatch(/const gateReason = gateReasonKey && !endTurnBusy \? t\(`run\.gate\.\$\{gateReasonKey\}`\) : undefined;/);
+    expect(code).not.toMatch(/gateReasonKey && !busy/);
     expect(code).toMatch(/const showButton = turn\.canEndTurn \|\| gateReasonKey != null;/);
   });
 });

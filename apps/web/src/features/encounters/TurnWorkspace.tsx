@@ -663,11 +663,18 @@ export function TurnWorkspace({
           syncBlocked: actionsDisabled,
         });
         // Suppressed while this player's own end-turn is in flight (issue #1933 review):
-        // `busy` is the operative blocker then, and GatedControl strips the native
-        // `disabled` whenever a reason is present, so the button would announce "the table
-        // is paused" during the moment the truth is "your click is still going". Same rule
-        // as `gateReasonText`'s busy argument and `syncGateReason`.
-        const gateReason = gateReasonKey && !busy ? t(`run.gate.${gateReasonKey}`) : undefined;
+        // GatedControl strips the native `disabled` whenever a reason is present, so the
+        // button would announce "the table is paused" during the moment the truth is "your
+        // click is still going". Same rule as `gateReasonText`'s busy argument.
+        //
+        // Deliberately `endTurnBusy`, NOT the broader `busy` (= endTurnBusy ||
+        // turnState.isPending). `turnState` covers every action-economy toggle,
+        // concentration clear and readied/delay edit, so suppressing on it would blank the
+        // reason during unrelated saves — leaving a player under `dmControlsTurns` with a
+        // mounted, disabled, unexplained button, which is the exact state this issue exists
+        // to eliminate. A viewer who cannot end the turn can never have an end-turn request
+        // in flight, so the narrow flag loses nothing.
+        const gateReason = gateReasonKey && !endTurnBusy ? t(`run.gate.${gateReasonKey}`) : undefined;
         // Applicability still keys off the UNsuppressed reason, so an in-flight request
         // never makes the button vanish for a player who had one.
         const showButton = turn.canEndTurn || gateReasonKey != null;
