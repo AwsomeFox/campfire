@@ -2255,6 +2255,7 @@ export class EncountersService {
     let emittedEncounter: typeof encounters.$inferSelect | undefined;
     let declared: AoeTemplateType | undefined;
     let action: 'encounter.aoe.declare' | 'encounter.aoe.update' = 'encounter.aoe.declare';
+    let changed = false;
 
     this.db.transaction((tx) => {
       const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
@@ -2280,6 +2281,10 @@ export class EncountersService {
           Object.entries(rawInput).filter(([key, value]) => key !== 'id' && key !== 'declaredByUserId' && value !== undefined),
         );
         declared = AoeTemplate.parse({ ...existing, ...supplied, declaredByUserId: existing.declaredByUserId });
+        if (isDeepStrictEqual(declared, existing)) {
+          emittedEncounter = fresh;
+          return;
+        }
         current[existingIndex] = declared;
         action = 'encounter.aoe.update';
       } else {
@@ -2295,19 +2300,22 @@ export class EncountersService {
         .where(eq(encounters.id, encounterId))
         .run();
       emittedEncounter = fresh;
+      changed = true;
     });
 
-    const encounter = emittedEncounter!;
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action,
-      entityType: 'encounter',
-      entityId: encounterId,
-      campaignId: encounter.campaignId,
-      detail: declared!.id,
-    });
-    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    if (changed) {
+      const encounter = emittedEncounter!;
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action,
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounter.campaignId,
+        detail: declared!.id,
+      });
+      this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    }
     return declared!;
   }
 

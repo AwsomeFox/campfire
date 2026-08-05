@@ -8,7 +8,7 @@ import { startFakeDdb, PUBLIC_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb'
 import { MCP_CATALOG_COUNTS, MCP_TOOL_NAMES } from '../src/modules/mcp/mcp-catalog';
 import { OPEN_LEGEND_PACK_SLUG, PF2E_PACK_SLUG } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns } from '../src/db/schema';
+import { auditLog, campaigns } from '../src/db/schema';
 
 interface TextContent {
   type: 'text';
@@ -1233,6 +1233,18 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       await client.callTool({ name: 'declare_aoe_template', arguments: { operation: 'update', encounterId: encounter.id, templateId: 'mcp-cone', x: 60 } }),
     ) as { id: string; x: number; angleDeg: number; color: string | null; declaredByUserId: string | null };
     expect(moved).toMatchObject({ id: 'mcp-cone', x: 60, angleDeg: 45, color: '#663399', declaredByUserId: created.declaredByUserId });
+
+    const beforeRetry = await dmAgent.get(`/api/v1/encounters/${encounter.id}`);
+    expect(beforeRetry.status).toBe(200);
+    const retried = parseResult(
+      await client.callTool({ name: 'declare_aoe_template', arguments: { operation: 'update', encounterId: encounter.id, templateId: 'mcp-cone', x: 60 } }),
+    ) as { id: string; x: number };
+    expect(retried).toMatchObject({ id: 'mcp-cone', x: 60 });
+    expect((await dmAgent.get(`/api/v1/encounters/${encounter.id}`)).body.updatedAt).toBe(beforeRetry.body.updatedAt);
+    const aoeActions = (await ctx.app.get<DrizzleDb>(DB).select().from(auditLog).where(eq(auditLog.entityId, encounter.id)))
+      .map((row) => row.action)
+      .filter((action) => action.startsWith('encounter.aoe.'));
+    expect(aoeActions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update']);
 
     const spoof = await client.callTool({
       name: 'declare_aoe_template',
