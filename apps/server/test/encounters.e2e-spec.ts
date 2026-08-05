@@ -9235,6 +9235,17 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
     const { encounterId, ariaId, monsterId } = await seedRunningFight();
     const server = ctx.app.getHttpServer();
 
+    await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ fog: { enabled: true, revealed: [] } });
+    expect(
+      (await request(server)
+        .post(`/api/v1/encounters/${encounterId}/aoe-templates`)
+        .set(player)
+        .send({ id: 'end-turn-owner-aoe', shape: 'circle', x: 20, y: 20, sizeFt: 10 })).status,
+    ).toBe(201);
+
     const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     expect(before.body.currentCombatantId).toBe(ariaId);
 
@@ -9244,6 +9255,7 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       .send({ expectedCurrentCombatantId: ariaId });
     expect(res.status).toBe(201);
     expect(res.body.currentCombatantId).toBe(monsterId);
+    expect(res.body.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'end-turn-owner-aoe', declaredByUserId: 'dev:p-1' })]));
   });
 
   it('player POST /end-turn is forbidden when it is not their turn', async () => {

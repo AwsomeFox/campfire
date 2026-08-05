@@ -6866,7 +6866,9 @@ export class EncountersService {
         if (opClaim) {
           const prior = findPriorEncounterOp(tx, opClaim, Date.now());
           if (prior) {
-            if (prior.response && prior.responseRole === role) {
+            // Player projections include their own fog-concealed AoE templates, so a
+            // role-only cached response is safe only for the DM's shared projection.
+            if (role === 'dm' && prior.response && prior.responseRole === role) {
               replayedEncounter = prior.response as EncounterWithCombatants;
             } else {
               // Claim committed but its body was never backfilled (a crash in the moment
@@ -7094,8 +7096,8 @@ export class EncountersService {
       if (err instanceof EncounterOpRaceMarker) {
         // Same intent, two concurrent attempts: ours rolled back, theirs committed.
         const prior = await readEncounterOpAfterRace(this.db, err.claim);
-        if (prior.response && prior.responseRole === role) return prior.response as EncounterWithCombatants;
-        return this.getWithCombatantsOrThrow(encounterId, role);
+        if (role === 'dm' && prior.response && prior.responseRole === role) return prior.response as EncounterWithCombatants;
+        return this.getWithCombatantsOrThrow(encounterId, role, user.id);
       }
       throw err;
     }
@@ -7104,7 +7106,7 @@ export class EncountersService {
     // turn marker, re-auditing, or re-emitting would manufacture the very duplicate this
     // exists to prevent.
     if (replayedEncounter) return replayedEncounter;
-    if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role);
+    if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role, user.id);
 
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
@@ -7173,12 +7175,12 @@ export class EncountersService {
         .catch(() => {});
     }
 
-    const view = await this.getWithCombatantsOrThrow(encounterId, role);
+    const view = await this.getWithCombatantsOrThrow(encounterId, role, user.id);
     // Backfill the original response onto the already-committed claim (issue #580) so a
     // retry gets the turn pointer THIS call produced, not merely "some current state".
     // Best-effort by construction: the claim (the part that prevents a second advance) is
     // already durable, and a replay that finds no body falls back to fresh truth.
-    if (opClaim) await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
+    if (opClaim && role === 'dm') await backfillEncounterOpResponse(this.db, opClaim, { body: view, role });
     return view;
   }
 
