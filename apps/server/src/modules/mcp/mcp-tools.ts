@@ -4616,15 +4616,17 @@ export class McpToolsService {
       'adjust_combatant_resource',
       'Spend or restore ONE bounded resource or spell-slot level on a combatant mid-fight — a character-linked ' +
         'combatant OR a monster/NPC combatant with an inline statblock. Exactly one of `key` (feature resource) or ' +
-        '`spellLevel` (1-9); `delta` is relative to the resource\'s current `used` (default +1). Spending past 0 or ' +
-        'restoring past `max` FAILS with a 400 — never a silent clamp — so success can be trusted as "the resource ' +
-        'was actually spent/restored." dm may adjust any combatant; a player only a combatant linked to a character ' +
-        'they own; a statblock combatant (no linked character) is dm-only, matching update_combatant\'s statblock ' +
-        'rule. Records a resource_changed encounter event. `idempotencyKey`: a lost-response retry with the SAME ' +
-        'key replays the original outcome instead of double-spending. Returns the combatant: for a statblock ' +
-        'combatant this shows the new value directly (the statblock lives on the combatant); for a character-' +
-        'linked combatant the resource lives on the CHARACTER sheet instead, so this response does not show the ' +
-        'new value — call get_character separately to confirm it.',
+        '`spellLevel` (1-9); `delta` is relative to the resource\'s current `used` (default +1). `key` must name a ' +
+        'resource that ALREADY exists on the combatant/character (from get_encounter/get_character) — an unknown ' +
+        'key FAILS with a 400 naming it rather than silently creating a new one, the same as an out-of-range ' +
+        '`spellLevel`. Spending past 0 or restoring past `max` FAILS with a 400 — never a silent clamp — so success ' +
+        'can be trusted as "the resource was actually spent/restored." dm may adjust any combatant; a player only a ' +
+        'combatant linked to a character they own; a statblock combatant (no linked character) is dm-only, ' +
+        'matching update_combatant\'s statblock rule. Records a resource_changed encounter event. `idempotencyKey`: ' +
+        'a lost-response retry with the SAME key replays the original outcome instead of double-spending. Returns ' +
+        'the combatant: for a statblock combatant this shows the new value directly (the statblock lives on the ' +
+        'combatant); for a character-linked combatant the resource lives on the CHARACTER sheet instead, so this ' +
+        'response does not show the new value — call get_character separately to confirm it.',
       // CombatantResourceAdjust is a ZodEffects (.superRefine requiring exactly one of
       // key|spellLevel), so it has no `.shape` to spread — list the wire fields here and
       // re-validate with .parse below, matching adjust_character_condition_level's pattern.

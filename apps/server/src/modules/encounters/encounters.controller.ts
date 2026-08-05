@@ -636,7 +636,9 @@ export class EncountersController {
     description:
       'dm or the owning player (of a character-linked combatant); a statblock combatant (no linked character) is ' +
       'dm-only, matching PATCH .../combatants/:cid\'s statblock rule. Exactly one of `key` (feature resource) or ' +
-      '`spellLevel` (1-9) plus a `delta` (default +1). Delta-based and transactional: unlike a whole-statblock or ' +
+      '`spellLevel` (1-9) plus a `delta` (default +1). `key` must name a resource that already exists on the ' +
+      'combatant/character — an unknown key 400s naming it, the same as an out-of-range `spellLevel`; this never ' +
+      'creates a new resource. Delta-based and transactional: unlike a whole-statblock or ' +
       'whole-character PATCH built from a stale client read, this reads the row fresh inside the write, so two ' +
       'concurrent single-pip spends on DIFFERENT resources on the SAME sheet/statblock both persist. Optional ' +
       '`expectedUsed`: the resource\'s `used` this caller last rendered — if another writer already changed it, ' +
@@ -652,7 +654,7 @@ export class EncountersController {
       'CHARACTER sheet instead, which this response does not re-read (a Combatant has no resources/spellSlots ' +
       'field) — read GET /characters/:id separately to confirm the committed value.',
   })
-  @ApiResponse({ status: 400, description: 'Overspend/over-restore outside [0, max], or the combatant has no sheet/inline-statblock resources.' })
+  @ApiResponse({ status: 400, description: 'Overspend/over-restore outside [0, max]; `key` names a resource that does not already exist on the combatant/character; or the combatant has no sheet/inline-statblock resources.' })
   @ApiResponse({ status: 409, description: '`expectedUsed` no longer matches the resource\'s current `used` — another writer changed it first.' })
   @ApiResponse({ status: 403, description: 'Not the dm or the owning player, or a non-dm targeting a statblock combatant.' })
   async adjustCombatantResource(

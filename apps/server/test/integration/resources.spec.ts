@@ -511,6 +511,46 @@ describe('inline spell slots & character resources (issue #422)', () => {
     expect(JSON.parse(character.resources)['layOnHands'].used).toBe(1);
   });
 
+  // Issue #1909 review (Devin, eleventh finding): the character branch had the SAME
+  // synthesized-`{max: 1, used: 0, ...}`-on-missing-key fallback as the statblock branch —
+  // a typo or a hallucinated AI-driver key would silently fabricate a brand-new max-1
+  // resource on the CHARACTER and mark it spent, instead of 400ing the way the spell-slot
+  // path already does for an out-of-range level. Proves the unknown key 400s AND that
+  // nothing was written to the character's stored resources.
+  it("an unknown resource key 400s naming it, instead of silently fabricating a max-1 resource on the character (Devin review)", async () => {
+    const user = { id: '1', username: 'test_user', displayName: 'Test', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db.insert(campaigns).values({ name: 'Unknown Resource Key Test', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+    const [c] = db
+      .insert(characters)
+      .values({
+        campaignId: camp.id,
+        name: 'Seelah',
+        ownerUserId: '1',
+        resources: JSON.stringify({ layOnHands: { max: 3, used: 0, name: 'Lay on Hands', recharge: 'long-rest' } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .all();
+    const [enc] = db.insert(encounters).values({ campaignId: camp.id, name: 'Unknown Resource Key Fight', status: 'running', createdAt: ts, updatedAt: ts }).returning().all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Seelah', sortOrder: 1 })
+      .returning()
+      .all();
+
+    await expect(
+      encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'nonexistentResource', delta: 1 }, user, 'dm'),
+    ).rejects.toThrow(BadRequestException);
+
+    const character = await charactersService.getRowOrThrow(c.id);
+    const resources = JSON.parse(character.resources);
+    expect(resources.nonexistentResource).toBeUndefined();
+    // The EXISTING resource is untouched too — nothing else was silently modified.
+    expect(resources.layOnHands.used).toBe(0);
+  });
+
   // Issue #1909 review (Codex P2): for a character-linked combatant the resource lives on
   // the CHARACTER row, not the combatant — `Combatant` has no resources/spellSlots field at
   // all, so the response cannot show the committed value regardless of freshness. Pins the
@@ -1309,6 +1349,26 @@ describe('inline spell slots & character resources (issue #422)', () => {
       await expect(
         encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'kiPoints', delta: 1000 }, user, 'dm'),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    // Issue #1909 review (Devin, eleventh finding): `key` used to fall back to a
+    // SYNTHESIZED `{max: 1, used: 0, ...}` entry when it didn't already exist on the
+    // statblock, silently creating a brand-new resource and marking it spent — a typo or a
+    // hallucinated AI-driver key (this PR added `adjust_combatant_resource` to the driver
+    // allow-list) would fabricate a resource rather than 400 the way the spell-slot path
+    // already does for an out-of-range level. Proves the unknown key 400s AND that nothing
+    // was written to the statblock (no new entry fabricated).
+    it("an unknown resource key 400s naming it, instead of silently fabricating a max-1 resource (Devin review)", async () => {
+      const { user, enc, comb } = await seedStatblockEncounter();
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'nonexistentResource', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
+      expect(JSON.parse(row.statblockJson!).resources.nonexistentResource).toBeUndefined();
+      // The EXISTING resource is untouched too — nothing else was silently modified.
+      expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(0);
     });
 
     it("a spell-slot entry missing `used` 400s naming the level, instead of silently persisting used: NaN (Codex review)", async () => {

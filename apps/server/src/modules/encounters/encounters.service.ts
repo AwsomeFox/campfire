@@ -8992,7 +8992,27 @@ export class EncountersService {
             eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
           } else if (patch.key) {
             const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
-            const res = resources[patch.key] ?? { max: 1, used: 0, name: patch.key, recharge: 'long-rest' };
+            // Issue #1909 review (Devin, eleventh finding): this used to fall back to a
+            // SYNTHESIZED `{max: 1, used: 0, ...}` entry when `patch.key` didn't exist on
+            // the character, silently creating a brand-new max-1 resource and marking it
+            // spent — the opposite of the spell-slot path just above, which 400s on an
+            // unknown level (`No spell slots at level N`), and a direct contradiction of
+            // this tool's own documented contract (`mcp-tools.ts`: "Spending past 0 or
+            // restoring past max FAILS with a 400 — never a silent clamp — so success can
+            // be trusted"). A fabricated pool made that promise false: the spend "succeeds"
+            // against a resource that never existed. This PR is what made the defect
+            // reachable at all — the web UI only ever sent keys it rendered FROM the
+            // stored resources, so an unknown key could never occur before this REST/MCP
+            // surface existed, and finding 9's AI-driver allow-list entry put a caller that
+            // can plausibly hallucinate a key on the other end. Decision: unknown key 400s,
+            // matching the spell-slot path and the documented contract, on BOTH branches of
+            // this method (see the statblock branch's identical fix below) — create-on-
+            // demand is a real feature someone could want, but it must be an explicit,
+            // named capability, not an accident of `??`.
+            const res = resources[patch.key];
+            if (!res) {
+              throw new BadRequestException(`No such resource '${patch.key}'`);
+            }
             // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
             // spell-slot branch above.
             if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
@@ -9158,15 +9178,17 @@ export class EncountersService {
             rawStatblock.spellSlots = { ...(rawStatblock.spellSlots as Record<string, unknown> | undefined), [levelKey]: statblock.spellSlots[levelKey] };
             eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
           } else if (patch.key) {
-            const res = (statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined) ?? {
-              max: 1,
-              used: 0,
-              name: patch.key,
-              recharge: 'long-rest',
-            };
+            // Issue #1909 review (Devin, eleventh finding): see the character branch's
+            // identical fix above for the full rationale — this branch had the SAME
+            // synthesized-`{max: 1, used: 0, ...}`-on-missing-key fallback, silently
+            // creating a brand-new resource on a typo or a hallucinated AI-driver key
+            // instead of 400ing the way the spell-slot path above already does.
+            const res = statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined;
+            if (!res) {
+              throw new BadRequestException(`No such resource '${patch.key}'`);
+            }
             // Issue #1909 review (Codex P2): same malformed-entry guard as the spell-slot
-            // branch above — the fallback default just above is always well-formed, but an
-            // EXISTING stored entry (this `??` skips) is not schema-enforced and can carry
+            // branch above — an EXISTING stored entry is not schema-enforced and can carry
             // a non-numeric `used`/`max`.
             if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
               throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
