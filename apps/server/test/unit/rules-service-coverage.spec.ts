@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { NotFoundException } from '@nestjs/common';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { RulesService } from '../../src/modules/rules/rules.service';
@@ -235,8 +236,14 @@ describe('RulesService unit coverage tests', () => {
     // 3. Getting homebrew without campaignId throws 404
     await expect(rulesService.getEntryOrThrow(homebrewEntry.id)).rejects.toThrow('not found');
 
-    // 4. Getting homebrew from another campaign with campaignId=999 throws 404
-    await expect(rulesService.getEntryOrThrow(homebrewEntry.id, 999, adminActor)).rejects.toThrow();
+    // 4. Getting homebrew scoped to a DIFFERENT campaignId (999, not the entry's real
+    // campaignId) throws NotFoundException specifically — the SQL scope excludes the row
+    // rather than falling through to some other error, so the id's existence never leaks
+    // outside its own campaign. `access` is mocked to always grant 'dm' above, so this
+    // isolates the scope condition itself; real non-member rejection (a genuine second
+    // campaign the caller isn't in) is covered by the e2e test in homebrew.e2e-spec.ts,
+    // which uses real per-campaign membership rather than this mock.
+    await expect(rulesService.getEntryOrThrow(homebrewEntry.id, 999, adminActor)).rejects.toThrow(NotFoundException);
 
     // 5. Member search with campaignId returns both global and homebrew
     const scopedSearch = await rulesService.search(
@@ -254,7 +261,20 @@ describe('RulesService unit coverage tests', () => {
     expect(globalNames).toContain('Goblin');
     expect(globalNames).not.toContain('Shadow Goblin');
 
-    // 7. Archived homebrew is excluded from scoped search
+    // 7. A `pack` filter alongside campaignId must not exclude homebrew: homebrew rows
+    // live under a separate internal pack (never the requested pack's id), and the web
+    // add-combatant picker always sends both once a campaign has a rule system configured
+    // (issue #1898 review) — the pack filter must narrow only the global half of the scope.
+    const packScopedSearch = await rulesService.search(
+      { q: 'Goblin', pack: pack.slug, campaignId },
+      10,
+      adminActor,
+    );
+    const packScopedNames = packScopedSearch.items.map((i) => i.name);
+    expect(packScopedNames).toContain('Goblin');
+    expect(packScopedNames).toContain('Shadow Goblin');
+
+    // 8. Archived homebrew is excluded from scoped search
     await rulesService.archiveCampaignHomebrew(campaignId, homebrewEntry.id, adminActor);
     const postArchiveSearch = await rulesService.search(
       { q: 'Goblin', campaignId },

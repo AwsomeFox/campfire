@@ -2550,10 +2550,20 @@ export class RulesService implements OnModuleInit {
    * from a previous `nextCursor` to continue. The optional second `limit` arg
    * is kept for MCP / AI-driver callers that want a smaller top-N page.
    */
-  private ruleScopeCondition(campaignId?: number) {
+  /**
+   * `packId` narrows only the GLOBAL half of the scope. Campaign homebrew rows live
+   * under a dedicated internal pack (homebrewPackId()), never under a real installed
+   * pack's id, so ANDing the pack filter across the whole scope (as this used to do)
+   * silently dropped every homebrew result whenever a `pack` filter was also given —
+   * which the encounter add-combatant picker and MCP lookup_rule always do once a
+   * campaign has a rule system configured (issue #1898 review). A homebrew row is
+   * admitted by campaign membership alone; `pack` never applies to it.
+   */
+  private ruleScopeCondition(campaignId?: number, packId?: number) {
+    const globalScope = packId !== undefined ? and(isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)) : isNull(ruleEntries.campaignId);
     return campaignId !== undefined
-      ? or(isNull(ruleEntries.campaignId), and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt)))
-      : isNull(ruleEntries.campaignId);
+      ? or(globalScope, and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt)))
+      : globalScope;
   }
 
   async search(
@@ -2598,9 +2608,8 @@ export class RulesService implements OnModuleInit {
   }): Promise<RuleSearchPage> {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'browse') as BrowseCursor | undefined;
     const baseConditions = [
-      this.ruleScopeCondition(opts.campaignId),
+      this.ruleScopeCondition(opts.campaignId, opts.packId),
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
-      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const keyset = cursor
@@ -2654,10 +2663,9 @@ export class RulesService implements OnModuleInit {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'fts') as FtsCursor | undefined;
     const rankExpr = nameMatchRank(opts.q);
     const baseConditions = [
-      this.ruleScopeCondition(opts.campaignId),
+      this.ruleScopeCondition(opts.campaignId, opts.packId),
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
-      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const keyset = cursor
@@ -2670,9 +2678,8 @@ export class RulesService implements OnModuleInit {
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const matchConditions = [
-      this.ruleScopeCondition(opts.campaignId),
+      this.ruleScopeCondition(opts.campaignId, opts.packId),
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
-      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
       this.countFts(baseConditions),
@@ -2730,10 +2737,9 @@ export class RulesService implements OnModuleInit {
       ? sql`(${ruleEntries.name} LIKE ${rawLike} OR ${foldedName} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${foldedSummary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${foldedBody} LIKE ${foldedLike})`
       : sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${rawLike})`;
     const baseConditions = [
-      this.ruleScopeCondition(opts.campaignId),
+      this.ruleScopeCondition(opts.campaignId, opts.packId),
       likeClause,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
-      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const keyset = cursor
@@ -2746,9 +2752,8 @@ export class RulesService implements OnModuleInit {
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const matchConditions = [
-      this.ruleScopeCondition(opts.campaignId),
+      this.ruleScopeCondition(opts.campaignId, opts.packId),
       likeClause,
-      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
       this.countEntries(baseConditions),
@@ -2791,10 +2796,14 @@ export class RulesService implements OnModuleInit {
     return Number(row?.n ?? 0);
   }
 
-  /** Conditions that scope a query to the active pack only (no query/type filter). */
+  /**
+   * Conditions that scope a query to the active pack only (no query/type filter).
+   * The pack filter is folded into ruleScopeCondition so it narrows only the global
+   * half of the scope — campaign homebrew (a different internal pack) still counts
+   * toward these facet/total figures alongside the requested pack (issue #1898 review).
+   */
   private packScopeConditions(packId?: number, campaignId?: number): Array<ReturnType<typeof sql> | ReturnType<typeof eq> | ReturnType<typeof isNull> | ReturnType<typeof or>> {
-    const scope = this.ruleScopeCondition(campaignId);
-    return packId === undefined ? [scope] : [scope, eq(ruleEntries.packId, packId)];
+    return [this.ruleScopeCondition(campaignId, packId)];
   }
 
   private async groupEntryCounts(
