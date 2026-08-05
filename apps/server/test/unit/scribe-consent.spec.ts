@@ -36,7 +36,31 @@ function source(): RecapDraftSource {
       },
     ],
     encounters: [
-      { id: 20, name: 'Goblin ambush', status: 'ended', combatants: [] },
+      {
+        id: 20,
+        name: 'Goblin ambush',
+        status: 'ended',
+        combatants: [],
+        events: [
+          {
+            id: 40,
+            encounterId: 20,
+            round: 1,
+            type: 'damage',
+            actor: 'Rook',
+            target: 'Goblin 1',
+            actorId: 1,
+            targetId: 2,
+            detail: 'took 8 damage',
+            chainId: null,
+            parentEventId: null,
+            phase: 'consequence',
+            performedBy: { userId: '10', role: 'player', kind: 'human' },
+            metadata: {},
+            createdAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      },
     ],
     diceRolls: [
       {
@@ -179,6 +203,89 @@ describe('scribe external-AI consent filtering (#501)', () => {
     expect(result.consent.excludedAuthorUserIds).toEqual(['10', '11', '12']);
     expect(result.consent.excludedInboxByConsent).toBe(2);
     expect(result.consent.excludedInboxPrivate).toBe(1);
+  });
+});
+
+/**
+ * Issue #1520 (follow-up to #501) — the documented boundary for encounter events.
+ *
+ * Encounter events are NOT gated on per-member consent: combatants are campaign entities,
+ * not user accounts, and `actor`/`target` (combatant/character names) are campaign canon
+ * the DM owns, same as a dice roll's `actor`. But `performedBy.userId` — the acting
+ * member's real account id — IS member-identifying, and unlike `rollerName` it carries no
+ * narrative value a recap ever renders, so it is stripped unconditionally rather than
+ * gated on consent.
+ */
+describe('scribe encounter-event boundary (#1520)', () => {
+  it('strips performedBy.userId from an event before it can reach an external client, even when the acting member has not consented', () => {
+    // Prove this can actually fail: assert against the FILTERED payload the external path
+    // produces, not against a helper in isolation.
+    const result = filterSourceForExternalAiConsent(source(), 'member_consent', new Set());
+
+    const event = result.source.encounters[0]?.events?.[0];
+    expect(event).toBeDefined();
+    expect(event?.performedBy?.userId).toBeNull();
+    expect(JSON.stringify(result.source)).not.toContain('"userId":"10"');
+  });
+
+  it('keeps the mechanical trail — round, type, actor/target names, and detail — ungated', () => {
+    const result = filterSourceForExternalAiConsent(source(), 'member_consent', new Set());
+
+    const event = result.source.encounters[0]?.events?.[0];
+    expect(event).toMatchObject({
+      round: 1,
+      type: 'damage',
+      actor: 'Rook',
+      target: 'Goblin 1',
+      detail: 'took 8 damage',
+    });
+  });
+
+  it('keeps performedBy.role/kind — categorical context, not an identity', () => {
+    const result = filterSourceForExternalAiConsent(source(), 'member_consent', new Set());
+
+    const event = result.source.encounters[0]?.events?.[0];
+    expect(event?.performedBy?.role).toBe('player');
+    expect(event?.performedBy?.kind).toBe('human');
+  });
+
+  it('strips performedBy.userId on the LOCAL path too — it never had a reason to leave assembly', () => {
+    const result = retainSourceForLocalGeneration(source(), 'member_consent');
+
+    expect(result.source.encounters[0]?.events?.[0]?.performedBy?.userId).toBeNull();
+  });
+
+  it('is unaffected by whether the acting member consented — the strip is unconditional, not a consent gate', () => {
+    const consenting = filterSourceForExternalAiConsent(source(), 'member_consent', new Set(['10']));
+    const notConsenting = filterSourceForExternalAiConsent(source(), 'member_consent', new Set());
+
+    expect(consenting.source.encounters[0]?.events?.[0]?.performedBy?.userId).toBeNull();
+    expect(notConsenting.source.encounters[0]?.events?.[0]?.performedBy?.userId).toBeNull();
+  });
+
+  it('leaves an event with no performedBy (legacy row) untouched', () => {
+    const withLegacyEvent = source();
+    withLegacyEvent.encounters[0]!.events!.push({
+      id: 41,
+      encounterId: 20,
+      round: 1,
+      type: 'turn',
+      actor: null,
+      target: null,
+      actorId: null,
+      targetId: null,
+      detail: 'Round 1 begins',
+      chainId: null,
+      parentEventId: null,
+      phase: null,
+      performedBy: null,
+      metadata: {},
+      createdAt: '2026-01-01T00:00:01.000Z',
+    });
+
+    const result = filterSourceForExternalAiConsent(withLegacyEvent, 'member_consent', new Set());
+
+    expect(result.source.encounters[0]?.events?.[1]?.performedBy).toBeNull();
   });
 });
 

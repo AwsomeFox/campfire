@@ -54,6 +54,42 @@ function withoutRollerUserId(
 }
 
 /**
+ * Encounter events (issue #1520, follow-up to #501) — the documented boundary.
+ *
+ * `encounters[].events` is the round-by-round damage/heal/condition/death/turn trail
+ * (issue #1068). It is NOT gated on per-member consent, and deliberately so: combatants
+ * are campaign entities, not user accounts, and there is no per-event author to check
+ * consent for — `actor`/`target` are combatant/character names, which (like a dice roll's
+ * `actor`) are campaign canon the DM owns, not member-identifying. Dropping events wholesale
+ * to be "safe" would gut recap quality for exactly the fights a recap is about, for no
+ * privacy gain.
+ *
+ * The ONE genuinely member-identifying value an event carries is `performedBy.userId` — the
+ * real account id (or PAT `token:<name>`) of whoever committed the action that produced the
+ * log line (see `action-resolver.service.ts#performedByFrom`). This is exactly the
+ * `rollerUserId` shape: an internal join key with zero narrative value that a recap never
+ * renders (`buildRecapDraft` never reads `performedBy`), so it is stripped UNCONDITIONALLY —
+ * on both the external and local paths, like `rollerUserId` — rather than redacted per
+ * consent like `rollerName`: there is no narrative fallback to preserve, so there is nothing
+ * to gate. `role`/`kind` are retained; they are categorical ("dm"/"player",
+ * "human"/"ai"/"system"), not an identity.
+ */
+function withoutPerformedByUserId(
+  encounters: RecapDraftSource['encounters'],
+): RecapDraftSource['encounters'] {
+  return encounters.map((encounter) =>
+    encounter.events
+      ? {
+          ...encounter,
+          events: encounter.events.map((event) =>
+            event.performedBy ? { ...event, performedBy: { ...event.performedBy, userId: null } } : event,
+          ),
+        }
+      : encounter,
+  );
+}
+
+/**
  * Apply the EXTERNAL-use gate: visibility allow-list, then per-member consent.
  *
  * Only ever call this on material bound for an endpoint that leaves the server.
@@ -121,7 +157,12 @@ export function filterSourceForExternalAiConsent(
     : source.diceRolls;
 
   return {
-    source: { ...source, resolvedInbox, ...(diceRolls ? { diceRolls } : {}) },
+    source: {
+      ...source,
+      resolvedInbox,
+      encounters: withoutPerformedByUserId(source.encounters),
+      ...(diceRolls ? { diceRolls } : {}),
+    },
     consent: {
       campaignPolicy: policy,
       externalSend: true,
@@ -165,6 +206,7 @@ export function retainSourceForLocalGeneration(
     source: {
       ...source,
       resolvedInbox,
+      encounters: withoutPerformedByUserId(source.encounters),
       ...(source.diceRolls ? { diceRolls: withoutRollerUserId(source.diceRolls) } : {}),
     },
     consent: {
