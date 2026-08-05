@@ -1207,13 +1207,15 @@ export default function RunSessionPage() {
             ? undefined
             : encounter?.combatants.find((candidate) => candidate.id === event.currentCombatantId);
           const ownerDataReady = charactersQuery.data !== undefined;
+          const rosterCombatantKnown = event.currentCombatantId == null || combatant != null;
           const isYourTurn = ownerDataReady && combatant?.characterId != null
             && characters.some((character) => character.id === combatant.characterId && character.ownerUserId === String(me?.user.id ?? ''));
           // Clear the hidden-tab prefix on the frame that ends an owned turn;
           // do not wait for the follow-up /turn refetch to settle. A character
-          // frame received before its owner list is available stays unknown so
-          // it cannot pin an incorrect negative result for the rest of the turn.
-          setTurnOwnerFromEvent(ownerDataReady || combatant?.characterId == null ? isYourTurn : null);
+          // frame received before its owner list or encounter roster is available
+          // stays unknown so it cannot pin an incorrect negative result for the
+          // rest of the turn.
+          setTurnOwnerFromEvent(rosterCombatantKnown && (ownerDataReady || combatant?.characterId == null) ? isYourTurn : null);
           const next: TurnBeatSnapshot = {
             encounterId: eid,
             combatantId: event.currentCombatantId ?? null,

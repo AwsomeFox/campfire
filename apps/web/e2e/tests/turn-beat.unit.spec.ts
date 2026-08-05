@@ -72,6 +72,12 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/isYourTurn=\{encounter\?\.status === 'running' &&/);
   });
 
+  test('keeps ownership unknown until an SSE combatant is present in the cached roster', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/const rosterCombatantKnown = event\.currentCombatantId == null \|\| combatant != null;/);
+    expect(source).toMatch(/setTurnOwnerFromEvent\(rosterCombatantKnown && \(ownerDataReady \|\| combatant\?\.characterId == null\) \? isYourTurn : null\);/);
+  });
+
   test('keeps Player Display to the paired encounter update load', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/screen/PlayerDisplayPage.tsx'), 'utf8');
     expect(source).toMatch(/if \(event\.type === 'encounter\.turn_changed'\) return;/);
