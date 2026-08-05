@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { legalTargets } from '../../src/features/encounters/ActionUseFlow';
+import { MAP_PING_TAP_SLOP_PX, mapPingTapExceededSlop } from '../../src/features/encounters/mapPingTap';
 import type { Combatant } from '@campfire/schema';
 
 test('legal targets are shared for player characters and monster actors', () => {
@@ -23,6 +24,13 @@ test('targeting lifecycle contracts keep preview and Back transitions explicit',
   expect(source).toContain('onPreviewError(resolveActionToken);');
 });
 
+test('movable target touch jitter stays a target tap inside the shared CSS-pixel slop', async () => {
+  expect(mapPingTapExceededSlop({ clientX: 100, clientY: 200 }, 100 + MAP_PING_TAP_SLOP_PX - 1, 200)).toBe(false);
+  expect(mapPingTapExceededSlop({ clientX: 100, clientY: 200 }, 100 + MAP_PING_TAP_SLOP_PX + 1, 200)).toBe(true);
+  const mapSource = await readFile(resolve(process.cwd(), 'src/features/encounters/map/BattleMap.tsx'), 'utf8');
+  expect(mapSource).toContain('mapPingTapExceededSlop(gesture, e.clientX, e.clientY)');
+});
+
 test('legal target affordances support repeated pointer and keyboard selection', async () => {
   const [mapSource, rosterSource] = await Promise.all([
     readFile(resolve(process.cwd(), 'src/features/encounters/map/BattleMap.tsx'), 'utf8'),
@@ -35,6 +43,7 @@ test('legal target affordances support repeated pointer and keyboard selection',
   expect(mapSource).toContain('if (movable) onTokenKeyDown(e, c);');
   expect(mapSource).toContain('if (movable) setSelectedTokenId(c.id);');
   expect(mapSource).toContain('targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };');
+  expect(mapSource).toContain('startClientX: e.clientX, startClientY: e.clientY');
   expect(mapSource).toContain('strokeWidth={2}');
   expect(mapSource).not.toContain('event.detail === 1');
   expect(rosterSource).toContain('data-testid={`combatant-target-toggle-${combatant.id}`}');

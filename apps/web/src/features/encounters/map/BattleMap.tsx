@@ -252,7 +252,7 @@ export function BattleMap({
   };
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
-    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null; start: MapPoint; moved: boolean; targetable: boolean }
+    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null; start: MapPoint; startClientX: number; startClientY: number; moved: boolean; targetable: boolean }
     | { kind: 'token-select'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint; additive: boolean }
     | { kind: 'token-lasso'; pointerId: number; captureTarget: Element; points: MapPoint[]; additive: boolean }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
@@ -937,7 +937,7 @@ export function BattleMap({
     if (targetable) targetGestureRef.current = null;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
-    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point, start: point, moved: false, targetable };
+    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point, start: point, startClientX: e.clientX, startClientY: e.clientY, moved: false, targetable };
     setDraggingId(c.id);
     setDragPos(point);
   }
@@ -1078,7 +1078,11 @@ export function BattleMap({
 
     if (gesture.kind === 'token') {
       gesture.point = pct;
-      if (Math.hypot(pct.x - gesture.start.x, pct.y - gesture.start.y) >= 0.25) gesture.moved = true;
+      // A movable legal target needs ordinary touch jitter to remain a target tap. Use the
+      // same CSS-pixel slop as map pings; map-percent movement varies with rendered map size.
+      if (gesture.targetable
+        ? mapPingTapExceededSlop(gesture, e.clientX, e.clientY)
+        : Math.hypot(pct.x - gesture.start.x, pct.y - gesture.start.y) >= 0.25) gesture.moved = true;
       setDragPos(pct);
     } else if (gesture.kind === 'token-select') {
       gesture.end = pct;
