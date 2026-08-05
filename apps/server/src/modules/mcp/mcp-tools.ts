@@ -4833,8 +4833,9 @@ export class McpToolsService {
         '`systemMathSupported` is true only when the campaign\'s rule system is 5e or an empty/unrecognized slug ' +
         '(the same 5e fallback combat math already uses) — false for a registered non-5e system (PF2e, OSR, …) that ' +
         'has not been audited against this maths (issue #1928, label don\'t block: resolution still runs and, under ' +
-        '`commit:true`, still applies — this only flags that the numbers are 5e-shaped, not this table\'s own rules). ' +
-        '`mathProfile` names the audited profile in force, or null when unsupported.',
+        '`commit:true`, still applies — the flag only marks the system UNAUDITED end-to-end, and does NOT tell you ' +
+        'which maths ran). `mathProfile` names the audited profile in force, or null when unsupported — read it, not ' +
+        'the flag, to learn what actually executed.',
       { encounterId: Id.describe('Encounter id'), ...ActionResolveRequest.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

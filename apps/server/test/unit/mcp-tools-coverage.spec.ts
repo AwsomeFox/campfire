@@ -132,4 +132,30 @@ describe('McpToolsService coverage unit tests', () => {
       await toolset.call(tool.name, { campaignId: 1, id: 1, query: 'test' });
     }
   });
+
+  /**
+   * Issue #1928 review (Codex, three separate rounds on this one sentence). An AI caller reads
+   * `resolve_action`'s description to decide how much to trust a result. `systemMathSupported:
+   * false` marks the system UNAUDITED end-to-end — it does not say which maths ran. OSR and Open
+   * Legend supply their own `resolveAttack` (descending-AC comparison, exploding dice pools) and
+   * are still reported unsupported because the combined attack/save profile is unaudited, so a
+   * blanket "the numbers are 5e-shaped" claim is false for exactly the systems the flag is meant
+   * to protect — and would push an agent to discount a result that was right for the table.
+   *
+   * This pins the correction rather than banning the phrase: the description legitimately says
+   * "5e-shaped" in a clause conditioned on `mathProfile` naming the 5e profile.
+   */
+  it('resolve_action does not tell callers the unsupported flag means 5e math ran', () => {
+    const service = createMcpToolsService();
+    const toolset = service.buildToolset(user);
+    const resolveAction = toolset.tools.find((t) => t.name === 'resolve_action');
+    expect(resolveAction).toBeDefined();
+    const description = resolveAction!.description ?? '';
+
+    // The corrective statement must be present...
+    expect(description).toMatch(/does NOT mean 5e math was necessarily used/);
+    expect(description).toMatch(/OSR, Open Legend/);
+    // ...and the flag must never be described as meaning the numbers ARE 5e-shaped.
+    expect(description).not.toMatch(/only flags that the numbers are 5e-shaped/);
+  });
 });
