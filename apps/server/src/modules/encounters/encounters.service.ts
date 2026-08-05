@@ -4447,11 +4447,18 @@ export class EncountersService {
       const parsed = replayResponse(prior.response);
       if (!parsed) return null;
       if (prior.responseRole === role) return parsed;
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
-      const found = snapshot.combatants.find((c) => c.id === combatantId);
-      if (!found) return null;
-      const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
-      return { combatant: found, roll };
+      // Best-effort re-derivation for a changed role: a failure here (e.g. the encounter
+      // became hidden to the caller between the preflight and the replay) must not mask the
+      // real rejection reason in `rollDeathSave`'s catch handler.
+      try {
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const found = snapshot.combatants.find((c) => c.id === combatantId);
+        if (!found) return null;
+        const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+        return { combatant: found, roll };
+      } catch {
+        return null;
+      }
     };
     const earlyReplay = await replayCommittedDeathSave();
     if (earlyReplay) return earlyReplay;
@@ -4907,9 +4914,14 @@ export class EncountersService {
       // A stored body may be missing or unparseable while the combatant still exists
       // (race/winner wrote a null response). Fall back to a current, role-filtered
       // projection — and tolerate a trashed encounter so an already-committed result
-      // can still be replayed (issue #1990).
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
-      return snapshot.combatants.find((c) => c.id === combatantId) ?? null;
+      // can still be replayed (issue #1990). A lookup failure must not mask the real
+      // rejection reason in the `EncounterOpRaceMarker` catch path.
+      try {
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        return snapshot.combatants.find((c) => c.id === combatantId) ?? null;
+      } catch {
+        return null;
+      }
     };
 
     try {
@@ -6368,11 +6380,17 @@ export class EncountersService {
       const parsed = replayResponse(prior.response);
       if (!parsed) return null;
       if (prior.responseRole === role) return parsed;
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
-      const found = snapshot.combatants.find((c) => c.id === combatantId);
-      if (!found) return null;
-      const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
-      return { combatant: found, roll };
+      // Re-derive for a changed role; tolerate a trashed encounter and treat any
+      // visibility failure as best-effort so the original rejection reason is preserved.
+      try {
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const found = snapshot.combatants.find((c) => c.id === combatantId);
+        if (!found) return null;
+        const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+        return { combatant: found, roll };
+      } catch {
+        return null;
+      }
     };
     const findPrior = (): EncounterOpPrior | null => {
       let prior: EncounterOpPrior | null = null;
