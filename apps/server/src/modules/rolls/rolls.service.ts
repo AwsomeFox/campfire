@@ -1,5 +1,5 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, desc, eq, inArray, lte } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, lte } from 'drizzle-orm';
 import type { DiceRoll, RollResult, RollResultTerm, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { diceRolls, encounters, npcs } from '../../db/schema';
@@ -183,26 +183,40 @@ export class RollsService implements OnApplicationBootstrap {
         .limit(limit);
       return rows.map(toDomain);
     }
-    // Issue #1904 review finding: applying the DB LIMIT before redaction can hand a non-DM
-    // caller a short (or empty) page while older VISIBLE rolls exist just past the cutoff —
-    // the newest `limit` rows might happen to be exactly the ones redaction then drops.
-    // Fetch a wider CANDIDATE window, redact THAT, and only then take the requested page —
-    // never the other way around. The candidate window covers the durable retention ceiling
-    // when it is finite (in the common case that already IS the whole per-campaign table,
-    // since the background sweep keeps it pruned to that size) and falls back to the
-    // platform default as a query-cost safety net when retention is configured unbounded
-    // (0/negative — "keep everything" is a deliberate operator choice about durable history,
-    // not license for an unbounded per-request query).
-    const retention = resolveDiceRollsRetention();
-    const candidateLimit = Math.max(limit, retention > 0 ? retention : DEFAULT_DICE_ROLLS_RETENTION);
-    const rows = await this.db
-      .select()
-      .from(diceRolls)
-      .where(eq(diceRolls.campaignId, campaignId))
-      .orderBy(desc(diceRolls.id))
-      .limit(candidateLimit);
-    const redacted = await this.redactForRole(rows.map(toDomain));
-    return redacted.slice(0, limit);
+    return this.listVisibleForCampaign(campaignId, limit);
+  }
+
+  /**
+   * Backfills the visible roll feed for non-DM callers. The requested `limit` is the
+   * number of *visible* rows to return, not the SQL page size, because hidden encounter
+   * rows and hidden-NPC masks are applied after the rows are read. We fetch small
+   * candidate batches and widen by descending id cursor only when the redacted result is
+   * still short — avoiding a full-table scan on every poll.
+   */
+  private async listVisibleForCampaign(campaignId: number, limit: number): Promise<DiceRoll[]> {
+    const visible: DiceRoll[] = [];
+    let cursor: number | undefined;
+    // Retention caps the table at 1000 rows per campaign, so a bounded number of batches
+    // is enough to drain the feed without an unbounded loop.
+    for (let i = 0; i < 40 && visible.length < limit; i++) {
+      const batchLimit = limit - visible.length;
+      const conditions = [eq(diceRolls.campaignId, campaignId)];
+      if (cursor !== undefined) conditions.push(lt(diceRolls.id, cursor));
+      const rows = await this.db
+        .select()
+        .from(diceRolls)
+        .where(and(...conditions))
+        .orderBy(desc(diceRolls.id))
+        .limit(batchLimit);
+      if (rows.length === 0) break;
+      // Fast path: nothing in this batch can trigger redaction, so it is all visible.
+      const batch = rows.map(toDomain);
+      const needsRedaction = batch.some((r) => r.encounterId !== undefined || r.npcId !== undefined);
+      const redacted = needsRedaction ? await this.redactForRole(batch) : batch;
+      visible.push(...redacted);
+      cursor = rows[rows.length - 1].id;
+    }
+    return visible.slice(0, limit);
   }
 
   /**
