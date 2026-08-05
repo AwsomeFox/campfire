@@ -2500,7 +2500,12 @@ export default function RunSessionPage() {
     if (!turnWorkspace) return;
     if (characterOwnershipPendingDataUpdatedAtRef.current != null) return;
     if (turnOwnerPendingCombatantId != null) {
-      if (turnWorkspace.current?.combatantId !== turnOwnerPendingCombatantId) return;
+      if (turnWorkspace.current?.combatantId !== turnOwnerPendingCombatantId) {
+        if (turnWorkspace.current?.combatantId === currentCombatantId) {
+          setTurnOwnerPendingCombatantId(null);
+        }
+        return;
+      }
       setTurnOwnerFromEvent({
         combatantId: turnOwnerPendingCombatantId,
         isYourTurn: turnWorkspace.isYourTurn,

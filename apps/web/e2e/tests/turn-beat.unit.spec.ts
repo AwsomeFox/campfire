@@ -74,6 +74,11 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/turnOwnerFromEvent != null && turnOwnerFromEvent\.combatantId === currentCombatantId\s*\? turnOwnerFromEvent\.isYourTurn/);
   });
 
+  test('releases a pending owner marker when the workspace confirms a polled actor change', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/turnWorkspace\.current\?\.combatantId !== turnOwnerPendingCombatantId\) \{\s*if \(turnWorkspace\.current\?\.combatantId === currentCombatantId\) \{\s*setTurnOwnerPendingCombatantId\(null\);/);
+  });
+
   test('relies on the paired encounter update while refreshing only /turn for a turn edge', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     const start = source.indexOf("if (event.type === 'encounter.turn_changed')");
