@@ -113,7 +113,19 @@ test.describe('encounter turn loop multi-client (issue #1465)', () => {
       const playerEndBtn = playerPage.getByTestId('workspace-end-turn');
       const dmNextBtn = dmPage.getByTestId('encounter-header-next-turn');
 
-      await Promise.allSettled([playerEndBtn.click(), dmNextBtn.click()]);
+      const [playerClickOutcome, dmClickOutcome] = await Promise.allSettled([
+        playerEndBtn.click(),
+        dmNextBtn.click(),
+      ]);
+      // Both clicks must actually land for this to be a real race. Playwright's `.click()`
+      // waits for actionability (visible, stable, enabled) first — if an SSE re-render from
+      // the OTHER page's click makes a button momentarily disabled or detached, the click
+      // can reject instead of firing, and `Promise.allSettled` alone swallows that silently.
+      // A single request would still satisfy "advances exactly once" below for the wrong
+      // reason, and no client would ever error, so the banner assertion could never pass —
+      // that would be a broken race, not proof the client fails to surface a real conflict.
+      expect(playerClickOutcome.status, 'player end-turn click').toBe('fulfilled');
+      expect(dmClickOutcome.status, 'dm next-turn click').toBe('fulfilled');
 
       // Turn must advance exactly ONCE (to Goblin), not twice (back to Hero in round 3).
       await expect(dmPage.getByTestId(`combatant-row-${monster.id}`)).toHaveAttribute(
