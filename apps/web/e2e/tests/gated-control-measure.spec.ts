@@ -76,4 +76,54 @@ test.describe('GatedControl — Measure gate (issue #1933)', () => {
     await expect(measureBtnAfter).toBeEnabled();
     await expect(measureBtnAfter).not.toHaveAttribute('aria-disabled', 'true');
   });
+
+  // Issue #1933 review finding: `modeBtn` used to wrap Measure in GatedControl only when
+  // `gateReason` was truthy (`gateReason ? <GatedControl>… : <button/>`), which changes the
+  // tree shape the instant the reason clears — forcing React to unmount and remount the
+  // button at exactly the false→true transition this affordance exists to explain. The
+  // reload-based test above cannot catch that (a fresh mount looks identical to a
+  // preserved one after a reload). This one never reloads: it marks the live DOM node,
+  // focuses it, flips the gate via a real PATCH (propagated over the page's own SSE
+  // connection, not a reload), and asserts the SAME node — with focus intact — is what
+  // ends up enabled.
+  test('setting the grid scale in place (no reload) does not remount the button or steal focus', async ({ page }) => {
+    const { campaignId } = seed();
+
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Measure gate in-place', hidden: false },
+    });
+    expect(created.ok()).toBe(true);
+    const id = ((await created.json()) as { id: number }).id;
+
+    const upload = await page.request.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+      multipart: {
+        kind: 'map',
+        file: { name: 'measure-gate-inplace-map.png', mimeType: 'image/png', buffer: MEASURE_GATE_MAP_PNG },
+      },
+    });
+    expect(upload.ok()).toBe(true);
+    const mapAttachmentId = ((await upload.json()) as { id: number }).id;
+    const attached = await page.request.patch(`/api/v1/encounters/${id}`, { data: { mapAttachmentId } });
+    expect(attached.ok()).toBe(true);
+
+    await page.goto(`/c/${campaignId}/encounters/${id}`);
+    const measureBtn = page.getByTestId('map-tool-measure');
+    await expect(measureBtn).toHaveAttribute('aria-disabled', 'true');
+
+    await measureBtn.focus();
+    await expect(measureBtn).toBeFocused();
+    await measureBtn.evaluate((el) => el.setAttribute('data-stable-probe', '1'));
+
+    const scaled = await page.request.patch(`/api/v1/encounters/${id}`, {
+      data: { gridSize: 8, gridScale: 5 },
+    });
+    expect(scaled.ok()).toBe(true);
+
+    // No reload: the gate must clear via the page's own live encounter read.
+    await expect(measureBtn).toBeEnabled({ timeout: 15_000 });
+    await expect(measureBtn).not.toHaveAttribute('aria-disabled', 'true');
+    // Same node (probe survived) and focus never left it.
+    await expect(measureBtn).toHaveAttribute('data-stable-probe', '1');
+    await expect(measureBtn).toBeFocused();
+  });
 });

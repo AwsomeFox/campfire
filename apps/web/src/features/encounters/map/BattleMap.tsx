@@ -1434,9 +1434,14 @@ export function BattleMap({
   // `gateReason` is optional and separate from `hint` (issue #1933): most of this
   // toolbar's disabled buttons keep their pre-existing hover-only `title`, unchanged.
   // Only the one call site that passes `gateReason` gets the full GatedControl
-  // affordance (hover/focus tooltip, aria-describedby, coarse-pointer tap hint).
-  const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string, gateReason?: string) => {
-    const button = (
+  // affordance (hover/focus tooltip, aria-describedby, coarse-pointer tap hint) — but the
+  // wrapper itself is ALWAYS present (reason={gateReason}, which is undefined for every
+  // other call site) rather than conditionally rendered. GatedControl's own doc comment
+  // explains why: a conditional wrapper changes the tree shape the moment `gateReason`
+  // flips from set to undefined, forcing React to unmount and remount the button — losing
+  // focus on the exact transition (grid scale gets set) this affordance exists to explain.
+  const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string, gateReason?: string) => (
+    <GatedControl reason={gateReason}>
       <button
         type="button"
         className="cf-map-tool cf-map-focusable"
@@ -1452,9 +1457,8 @@ export function BattleMap({
       >
         {label}
       </button>
-    );
-    return gateReason ? <GatedControl reason={gateReason}>{button}</GatedControl> : button;
-  };
+    </GatedControl>
+  );
 
   return (
     <Card

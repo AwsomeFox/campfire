@@ -18,7 +18,7 @@ import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions, useTableSafety } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions, invalidateTableSafety, useTableSafety } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import { beginReconcile, blocksFurtherActions, clearReconcile, completeReconcile, IDLE_RECONCILE, isAmbiguousOutcome, type ReconcileState } from '../../lib/ambiguousMutation';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
@@ -1367,6 +1367,19 @@ export default function RunSessionPage() {
           // This one event represents the whole atomic recovery batch. Linked
           // encounter rows emit their own post-commit encounter.updated frame.
           invalidateCampaignCharactersForOwnership();
+          return;
+        }
+        // Issue #1933 review finding: this event has no encounterId (it is campaign-wide,
+        // like character/membership frames above) and was falling into the encounterId
+        // filter below, which drops it — so another participant's hold activate/release
+        // only reached this page via useTableSafety's own 20s poll. safetyHoldActive
+        // gates real writes (start/nextTurn/undoTurn/endTurn), so a stale mirror meant the
+        // exact failure this feature exists to prevent: the server rejects and the UI
+        // cannot say why, for up to a poll interval. Refetch the safety row immediately
+        // instead — the anonymity rules stay enforced there, this frame carries only
+        // `active` (see useCampaignEvents' own doc comment on 'safety.hold').
+        if (event.type === 'safety.hold') {
+          invalidateTableSafety(queryClient, cid);
           return;
         }
         // Sheet / membership frames have no encounterId — must not fall into the

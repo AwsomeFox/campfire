@@ -88,19 +88,39 @@ export function DmLifecycleHeader({
                 : t('encounters.run.rollInitiative')}
             </Btn>
           </GatedControl>
-          <GatedControl
-            reason={gateReasonText(
-              startGateReason({ safetyHoldActive, riskyBlocked, hasNoCombatants, needsInitiativeCount }),
-              t,
-            )}
-          >
-            <Btn
-              disabled={headerBusy || riskyBlocked || hasNoCombatants || needsInitiativeCount > 0}
-              onClick={onStart}
-            >
-              {t('encounters.run.start')}
-            </Btn>
-          </GatedControl>
+          {(() => {
+            const startReasonKey = startGateReason({
+              safetyHoldActive,
+              riskyBlocked,
+              hasNoCombatants,
+              needsInitiativeCount,
+            });
+            const startReason = gateReasonText(startReasonKey, t);
+            // Issue #1933 review finding: the roster-state reasons (no combatants yet /
+            // initiative incomplete) are a standing "what to do next" instruction, not a
+            // transient one like the sync gate or a safety hold — this used to be a
+            // permanently visible paragraph, and hiding it behind hover/focus/tap made a
+            // sighted DM who never hovers, and a touch user who never taps a disabled
+            // button, see an unexplained greyed-out Start. Keep the paragraph, source it
+            // from the SAME run.gate.* string GatedControl uses so the two can never drift.
+            const showStandingHint =
+              startReasonKey === 'needsCombatantsToStart' || startReasonKey === 'needsInitiativeToStart';
+            return (
+              <div className="flex flex-col gap-0.5 items-stretch">
+                <GatedControl reason={startReason}>
+                  <Btn
+                    disabled={headerBusy || riskyBlocked || hasNoCombatants || needsInitiativeCount > 0}
+                    onClick={onStart}
+                  >
+                    {t('encounters.run.start')}
+                  </Btn>
+                </GatedControl>
+                {showStandingHint && (
+                  <p className="text-muted text-xs m-0 max-w-[14rem]">{startReason}</p>
+                )}
+              </div>
+            );
+          })()}
         </>
       )}
       {lifecycle.undoTurn && (
