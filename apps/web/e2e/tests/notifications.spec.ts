@@ -514,24 +514,12 @@ test('coordinates polling and read state between tabs', async ({ browser }) => {
   await second.waitForTimeout(100);
   expect(countRequests).toBe(1);
 
-  await first.bringToFront();
-  await first.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-
-  await second.bringToFront();
-  await second.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
-
-  await expect.poll(() => countRequests, { timeout: 25000 }).toBe(2);
-  await expect.poll(() => activeRequests, { timeout: 25000 }).toBe(0);
+  await Promise.all([
+    first.getByRole('link', { name: 'Quests', exact: true }).click(),
+    second.getByRole('link', { name: 'Quests', exact: true }).click(),
+  ]);
+  await expect.poll(() => countRequests, { timeout: 15000 }).toBe(2);
+  await expect.poll(() => activeRequests, { timeout: 15000 }).toBe(0);
   expect(maxActiveRequests).toBe(1);
 
   await first.getByRole('button', { name: /Notifications/ }).click();
@@ -583,15 +571,8 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   // Start a count load before read-all in the other tab, then release its stale
   // positive response after the read-all broadcast arrives.
   holdNextCount = true;
-  await second.bringToFront();
-  await second.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-  });
   void second.getByRole('link', { name: 'Quests', exact: true }).click();
-  await expect.poll(() => staleCountStarted, { timeout: 25000 }).toBe(true);
+  await expect.poll(() => staleCountStarted, { timeout: 15000 }).toBe(true);
   await first.getByRole('button', { name: /Notifications/ }).click();
   await first.getByRole('button', { name: 'Mark all (2) read' }).click();
   const confirm = first.getByRole('dialog').filter({ hasText: 'Mark all 2 notifications as read?' });
