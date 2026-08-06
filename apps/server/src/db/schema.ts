@@ -1017,14 +1017,11 @@ export const users = sqliteTable('users', {
   timeFormat: text('time_format').notNull().default('system'),
   // Per-player dice overlay skin (issue #1315).
   diceTheme: text('dice_theme').notNull().default('nocturne'),
+  // Whether to play spectator tumble/crit animations for other players' rolls (issue #1899).
+  animateOthersRolls: integer('animate_others_rolls', { mode: 'boolean' }).notNull().default(true),
   // Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
   // campaign-creation policy (settings.campaignCreationPolicy). Ignored entirely under
   // the 'everyone'/'admins_only' policies.
-  //
-  // Defaults FALSE so an insert that omits it fails CLOSED (review) — see the matching
-  // note in bootstrap.sql.ts. Every path that should grant it says so explicitly.
-  // Upgrade safety is migration 0164's job, not this default's: it backfills every
-  // account that predates the flag to true, so no existing user loses an ability they had.
   canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(false),
   // Color-vision-assist mode: adds non-color channels to combat indicators (issue #1942).
   colorVisionAssist: integer('color_vision_assist', { mode: 'boolean' }).notNull().default(false),

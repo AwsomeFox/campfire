@@ -130,12 +130,18 @@ export default function PreferencesPage() {
   const [selectedDiceTheme, setSelectedDiceTheme] = useState<DiceTheme>(
     () => me?.user?.diceTheme ?? 'nocturne',
   );
+  const [animateOthersRolls, setAnimateOthersRolls] = useState<boolean>(
+    () => me?.user?.animateOthersRolls ?? true,
+  );
 
   useEffect(() => {
     if (me?.user?.diceTheme) {
       setSelectedDiceTheme(me.user.diceTheme);
     }
-  }, [me?.user?.diceTheme]);
+    if (me?.user?.animateOthersRolls !== undefined) {
+      setAnimateOthersRolls(me.user.animateOthersRolls);
+    }
+  }, [me?.user?.diceTheme, me?.user?.animateOthersRolls]);
 
   if (!user) {
     return (
@@ -174,6 +180,17 @@ export default function PreferencesPage() {
       if (latestDiceThemeRequest.current === token) {
         setSelectedDiceTheme(previous);
       }
+    }
+  }
+
+  async function toggleAnimateOthersRolls(checked: boolean) {
+    const previous = animateOthersRolls;
+    setAnimateOthersRolls(checked);
+    try {
+      await api.patch<User>(`${API}/me/preferences`, { animateOthersRolls: checked });
+      await refresh();
+    } catch {
+      setAnimateOthersRolls(previous);
     }
   }
 
@@ -516,6 +533,24 @@ export default function PreferencesPage() {
           >
             🎲 {t('dice.testRollButton', 'Test Roll (1d20)')}
           </button>
+        </div>
+        <div className="pt-3 border-t border-muted/20 flex items-center justify-between">
+          <div>
+            <label htmlFor="prefs-animate-others" className="text-sm font-medium cursor-pointer block">
+              {t('preferences.animateOthersRolls')}
+            </label>
+            <p className="text-xs text-muted m-0">
+              {t('preferences.animateOthersRollsDescription')}
+            </p>
+          </div>
+          <input
+            id="prefs-animate-others"
+            type="checkbox"
+            checked={animateOthersRolls}
+            aria-label={t('preferences.animateOthersRollsLabel')}
+            onChange={(e) => toggleAnimateOthersRolls(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+          />
         </div>
       </Card>
 

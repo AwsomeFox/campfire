@@ -67,12 +67,7 @@ function toDomain(row: typeof users.$inferSelect): User {
     textSize: row.textSize as User['textSize'],
     diceTheme: (row.diceTheme ?? 'nocturne') as User['diceTheme'],
     timeFormat: (row.timeFormat ?? 'system') as User['timeFormat'],
-    // Issue #851 — organizer eligibility. Nullable-safe for a row read before migration
-    // 0164 runs, and that fallback is FALSE (review): a read path cannot know whether a
-    // missing value means "predates the flag" or "never granted", so the only safe answer
-    // is the denying one. Upgrade safety is the migration's explicit backfill, which sets
-    // every pre-existing account to true — not this default, which would otherwise hand
-    // organizer eligibility to any row the column happened to be missing from.
+    animateOthersRolls: row.animateOthersRolls ?? true,
     canCreateCampaigns: row.canCreateCampaigns ?? false,
     colorVisionAssist: row.colorVisionAssist ?? false,
     createdAt: row.createdAt,
@@ -468,6 +463,7 @@ export class UsersService {
       if (input.textSize !== undefined) update.textSize = input.textSize;
       if (input.diceTheme !== undefined) update.diceTheme = input.diceTheme;
       if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
+      if (input.animateOthersRolls !== undefined) update.animateOthersRolls = input.animateOthersRolls;
       if (input.colorVisionAssist !== undefined) update.colorVisionAssist = input.colorVisionAssist;
 
       const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
