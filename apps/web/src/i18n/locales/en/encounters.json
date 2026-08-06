@@ -158,6 +158,12 @@
         "clearPlayers": "Clear player templates",
         "clearPlayersHint": "Remove every player-declared template",
         "declaredBy": "Declared by {{name}}"
+      },
+      "dragDistance": {
+        "budget": "used {{used}} of {{max}} {{unit}}",
+        "overSpeed": "over speed",
+        "movedMessage": "Moved {{feet}} {{unit}}.",
+        "undoneMessage": "Move undone."
       }
     },
     "workspace": {
