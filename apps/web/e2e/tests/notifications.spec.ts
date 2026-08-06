@@ -515,9 +515,19 @@ test('coordinates polling and read state between tabs', async ({ browser }) => {
   expect(countRequests).toBe(1);
 
   await first.bringToFront();
+  await first.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
   await first.getByRole('link', { name: 'Quests', exact: true }).click();
+
   await second.bringToFront();
+  await second.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
   await second.getByRole('link', { name: 'Quests', exact: true }).click();
+
   await expect.poll(() => countRequests, { timeout: 25000 }).toBe(2);
   await expect.poll(() => activeRequests, { timeout: 25000 }).toBe(0);
   expect(maxActiveRequests).toBe(1);
@@ -572,6 +582,10 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   // positive response after the read-all broadcast arrives.
   holdNextCount = true;
   await second.bringToFront();
+  await second.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
   void second.getByRole('link', { name: 'Quests', exact: true }).click();
   await expect.poll(() => staleCountStarted, { timeout: 25000 }).toBe(true);
   await first.getByRole('button', { name: /Notifications/ }).click();
