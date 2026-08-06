@@ -191,7 +191,18 @@ jobs:
   # production source file, but executes only test/unit/**/*.spec.ts. Integration
   # and server e2e suites run without instrumentation in `server-tests`.
   coverage:
-    timeout-minutes: 15
+    # Raised from 15 (issue #2021). `npm run test:cov` had grown to ~14m30-14m50 on its
+    # own, before this job's checkout/setup/restore/schema-build, so the budget was being
+    # exhausted by a suite that PASSED: one run logged
+    # "208 passed, 208 total / 2561 passed / Time: 867.859 s" and was killed anyway.
+    #
+    # A timeout kill surfaces as `cancelled`, and the aggregate `ci` job explains a
+    # cancelled dependency as "a newer push cancelled this run" — so the failure pointed
+    # at the wrong cause and invited a re-push, which just rolled the dice again.
+    #
+    # This buys headroom; it does not address the growth. Sharding test:cov the way
+    # server-tests is already sharded is the durable fix — see #2021.
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
