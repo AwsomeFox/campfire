@@ -56,6 +56,12 @@
       "delayingBadge": "Delaying",
       "announcement": "Moved {{name}} in the initiative order."
     },
+    "controller": {
+      "giveControlTo": "Give control to {{name}}",
+      "giveControl": "Give control to player",
+      "clearControl": "Clear player control",
+      "controlledBy": "Controlled by {{name}}"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",

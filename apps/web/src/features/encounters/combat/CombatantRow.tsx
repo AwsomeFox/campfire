@@ -205,30 +205,8 @@ export type CombatantRowProps = {
   /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
    *  entries — gates the "Full rule" link on condition-tag rules-hint popovers. */
   rulesHintCompendiumAvailable?: boolean;
-  /**
-   * Manual initiative reorder controls (issue #1923) — a drag handle plus the accessible
-   * "Move up / Move down / Move after…" fallback menu. `null` when the caller (DM only,
-   * encounter preparing/running) is not permitted to reorder right now — the whole
-   * control does not mount, matching every other DM-only affordance on this row so a
-   * player/viewer never sees a handle or menu at all.
-   */
-  reorder?: {
-    canMoveUp: boolean;
-    canMoveDown: boolean;
-    onMoveUp: () => void;
-    onMoveDown: () => void;
-    menuTargets: readonly { id: number; name: string }[];
-    onMoveAfter: (afterCombatantId: number | 'top') => void;
-    dragHandleProps: {
-      onPointerDown: (e: ReactPointerEvent<HTMLElement>) => void;
-      onPointerMove: (e: ReactPointerEvent<HTMLElement>) => void;
-      onPointerUp: (e: ReactPointerEvent<HTMLElement>) => void;
-      onPointerCancel: (e: ReactPointerEvent<HTMLElement>) => void;
-    };
-    isDragging: boolean;
-    isDropTarget: boolean;
-    busy: boolean;
-  } | null;
+  members?: readonly { userId: number; displayName?: string; username?: string }[];
+  onSetControllerUserId?: (userId: number | null) => void;
 };
 
 export const CombatantRow = memo(function CombatantRow({
@@ -291,6 +269,8 @@ export const CombatantRow = memo(function CombatantRow({
   rulesHintCampaignId,
   rulesHintCompendiumAvailable = false,
   reorder = null,
+  members,
+  onSetControllerUserId,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   const [showWhisper, setShowWhisper] = useState(false);
@@ -832,6 +812,30 @@ export const CombatantRow = memo(function CombatantRow({
                 ))}
               </select>
             </div>
+            {canEditIdentity && members && members.length > 0 && (
+              <div className="field" style={{ minWidth: 150 }}>
+                <label htmlFor={`controller-${combatant.id}`}>{t('encounters.controller.giveControl')}</label>
+                <select
+                  id={`controller-${combatant.id}`}
+                  data-testid={`controller-select-${combatant.id}`}
+                  aria-label={`Controller for ${combatant.name}`}
+                  value={combatant.controllerUserId ?? ''}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    onSetControllerUserId?.(val ? Number(val) : null);
+                  }}
+                  style={{ height: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+                >
+                  <option value="">{t('encounters.controller.clearControl')}</option>
+                  {members.map((m) => (
+                    <option key={m.userId} value={m.userId}>
+                      {m.displayName || m.username || `User #${m.userId}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <Btn onClick={commitIdentity} disabled={busy}>Save</Btn>
             <button className="btn btn-ghost" style={{ fontSize: 'var(--type-label)' }} onClick={() => { setEditingIdentity(false); setNameDraft(combatant.name); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }}>Cancel</button>
           </div>
@@ -844,6 +848,23 @@ export const CombatantRow = memo(function CombatantRow({
                 style={{ color: 'var(--color-accent)', fontSize: 12 }}
               >
                 ▸
+              </span>
+            )}
+            {combatant.controllerUserId != null && (
+              <span
+                className="tag tag-neutral"
+                data-testid={`controlled-tag-${combatant.id}`}
+                title={t('encounters.controller.controlledBy', {
+                  name: members?.find((m) => m.userId === combatant.controllerUserId)?.displayName ||
+                    members?.find((m) => m.userId === combatant.controllerUserId)?.username ||
+                    `User #${combatant.controllerUserId}`,
+                })}
+              >
+                🎮 {t('encounters.controller.controlledBy', {
+                  name: members?.find((m) => m.userId === combatant.controllerUserId)?.displayName ||
+                    members?.find((m) => m.userId === combatant.controllerUserId)?.username ||
+                    `User #${combatant.controllerUserId}`,
+                })}
               </span>
             )}
             <span style={down ? { textDecoration: 'line-through' } : undefined}>

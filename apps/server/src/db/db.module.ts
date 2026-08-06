@@ -3630,6 +3630,7 @@ function migrateStarfinderCombatState(sqlite: Database.Database): void {
     if (!has('rp_max')) sqlite.exec('ALTER TABLE combatants ADD COLUMN rp_max INTEGER NOT NULL DEFAULT 0');
     if (!has('eac')) sqlite.exec('ALTER TABLE combatants ADD COLUMN eac INTEGER');
     if (!has('kac')) sqlite.exec('ALTER TABLE combatants ADD COLUMN kac INTEGER');
+    if (!has('controller_user_id')) sqlite.exec('ALTER TABLE combatants ADD COLUMN controller_user_id INTEGER');
   }
 }
 

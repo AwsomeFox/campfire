@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, count, eq } from 'drizzle-orm';
+import { and, count, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import { GuestDmGrantCreate, MemberAiConsentUpdate, MemberCreate, MemberUpdate } from '@campfire/schema';
 import type { CampaignMember, GuestDmGrant, GuestDmGrantScope, Role } from '@campfire/schema';
@@ -10,6 +10,8 @@ import {
   campaigns,
   users,
   characters,
+  combatants,
+  encounters,
   participantSupportPreferences,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -997,6 +999,23 @@ export class MembersService {
         .all();
       for (const owned of ownedRows) {
         tx.update(characters).set({ ownerUserId: null, updatedAt: nextUpdatedAt(owned.updatedAt) }).where(eq(characters.id, owned.id)).run();
+      }
+      const campaignEncounterIds = tx
+        .select({ id: encounters.id })
+        .from(encounters)
+        .where(eq(encounters.campaignId, campaignId))
+        .all()
+        .map((e) => e.id);
+      if (campaignEncounterIds.length > 0) {
+        tx.update(combatants)
+          .set({ controllerUserId: null })
+          .where(
+            and(
+              eq(combatants.controllerUserId, row.member.userId),
+              inArray(combatants.encounterId, campaignEncounterIds),
+            ),
+          )
+          .run();
       }
       return row.member;
     });

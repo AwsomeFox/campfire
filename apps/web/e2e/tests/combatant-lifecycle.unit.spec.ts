@@ -18,6 +18,7 @@ function combatant(overrides: Partial<Combatant> = {}): Combatant {
     encounterId: 1,
     kind: 'character',
     characterId: 1,
+    controllerUserId: null,
     npcId: null,
     name: 'Ari',
     initiative: 12,

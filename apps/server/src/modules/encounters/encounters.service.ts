@@ -12,7 +12,7 @@ import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateU
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
+import { attachments, campaignMembers, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
@@ -474,6 +474,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     encounterId: row.encounterId,
     kind: row.kind as Combatant['kind'],
     characterId: row.characterId,
+    controllerUserId: row.controllerUserId ?? null,
     npcId: row.npcId,
     npcDispositionSnapshot: row.npcDispositionSnapshot,
     name: row.name,
@@ -760,16 +761,22 @@ function deathSaveRollEventDetail(
  * SOLE server-side choke point for the mode; there is no client-side hiding anywhere
  * downstream of this function.
  */
-function redactMonsterHp(c: Combatant, mode: MonsterHpDisplay): Combatant {
+export function redactMonsterHp(
+  c: Combatant,
+  modeOrUserId?: MonsterHpDisplay | string | number,
+  viewerUserId?: string | number,
+): Combatant {
+  let mode: MonsterHpDisplay = 'band';
+  let userId = viewerUserId;
+
+  if (typeof modeOrUserId === 'string' && (modeOrUserId === 'band' || modeOrUserId === 'exact' || modeOrUserId === 'hidden')) {
+    mode = modeOrUserId;
+  } else if (modeOrUserId !== undefined) {
+    userId = modeOrUserId;
+  }
+
   if (c.kind !== 'monster' && c.kind !== 'npc') return c;
-  // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
-  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43),
-  // UNLESS the DM has explicitly revealed this combatant's statblock (issue #1926) —
-  // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
-  // never carries the field until the DM turns it on. HP banding itself is entirely
-  // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
-  // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
-  // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
+  const isController = userId != null && c.controllerUserId != null && String(c.controllerUserId) === String(userId);
   const redacted: Combatant = {
     ...c,
     statblock: c.statblockRevealed ? c.statblock : null,
@@ -778,20 +785,14 @@ function redactMonsterHp(c: Combatant, mode: MonsterHpDisplay): Combatant {
       pendingConcentrationChecks: [],
     },
   };
+  if (isController) return redacted;
   if (redacted.hpCurrent === null || redacted.hpMax === null) return redacted;
   const band = hpBandFor(redacted.hpCurrent, redacted.hpMax);
   if (mode === 'exact') {
-    // Real numbers ship as-is; the band rides along too (harmless — it's derivable from
-    // the numbers already present) so a 0-HP monster still reports 'down' consistently
-    // with the other two modes.
     return { ...redacted, hpBand: band };
   }
-  // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
-  // temp-HP buffed monster doesn't leak numbers through the redaction.
   return {
     ...redacted,
-    // 'hidden' withholds the band too, EXCEPT 'down' — the table must always know who
-    // dropped, in every mode.
     hpBand: mode === 'hidden' && band !== 'down' ? null : band,
     hpCurrent: null,
     hpMax: null,
@@ -870,6 +871,17 @@ export class EncountersService {
      */
     @Optional() private readonly actionResolver?: ActionResolverService,
   ) {}
+
+  private async assertControllerIsCampaignMember(campaignId: number, controllerUserId: number): Promise<void> {
+    const [member] = await this.db
+      .select({ id: campaignMembers.id })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, controllerUserId)))
+      .limit(1);
+    if (!member) {
+      throw new BadRequestException(`User ${controllerUserId} is not a member of campaign ${campaignId}`);
+    }
+  }
 
   /**
    * Refuse to advance play while a participant's safety hold stands (issue #599).
@@ -1770,7 +1782,7 @@ export class EncountersService {
       // server-side difficulty/XP calculation. It is DM-only: campaign-authored
       // values may reveal a hidden NPC's allegiance to players.
       const monsterHpDisplay = (row.monsterHpDisplay ?? 'band') as MonsterHpDisplay;
-      list = list.map((c) => ({ ...redactMonsterHp(c, monsterHpDisplay), npcDispositionSnapshot: null }));
+      list = list.map((c) => ({ ...redactMonsterHp(c, monsterHpDisplay, viewerUserId), npcDispositionSnapshot: null }));
       // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant
       // linked to a HIDDEN NPC still leaked that NPC's identity to non-DMs via `npcId` + the
       // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
@@ -4052,6 +4064,13 @@ export class EncountersService {
     this.assertMutable(encounterRow);
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
 
+    if (input.controllerUserId !== undefined && input.controllerUserId !== null) {
+      if (role !== 'dm') {
+        throw new ForbiddenException('Only DM may set controllerUserId');
+      }
+      await this.assertControllerIsCampaignMember(encounterRow.campaignId, input.controllerUserId);
+    }
+
     let name = input.name;
     let hpMax = input.hpMax;
     let initMod = input.initMod ?? 0;
@@ -4377,6 +4396,7 @@ export class EncountersService {
             characterId,
             npcId,
             npcDispositionSnapshot,
+            controllerUserId: input.controllerUserId ?? null,
             name: n,
             initiative: null,
             initMod,
@@ -4823,23 +4843,25 @@ export class EncountersService {
         patch.statblockRevealed !== undefined ||
         patch.eac !== undefined ||
         patch.kac !== undefined ||
-        // Issue #1921: DM force-toggle of a limited-use/recharge action's spend state joins
-        // the same absolute-rule list — a player never needs to override their own or a
-        // monster's spend, and (per the acceptance criteria) must get a 403, not a silent no-op.
-        patch.actionUses !== undefined
+        patch.actionUses !== undefined ||
+        patch.controllerUserId !== undefined
       ) {
         throw new ForbiddenException({
           code: 'COMBATANT_FIELD_DM_ONLY',
           message:
-            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, eac, kac, or actionUses — roll your own initiative via the dedicated roll-initiative action.',
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, eac, kac, actionUses, or controllerUserId — roll your own initiative via the dedicated roll-initiative action.',
         });
       }
-      if (!existing.characterId) {
-        throw new ForbiddenException('Only dm may modify this combatant');
+      const isControlled = existing.controllerUserId !== null && String(existing.controllerUserId) === String(user.id);
+      let isOwnedCharacter = false;
+      if (existing.characterId) {
+        const [character] = await this.db.select().from(characters).where(eq(characters.id, existing.characterId)).limit(1);
+        if (character && character.ownerUserId === user.id) {
+          isOwnedCharacter = true;
+        }
       }
-      const [character] = await this.db.select().from(characters).where(eq(characters.id, existing.characterId)).limit(1);
-      if (!character || character.ownerUserId !== user.id) {
-        throw new ForbiddenException('Only dm or the owning player may modify this combatant');
+      if (!isControlled && !isOwnedCharacter) {
+        throw new ForbiddenException('Only dm or the controlling/owning player may modify this combatant');
       }
     }
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
@@ -4908,6 +4930,12 @@ export class EncountersService {
     if (patch.initiative !== undefined && isDm) staticUpdate.initiative = patch.initiative;
     if (patch.name !== undefined && isDm) staticUpdate.name = patch.name;
     if (patch.initMod !== undefined && isDm) staticUpdate.initMod = patch.initMod;
+    if (patch.controllerUserId !== undefined && isDm) {
+      if (patch.controllerUserId !== null) {
+        await this.assertControllerIsCampaignMember(encounterRow.campaignId, patch.controllerUserId);
+      }
+      staticUpdate.controllerUserId = patch.controllerUserId;
+    }
     // Battle-map token position (issue #39). Not DM-gated: the player-write branch above
     // already restricts a non-DM to a combatant linked to a character they own, which is
     // exactly the "a player moves only their own token" rule. Clamp to 0–100 (mirrors the
@@ -5569,6 +5597,7 @@ export class EncountersService {
       staticUpdate.initMod !== undefined ||
       staticUpdate.statblockRevealed !== undefined ||
       actionUsesPatch !== null ||
+      staticUpdate.controllerUserId !== undefined ||
       defenseOrStatblockChanged ||
       hpMaxChanged;
     if (changedNonHp) {
@@ -5602,18 +5631,22 @@ export class EncountersService {
       });
     }
 
-    // Issue #1921: log the DM's manual override of an action's limited-use/recharge spend.
-    // The ability's NAME is deliberately omitted for the same reason as the turn-start
-    // recharge log (see `rechargeRolls` in nextTurn): the combat log is readable by every
-    // campaign member, `redactEncounterEventsForViewer` masks only hidden-combatant
-    // identity rather than action names, and this fires for a monster whose statblock may
-    // be deliberately unrevealed (#1926). `actionUsesLabel` is still resolved — it gates
-    // whether the event is written at all — but only the COMBATANT lands on the event.
     if (actionUsesPatch && actionUsesLabel) {
       await this.appendEvent(encounterId, round, 'resource_changed', {
         target: targetName,
         targetId: combatantId,
         detail: 'limited-use ability uses set by DM',
+      });
+    }
+
+    if (staticUpdate.controllerUserId !== undefined && staticUpdate.controllerUserId !== existing.controllerUserId) {
+      const isAssigned = staticUpdate.controllerUserId !== null;
+      await this.appendEvent(encounterId, round, 'note', {
+        target: targetName,
+        targetId: combatantId,
+        detail: isAssigned ? "'s controller was updated" : "'s controller was cleared",
+      });
+    }
       });
     }
 
@@ -6717,10 +6750,16 @@ export class EncountersService {
       // concurrent change between this read and the write cannot be raced past.
       const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
       if (role !== 'dm') {
-        if (combatant.characterId === null) throw new ForbiddenException('Only dm may roll initiative for this combatant');
-        const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
-        if (!character || character.ownerUserId !== user.id) {
-          throw new ForbiddenException('Only dm or the owning player may roll initiative for this combatant');
+        const isControlled = combatant.controllerUserId !== null && String(combatant.controllerUserId) === String(user.id);
+        let isOwned = false;
+        if (combatant.characterId !== null) {
+          const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+          if (character && character.ownerUserId === user.id) {
+            isOwned = true;
+          }
+        }
+        if (!isControlled && !isOwned) {
+          throw new ForbiddenException('Only dm or the controlling/owning player may roll initiative for this combatant');
         }
       }
       // Group-initiative systems (issue #765) share ONE die per side — a per-combatant
@@ -6764,10 +6803,15 @@ export class EncountersService {
           .all();
         if (!freshCombatant) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
         if (role !== 'dm') {
-          if (freshCombatant.characterId === null) throw new ForbiddenException('Only dm may roll initiative for this combatant');
-          const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, freshCombatant.characterId)).limit(1).all();
-          if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
-            throw new ForbiddenException('Only dm or the owning player may roll initiative for this combatant');
+          const isController = freshCombatant.controllerUserId !== null && String(freshCombatant.controllerUserId) === String(user.id);
+          if (!isController) {
+            if (freshCombatant.characterId === null) {
+              throw new ForbiddenException('Only dm or the controlling player may roll initiative for this combatant');
+            }
+            const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, freshCombatant.characterId)).limit(1).all();
+            if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
+              throw new ForbiddenException('Only dm or the owning player may roll initiative for this combatant');
+            }
           }
         }
         if (freshCombatant.initiative !== null && !(role === 'dm' && overwrite === true)) {
@@ -7278,15 +7322,22 @@ export class EncountersService {
       entityId: encounterId,
     }).catch(() => {});
 
-    if (first?.kind === 'character' && first.characterId) {
-      this.db
-        .select({ ownerUserId: characters.ownerUserId })
-        .from(characters)
-        .where(eq(characters.id, first.characterId))
-        .limit(1)
-        .then(([char]) => {
-          if (char && char.ownerUserId) {
-            this.notifications.notifyUser(char.ownerUserId, campaignId, user, {
+    if (first) {
+      const getNotifyUserId = async (): Promise<number | null> => {
+        if (first.kind === 'character' && first.characterId) {
+          const [char] = await this.db
+            .select({ ownerUserId: characters.ownerUserId })
+            .from(characters)
+            .where(eq(characters.id, first.characterId))
+            .limit(1);
+          if (char?.ownerUserId) return Number(char.ownerUserId);
+        }
+        return first.controllerUserId ?? null;
+      };
+      getNotifyUserId()
+        .then((targetUserId) => {
+          if (targetUserId) {
+            this.notifications.notifyUser(targetUserId, campaignId, user, {
               type: 'encounter_turn',
               title: 'Your turn!',
               body: `It's ${first.name}'s turn in '${encounterRow.name}'.`,
@@ -7888,15 +7939,22 @@ export class EncountersService {
     });
 
     const [newCurrentRow] = await this.db.select().from(combatants).where(eq(combatants.id, newCurrentId!)).limit(1);
-    if (newCurrentRow?.kind === 'character' && newCurrentRow.characterId) {
-      this.db
-        .select({ ownerUserId: characters.ownerUserId })
-        .from(characters)
-        .where(eq(characters.id, newCurrentRow.characterId))
-        .limit(1)
-        .then(([char]) => {
-          if (char && char.ownerUserId) {
-            this.notifications.notifyUser(char.ownerUserId, encounterRow.campaignId, user, {
+    if (newCurrentRow) {
+      const getNotifyUserId = async (): Promise<number | null> => {
+        if (newCurrentRow.kind === 'character' && newCurrentRow.characterId) {
+          const [char] = await this.db
+            .select({ ownerUserId: characters.ownerUserId })
+            .from(characters)
+            .where(eq(characters.id, newCurrentRow.characterId))
+            .limit(1);
+          if (char?.ownerUserId) return Number(char.ownerUserId);
+        }
+        return newCurrentRow.controllerUserId ?? null;
+      };
+      getNotifyUserId()
+        .then((targetUserId) => {
+          if (targetUserId) {
+            this.notifications.notifyUser(targetUserId, encounterRow.campaignId, user, {
               type: 'encounter_turn',
               title: 'Your turn!',
               body: `It's ${newCurrentRow.name}'s turn in '${encounterRow.name}'.`,
@@ -8451,6 +8509,9 @@ export class EncountersService {
         .where(eq(characters.id, c.characterId))
         .limit(1);
       ownerUserId = character?.ownerUserId ?? null;
+    }
+    if (ownerUserId === null && c.controllerUserId !== null) {
+      ownerUserId = String(c.controllerUserId);
     }
     return {
       combatantId: c.id,

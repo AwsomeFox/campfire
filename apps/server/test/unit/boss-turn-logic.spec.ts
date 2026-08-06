@@ -16,6 +16,7 @@ function combatant(id: number, initiative: number | null): Combatant {
     encounterId: 1,
     kind: 'monster',
     characterId: null,
+    controllerUserId: null,
     npcId: null,
     name: `C${id}`,
     initiative,
