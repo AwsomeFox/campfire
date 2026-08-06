@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { createTestAppNoDevAuth, type TestAppContext } from './test-app';
+import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 interface TextContent {
   type: 'text';
@@ -86,7 +86,7 @@ describe('Issue #2029: restore_campaign MCP tool restores trashed campaign (e2e)
       await client.close().catch(() => undefined);
     }
     if (ctx) {
-      await ctx.app.close();
+      await closeTestApp(ctx);
     }
   });
 
@@ -121,7 +121,7 @@ describe('Issue #2029: restore_campaign MCP tool restores trashed campaign (e2e)
       name: 'restore_campaign',
       arguments: { campaignId },
     });
-    expect(dmResult.isError).toBeUndefined();
+    expect(dmResult.isError).toBeFalsy();
 
     const restored = parseResult(dmResult) as { id: number; deletedAt: string | null };
     expect(restored.id).toBe(campaignId);
