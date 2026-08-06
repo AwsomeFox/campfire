@@ -8,7 +8,7 @@
  * own suites).
  */
 import request from 'supertest';
-import { eq, and } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { isResolvableSpec } from '@campfire/schema';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
