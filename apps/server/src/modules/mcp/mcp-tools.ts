@@ -2307,7 +2307,7 @@ export class McpToolsService {
         'child row intact. 404 if not actually in the trash.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true, allowTrashed: true });
         return this.campaigns.restore(campaignId as number, user);
       },
     );
