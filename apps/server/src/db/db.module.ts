@@ -5123,7 +5123,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // against a real database under either name, so no installation can have recorded 0162 for
   // it, and upgrade compatibility is unaffected.
   { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
-  { name: '0164_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
+  // #1942 originally claimed 0164; #851 (0164_users_can_create_campaigns_851,
+  // 0165_campaign_creation_requests_851) landed first and owns those two ordinals.
+  // Renumbered to the next free ordinal — this migration has never run against a
+  // real database under 0164, so no installation can have recorded it, and upgrade
+  // compatibility is unaffected. Belongs after 0165 once this branch rebases past it.
+  { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
 ];
 
 /**

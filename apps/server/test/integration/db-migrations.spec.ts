@@ -2671,8 +2671,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
      }
    });
 
-  it('0164 adds users.color_vision_assist and defaults existing rows to off (#1942)', () => {
-    expect(MIGRATION_NAMES).toContain('0164_users_color_vision_assist_1942');
+  it('0166 adds users.color_vision_assist and defaults existing rows to off (#1942)', () => {
+    expect(MIGRATION_NAMES).toContain('0166_users_color_vision_assist_1942');
 
     dataDir = makeTempDataDir();
     writeOldSchemaDb(dataDir);
