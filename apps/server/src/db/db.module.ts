@@ -271,6 +271,23 @@ function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before color-vision-assist mode (issue #1942):
+ * `users.color_vision_assist` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN.
+ */
+function migrateUsersTableForColorVisionAssist1942(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasColorVisionAssist = columns.some((c) => c.name === 'color_vision_assist');
+  if (hasColorVisionAssist) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN color_vision_assist INTEGER NOT NULL DEFAULT 0');
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -5106,6 +5123,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // against a real database under either name, so no installation can have recorded 0162 for
   // it, and upgrade compatibility is unaffected.
   { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
+  { name: '0164_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
 ];
 
 /**

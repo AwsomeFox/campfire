@@ -123,6 +123,11 @@ export type CombatantRowProps = {
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
   targeting?: { legal: boolean; selected: boolean; declared: boolean; atCapacity: boolean; onToggle: () => void } | null;
+  /**
+   * Color-vision-assist mode (issue #1942): adds a current-turn chevron beside the
+   * accent border/tint, and an HP danger glyph beside the color-only bar tone.
+   */
+  colorVisionAssist?: boolean;
 };
 
 export function CombatantRow({
@@ -171,6 +176,7 @@ export function CombatantRow({
   onDuplicate,
   onRemove,
   targeting = null,
+  colorVisionAssist = false,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   // Issue #1746: one shared reason string for every write control this row disables while
@@ -514,6 +520,15 @@ export function CombatantRow({
           </div>
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+            {colorVisionAssist && isCurrentTurn && (
+              <span
+                data-testid={`combatant-row-turn-chevron-${combatant.id}`}
+                aria-hidden="true"
+                style={{ color: 'var(--color-accent)', fontSize: 12 }}
+              >
+                ▸
+              </span>
+            )}
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
               {down && <GameIcon slug="death-skull" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1.5" />}
               {combatant.name}
@@ -1231,7 +1246,7 @@ export function CombatantRow({
                   {hpDisplay(combatant)}
                 </span>
               </div>
-              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
+              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} colorVisionAssist={colorVisionAssist} />
             </div>
             {/* RP (Resolve Points) indicator for Starfinder */}
             {combatant.rpMax != null && combatant.rpMax > 0 && (

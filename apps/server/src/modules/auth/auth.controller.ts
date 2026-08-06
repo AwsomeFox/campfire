@@ -237,6 +237,7 @@ export class MeController {
           textSize: 'default',
           diceTheme: 'nocturne',
           timeFormat: 'system',
+          colorVisionAssist: false,
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },

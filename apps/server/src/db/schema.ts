@@ -1017,6 +1017,8 @@ export const users = sqliteTable('users', {
   timeFormat: text('time_format').notNull().default('system'),
   // Per-player dice overlay skin (issue #1315).
   diceTheme: text('dice_theme').notNull().default('nocturne'),
+  // Color-vision-assist mode: adds non-color channels to combat indicators (issue #1942).
+  colorVisionAssist: integer('color_vision_assist', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

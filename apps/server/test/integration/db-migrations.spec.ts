@@ -2670,4 +2670,24 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
        upgraded.sqlite.close();
      }
    });
+
+  it('0164 adds users.color_vision_assist and defaults existing rows to off (#1942)', () => {
+    expect(MIGRATION_NAMES).toContain('0164_users_color_vision_assist_1942');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'users')).toContain('color_vision_assist');
+      const user = sqlite.prepare('SELECT color_vision_assist FROM users WHERE id = 1').get() as {
+        color_vision_assist: number;
+      };
+      // NOT NULL DEFAULT 0 backfills the pre-existing legacy row — assist stays
+      // off for everyone until they opt in via PATCH /me/preferences.
+      expect(user.color_vision_assist).toBe(0);
+    } finally {
+      sqlite.close();
+    }
+  });
 });

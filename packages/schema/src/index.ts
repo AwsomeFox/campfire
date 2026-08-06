@@ -6570,6 +6570,13 @@ export const User = z.object({
   diceTheme: DiceTheme.default('nocturne'),
   /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
   timeFormat: TimeFormat.default('system'),
+  /**
+   * Color-vision-assist mode (issue #1942): adds non-color channels (shape/pattern,
+   * glyphs, chevrons) alongside the existing color-only combat indicators — token
+   * identity, HP danger escalation, current-turn marker, crit/fumble overlay. Off by
+   * default so default-path rendering is unchanged.
+   */
+  colorVisionAssist: z.boolean().default(false),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -6594,6 +6601,7 @@ export const PreferencesUpdate = z.object({
   textSize: TextSize.optional(),
   diceTheme: DiceTheme.optional(),
   timeFormat: TimeFormat.optional(),
+  colorVisionAssist: z.boolean().optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 

@@ -920,6 +920,7 @@ CREATE TABLE IF NOT EXISTS users (
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
   dice_theme TEXT NOT NULL DEFAULT 'nocturne',
+  color_vision_assist INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
