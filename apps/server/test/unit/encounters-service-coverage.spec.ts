@@ -13,6 +13,7 @@ import { ModerationService } from '../../src/modules/moderation/moderation.servi
 import type { RequestUser } from '../../src/common/user.types';
 import { eq } from 'drizzle-orm';
 import { campaigns, characters, encounterOpIdempotency, encounters, npcs } from '../../src/db/schema';
+import { ForbiddenException } from '@nestjs/common';
 import { UNKNOWN_COMBATANT_LABEL } from '../../src/modules/encounters/encounters.logic';
 import { nowIso } from '../../src/common/time';
 
@@ -516,5 +517,31 @@ describe('EncountersService unit coverage tests', () => {
     const stored = reread.combatants.find((c) => c.id === goblin.id)!;
     expect(stored.eac).toBe(12);
     expect(stored.kac).toBe(14);
+  });
+
+  // Devin review of #1990: `statblock`, `eac`, and `kac` are each written only under
+  // `isDm`, but the no-op early return tested `patch.statblock === undefined` without the
+  // isDm qualifier. A non-DM patch carrying only one of them slipped past the guard,
+  // entered the transaction with an empty writeSet, and drizzle threw "No values to set"
+  // — a 500 where a 403 was owed. Exactly the same asymmetry as the eac/kac no-op fix
+  // earlier on this branch, one field over.
+  it('rejects a non-DM patch carrying only a DM-only field instead of 500ing on an empty write', async () => {
+    const [char] = await db
+      .insert(characters)
+      .values({ campaignId, ownerUserId: 'player-9', name: 'Owned Hero', createdAt: nowIso(), updatedAt: nowIso() })
+      .returning();
+    const enc = await encountersService.create(campaignId, { name: 'DM-Only Field Guard', hidden: false }, dmActor, 'dm');
+    const combatant = enc.combatants.find((c) => c.characterId === char.id)!;
+    const player: RequestUser = { id: 'player-9', name: 'Player Nine', serverRole: 'user' };
+
+    for (const patch of [{ statblock: { ac: 15 } }, { eac: 12 }, { kac: 14 }] as const) {
+      await expect(
+        encountersService.updateCombatant(enc.id, combatant.id, patch as never, player, 'player'),
+      ).rejects.toThrow(ForbiddenException);
+    }
+
+    // A DM sending the same statblock still succeeds — the guard is about role, not field.
+    const asDm = await encountersService.updateCombatant(enc.id, combatant.id, { eac: 12 }, dmActor, 'dm');
+    expect(asDm.eac).toBe(12);
   });
 });
