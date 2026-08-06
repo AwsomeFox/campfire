@@ -79,6 +79,7 @@ export default function PreferencesPage() {
   const [appliedAccent, setAppliedAccent] = useState<string | null>(user?.accentColor ?? null);
   const [textSize, setTextSize] = useState<TextSize>(user?.textSize ?? 'default');
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(user?.timeFormat ?? 'system');
+  const [colorVisionAssist, setColorVisionAssist] = useState<boolean>(user?.colorVisionAssist ?? false);
   const [hexInput, setHexInput] = useState(user?.accentColor ?? '');
   const [hexError, setHexError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -102,6 +103,7 @@ export default function PreferencesPage() {
     setAppliedAccent(user.accentColor ?? null);
     setTextSize(user.textSize ?? 'default');
     setTimeFormat(user.timeFormat ?? 'system');
+    setColorVisionAssist(user.colorVisionAssist ?? false);
     setHexInput(user.accentColor ?? '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
@@ -148,7 +150,8 @@ export default function PreferencesPage() {
   const profileDirty =
     displayName !== (user.displayName ?? '') ||
     textSize !== (user.textSize ?? 'default') ||
-    timeFormat !== (user.timeFormat ?? 'system');
+    timeFormat !== (user.timeFormat ?? 'system') ||
+    colorVisionAssist !== (user.colorVisionAssist ?? false);
   const accentDirty = accentColor !== appliedAccent;
   const previewSeed = accentColor ?? DEFAULT_ACCENT;
 
@@ -265,10 +268,12 @@ export default function PreferencesPage() {
         displayName: displayName.trim(),
         textSize,
         timeFormat,
+        colorVisionAssist,
       });
       setDisplayName(updated.displayName ?? '');
       setTextSize(updated.textSize ?? 'default');
       setTimeFormat(updated.timeFormat ?? 'system');
+      setColorVisionAssist(updated.colorVisionAssist ?? false);
       await refresh();
       setSaved(true);
       if (savedFlashTimerRef.current) clearTimeout(savedFlashTimerRef.current);
@@ -596,6 +601,22 @@ export default function PreferencesPage() {
         </div>
         <p className="text-muted reading-supporting" style={{ margin: 0 }}>
           {t('preferences.timeFormatNote')}
+        </p>
+      </Card>
+
+      <Card density="compact" elev="sm">
+        <span className="card-kicker">{t('preferences.colorVisionAssist')}</span>
+        <label className="flex items-center gap-2" htmlFor="prefs-color-vision-assist" style={{ fontSize: 13.5 }}>
+          <input
+            id="prefs-color-vision-assist"
+            type="checkbox"
+            checked={colorVisionAssist}
+            onChange={(e) => setColorVisionAssist(e.target.checked)}
+          />
+          {t('preferences.colorVisionAssistLabel')}
+        </label>
+        <p className="text-muted reading-supporting" style={{ margin: 0 }}>
+          {t('preferences.colorVisionAssistNote')}
         </p>
       </Card>
 

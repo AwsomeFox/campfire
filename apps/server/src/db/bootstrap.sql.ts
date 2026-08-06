@@ -925,6 +925,7 @@ CREATE TABLE IF NOT EXISTS users (
   -- permissive value is correct only for the ADD COLUMN backfill of pre-existing accounts,
   -- which migration 0164 does with an explicit UPDATE rather than a column default.
   can_create_campaigns INTEGER NOT NULL DEFAULT 0,
+  color_vision_assist INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

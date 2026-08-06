@@ -76,7 +76,7 @@ import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMo
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
-import { tokenIdentityBackground } from './tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export { BattleMap } from './map/BattleMap';
@@ -429,12 +429,15 @@ function InitiativeStrip({
   charactersById,
   turnPulse = false,
   hpFeedbackByCombatant,
+  colorVisionAssist = false,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
   turnPulse?: boolean;
   hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
+  /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
+  colorVisionAssist?: boolean;
 }) {
   return (
     <div
@@ -469,10 +472,20 @@ function InitiativeStrip({
               }
             }}
           >
+            {colorVisionAssist && isCurrent && (
+              <span
+                data-testid="strip-token-turn-chevron"
+                aria-hidden="true"
+                style={{ fontSize: 11, lineHeight: 1, color: 'var(--color-accent)' }}
+              >
+                ▾
+              </span>
+            )}
             <div
               aria-current={isCurrent ? 'true' : undefined}
               className={`flex items-center justify-center overflow-hidden bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
               style={{
+                position: 'relative',
                 width: isCurrent ? 48 : 40,
                 height: isCurrent ? 48 : 40,
                 transition: 'all 0.2s ease',
@@ -490,6 +503,23 @@ function InitiativeStrip({
                 <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
                   {tokenInitials(c.name)}
                 </span>
+              )}
+              {colorVisionAssist && (
+                <span
+                  data-testid="strip-token-identity-shape"
+                  data-token-shape={tokenIdentityShape(c.id)}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    right: 2,
+                    bottom: 2,
+                    width: 9,
+                    height: 9,
+                    background: '#fff',
+                    clipPath: TOKEN_IDENTITY_SHAPE_CLIP_PATH[tokenIdentityShape(c.id)],
+                    boxShadow: '0 0 0 1px rgba(15,23,42,.7)',
+                  }}
+                />
               )}
             </div>
             <FloatingNumbers events={feedback} />
@@ -3564,6 +3594,7 @@ export default function RunSessionPage() {
           canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
           onBatchTokens={batchMoveTokens}
@@ -3621,6 +3652,7 @@ export default function RunSessionPage() {
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
           movementDefault={movementDefault}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -3949,6 +3981,7 @@ export default function RunSessionPage() {
               charactersById={charactersById}
               turnPulse={turnPulse}
               hpFeedbackByCombatant={hpFeedbackByCombatant}
+              colorVisionAssist={me?.user.colorVisionAssist ?? false}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
@@ -3986,6 +4019,7 @@ export default function RunSessionPage() {
                   combatant={c}
                   hpFeedbackEvents={hpFeedbackByCombatant.get(c.id) ?? []}
                   isCurrentTurn={c.id === currentCombatantId}
+                  colorVisionAssist={me?.user.colorVisionAssist ?? false}
                   // Permission decides whether these controls MOUNT at all (issue #1746):
                   // a genuinely unauthorized viewer (wrong owner, ended encounter) never sees
                   // them. Whether the sync gate currently blocks writes is a separate, transient

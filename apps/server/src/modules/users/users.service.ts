@@ -74,6 +74,7 @@ function toDomain(row: typeof users.$inferSelect): User {
     // every pre-existing account to true — not this default, which would otherwise hand
     // organizer eligibility to any row the column happened to be missing from.
     canCreateCampaigns: row.canCreateCampaigns ?? false,
+    colorVisionAssist: row.colorVisionAssist ?? false,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -467,6 +468,7 @@ export class UsersService {
       if (input.textSize !== undefined) update.textSize = input.textSize;
       if (input.diceTheme !== undefined) update.diceTheme = input.diceTheme;
       if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
+      if (input.colorVisionAssist !== undefined) update.colorVisionAssist = input.colorVisionAssist;
 
       const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
       if (input.displayName !== undefined && input.displayName !== existing.displayName) {

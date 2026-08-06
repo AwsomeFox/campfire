@@ -323,6 +323,23 @@ function migrateCampaignCreationRequestsTable851(sqlite: Database.Database): voi
 }
 
 /**
+ * Migration for DBs created before color-vision-assist mode (issue #1942):
+ * `users.color_vision_assist` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN.
+ */
+function migrateUsersTableForColorVisionAssist1942(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasColorVisionAssist = columns.some((c) => c.name === 'color_vision_assist');
+  if (hasColorVisionAssist) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN color_vision_assist INTEGER NOT NULL DEFAULT 0');
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -5165,6 +5182,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // name, so no installation can have recorded the old numbers.
   { name: '0164_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
   { name: '0165_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
+  // #1942 originally claimed 0164; #851 landed first (5981ba5a) and owns 0164/0165.
+  // Renumbered to the next free ordinal — this migration has never run against a
+  // real database under 0164, so no installation can have recorded it, and upgrade
+  // compatibility is unaffected.
+  { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
 ];
 
 /**

@@ -1026,6 +1026,8 @@ export const users = sqliteTable('users', {
   // Upgrade safety is migration 0164's job, not this default's: it backfills every
   // account that predates the flag to true, so no existing user loses an ability they had.
   canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(false),
+  // Color-vision-assist mode: adds non-color channels to combat indicators (issue #1942).
+  colorVisionAssist: integer('color_vision_assist', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

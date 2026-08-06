@@ -33,7 +33,7 @@ import { scrollBehavior, prefersReducedMotion } from '../../../lib/prefersReduce
 import { armMapPingTap, decideMapPingTapRelease, isMapPingKeyboardActivation, mapPingTapExceededSlop, MAP_PING_KEYBOARD_POINT, type MapPingTapArm } from '../mapPingTap';
 import { applyPinch, applyWheelZoom, clampPan, DEFAULT_MAP_VIEWPORT, fitViewport, formatViewportZoomPercent, MAP_VIEWPORT_PAN_STEP_PX, MAP_VIEWPORT_ZOOM_STEP, panBy, resetViewport, surfaceToContentPoint, viewportTransformStyle, zoomByFactor, type MapViewportState, type PinchGesture } from '../mapViewport';
 import { tokenDiameterPx } from '../tokenFootprint';
-import { tokenIdentityBackground } from '../tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from '../tokenIdentity';
 import {
   readTokenDetailMode,
   tokenArcGeometry,
@@ -203,6 +203,12 @@ export type BattleMapProps = {
   ruleSystem: string | null;
   targeting?: { actorId: number; legalIds: readonly number[]; selectedIds: readonly number[]; declared: boolean; atCapacity: boolean; onToggle: (id: number) => void } | null;
   impactTargetIds?: readonly number[];
+  /**
+   * Color-vision-assist mode (issue #1942): adds a non-color identity shape badge
+   * and a current-turn chevron to the map token, alongside their color-only
+   * counterparts (fill color, accent ring).
+   */
+  colorVisionAssist?: boolean;
 };
 
 export function BattleMap({
@@ -246,6 +252,7 @@ export function BattleMap({
   ruleSystem,
   targeting = null,
   impactTargetIds = [],
+  colorVisionAssist = false,
 }: BattleMapProps) {
   const isCast = projection === 'cast';
   const effectiveIsDm = isCast ? false : isDm;
@@ -2598,6 +2605,24 @@ export function BattleMap({
                         >
                           {tokenInitials(c.name)}
                         </span>
+                        {colorVisionAssist && (
+                          <span
+                            data-testid={`map-token-identity-shape-${c.id}`}
+                            data-token-shape={tokenIdentityShape(c.id)}
+                            aria-hidden="true"
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              bottom: 0,
+                              width: Math.max(6, Math.round(sizePx * 0.24)),
+                              height: Math.max(6, Math.round(sizePx * 0.24)),
+                              background: '#fff',
+                              clipPath: TOKEN_IDENTITY_SHAPE_CLIP_PATH[tokenIdentityShape(c.id)],
+                              boxShadow: '0 0 0 1px rgba(15,23,42,.85)',
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
                         {selectedTarget && <span aria-hidden="true" data-testid={`map-target-crosshair-${c.id}`} style={{ position: 'absolute', inset: -7, display: 'grid', placeItems: 'center', color: 'var(--color-accent)', fontSize: Math.max(14, Math.round(sizePx * .45)), pointerEvents: 'none' }}>⌖</span>}
                         {impactTarget && <span aria-hidden="true" data-testid={`map-target-impact-${c.id}`} className="cf-target-impact-ring" />}
                         {showTokenState && hpFraction != null && hpTone != null && (
@@ -2614,6 +2639,24 @@ export function BattleMap({
                           <span data-testid={`map-token-current-turn-${c.id}`} aria-label={t('encounters.map.tokenDetails.currentTurn')} role="img"
                             className={reducedMotion ? undefined : 'cf-token-state-pulse'}
                             style={{ position: 'absolute', inset: -4, border: '2px solid var(--color-accent)', borderRadius: '50%', pointerEvents: 'none' }} />
+                        )}
+                        {isCurrentTurn && colorVisionAssist && (
+                          <span
+                            data-testid={`map-token-turn-chevron-${c.id}`}
+                            aria-hidden="true"
+                            style={{
+                              position: 'absolute',
+                              top: -14,
+                              left: '50%',
+                              transform: 'translateX(-50%)',
+                              color: 'var(--color-accent)',
+                              fontSize: Math.max(10, Math.round(sizePx * 0.3)),
+                              lineHeight: 1,
+                              pointerEvents: 'none',
+                            }}
+                          >
+                            ▾
+                          </span>
                         )}
                         {showTokenState && deathMarker && (
                           <span data-testid={`map-token-death-${c.id}`} aria-label={t(`encounters.map.tokenDetails.${deathMarker}`)} role="img"
