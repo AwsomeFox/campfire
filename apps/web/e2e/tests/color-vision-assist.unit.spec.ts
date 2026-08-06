@@ -5,10 +5,16 @@
  *
  * Pure-logic coverage follows the `tokenStateBadges.ts` / `accentPalette.ts`
  * convention already used in this suite (issues #1905, #795): deterministic
- * helpers are unit-tested directly, and their conditional wiring into JSX —
- * which this Playwright *.unit.spec config runs with no DOM/browser — is
- * verified with source-text assertions the same way
+ * helpers are unit-tested directly. Conditional wiring into JSX is verified
+ * with source-text assertions here for the surfaces this Playwright
+ * *.unit.spec config (no DOM/browser) cannot reach — the same way
  * `token-state-badges.unit.spec.ts` pins BattleMap's readTokenDetailMode call.
+ *
+ * The CombatantRow/HpBar and PreferencesPage wiring formerly covered here as
+ * source-scan assertions were converted to rendered assertions (issue #2025)
+ * — see apps/web/test/component/CombatantRow.spec.tsx and
+ * PreferencesPage.spec.tsx, which run under the jsdom + Testing Library tier
+ * (`npm run test:component -w apps/web`) rather than this Playwright config.
  */
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
@@ -27,11 +33,8 @@ import { hpTone, hpToneGlyph } from '../../src/components/ui';
 const CVD: ColorVisionSim[] = ['protanopia', 'deuteranopia', 'tritanopia'];
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
-const COMBATANT_ROW = resolve(__dirname, '../../src/features/encounters/combat/CombatantRow.tsx');
 const BATTLE_MAP = resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx');
 const DICE_ROLL_OVERLAY = resolve(__dirname, '../../src/components/DiceRollOverlay.tsx');
-const UI = resolve(__dirname, '../../src/components/ui.tsx');
-const PREFERENCES_PAGE = resolve(__dirname, '../../src/features/preferences/PreferencesPage.tsx');
 
 test.describe('token identity shape (issue #1942)', () => {
   test('is deterministic per combatantId — same combatant always yields the same shape', () => {
@@ -117,11 +120,12 @@ test.describe('assist wiring is gated on the colorVisionAssist preference (issue
     expect(occurrences.length).toBeGreaterThanOrEqual(4);
   });
 
-  test('CombatantRow: turn chevron gated on colorVisionAssist, HpBar receives the prop', () => {
-    const source = readFileSync(COMBATANT_ROW, 'utf8');
-    expect(source).toContain('colorVisionAssist && isCurrentTurn && (');
-    expect(source).toContain('<HpBar current={combatant.hpCurrent} max={combatant.hpMax} colorVisionAssist={colorVisionAssist} />');
-  });
+  // CombatantRow's turn-chevron gate and HpBar's colorVisionAssist prop wiring were
+  // covered here as source-scan assertions; both are now rendered assertions in
+  // apps/web/test/component/CombatantRow.spec.tsx (issue #2025), which mounts the
+  // real row for every (colorVisionAssist, isCurrentTurn) combination and checks
+  // the chevron and the HpBar danger glyph actually appear/disappear in the DOM —
+  // strictly stronger than confirming the JSX string is still present.
 
   test('BattleMap: map-token identity shape and turn chevron both gated on colorVisionAssist', () => {
     const source = readFileSync(BATTLE_MAP, 'utf8');
@@ -137,20 +141,16 @@ test.describe('assist wiring is gated on the colorVisionAssist preference (issue
     expect(source).toContain('cf-dice-roll-overlay__assist-glyph');
   });
 
-  test('HpBar: tone glyph only rendered when colorVisionAssist is on', () => {
-    const source = readFileSync(UI, 'utf8');
-    expect(source).toContain('const glyph = colorVisionAssist ? hpToneGlyph(tone) : null;');
-    expect(source).toContain('{glyph && (');
-  });
+  // HpBar's colorVisionAssist-gated glyph render was covered here as a source-scan
+  // assertion against ui.tsx directly; it's now exercised end-to-end (through the
+  // real, mounted HpBar) by apps/web/test/component/CombatantRow.spec.tsx's glyph
+  // tests, which assert the glyph's presence, absence, text, and tone attribute
+  // rather than a snippet of the implementation.
 
-  test('PreferencesPage: colorVisionAssist toggle is wired to state and PATCH /me/preferences', () => {
-    const source = readFileSync(PREFERENCES_PAGE, 'utf8');
-    expect(source).toContain('prefs-color-vision-assist');
-    expect(source).toContain('checked={colorVisionAssist}');
-    expect(source).toContain('onChange={(e) => setColorVisionAssist(e.target.checked)}');
-    // Included in the PATCH payload and the dirty-check, so Save actually persists it
-    // and the button isn't disabled when only this toggle changed.
-    expect(source).toMatch(/colorVisionAssist,\s*\n\s*\}\);/);
-    expect(source).toContain("colorVisionAssist !== (user.colorVisionAssist ?? false)");
-  });
+  // PreferencesPage's colorVisionAssist-to-PATCH wiring, including the dirty-check
+  // that unlocks Save for this field alone, was covered here as a source-scan
+  // assertion. It's now a rendered assertion in
+  // apps/web/test/component/PreferencesPage.spec.tsx, which drives the real
+  // checkbox and Save button and asserts on the actual PATCH /me/preferences
+  // payload sent, in both directions (on -> off and off -> on).
 });
