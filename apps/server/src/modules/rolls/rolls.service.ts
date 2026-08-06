@@ -1,4 +1,4 @@
-import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
+import { Inject, Injectable, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, desc, eq, inArray, lte, notExists, sql } from 'drizzle-orm';
 import type { DiceRoll, RollResult, RollResultTerm, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -7,6 +7,7 @@ import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import type { RequestUser } from '../../common/user.types';
 import { UNKNOWN_COMBATANT_LABEL } from '../encounters/encounters.logic';
+import { CampaignEventsService } from '../events/campaign-events.service';
 
 /**
  * #614: how many dice rolls each campaign keeps before the oldest are pruned.
@@ -107,7 +108,19 @@ type RollWriteDb = Pick<DrizzleDb, 'insert'>;
  */
 @Injectable()
 export class RollsService implements OnApplicationBootstrap {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    @Optional() @Inject(CampaignEventsService) private readonly events?: CampaignEventsService,
+  ) {}
+
+  emitDiceRolled(roll: DiceRoll | { id: number; campaignId: number; encounterId?: number | null }): void {
+    this.events?.emit({
+      type: 'dice.rolled',
+      campaignId: roll.campaignId,
+      rollId: roll.id,
+      ...(roll.encounterId != null ? { encounterId: roll.encounterId } : {}),
+    });
+  }
 
   /**
    * Kick off retention. Prune once at boot (awaited so a test's immediate
@@ -128,7 +141,9 @@ export class RollsService implements OnApplicationBootstrap {
    * always fast and a roll is never lost to a synchronous delete race.
    */
   async record(campaignId: number, result: RollResult, user: RequestUser): Promise<DiceRoll> {
-    return this.recordInTransaction(this.db, campaignId, result, user);
+    const roll = this.recordInTransaction(this.db, campaignId, result, user);
+    this.emitDiceRolled(roll);
+    return roll;
   }
 
   /**

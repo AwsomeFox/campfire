@@ -48,11 +48,13 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
       await expect(log).toHaveAttribute('aria-live', 'off');
       await watchAnnouncements(viewerPage);
 
+      const rollsPromise = viewerPage.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
       const rolled = await dmPage.request.post(`/api/v1/campaigns/${campaignId}/roll`, {
         data: { expr: '1d4+5', label: 'Stealth check' },
       });
       expect(rolled.ok()).toBe(true);
       const body = (await rolled.json()) as { total: number; expr: string };
+      await rollsPromise;
       await waitForAnnouncement(viewerPage, 'Stealth check');
       await waitForAnnouncement(viewerPage, body.expr);
       await waitForAnnouncement(viewerPage, String(body.total));
@@ -62,7 +64,6 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
       expect(afterFirst.filter((message) => /Rolled|rolled/i.test(message) && message.includes(String(body.total)))).toHaveLength(1);
 
       // Poll refetch must not re-announce the same roll id.
-      await viewerPage.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
       await expect.poll(async () => (await announcements(viewerPage)).filter((message) => /Rolled|rolled/i.test(message) && message.includes(String(body.total))).length).toBe(1);
     } finally {
       await dmContext.close();
@@ -81,7 +82,9 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
     await page.locator('details.dice-advanced summary').click();
     await page.getByLabel('Dice expression').fill('1d20');
     await watchAnnouncements(page);
+    const rollsPromise = page.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
     await page.locator('details.dice-advanced').getByRole('button', { name: 'Roll' }).click();
+    await rollsPromise;
     // Wait specifically for a dice announcement — not catch-up / other polite chatter.
     await expect
       .poll(async () => (await announcements(page)).some((message) => /Rolled|rolled/i.test(message)))
@@ -89,7 +92,6 @@ test.describe('shared dice log accessibility — remote clients (#590)', () => {
     const afterRoll = await announcements(page);
     const totalLine = afterRoll.find((message) => /Rolled|rolled/i.test(message)) ?? '';
     expect(totalLine.length).toBeGreaterThan(0);
-    await page.waitForResponse((res) => res.url().includes(`/api/v1/campaigns/${campaignId}/rolls`) && res.request().method() === 'GET');
     const afterPoll = await announcements(page);
     expect(afterPoll.filter((message) => message === totalLine)).toHaveLength(1);
   });

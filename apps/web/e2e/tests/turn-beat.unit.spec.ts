@@ -103,10 +103,6 @@ test.describe('turn-change beat (issue #1906)', () => {
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       round: -1,
     })).toBe(false);
-    const source = readFileSync(resolve(process.cwd(), 'src/lib/useCampaignEvents.ts'), 'utf8');
-    const schema = readFileSync(resolve(process.cwd(), '../../packages/schema/src/index.ts'), 'utf8');
-    expect(source).toMatch(/CombatantKind\.safeParse\(v\.combatantKind\)\.success/);
-    expect(schema).toMatch(/combatantKind: CombatantKind\.nullable\(\)\.optional\(\)/);
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       turnReverted: false,

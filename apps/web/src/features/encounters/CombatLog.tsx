@@ -9,7 +9,8 @@ import {
   formatCombatLogChainDetails,
   formatCombatLogChainSummary,
   formatCombatLogEventSummary,
-} from './combatLogAccessibility'; 
+} from './combatLogAccessibility';
+import { isDeathSaveRollEvent } from './combat/deathSaveOutcome';
 
 const EVENT_ICON: Record<string, string> = {
   damage: 'crossed-swords',
@@ -75,8 +76,15 @@ export const CombatLog = React.memo(function CombatLog({ events }: { events: Enc
               const details = expandable ? formatCombatLogChainDetails(chain) : [];
               const summary = chain.chainId ? formatCombatLogChainSummary(chain) : formatCombatLogEventSummary(head);
               const iconType = head.type;
+              // Issue #1919 — a death-save roll is the tensest line in the log; give it a
+              // distinct highlighted style rather than reading identically to any other roll.
+              const isDeathSaveRoll = !chain.chainId && isDeathSaveRollEvent(head);
               return (
-                <li key={chainKey} style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 12.5, lineHeight: 1.4 }}>
+                <li
+                  key={chainKey}
+                  className={isDeathSaveRoll ? 'cf-combat-log-death-save' : undefined}
+                  style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 12.5, lineHeight: 1.4 }}
+                >
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
                     <span aria-hidden="true" style={{ flex: 'none' }}>
                       {EVENT_ICON[iconType] ? <GameIcon slug={EVENT_ICON[iconType]} size={UI_ICON_SIZE.xs} /> : '•'}
