@@ -89,6 +89,16 @@ describe('shared-instance governance (issue #851, e2e)', () => {
     expect(second.status).toBe(409);
   });
 
+  it('refuses a zero default storage quota at the SERVER contract, not just in the admin card', async () => {
+    // `null` already means unlimited, so 0 carries no useful meaning — and it is not inert:
+    // AttachmentsService enforces any non-null quota, so a stored 0 refuses every upload in
+    // every campaign created afterwards. The admin card rejects it, but a client-side guard
+    // is not the contract; PATCH /settings validates against ServerSettings.partial(), so an
+    // API or MCP caller could persist it.
+    const res = await adminAgent.patch('/api/v1/settings').send({ defaultCampaignStorageQuotaBytes: 0 });
+    expect(res.status).toBe(400);
+  });
+
   it('withholds server-wide campaign counts from a non-admin caller', async () => {
     // Review: every other campaign read in this product is membership-scoped — GET /campaigns
     // is, even for a server admin — so returning an aggregate over campaigns the caller has no

@@ -69,6 +69,13 @@ export class CampaignGovernanceService {
       // Mirrors the existing `if (!user.devRole)` carve-out in CampaignsService.create()
       // — synthetic dev:* principals never get a campaignMembers row, so they cannot be
       // metered against a per-user limit, and every e2e/dev-auth flow predates this policy.
+      //
+      // The POLICY and LIMITS are bypassed; the storage default is NOT (review). It is not an
+      // authorization decision — it is what a brand-new campaign's `storageQuotaBytes` is
+      // stamped with — so hard-coding it to null here meant a header-auth deployment silently
+      // ignored the operator's configured default on every create, import and clone. The
+      // bypass exists because there is no account to meter, which says nothing about storage.
+      const devSettings = await this.settings.getAll();
       return {
         bypass: true,
         policy: 'everyone',
@@ -76,7 +83,7 @@ export class CampaignGovernanceService {
         canCreateCampaigns: true,
         userId: null,
         limits: { activePerUser: null, totalPerUser: null, activeServerWide: null, totalServerWide: null },
-        defaultStorageQuotaBytes: null,
+        defaultStorageQuotaBytes: devSettings.defaultCampaignStorageQuotaBytes ?? null,
       };
     }
     const all = await this.settings.getAll();

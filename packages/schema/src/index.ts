@@ -6649,7 +6649,14 @@ export const ServerSettings = z.object({
   // campaign (create/import/clone). null = unlimited (matches the pre-#851 default
   // for every campaign already on disk — this only ever affects NEW rows going
   // forward, never retroactively changes an existing campaign's storageQuotaBytes).
-  defaultCampaignStorageQuotaBytes: z.number().int().nonnegative().nullable().default(null),
+  // `.positive()`, not `.nonnegative()` (review). `null` is already the wire value for
+  // "unlimited", so 0 carries no useful meaning — and it is not inert: AttachmentsService
+  // enforces any non-null quota, so a stored 0 is a real zero-byte allowance that refuses
+  // every upload in every campaign created afterwards. The admin card rejects it, but a
+  // client-side guard is not the contract: PATCH /settings validates against
+  // ServerSettings.partial(), so any API or MCP caller could persist it. Every sibling
+  // ceiling in this block already uses `.positive()`.
+  defaultCampaignStorageQuotaBytes: z.number().int().positive().nullable().default(null),
 });
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();

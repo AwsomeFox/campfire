@@ -356,4 +356,19 @@ describe('CampaignGovernanceService (issue #851)', () => {
       expect(memberRows.every((m) => m.primaryOwner)).toBe(true);
     });
   });
+
+  describe('#851 review — the dev-principal bypass skips POLICY, not the storage default', () => {
+    it('still reports the operator default storage quota for a dev/header-auth principal', async () => {
+      // The bypass exists because a synthetic dev:* principal has no campaignMembers row and so
+      // cannot be metered against a per-user limit. That says nothing about storage: the default
+      // quota is what a new campaign's storageQuotaBytes is stamped with, not an authorization
+      // decision. Hard-coding it to null on that branch meant a header-auth deployment silently
+      // ignored the configured default on every create, import and clone.
+      await settings.update({ defaultCampaignStorageQuotaBytes: 7_000_000 });
+      const allowance = await governance.getAllowance({ id: 'dev:dm', devRole: 'dm' } as never);
+      expect(allowance.defaultStorageQuotaBytes).toBe(7_000_000);
+      // ...and the policy/limit bypass it rides on is untouched.
+      expect(allowance.canCreate).toBe(true);
+    });
+});
 });
