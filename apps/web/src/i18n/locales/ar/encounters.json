@@ -158,6 +158,12 @@
         "clearPlayers": "امسح قوالب اللاعبين",
         "clearPlayersHint": "أزل كل قوالب التأثير التي أعلنها اللاعبون",
         "declaredBy": "أعلنه {{name}}"
+      },
+      "dragDistance": {
+        "budget": "استُخدم {{used}} من {{max}} {{unit}}",
+        "overSpeed": "تجاوز السرعة",
+        "movedMessage": "تحرك {{feet}} {{unit}}.",
+        "undoneMessage": "تم التراجع عن الحركة."
       }
     },
     "workspace": {

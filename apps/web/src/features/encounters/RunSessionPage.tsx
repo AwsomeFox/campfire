@@ -3566,6 +3566,9 @@ export default function RunSessionPage() {
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
+          currentTurnCombatantId={encounter.status === 'running' ? turnWorkspace?.current?.combatantId ?? null : null}
+          currentTurnMovementMaxFt={turnWorkspace?.movement?.maxFt ?? null}
+          onMoveFt={(combatantId, moveFt) => patchCombatantTurnState(combatantId, { moveFt })}
           onBatchTokens={batchMoveTokens}
           onUndoTokenBatch={undoTokenBatch}
           dismissTokenUndoNonce={dismissTokenUndoNonce}
