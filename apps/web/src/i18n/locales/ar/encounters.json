@@ -30,6 +30,7 @@
       "off": "إيقاف",
       "presetSeconds": "{{seconds}} ثانية"
     },
+    "initiativeChipLabel": "المبادرة: {{value}}",
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",

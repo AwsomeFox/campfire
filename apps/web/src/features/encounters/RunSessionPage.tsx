@@ -51,6 +51,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
+import { shouldRevealInitiative } from './initiativeReveal';
 import { CheckRequestPanel } from './CheckRequests';
 import { ActionUsePanel, legalTargets } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -433,6 +434,7 @@ function InitiativeStrip({
   turnPulse = false,
   hpFeedbackByCombatant,
   colorVisionAssist = false,
+  revealTick = 0,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
@@ -441,8 +443,16 @@ function InitiativeStrip({
   hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
   colorVisionAssist?: boolean;
+  /** Issue #1934: reveal animation trigger tick when transitioning preparing->running. */
+  revealTick?: number;
 }) {
+  const { t } = useTranslation();
   const combatantRefs = useRef(new Map<number, HTMLDivElement>());
+  const prevPositionsRef = useRef<Map<number, number>>(new Map());
+  const [staggeredVisibleIds, setStaggeredVisibleIds] = useState<Set<number> | null>(null);
+
+  const staggerTimersRef = useRef<NodeJS.Timeout[]>([]);
+  const consumedRevealTickRef = useRef(0);
 
   // A callback ref runs again for unrelated renders, which repeatedly stole the
   // DM's horizontal scroll position. Restrict the scroll to an actual turn
@@ -454,10 +464,86 @@ function InitiativeStrip({
       ?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
   }, [currentCombatantId]);
 
+  useEffect(() => {
+    return () => {
+      staggerTimersRef.current.forEach(clearTimeout);
+      staggerTimersRef.current = [];
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    // Record current untransformed layout positions BEFORE applying FLIP transforms
+    // (offsetLeft is transform- and scroll-independent)
+    const currentPositions = new Map<number, number>();
+    combatantRefs.current.forEach((el, id) => {
+      if (el) {
+        currentPositions.set(id, el.offsetLeft);
+      }
+    });
+
+    const prevPositions = prevPositionsRef.current;
+
+    const animateFlip = () => {
+      combatantRefs.current.forEach((el, id) => {
+        const prevLeft = prevPositions.get(id);
+        if (prevLeft == null || !el) return;
+        const currentLeft = currentPositions.get(id) ?? el.offsetLeft;
+        const deltaX = prevLeft - currentLeft;
+        if (Math.abs(deltaX) > 1) {
+          el.style.transform = `translateX(${deltaX}px)`;
+          el.style.transition = 'none';
+          requestAnimationFrame(() => {
+            el.style.transition = 'transform 500ms cubic-bezier(0.2, 0, 0, 1)';
+            el.style.transform = '';
+          });
+        }
+      });
+    };
+
+    if (revealTick > 0 && revealTick !== consumedRevealTickRef.current) {
+      consumedRevealTickRef.current = revealTick;
+
+      staggerTimersRef.current.forEach(clearTimeout);
+      staggerTimersRef.current = [];
+
+      if (prefersReducedMotion()) {
+        setStaggeredVisibleIds(null);
+        prevPositionsRef.current = currentPositions;
+        return;
+      }
+
+      animateFlip();
+
+      const sortedCombatantIds = [...combatants]
+        .sort((a, b) => (b.initiative ?? -Infinity) - (a.initiative ?? -Infinity))
+        .map((c) => c.id);
+
+      setStaggeredVisibleIds(new Set());
+      sortedCombatantIds.forEach((id, index) => {
+        const timer = setTimeout(() => {
+          setStaggeredVisibleIds((prev) => (prev ? new Set([...prev, id]) : null));
+        }, index * 60);
+        staggerTimersRef.current.push(timer);
+      });
+
+      const totalTime = sortedCombatantIds.length * 60 + 200;
+      const endTimer = setTimeout(() => {
+        setStaggeredVisibleIds(null);
+        staggerTimersRef.current = [];
+      }, totalTime);
+      staggerTimersRef.current.push(endTimer);
+    } else if (consumedRevealTickRef.current > 0) {
+      animateFlip();
+    }
+
+    prevPositionsRef.current = currentPositions;
+  }, [revealTick, combatants]);
+
   return (
     <div
       className="flex gap-2 overflow-x-auto pb-4 pt-2 px-2"
       style={{
+        position: 'relative',
         scrollSnapType: 'x mandatory',
         scrollbarWidth: 'none',
       }}
@@ -475,6 +561,8 @@ function InitiativeStrip({
             : feedback.some((event) => event.crit)
               ? ' cf-hp-feedback-anchor--crit'
               : '';
+        const initiativeValue = c.initiative != null ? String(c.initiative) : '—';
+        const isChipVisible = staggeredVisibleIds == null || staggeredVisibleIds.has(c.id);
 
         return (
           <div
@@ -497,7 +585,7 @@ function InitiativeStrip({
             )}
             <div
               aria-current={isCurrent ? 'true' : undefined}
-              className={`flex items-center justify-center overflow-hidden bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
+              className={`flex items-center justify-center bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
               style={{
                 position: 'relative',
                 width: isCurrent ? 48 : 40,
@@ -509,15 +597,47 @@ function InitiativeStrip({
               }}
               title={c.name}
             >
-              {character?.portraitUrl ? (
-                <img src={character.portraitUrl} alt={c.name} className="w-full h-full object-cover" />
-              ) : isSilhouette ? (
-                <span style={{ color: '#fff', display: 'flex' }}><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.sm} /></span>
-              ) : (
-                <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
-                  {tokenInitials(c.name)}
-                </span>
-              )}
+              <div className="w-full h-full flex items-center justify-center overflow-hidden" style={{ borderRadius: 4 }}>
+                {character?.portraitUrl ? (
+                  <img src={character.portraitUrl} alt={c.name} className="w-full h-full object-cover" />
+                ) : isSilhouette ? (
+                  <span style={{ color: '#fff', display: 'flex' }}><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.sm} /></span>
+                ) : (
+                  <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
+                    {tokenInitials(c.name)}
+                  </span>
+                )}
+              </div>
+              {/* Persistent initiative chip (issue #1934) */}
+              <span
+                data-testid="initiative-chip"
+                data-combatant-id={c.id}
+                aria-label={t('encounters.initiativeChipLabel', 'Initiative: {{value}}', { value: initiativeValue })}
+                style={{
+                  position: 'absolute',
+                  top: -4,
+                  right: -4,
+                  minWidth: 18,
+                  height: 18,
+                  padding: '0 4px',
+                  borderRadius: 9,
+                  background: 'var(--color-bg-surface-raised, #1e293b)',
+                  border: '1px solid var(--color-border, #475569)',
+                  color: 'var(--color-text-main, #f8fafc)',
+                  fontSize: 10,
+                  fontWeight: 700,
+                  lineHeight: '16px',
+                  textAlign: 'center',
+                  zIndex: 10,
+                  pointerEvents: 'none',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.5)',
+                  opacity: isChipVisible ? 1 : 0,
+                  transform: isChipVisible ? 'scale(1)' : 'scale(0)',
+                  transition: prefersReducedMotion() ? 'none' : 'opacity 0.2s ease, transform 0.2s ease',
+                }}
+              >
+                {initiativeValue}
+              </span>
               {colorVisionAssist && (
                 <span
                   data-testid="strip-token-identity-shape"
@@ -1692,6 +1812,10 @@ export default function RunSessionPage() {
     }
   }, [eid, eventsQuery.data, announce, t]);
 
+  const revealedEncounterIdsRef = useRef<Set<number>>(new Set());
+  const pendingRollInitiativeCountRef = useRef<number>(0);
+  const [revealTick, setRevealTick] = useState(0);
+
   // Ending an encounter does not currently append a combat-log row. Retain that
   // useful status announcement without restoring the old turn/HP diff path, which
   // would duplicate the persisted-event announcements above.
@@ -1702,6 +1826,29 @@ export default function RunSessionPage() {
     if (previous?.encounterId === eid && previous.status !== encounter.status && encounter.status === 'ended') {
       announce('Encounter ended');
     }
+
+    if (previous?.encounterId === eid && previous.status !== 'preparing' && encounter.status === 'preparing') {
+      revealedEncounterIdsRef.current.delete(eid);
+    }
+
+    const prevStatus = previous?.encounterId === eid ? previous.status : null;
+    const rolledCount = pendingRollInitiativeCountRef.current;
+    if (
+      shouldRevealInitiative({
+        prevStatus,
+        nextStatus: encounter.status,
+        encounterId: eid,
+        revealedEncounterIds: revealedEncounterIdsRef.current,
+        rolledCount,
+      })
+    ) {
+      if (encounter.status === 'running') {
+        revealedEncounterIdsRef.current.add(eid);
+      }
+      setRevealTick((t) => t + 1);
+    }
+    pendingRollInitiativeCountRef.current = 0;
+
     previousEncounterStatusRef.current = { encounterId: eid, status: encounter.status };
   }, [eid, encounter, announce]);
 
@@ -1847,6 +1994,14 @@ export default function RunSessionPage() {
     }) => api.post(`${API}/encounters/${eid}/${action}`, body),
     onMutate: () => setActionError(null),
     onError: reportError,
+    onSuccess: (data, variables) => {
+      if (variables.action === 'roll-initiative') {
+        const rolledCount = (data as { rolledCount?: number })?.rolledCount ?? 0;
+        if (rolledCount > 0) {
+          pendingRollInitiativeCountRef.current = rolledCount;
+        }
+      }
+    },
     onSettled: () => invalidateEncounter(queryClient, eid),
   });
 
@@ -4114,6 +4269,7 @@ export default function RunSessionPage() {
               turnPulse={turnPulse}
               hpFeedbackByCombatant={hpFeedbackByCombatant}
               colorVisionAssist={me?.user.colorVisionAssist ?? false}
+              revealTick={revealTick}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
