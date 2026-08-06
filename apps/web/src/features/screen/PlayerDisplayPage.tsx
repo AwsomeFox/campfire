@@ -596,7 +596,7 @@ export default function PlayerDisplayPage() {
     const party = safeParty(summary.party, { includeAlumni, participatingCharacterIds });
     const quests = safeQuests(summary.quests);
     const npcs = safeNpcs(summary.npcs);
-    const combatants = encounter ? safeCombatants(encounter.combatants) : [];
+    const combatants = encounter ? safeCombatants(encounter.combatants, encounter.monsterHpDisplay) : [];
     const currentId =
       encounter && encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
     const currentIndex = currentId != null ? combatants.findIndex((c) => c.id === currentId) : -1;
@@ -644,7 +644,7 @@ export default function PlayerDisplayPage() {
       prevAnnounceRef.current = null;
       return;
     }
-    const safe = safeCombatants(encounter.combatants);
+    const safe = safeCombatants(encounter.combatants, encounter.monsterHpDisplay);
     const currentId = encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
     const turnKey =
       encounter.status === 'running' ? `${encounter.round}:${currentId}` : encounter.status;
@@ -674,10 +674,12 @@ export default function PlayerDisplayPage() {
         const now = hp.get(c.id);
         if (before == null || now == null || now === '' || before === now) continue;
         if (c.hpBand != null) {
-          // Monster — band label only, never the exact numbers.
+          // Monster/NPC in 'band' or 'hidden'-and-down mode — band label only, never the
+          // exact numbers (issue #1925: the mode already decided this server-side).
           combatantUpdates.push(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
         } else if (c.hpCurrent != null && c.hpMax != null) {
-          // Character — exact HP is shared table info.
+          // Character (always), or a monster/NPC in 'exact' mode — exact HP is safe to
+          // announce because the server already decided to ship the real numbers.
           combatantUpdates.push(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
         }
       }
@@ -1745,14 +1747,18 @@ function InitiativeRow({
   isCurrent: boolean;
   tick: number;
 }) {
-  // Non-character combatants (monsters AND DM-controlled NPCs) show a coarse HP band,
-  // not exact numbers — safeCombatant redacts both, so treat both the same here.
+  // Kind badge only — unrelated to which HP form is shown below.
   const isMonster = combatant.kind !== 'character';
+  // Which HP form to show follows the encounter's monsterHpDisplay dial (issue #1925),
+  // already applied server-side and carried through by safeCombatant: exact numbers when
+  // present (characters always, monsters/NPCs in 'exact' mode), a coarse band otherwise
+  // ('band' mode, or a downed combatant in 'hidden' mode), or neither ('hidden').
+  const hasExactHp = combatant.hpCurrent != null && combatant.hpMax != null;
   const bandPct = combatant.hpBand ? HP_BAND_PCT[combatant.hpBand] : 0;
   const bandTone = combatant.hpBand ? HP_BAND_TONE[combatant.hpBand] : '';
   const charPct =
-    combatant.hpCurrent != null && combatant.hpMax != null && combatant.hpMax > 0
-      ? Math.max(0, Math.min(100, (combatant.hpCurrent / combatant.hpMax) * 100))
+    hasExactHp && combatant.hpMax! > 0
+      ? Math.max(0, Math.min(100, (combatant.hpCurrent! / combatant.hpMax!) * 100))
       : 0;
   const charTone = charPct <= 25 ? 'crit' : charPct <= 50 ? 'low' : '';
 
@@ -1782,20 +1788,20 @@ function InitiativeRow({
         <ConditionChips conditions={combatant.conditions} tick={tick} />
       </div>
       <div className="cf-init-hp">
-        {isMonster ? (
-          <>
-            <span className="cf-hp-num">{combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}</span>
-            <div className={`cf-screen-hp ${bandTone}`}>
-              <div style={{ width: `${bandPct}%` }} />
-            </div>
-          </>
-        ) : (
+        {hasExactHp ? (
           <>
             <span className="cf-hp-num">
               {combatant.hpCurrent}/{combatant.hpMax}
             </span>
             <div className={`cf-screen-hp ${charTone}`}>
               <div style={{ width: `${charPct}%` }} />
+            </div>
+          </>
+        ) : (
+          <>
+            <span className="cf-hp-num">{combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}</span>
+            <div className={`cf-screen-hp ${bandTone}`}>
+              <div style={{ width: `${bandPct}%` }} />
             </div>
           </>
         )}

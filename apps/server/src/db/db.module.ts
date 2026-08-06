@@ -1335,6 +1335,19 @@ function migrateEncountersTableForAftermathMutations1448(sqlite: Database.Databa
   if (!has('aftermath_loot')) sqlite.exec('ALTER TABLE encounters ADD COLUMN aftermath_loot TEXT');
 }
 
+/** Per-encounter monster-HP display dial for non-DM viewers (issue #1925). */
+function migrateEncountersTableForMonsterHpDisplay1925(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'monster_hp_display')) return;
+
+  sqlite.exec("ALTER TABLE encounters ADD COLUMN monster_hp_display TEXT NOT NULL DEFAULT 'band'");
+}
+
 /** Boss-fight turn scheduling — lair slot at initiative 20 (issue #618). */
 function migrateEncountersTableForBossTurnPhase(sqlite: Database.Database): void {
   const hasEncountersTable = sqlite
@@ -5106,6 +5119,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // against a real database under either name, so no installation can have recorded 0162 for
   // it, and upgrade compatibility is unaffected.
   { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
+  // 0164/0165 are reserved by PR #2002 (not yet on main as of this migration) — this one
+  // takes the next free ordinal above that reservation.
+  { name: '0166_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
 ];
 
 /**

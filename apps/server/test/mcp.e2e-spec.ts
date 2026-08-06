@@ -1664,6 +1664,69 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(viewerOgre.hpBand).toBeTruthy();
   });
 
+  it('update_encounter sets monsterHpDisplay; a viewer-scoped get_encounter honors exact and hidden modes (issue #1925)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const viewerC = await mcpClient(viewerToken);
+    const enc = parseResult(
+      await dmC.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId, name: '1925 HP Dial', hidden: false },
+      }),
+    ) as { id: number };
+    const added = await dmC.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: enc.id, kind: 'monster', name: 'Dial Wraith', hpMax: 50 },
+    });
+    expect(added.isError).toBeFalsy();
+
+    // Default is 'band' — unchanged behavior.
+    const bandView = parseResult(
+      await dmC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { monsterHpDisplay: string };
+    expect(bandView.monsterHpDisplay).toBe('band');
+
+    // A non-DM PAT cannot set the mode (the whole update_encounter tool is DM-only).
+    const viewerAttempt = await viewerC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'exact' },
+    });
+    expect(viewerAttempt.isError).toBe(true);
+
+    // DM sets 'exact' — a viewer-scoped PAT now gets real numbers.
+    const exactUpdate = await dmC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'exact' },
+    });
+    expect(exactUpdate.isError).toBeFalsy();
+    expect((parseResult(exactUpdate) as { monsterHpDisplay: string }).monsterHpDisplay).toBe('exact');
+    const exactViewerView = parseResult(
+      await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { monsterHpDisplay: string; combatants: Array<{ name: string; hpCurrent: number | null; hpMax: number | null }> };
+    expect(exactViewerView.monsterHpDisplay).toBe('exact');
+    const exactWraith = exactViewerView.combatants.find((c) => c.name === 'Dial Wraith')!;
+    expect(exactWraith.hpCurrent).toBe(50);
+    expect(exactWraith.hpMax).toBe(50);
+
+    // DM sets 'hidden' — the viewer-scoped PAT gets neither the number nor the band.
+    const hiddenUpdate = await dmC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'hidden' },
+    });
+    expect(hiddenUpdate.isError).toBeFalsy();
+    const hiddenViewerRes = await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } });
+    expect(hiddenViewerRes.isError).toBeFalsy();
+    const hiddenViewerView = parseResult(hiddenViewerRes) as {
+      monsterHpDisplay: string;
+      combatants: Array<{ name: string; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>;
+    };
+    expect(hiddenViewerView.monsterHpDisplay).toBe('hidden');
+    const hiddenWraith = hiddenViewerView.combatants.find((c) => c.name === 'Dial Wraith')!;
+    expect(hiddenWraith.hpCurrent).toBeNull();
+    expect(hiddenWraith.hpMax).toBeNull();
+    expect(hiddenWraith.hpBand).toBeNull();
+    expect(JSON.stringify(hiddenViewerRes)).not.toMatch(/"hpCurrent":\s*50/);
+  });
+
   it('list_encounter_events returns the persisted combat log with stable ids (issue #1068)', async () => {
     const dmC = await mcpClient(dmToken);
     const enc = parseResult(

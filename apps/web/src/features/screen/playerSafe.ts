@@ -22,6 +22,7 @@ import type {
   FogState,
   HpBand,
   Location,
+  MonsterHpDisplay,
   Npc,
   Quest,
   QuestObjective,
@@ -171,7 +172,15 @@ export interface SafeCombatant {
   hpBand: HpBand | null;
 }
 
-export function safeCombatant(c: Combatant): SafeCombatant {
+/**
+ * Issue #1925: monster/NPC HP follows the encounter's `monsterHpDisplay` dial. The
+ * server has ALREADY applied that mode to `c` before it ever reaches this client code
+ * (real numbers in 'exact', band-only in 'band', neither in 'hidden' except 'down') —
+ * this function mirrors that server decision through to the cast-window projection,
+ * it never makes its own hiding decision. Defaults to 'band' (today's behavior) for
+ * any caller that hasn't threaded the encounter's mode through yet.
+ */
+export function safeCombatant(c: Combatant, monsterHpDisplay: MonsterHpDisplay = 'band'): SafeCombatant {
   const base = {
     id: c.id,
     kind: c.kind,
@@ -180,8 +189,15 @@ export function safeCombatant(c: Combatant): SafeCombatant {
     conditions: c.conditions,
     down: c.hpCurrent != null ? c.hpCurrent <= 0 : c.hpBand === 'down',
   };
-  // Characters expose exact HP to the table; monsters are banded, exact numbers withheld.
+  // Characters expose exact HP to the table; party HP is shared table knowledge.
   if (c.kind === 'character') {
+    return { ...base, hpCurrent: c.hpCurrent, hpMax: c.hpMax, hpBand: null };
+  }
+  // 'exact' mode: the server already sent the real numbers on `c` — carry them
+  // through rather than stripping them (the historical monster-only behavior below).
+  // hpBand stays null here: numbers and band are mutually exclusive on SafeCombatant,
+  // and the exact numbers already convey everything the band would.
+  if (monsterHpDisplay === 'exact' && c.hpCurrent != null && c.hpMax != null) {
     return { ...base, hpCurrent: c.hpCurrent, hpMax: c.hpMax, hpBand: null };
   }
   const band =
@@ -193,8 +209,8 @@ export function filterPlayerSafeCombatants<T>(combatants: T[]): T[] {
   return combatants.filter((c) => (c as { hidden?: boolean }).hidden !== true);
 }
 
-export function safeCombatants(combatants: Combatant[]): SafeCombatant[] {
-  return filterPlayerSafeCombatants(combatants).map(safeCombatant);
+export function safeCombatants(combatants: Combatant[], monsterHpDisplay: MonsterHpDisplay = 'band'): SafeCombatant[] {
+  return filterPlayerSafeCombatants(combatants).map((c) => safeCombatant(c, monsterHpDisplay));
 }
 
 

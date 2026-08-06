@@ -289,6 +289,37 @@ describe('Player Display cast sessions (e2e)', () => {
     ).toBe(404);
   });
 
+  it('issue #1925: the cast path honors exact and hidden monsterHpDisplay modes, matching the DM PATCH route', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/cast-sessions`)
+      .set(dm)
+      .send({ label: 'HP Dial TV', expiresAt: futureExpiry() });
+    const token = created.body.token as string;
+
+    try {
+      const exactPatch = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ monsterHpDisplay: 'exact' });
+      expect(exactPatch.status).toBe(200);
+      const exactDetail = await request(server).get(`/api/v1/cast/${token}/encounters/${encounterId}`);
+      expect(exactDetail.status).toBe(200);
+      const exactMonster = exactDetail.body.combatants.find((c: { id: number }) => c.id === monsterId);
+      expect(exactMonster).toEqual(expect.objectContaining({ hpCurrent: 22, hpMax: 22 }));
+
+      const hiddenPatch = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ monsterHpDisplay: 'hidden' });
+      expect(hiddenPatch.status).toBe(200);
+      const hiddenDetail = await request(server).get(`/api/v1/cast/${token}/encounters/${encounterId}`);
+      expect(hiddenDetail.status).toBe(200);
+      const hiddenMonster = hiddenDetail.body.combatants.find((c: { id: number }) => c.id === monsterId);
+      expect(hiddenMonster).toEqual(expect.objectContaining({ hpCurrent: null, hpMax: null, hpBand: null }));
+      expect(JSON.stringify(hiddenDetail.body)).not.toContain('"hpCurrent":22');
+      expect(JSON.stringify(hiddenDetail.body)).not.toContain('"hpBand":"healthy"');
+    } finally {
+      // Restore the default so later tests in this file (which assert 'healthy' bands)
+      // are unaffected by this test's mode switches.
+      await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ monsterHpDisplay: 'band' });
+    }
+  });
+
   it('404s an invalid capability even for an unsupported status filter', async () => {
     const server = ctx.app.getHttpServer();
     const bogus = `cf_cast_${'0'.repeat(48)}`;

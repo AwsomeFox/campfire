@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -432,6 +432,10 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     fog: parseFog(row.fog),
     aoe: parseAoe(row.aoe),
     hidden: row.hidden,
+    // Monster-HP display dial (issue #1925). Readable by every viewer — DM and player
+    // alike — so a player's client knows whether to expect a number, a band, or
+    // neither; the mode itself leaks nothing about any combatant's HP.
+    monsterHpDisplay: (row.monsterHpDisplay as MonsterHpDisplay) ?? 'band',
     endedAt: row.endedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -718,8 +722,17 @@ function deathSaveRollEventDetail(
  * monster AND npc combatants we replace hpCurrent/hpMax with a coarse status band and
  * null the exact numbers. Character combatants keep exact HP for everyone: party HP
  * is shared table knowledge and a player already sees their own character sheet.
+ *
+ * Issue #1925: the encounter's `monsterHpDisplay` dial controls how much of that is
+ * withheld. `band` (default) is the behaviour above, unchanged. `exact` ships the real
+ * hpCurrent/hpMax/hpTemp/sp/rp to non-DMs too (statblock + pendingConcentrationChecks
+ * stay stripped regardless — separate secrecy concerns, issue #425/#606). `hidden` ships
+ * neither the numbers NOR the band — except a combatant at 0 HP still reports
+ * `hpBand: 'down'` in every mode, so the table always knows who dropped. This is the
+ * SOLE server-side choke point for the mode; there is no client-side hiding anywhere
+ * downstream of this function.
  */
-function redactMonsterHp(c: Combatant): Combatant {
+function redactMonsterHp(c: Combatant, mode: MonsterHpDisplay): Combatant {
   if (c.kind !== 'monster' && c.kind !== 'npc') return c;
   // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
   // withhold from non-DM encounter reads the same way exact HP is banded (issue #43).
@@ -734,11 +747,20 @@ function redactMonsterHp(c: Combatant): Combatant {
     },
   };
   if (redacted.hpCurrent === null || redacted.hpMax === null) return redacted;
+  const band = hpBandFor(redacted.hpCurrent, redacted.hpMax);
+  if (mode === 'exact') {
+    // Real numbers ship as-is; the band rides along too (harmless — it's derivable from
+    // the numbers already present) so a 0-HP monster still reports 'down' consistently
+    // with the other two modes.
+    return { ...redacted, hpBand: band };
+  }
   // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
   // temp-HP buffed monster doesn't leak numbers through the redaction.
   return {
     ...redacted,
-    hpBand: hpBandFor(redacted.hpCurrent, redacted.hpMax),
+    // 'hidden' withholds the band too, EXCEPT 'down' — the table must always know who
+    // dropped, in every mode.
+    hpBand: mode === 'hidden' && band !== 'down' ? null : band,
     hpCurrent: null,
     hpMax: null,
     spCurrent: null,
@@ -1715,7 +1737,8 @@ export class EncountersService {
       // The disposition snapshot preserves encounter-time enemy allegiance for
       // server-side difficulty/XP calculation. It is DM-only: campaign-authored
       // values may reveal a hidden NPC's allegiance to players.
-      list = list.map((c) => ({ ...redactMonsterHp(c), npcDispositionSnapshot: null }));
+      const monsterHpDisplay = (row.monsterHpDisplay ?? 'band') as MonsterHpDisplay;
+      list = list.map((c) => ({ ...redactMonsterHp(c, monsterHpDisplay), npcDispositionSnapshot: null }));
       // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant
       // linked to a HIDDEN NPC still leaked that NPC's identity to non-DMs via `npcId` + the
       // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
@@ -2069,6 +2092,12 @@ export class EncountersService {
     if (input.hidden !== undefined && input.hidden !== encounterRow.hidden) {
       set.hidden = input.hidden;
       changedPredicates.push(sql`${encounters.hidden} IS NOT ${input.hidden ? 1 : 0}`);
+    }
+    // Monster-HP display dial (issue #1925) — DM-only (this whole endpoint requires dm).
+    // Mid-fight switches propagate to non-DM viewers on their next read/SSE refetch.
+    if (input.monsterHpDisplay !== undefined && input.monsterHpDisplay !== (encounterRow.monsterHpDisplay ?? 'band')) {
+      set.monsterHpDisplay = input.monsterHpDisplay;
+      changedPredicates.push(sql`${encounters.monsterHpDisplay} IS NOT ${input.monsterHpDisplay}`);
     }
 
     if (changedPredicates.length === 0) {

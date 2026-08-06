@@ -1547,6 +1547,9 @@ export const encounters = sqliteTable('encounters', {
   // difficulty are DM-only, and the encounter is dropped wholesale from non-DM reads until
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Monster-HP display dial for non-DM viewers (issue #1925): 'band'|'exact'|'hidden'.
+  // Added by migration on older DBs (see db/db.module.ts migrateEncountersTableForMonsterHpDisplay1925).
+  monsterHpDisplay: text('monster_hp_display').notNull().default('band'),
   endedAt: text('ended_at'),
   // Issue #473: DM deferred the post-encounter aftermath panel (idempotent resume).
   aftermathDismissedAt: text('aftermath_dismissed_at'),
