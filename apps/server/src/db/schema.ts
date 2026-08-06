@@ -1022,7 +1022,9 @@ export const users = sqliteTable('users', {
   // upgrade never revokes an existing user's ability to create/import a campaign —
   // only an admin who deliberately switches the policy AND revokes this per-user can
   // narrow it. Ignored entirely under the 'everyone'/'admins_only' policies.
-  canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(true),
+  // Defaults to false so an insert that omits it fails CLOSED (review) — see the matching
+  // note in bootstrap.sql.ts. Every path that should grant it says so explicitly.
+  canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

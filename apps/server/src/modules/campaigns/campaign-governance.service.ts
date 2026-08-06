@@ -340,29 +340,42 @@ export class CampaignGovernanceService {
       if (existing) {
         throw new ConflictException('You already have a pending campaign-creation request');
       }
-      return tx
+      const inserted = tx
         .insert(campaignCreationRequests)
         .values({ userId, status: 'pending', note: note ?? '', requestedAt: ts })
         .returning()
         .get();
+      // Audited INSIDE the transaction, like decide() (review). It used to be a bare
+      // `await this.audit.log(...)` after the commit, and AuditService.log does not swallow
+      // errors — so an audit-write failure rethrew as a 500 with the pending row already
+      // committed. The duplicate guard above then answered every retry with 409, and the
+      // pending queue is admin-only, so the user could neither see that their request had
+      // landed nor file another one: permanently stuck, by a failure in record-keeping.
+      //
+      // logInTx rather than auditBestEffort because these two writes belong together. A
+      // best-effort audit is right when the caller's outcome must survive a bookkeeping
+      // failure (the denial audits do that — a 403 must not become a 500). Here the row IS
+      // the outcome, and a request with no audit record is not worth keeping, so failing
+      // both and letting the user retry cleanly is the better trade.
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        // The requester's REAL role (review). A creation request is filed precisely by someone
+        // with no dm authority — often a user the policy has restricted — so recording every one
+        // as 'dm' misattributes exactly the distinction this field exists to preserve. decide()
+        // in this same service already uses the helper.
+        actorRole: auditActorRole(user),
+        action: 'campaign_creation_request.create',
+        entityType: 'campaign_creation_request',
+        entityId: inserted.id,
+        detail: note ? `note=${note}` : undefined,
+      });
+      return inserted;
     });
     const [who] = await this.db
       .select({ username: users.username, displayName: users.displayName })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
-    await this.audit.log({
-      actor: auditActor(user),
-      // The requester's REAL role (review). A creation request is filed precisely by someone
-      // with no dm authority — often a user the policy has restricted — so recording every one
-      // as 'dm' misattributes exactly the distinction this field exists to preserve. decide()
-      // in this same service already uses the helper.
-      actorRole: auditActorRole(user),
-      action: 'campaign_creation_request.create',
-      entityType: 'campaign_creation_request',
-      entityId: row.id,
-      detail: note ? `note=${note}` : undefined,
-    });
     return {
       id: row.id,
       userId,

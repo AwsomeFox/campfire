@@ -288,7 +288,16 @@ function migrateUsersTableForCanCreateCampaigns851(sqlite: Database.Database): v
   const hasCanCreateCampaigns = columns.some((c) => c.name === 'can_create_campaigns');
   if (hasCanCreateCampaigns) return;
 
-  sqlite.exec('ALTER TABLE users ADD COLUMN can_create_campaigns INTEGER NOT NULL DEFAULT 1');
+  // Two statements, deliberately (review). The COLUMN default is 0 so that any insert which
+  // forgets the field fails CLOSED, and the UPDATE then grants every PRE-EXISTING account the
+  // flag — an upgrade must never silently revoke someone's ability to create campaigns.
+  //
+  // Adding it with `DEFAULT 1` would do the backfill in one statement, but SQLite has no
+  // `ALTER COLUMN SET DEFAULT`, so the permissive default would be baked into every upgraded
+  // database forever, leaving the safe value dependent on every current and future
+  // account-insert path remembering to override it.
+  sqlite.exec('ALTER TABLE users ADD COLUMN can_create_campaigns INTEGER NOT NULL DEFAULT 0');
+  sqlite.exec('UPDATE users SET can_create_campaigns = 1');
 }
 
 /**
