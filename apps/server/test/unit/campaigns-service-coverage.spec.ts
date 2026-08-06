@@ -35,7 +35,10 @@ describe('CampaignsService unit coverage tests', () => {
   let campaignsService: CampaignsService;
   let usersService: UsersService;
   let audit: AuditService;
-  let dummyGovernance: Pick<CampaignGovernanceService, 'resolveContext' | 'enforceTx' | 'assertPolicyAllowed'>;
+  let dummyGovernance: Pick<
+    CampaignGovernanceService,
+    'resolveContext' | 'enforceTx' | 'assertPolicyAllowed' | 'getOwnerUserId' | 'enforceActiveLimitTx'
+  >;
 
   let creatorUserId: number;
 
@@ -106,6 +109,13 @@ describe('CampaignsService unit coverage tests', () => {
       }),
       enforceTx: jest.fn(),
       assertPolicyAllowed: jest.fn(),
+      // Issue #2016 — the reactivation ceiling. Same `bypass` rationale as above: this
+      // suite exercises CampaignsService's own logic, and the real enforcement has its
+      // own spec (campaign-governance.spec.ts). `getOwnerUserId` must still return a
+      // value rather than being absent, because update()/restore() call it before
+      // enforceActiveLimitTx on every reactivation.
+      getOwnerUserId: jest.fn().mockReturnValue(null),
+      enforceActiveLimitTx: jest.fn(),
     };
     const dummyInvites = {
       suspendForCampaign: jest.fn().mockResolvedValue(undefined),
