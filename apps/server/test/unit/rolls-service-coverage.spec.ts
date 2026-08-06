@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
+import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { campaigns, diceRolls, encounters } from '../../src/db/schema';
 import { nowIso } from '../../src/common/time';
@@ -68,6 +69,68 @@ describe('RollsService unit coverage tests', () => {
     expect(list.length).toBe(1);
 
     await rollsService.pruneOverCap();
+  });
+
+  it('emits a thin dice.rolled event carrying only ids and timestamps on roll record (#1899)', async () => {
+    const events = new CampaignEventsService();
+    const service = new RollsService(db, events);
+    const received: any[] = [];
+    events.streamFor(campaignId).subscribe((ev) => received.push(ev));
+
+    const roll = await service.record(
+      campaignId,
+      {
+        expr: '2d6+4',
+        rolls: [3, 5],
+        total: 12,
+        label: 'Greatsword',
+      },
+      adminActor,
+    );
+
+    expect(received.length).toBe(1);
+    const event = received[0];
+    expect(event.type).toBe('dice.rolled');
+    expect(event.campaignId).toBe(campaignId);
+    expect(event.rollId).toBe(roll.id);
+    expect(typeof event.at).toBe('string');
+
+    // Verify thin payload: NO expression, rolls, total, rollerName, or label on wire
+    expect(Object.keys(event).sort()).toEqual(['at', 'campaignId', 'rollId', 'type']);
+    expect(event.expr).toBeUndefined();
+    expect(event.rolls).toBeUndefined();
+    expect(event.total).toBeUndefined();
+    expect(event.rollerName).toBeUndefined();
+  });
+
+  it('emits dice.rolled after transaction commit for recordInTransaction callers (#1899)', async () => {
+    const events = new CampaignEventsService();
+    const service = new RollsService(db, events);
+    const received: any[] = [];
+    events.streamFor(campaignId).subscribe((ev) => received.push(ev));
+
+    let roll: any;
+    // Simulate transaction commit
+    db.transaction((tx) => {
+      roll = service.recordInTransaction(
+        tx,
+        campaignId,
+        {
+          expr: '1d20',
+          rolls: [20],
+          total: 20,
+          label: 'Death Save',
+        },
+        adminActor,
+      );
+      // Event must NOT be emitted before transaction completes
+      expect(received.length).toBe(0);
+    });
+
+    // Emitted post-commit
+    service.emitDiceRolled(roll);
+    expect(received.length).toBe(1);
+    expect(received[0].rollId).toBe(roll.id);
   });
 
   // Issue #1904 review finding (performance regression from the prior fix): the first

@@ -1708,11 +1708,16 @@ export class McpToolsService {
     this.tool(
       server,
       'generate_encounter',
-      'Generate a balanced monster group from the installed compendium to hit a target difficulty band for the ' +
-        'party (issue #304) — a first-party, offline, DETERMINISTIC builder (no external data) sized by a 5e-shaped ' +
-        'count/CR heuristic for every rule system. NON-MUTATING: returns a read-only suggestion ' +
-        '{ combatants:[{ruleEntryId,name,entryType,cr,xp,hpMax,count}], difficulty, totalXp, shape, seed, matchedBand, difficultySupport } ' +
-        'and persists NOTHING. `difficulty` is the target band (trivial|easy|medium|hard|deadly) — accepted and used ' +
+      'Generate a balanced monster group from the installed compendium PLUS the campaign\'s own homebrew monsters ' +
+        '(issue #1927) to hit a target difficulty band for the party (issue #304) — a first-party, offline, ' +
+        'DETERMINISTIC builder (no external data) sized by a 5e-shaped count/CR heuristic for every rule system. ' +
+        'NON-MUTATING: returns a read-only suggestion ' +
+        '{ combatants:[{ruleEntryId,name,entryType,cr,xp,hpMax,count,source}], difficulty, totalXp, shape, seed, matchedBand, difficultySupport } ' +
+        'and persists NOTHING. Each line\'s `source` is \'homebrew\' for the campaign\'s own creature or \'pack\' for a ' +
+        'globally installed one; a homebrew monster with no parseable CR is never auto-picked here (add it manually ' +
+        'via commit\'s roster/add_combatant instead). Installing, removing, or archiving a rule pack or homebrew entry ' +
+        'changes the candidate set the SAME `seed` reproduces from, exactly like a pack install always has. ' +
+        '`difficulty` is the target band (trivial|easy|medium|hard|deadly) — accepted and used ' +
         'to size the roster for every system, but the REPORTED `difficulty` result is only the rule system\'s own ' +
         'audited XP/CR math when `difficultySupport:\'supported\'` (5e and an empty/homebrew slug); a registered ' +
         'non-5e system (PF2e, OSR, …) returns `difficultySupport:\'heuristic\'` with `difficulty.status:\'unsupported\'` ' +
@@ -1775,7 +1780,9 @@ export class McpToolsService {
     this.tool(
       server,
       'preview_encounter',
-      'Preview & TUNE a generated encounter (issue #412) — NON-MUTATING. Returns a multi-slot roster with ' +
+      'Preview & TUNE a generated encounter (issue #412) — NON-MUTATING. Roster candidates include the installed ' +
+        'compendium PLUS the campaign\'s own homebrew monsters (issue #1927); each returned slot carries `source` ' +
+        '(\'homebrew\' or \'pack\'). Returns a multi-slot roster with ' +
         'per-creature inspection (AC/HP/actions/saves/traits), an XP/difficulty EXPLANATION (headline + detail, not ' +
         'just a band), a `difficultySupport` flag (\'supported\' for 5e/homebrew, \'heuristic\' for a registered ' +
         'non-5e system, where the roster was SIZED by the 5e-shaped heuristic but the reported `difficulty` is ' +
@@ -2300,7 +2307,7 @@ export class McpToolsService {
         'child row intact. 404 if not actually in the trash.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true, allowTrashed: true });
         return this.campaigns.restore(campaignId as number, user);
       },
     );
@@ -4684,7 +4691,9 @@ export class McpToolsService {
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
-        'fields: initiative, and the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat). ' +
+        'fields: initiative, the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat), and ' +
+        'statblockRevealed (reveals/hides this monster or npc\'s statblock to players; a non-DM read genuinely omits ' +
+        'the statblock until this is true — logs a combat-log note event and an audit row). ' +
         'Battle-map token position tokenX/tokenY (0–100 percent overlay, clamped) moves the combatant\'s token on the ' +
         'encounter map. DM may modify any combatant; a player may only touch hp/temp-hp/death-saves/conditions/token ' +
         'on a combatant linked to a character they own.',

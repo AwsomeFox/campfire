@@ -489,6 +489,9 @@ export class InvitesService {
             passwordHash,
             serverRole: 'user',
             disabled: false,
+            // Issue #851 — a brand-new account created by accepting an invite is not
+            // an approved organizer by default (same reasoning as UsersService.create()).
+            canCreateCampaigns: false,
             createdAt: ts,
             updatedAt: ts,
           })

@@ -6570,6 +6570,27 @@ export const User = z.object({
   diceTheme: DiceTheme.default('nocturne'),
   /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
   timeFormat: TimeFormat.default('system'),
+  /** Whether to play spectator tumble/crit animations for other players' rolls (issue #1899). */
+  animateOthersRolls: z.boolean().default(true),
+  /**
+   * Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
+   * campaign-creation policy. Defaults FALSE, matching the database column and every
+   * account-creation path: a brand-new account is not an approved organizer.
+   *
+   * Upgrade safety lives in migration 0164's one-off backfill of accounts that predate
+   * the flag — it is a property of that migration, not of this shape. Stating it as the
+   * contract's default told every client the opposite of what the server does, and any
+   * consumer filling in the missing field from the declared default would have flipped
+   * the permission on. Ignored under the 'everyone'/'admins_only' policies.
+   */
+  canCreateCampaigns: z.boolean().default(false),
+  /**
+   * Color-vision-assist mode (issue #1942): adds non-color channels (shape/pattern,
+   * glyphs, chevrons) alongside the existing color-only combat indicators — token
+   * identity, HP danger escalation, current-turn marker, crit/fumble overlay. Off by
+   * default so default-path rendering is unchanged.
+   */
+  colorVisionAssist: z.boolean().default(false),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -6584,7 +6605,7 @@ export const UserCreate = z.object({ username: User.shape.username, password: Pa
 // Self-service signup (POST /auth/signup) — same shape as SetupRequest, but the created
 // account is always serverRole 'user' (never admin) and the route is gated on allowSignup.
 export const SignupRequest = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional() });
-export const UserUpdate = z.object({ displayName: z.string().max(120).optional(), serverRole: ServerRole.optional(), disabled: z.boolean().optional() });
+export const UserUpdate = z.object({ displayName: z.string().max(120).optional(), serverRole: ServerRole.optional(), disabled: z.boolean().optional(), canCreateCampaigns: z.boolean().optional() });
 export const PasswordChange = z.object({ currentPassword: z.string().optional(), newPassword: Password }); // current required for self-change; admin reset omits
 
 // Self-service preferences (PATCH /me/preferences) — separate from admin-only UserUpdate above.
@@ -6594,6 +6615,8 @@ export const PreferencesUpdate = z.object({
   textSize: TextSize.optional(),
   diceTheme: DiceTheme.optional(),
   timeFormat: TimeFormat.optional(),
+  animateOthersRolls: z.boolean().optional(),
+  colorVisionAssist: z.boolean().optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 
@@ -6662,6 +6685,15 @@ export const OidcRecoveryCategory = z.enum([
 ]);
 export type OidcRecoveryCategory = z.infer<typeof OidcRecoveryCategory>;
 
+// Issue #851 — shared-instance governance: who may create/import a campaign at all.
+//  - 'everyone'            — any authenticated user (the historical, pre-#851 default;
+//                            an upgrading instance must not retroactively lock anyone out).
+//  - 'approved_organizers' — server admins, plus any user with User.canCreateCampaigns=true.
+//  - 'admins_only'         — real server-admin power only (hasServerAdminPower(), NOT the raw
+//                            serverRole — a PAT minted without adminEnabled stays capped).
+export const CampaignCreationPolicy = z.enum(['everyone', 'approved_organizers', 'admins_only']);
+export type CampaignCreationPolicy = z.infer<typeof CampaignCreationPolicy>;
+
 export const ServerSettings = z.object({
   allowLocalLogin: z.boolean().default(true), // gate for non-admin local login
   allowSignup: z.boolean().default(false), // gate for self-service signup (POST /auth/signup) — off by default
@@ -6677,9 +6709,93 @@ export const ServerSettings = z.object({
   // regardless of any per-campaign budget still remaining. Admin-managed from the
   // AI console (PUT /settings/ai/caps).
   aiServerTokenCap: z.number().int().nonnegative().max(1_000_000_000).default(0),
+  // Issue #851 — who may create/import a campaign. Defaults to the pre-existing
+  // unrestricted behavior so an upgrade never locks out an existing user.
+  campaignCreationPolicy: CampaignCreationPolicy.default('everyone'),
+  // Issue #851 — per-user / server-wide campaign ceilings. null = unlimited (the
+  // pre-existing behavior). "Active" counts only status='active' campaigns; "total"
+  // counts every non-trashed campaign (active + paused + completed) a user owns
+  // (campaignMembers.primaryOwner) or the server holds.
+  maxActiveCampaignsPerUser: z.number().int().positive().nullable().default(null),
+  maxTotalCampaignsPerUser: z.number().int().positive().nullable().default(null),
+  maxActiveCampaignsServerWide: z.number().int().positive().nullable().default(null),
+  maxTotalCampaignsServerWide: z.number().int().positive().nullable().default(null),
+  // Issue #851 — operator default storage quota inherited atomically by a brand-new
+  // campaign (create/import/clone). null = unlimited (matches the pre-#851 default
+  // for every campaign already on disk — this only ever affects NEW rows going
+  // forward, never retroactively changes an existing campaign's storageQuotaBytes).
+  // `.positive()`, not `.nonnegative()` (review). `null` is already the wire value for
+  // "unlimited", so 0 carries no useful meaning — and it is not inert: AttachmentsService
+  // enforces any non-null quota, so a stored 0 is a real zero-byte allowance that refuses
+  // every upload in every campaign created afterwards. The admin card rejects it, but a
+  // client-side guard is not the contract: PATCH /settings validates against
+  // ServerSettings.partial(), so any API or MCP caller could persist it. Every sibling
+  // ceiling in this block already uses `.positive()`.
+  defaultCampaignStorageQuotaBytes: z.number().int().positive().nullable().default(null),
 });
 export type ServerSettings = z.infer<typeof ServerSettings>;
 export const SettingsUpdate = ServerSettings.partial();
+
+/**
+ * Issue #851 — effective campaign-creation allowance for the CALLING user, computed
+ * server-side (GET /campaigns/allowance) so a wizard/import button can show real
+ * numbers before the caller commits to the flow. Never itself an authorization
+ * decision surface for the client to trust blindly — the server re-checks every
+ * one of these at create/import/clone time regardless of what this reports.
+ */
+export const CampaignAllowanceReason = z.enum([
+  'ok',
+  'policy_admins_only',
+  'policy_requires_approval',
+  'limit_active_per_user',
+  'limit_total_per_user',
+  'limit_active_server_wide',
+  'limit_total_server_wide',
+]);
+export type CampaignAllowanceReason = z.infer<typeof CampaignAllowanceReason>;
+
+const CampaignAllowanceCounter = z.object({ used: z.number().int().nonnegative(), max: z.number().int().positive().nullable() });
+export const CampaignAllowance = z.object({
+  policy: CampaignCreationPolicy,
+  canCreate: z.boolean(),
+  reason: CampaignAllowanceReason,
+  activePerUser: CampaignAllowanceCounter,
+  totalPerUser: CampaignAllowanceCounter,
+  // Server-wide counts are ADMIN-ONLY; null for everyone else (issue #851 review).
+  // Every other campaign read in this product is membership-scoped — `GET /campaigns` is,
+  // even for a server admin — so handing a viewer-scoped PAT an aggregate over campaigns it
+  // has no membership relationship with widens that boundary. A non-admin who is blocked by
+  // a server-wide ceiling still learns it from `reason`, which is what they need in order to
+  // act; the population figure is not.
+  activeServerWide: CampaignAllowanceCounter.nullable(),
+  totalServerWide: CampaignAllowanceCounter.nullable(),
+  defaultStorageQuotaBytes: z.number().int().nonnegative().nullable(),
+  /** Whether the caller already has an undecided creation request pending. */
+  hasPendingRequest: z.boolean(),
+});
+export type CampaignAllowance = z.infer<typeof CampaignAllowance>;
+
+// Issue #851 — the safe request/approval flow for a restricted creation policy.
+// Mirrors the shape of the existing forgot-password admin-approved flow
+// (passwordResetRequests): a user files a 'pending' row, an admin decides it.
+export const CampaignCreationRequestStatus = z.enum(['pending', 'approved', 'denied']);
+export type CampaignCreationRequestStatus = z.infer<typeof CampaignCreationRequestStatus>;
+
+export const CampaignCreationRequest = z.object({
+  id: Id,
+  userId: Id,
+  username: z.string(),
+  displayName: z.string(),
+  status: CampaignCreationRequestStatus,
+  note: z.string().max(500).default(''),
+  requestedAt: z.string(),
+  decidedAt: z.string().nullable(),
+  decidedBy: z.string().nullable(),
+});
+export type CampaignCreationRequest = z.infer<typeof CampaignCreationRequest>;
+
+export const CampaignCreationRequestCreate = z.object({ note: z.string().max(500).optional() });
+export const CampaignCreationRequestDecision = z.object({ note: z.string().max(500).optional() });
 
 // ── OIDC / SSO in-app configuration (server-admin only) ──────────────────────
 // Persisted alongside server settings so OIDC can be configured from the admin
@@ -10038,6 +10154,10 @@ export const EncounterSuggestionCombatant = z.object({
   xp: z.number().int().nonnegative(), // per-entry XP (monster or hazard; 5e CR→XP table)
   hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it (null when unknown)
   count: z.number().int().min(1), // how many of this entry (monster or hazard) to add
+  // Issue #1927: 'homebrew' when the entry is the campaign's own homebrew (rule_entries row
+  // with a non-null campaignId), 'pack' for a globally installed compendium entry. Defaults
+  // to 'pack' so payloads persisted before this change still parse.
+  source: z.enum(['pack', 'homebrew']).default('pack'),
 });
 export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
 
@@ -10162,6 +10282,10 @@ export const EncounterRosterSlot = z.object({
   pinned: z.boolean(),
   seed: z.number().int().nonnegative(),
   inspection: EncounterCreatureInspection,
+  // Issue #1927: 'homebrew' for the campaign's own rule_entries row (non-null campaignId),
+  // 'pack' for a globally installed compendium entry. Defaults to 'pack' so payloads
+  // persisted before this change still parse.
+  source: z.enum(['pack', 'homebrew']).default('pack'),
 });
 export type EncounterRosterSlot = z.infer<typeof EncounterRosterSlot>;
 
@@ -10534,6 +10658,11 @@ export const Combatant = z.object({
   // Inline homebrew statblock for manual monsters (issue #425). Null when HP/init-only
   // or when actions are expanded from a linked compendium entry at read time.
   statblock: CombatantStatblock.nullable().default(null),
+  // Issue #1926: DM-controlled reveal for a monster/npc's statblock. Server-enforced —
+  // when false, the non-DM read path (redactMonsterHp) nulls `statblock` the same way
+  // it already bands exact HP; the ruleEntryId link itself is not gated by this flag
+  // (compendium reads stay their own authorization surface, unchanged by this issue).
+  statblockRevealed: z.boolean().default(false),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -10674,6 +10803,11 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
   // Inline homebrew statblock edits (issue #425) — dm only, enforced server-side.
   statblock: CombatantStatblock.optional(),
+  // Reveal/hide this monster/npc's statblock to non-DM viewers (issue #1926) — dm
+  // only, enforced server-side (rejected outright for a non-DM patch, alongside
+  // name/hpMax/initMod/tokenSize/initiative above). Toggling logs a combat-log
+  // 'note' event and an audit row.
+  statblockRevealed: z.boolean().optional(),
   // Issue #580: per-intent operation id. `hpDelta` / `spDelta` / `rpDelta` are
   // relative writes — replaying one double-damages. Send a key
   // minted at the click and a retry after a lost response replays the ORIGINAL
@@ -11497,6 +11631,9 @@ export const CampaignEventType = z.enum([
   // permission-checked REST endpoints, never carried on the wire.
   'check.requested',
   'check.resolved',
+  // Issue #1899: shared dice roll feed tick. Thin id-only variant so connected clients can
+  // refetch the roll log and trigger spectator animations without carrying faces on wire.
+  'dice.rolled',
   // Issue #867: campaign moved to Trash. SSE controllers tear down EVERY open
   // stream on the campaign (control signal — filtered from the data path like
   // membership.revoked). A reconnect hits requireMember and 404s.
@@ -11531,6 +11668,13 @@ export const CampaignEventType = z.enum([
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('dice.rolled'),
+    campaignId: Id,
+    rollId: Id,
+    encounterId: Id.optional(),
+    at: IsoDate,
+  }),
   z.object({ type: z.literal('party.rest.updated'), campaignId: Id, batchId: Id, characterIds: z.array(Id), at: IsoDate }),
   z.object({
     type: z.literal('encounter.updated'),

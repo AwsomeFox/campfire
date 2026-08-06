@@ -4,7 +4,22 @@
     "vitals": {
       "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
       "maxHp": "الحد الأقصى لنقاط الحياة",
-      "setMax": "تعيين الحد الأقصى"
+      "setMax": "تعيين الحد الأقصى",
+      "deathSaves": "رميات الموت",
+      "dyingStrip": "أنت تحتضر — {{successes}} نجاحات / {{failures}} إخفاقات",
+      "rollDeathSave": "ارمِ نرد الموت"
+    },
+    "deathSave": {
+      "outcome": {
+        "revive": "٢٠ طبيعي — عدت إلى قدميك!",
+        "dead": "توفي.",
+        "stabilized": "استقرت حالته.",
+        "success": "نجاح (بنتيجة {{natural}}).",
+        "failure": "إخفاق (بنتيجة {{natural}})."
+      },
+      "spectatorToast": "{{name}} - رمية موت: {{outcome}} (بنتيجة {{natural}})",
+      "spectatorOutcomeSuccess": "نجاح",
+      "spectatorOutcomeFailure": "إخفاق"
     },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
@@ -167,6 +182,12 @@
         "clearPlayers": "امسح قوالب اللاعبين",
         "clearPlayersHint": "أزل كل قوالب التأثير التي أعلنها اللاعبون",
         "declaredBy": "أعلنه {{name}}"
+      },
+      "dragDistance": {
+        "budget": "استُخدم {{used}} من {{max}} {{unit}}",
+        "overSpeed": "تجاوز السرعة",
+        "movedMessage": "تحرك {{feet}} {{unit}}.",
+        "undoneMessage": "تم التراجع عن الحركة."
       }
     },
     "workspace": {
@@ -242,7 +263,8 @@
       "none": "— none —",
       "noStatblock": "No statblock detail — HP/CR may be incomplete.",
       "heuristicDifficultyBadge": "الفئة المستهدفة: تقديرية",
-      "heuristicDifficultyHint": "تم تحديد حجم الفئة المستهدفة وفق ميزانية نقاط الخبرة الخاصة بـ D&D 5e — لا يمتلك نظام القواعد هذا حسابات صعوبة خاصة به."
+      "heuristicDifficultyHint": "تم تحديد حجم الفئة المستهدفة وفق ميزانية نقاط الخبرة الخاصة بـ D&D 5e — لا يمتلك نظام القواعد هذا حسابات صعوبة خاصة به.",
+      "homebrewBadge": "محتوى منزلي"
     },
     "duplicate": "تكرار",
     "duplicateCombatant": "تكرار {{name}}",
@@ -274,6 +296,16 @@
       "loading": "جارٍ البحث…",
       "typeToSearch": "ابدأ الكتابة للبحث في القواعد والابتكارات…",
       "searchError": "تعذر البحث في القواعد."
+    },
+    "statblock": {
+      "reveal": "كشف",
+      "revealed": "مكشوف",
+      "revealToPlayers": "كشف بطاقة الإحصائيات للاعبين",
+      "hideFromPlayers": "إخفاء بطاقة الإحصائيات عن اللاعبين",
+      "revealedSummary": "بطاقة الإحصائيات (مكشوفة للاعبين)",
+      "killPrompt": "وصل {{name}} إلى 0 نقطة حياة — هل تريد كشف بطاقة إحصائياته للاعبين؟",
+      "dismiss": "تجاهل",
+      "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات"
     }
   }
 }

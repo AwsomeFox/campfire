@@ -267,7 +267,93 @@ function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
   const hasDiceTheme = columns.some((c) => c.name === 'dice_theme');
   if (hasDiceTheme) return;
 
-  sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+}
+
+/**
+ * Migration for DBs created before spectator roll animation toggle (issue #1899):
+ * `users.animate_others_rolls` didn't exist. Plain NOT NULL DEFAULT 1 ADD COLUMN.
+ */
+function migrateUsersTableForAnimateOthersRolls(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasAnimate = columns.some((c) => c.name === 'animate_others_rolls');
+  if (hasAnimate) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN animate_others_rolls INTEGER NOT NULL DEFAULT 1');
+}
+
+/**
+ * Migration for DBs created before shared-instance governance (issue #851):
+ * `users.can_create_campaigns` didn't exist. Plain NOT NULL DEFAULT 1 ADD COLUMN —
+ * defaulting every EXISTING user to true is deliberate: switching
+ * settings.campaignCreationPolicy to 'approved_organizers' must never silently
+ * revoke a user's pre-existing ability to create/import a campaign; an admin who
+ * wants to narrow it does so per-user afterwards.
+ */
+function migrateUsersTableForCanCreateCampaigns851(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasCanCreateCampaigns = columns.some((c) => c.name === 'can_create_campaigns');
+  if (hasCanCreateCampaigns) return;
+
+  // Two statements, deliberately (review). The COLUMN default is 0 so that any insert which
+  // forgets the field fails CLOSED, and the UPDATE then grants every PRE-EXISTING account the
+  // flag — an upgrade must never silently revoke someone's ability to create campaigns.
+  //
+  // Adding it with `DEFAULT 1` would do the backfill in one statement, but SQLite has no
+  // `ALTER COLUMN SET DEFAULT`, so the permissive default would be baked into every upgraded
+  // database forever, leaving the safe value dependent on every current and future
+  // account-insert path remembering to override it.
+  sqlite.exec('ALTER TABLE users ADD COLUMN can_create_campaigns INTEGER NOT NULL DEFAULT 0');
+  sqlite.exec('UPDATE users SET can_create_campaigns = 1');
+}
+
+/**
+ * Issue #851 — the campaign-creation request/approval flow's table. A single new
+ * CREATE TABLE / CREATE INDEX, so this is a recorded no-op on fresh DBs
+ * (BOOTSTRAP_SQL already declares it) and a one-time create on upgraded DBs.
+ * Mirrors bootstrap.sql.ts exactly.
+ */
+function migrateCampaignCreationRequestsTable851(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_creation_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT NOT NULL DEFAULT '',
+      requested_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_creation_requests_user
+      ON campaign_creation_requests(user_id, status);
+  `);
+}
+
+/**
+ * Migration for DBs created before color-vision-assist mode (issue #1942):
+ * `users.color_vision_assist` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN.
+ */
+function migrateUsersTableForColorVisionAssist1942(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasColorVisionAssist = columns.some((c) => c.name === 'color_vision_assist');
+  if (hasColorVisionAssist) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN color_vision_assist INTEGER NOT NULL DEFAULT 0');
 }
 
 /**
@@ -2781,6 +2867,24 @@ function migrateCombatantsTableForStatblockJson(sqlite: Database.Database): void
   }
 }
 
+/**
+ * Issue #1926 — DM-controlled reveal of a monster/npc's statblock to non-DM viewers.
+ * Single ADD COLUMN (no follow-up UPDATE): DEFAULT 0 (not revealed) is already the
+ * correct/safe backfill for every pre-existing combatant, not merely a permissive
+ * placeholder — an upgrade must never retroactively reveal a monster's statblock
+ * that was withheld before this column existed.
+ */
+function migrateCombatantsTableForStatblockRevealed1926(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'statblock_revealed')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN statblock_revealed INTEGER NOT NULL DEFAULT 0');
+  }
+}
+
 function migrateCombatantsTableForNpcDispositionSnapshot(sqlite: Database.Database): void {
   const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
   if (!hasTable) return;
@@ -5114,13 +5218,31 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
   { name: '0161_character_combatant_speed_1910', run: migrateCharacterCombatantSpeed1910 },
   { name: '0162_ai_dm_seats_comprehension_profile_874', run: migrateAiDmSeatsTableForComprehensionProfile874 },
-  // #1502 originally declared 0162, which #874 claimed first on main (eca15e17). Renumbered
-  // to the next free ordinal as a deliberate pre-merge step — this migration has never run
-  // against a real database under either name, so no installation can have recorded 0162 for
-  // it, and upgrade compatibility is unaffected.
   { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
-  // Migration ledger applied through 0168 on main; 0169/0170 are reserved by other
-  // in-flight PRs — this one claims the next free ordinal above that reservation.
+  // #851 shared-instance governance: organizer eligibility flag + the creation
+  // request/approval table. Originally declared 0162/0163; #874 claimed 0162 on main
+  // (eca15e17) and #1502 claimed 0163 (002174ac), so both take the next free ordinals as a
+  // deliberate pre-merge step. Neither has run against a real database under its earlier
+  // name, so no installation can have recorded the old numbers.
+  { name: '0164_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
+  { name: '0165_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
+  // #1942 originally claimed 0164; #851 landed first (5981ba5a) and owns 0164/0165.
+  // Renumbered to the next free ordinal — this migration has never run against a
+  // real database under 0164, so no installation can have recorded it, and upgrade
+  // compatibility is unaffected.
+  { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
+  { name: '0167_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
+  // Renumbered twice while this branch was open: #1942 took 0166, then #1899 took 0167
+  // on main. 0168 is the next free ordinal. This migration has never run against a real
+  // database under 0166 or 0167, so no installation can have recorded either name and
+  // upgrade compatibility is unaffected.
+  { name: '0168_combatants_statblock_revealed_1926', run: migrateCombatantsTableForStatblockRevealed1926 },
+  // Ledger is applied through 0168 on main; 0169 (#1943 group checks) and 0170 (#1935
+  // turn timer) are claimed by other in-flight PRs, so this takes 0171. Whichever of
+  // this branch and #1992's statblock-revision migration lands second gets renumbered
+  // by the coordinator before merge — neither has run against a real database under
+  // 0171, so no installation can have recorded the name and upgrade compatibility is
+  // unaffected either way.
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
 ];
 

@@ -13,6 +13,9 @@ import { d20Flavor, d20TotalClasses } from '../lib/d20Flavor';
 import { UIIcon } from './UIIcon';
 import { Btn } from './ui';
 
+import { useAuth } from '../app/auth';
+import { diceRollDisplayActor } from '../features/dice/diceRollDisplay';
+
 const AUTO_DISMISS_MS = 15000;
 
 export function RollResultToast({
@@ -26,12 +29,18 @@ export function RollResultToast({
   onApply?: () => void;
 }) {
   const { t } = useTranslation();
+  const { me } = useAuth();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flavor = d20Flavor(roll);
   const crit = flavor === 'crit';
   const fumble = flavor === 'fumble';
   const totalColor = crit ? 'var(--cf-crit, #fbbf24)' : fumble ? 'var(--color-danger, #f87171)' : 'var(--color-accent)';
   const totalClass = d20TotalClasses(flavor, true);
+  const isNonOwn = me?.user?.id != null && String(roll.rollerUserId) !== String(me.user.id);
+  const roller = diceRollDisplayActor(roll);
+  const toastLabel = isNonOwn
+    ? t('dice.spectatorAttribution', { roller, expr: roll.label ? `${roll.expr} (${roll.label})` : roll.expr })
+    : (roll.label || roll.expr);
 
   useEffect(() => {
     timerRef.current = setTimeout(onDismiss, AUTO_DISMISS_MS);
@@ -61,10 +70,10 @@ export function RollResultToast({
       <div className="cf-roll-result-toast__body">
         <p
           className="cf-roll-result-toast__label cf-name-reveal"
-          title={roll.label || roll.expr}
-          aria-label={roll.label || roll.expr}
+          title={toastLabel}
+          aria-label={toastLabel}
         >
-          {roll.label || roll.expr}
+          {toastLabel}
         </p>
         <p className="cf-roll-result-toast__meta">
           <span>{roll.expr}</span>

@@ -482,6 +482,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditionInstances: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
     legendaryActions: null,
     statblock: parseCombatantStatblock(row.statblockJson),
+    statblockRevealed: row.statblockRevealed,
   };
 }
 
@@ -735,12 +736,16 @@ function deathSaveRollEventDetail(
 function redactMonsterHp(c: Combatant, mode: MonsterHpDisplay): Combatant {
   if (c.kind !== 'monster' && c.kind !== 'npc') return c;
   // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
-  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43).
+  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43),
+  // UNLESS the DM has explicitly revealed this combatant's statblock (issue #1926) —
+  // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
+  // never carries the field until the DM turns it on. HP banding itself is entirely
+  // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
   // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
   // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
   const redacted: Combatant = {
     ...c,
-    statblock: null,
+    statblock: c.statblockRevealed ? c.statblock : null,
     turnState: {
       ...c.turnState,
       pendingConcentrationChecks: [],
@@ -3258,6 +3263,7 @@ export class EncountersService {
   private async loadMonsterCandidates(
     adapter: RuleSystemAdapter,
     filters: EncounterGenerateInput['filters'],
+    campaignId: number,
   ): Promise<GeneratorCandidate[]> {
     // Optional single-pack scoping: resolve the slug to a pack id, or short-circuit to no
     // candidates if the slug isn't installed (mirrors RulesService.search's pack filter).
@@ -3270,8 +3276,22 @@ export class EncountersService {
 
     const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
     const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
-    const where = packId !== undefined ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)) : and(typeWhere, isNull(ruleEntries.campaignId));
-    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
+    // Issue #1927: campaign homebrew (a rule_entries row with a non-null campaignId) is now a
+    // candidate alongside globally installed pack entries, using the same
+    // or(isNull(campaignId), eq(campaignId, ...)) idiom already used at commit/defenses/
+    // difficulty/add-combatant/aftermath — plus isNull(archivedAt) so soft-archived homebrew
+    // never generates. `packSlug` (below) narrows ONLY the global half: homebrew rows always
+    // live under a dedicated internal pack id (RulesService.homebrewPackId()), never under a
+    // real installed pack's id, so an explicit pack filter naturally excludes homebrew without
+    // extra logic — packSlug stays pack-only, unchanged from before this issue.
+    const where =
+      packId !== undefined
+        ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId))
+        : and(typeWhere, or(isNull(ruleEntries.campaignId), and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt))));
+    const rows = await this.db
+      .select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson, campaignId: ruleEntries.campaignId })
+      .from(ruleEntries)
+      .where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
     const envNeedle = filters?.environment?.trim().toLowerCase();
@@ -3308,6 +3328,7 @@ export class EncountersService {
         cr,
         xp: typeof data.xp === 'number' && data.xp > 0 ? data.xp : typeof data.experience === 'number' && data.experience > 0 ? data.experience : crToXp(cr),
         hpMax: adapter.monsterHitPoints(data),
+        source: row.campaignId != null ? 'homebrew' : 'pack',
       });
     }
     return candidates;
@@ -3332,7 +3353,7 @@ export class EncountersService {
     const { ruleSystem, customMechanicsProfile } = await this.ruleSystemForCampaign(campaignId);
     const adapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
-    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters, campaignId);
 
     // Mint a seed when the caller didn't supply one, so the result is reproducible: the
     // returned seed round-trips back through `seed` to rebuild the identical group.
@@ -3360,7 +3381,16 @@ export class EncountersService {
     });
 
     return {
-      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, entryType: p.entryType ?? 'monster', cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
+      combatants: result.picks.map((p) => ({
+        ruleEntryId: p.ruleEntryId,
+        name: p.name,
+        entryType: p.entryType ?? 'monster',
+        cr: p.cr,
+        xp: p.xp,
+        hpMax: p.hpMax,
+        count: p.count,
+        source: p.source ?? 'pack',
+      })),
       targetBand: input.difficulty,
       difficulty: reported,
       // Codex review (#1981): `reported.adjustedXp` is 0 for an `unsupported` status
@@ -3559,7 +3589,7 @@ export class EncountersService {
     const adapter = await this.adapterForCampaign(campaignId);
     const { ruleSystem } = await this.ruleSystemForCampaign(campaignId);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
-    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters, campaignId);
     const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
     const maxCount = input.count ?? 12;
 
@@ -3595,7 +3625,13 @@ export class EncountersService {
     const pickedIds = [...new Set(result.picks.map((p) => p.ruleEntryId))];
     const dataById = new Map<number, Record<string, unknown>>();
     if (pickedIds.length > 0) {
-      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(inArray(ruleEntries.id, pickedIds), isNull(ruleEntries.campaignId)));
+      // Issue #1927: picks may now include the campaign's own homebrew, so this must resolve
+      // statblocks for BOTH scopes (same widen as loadMonsterCandidates above), not just global
+      // pack entries — otherwise a homebrew pick's inspection card would silently come back empty.
+      const rows = await this.db
+        .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+        .from(ruleEntries)
+        .where(and(inArray(ruleEntries.id, pickedIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))));
       for (const r of rows) dataById.set(r.id, fromJsonText<Record<string, unknown>>(r.dataJson, {}));
     }
 
@@ -3618,6 +3654,7 @@ export class EncountersService {
         pinned: slotPlan.pinned,
         seed: slotPlan.seed,
         inspection: this.buildCreatureInspection(adapter, data, cr, xp, hpMax),
+        source: pick?.source ?? 'pack',
       };
     });
 
@@ -4567,6 +4604,7 @@ export class EncountersService {
       if (replayed) return replayed;
       if (roll === null) throw new Error('Death-save dice roll was not persisted');
       const persistedRoll = roll as DiceRoll;
+      this.rolls.emitDiceRolled?.(persistedRoll);
 
       return { combatant: updated, roll: persistedRoll };
     } catch (err) {
@@ -4692,12 +4730,13 @@ export class EncountersService {
         patch.hpMax !== undefined ||
         patch.initMod !== undefined ||
         patch.tokenSize !== undefined ||
-        patch.initiative !== undefined
+        patch.initiative !== undefined ||
+        patch.statblockRevealed !== undefined
       ) {
         throw new ForbiddenException({
           code: 'COMBATANT_FIELD_DM_ONLY',
           message:
-            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, or initiative — roll your own initiative via the dedicated roll-initiative action.',
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, or statblockRevealed — roll your own initiative via the dedicated roll-initiative action.',
         });
       }
       if (!existing.characterId) {
@@ -4788,6 +4827,8 @@ export class EncountersService {
     if (patch.statblock !== undefined && isDm) {
       staticUpdate.statblockJson = toJsonText(CombatantStatblock.parse(patch.statblock));
     }
+    // Statblock reveal toggle (issue #1926) — DM-only (see the ForbiddenException above).
+    if (patch.statblockRevealed !== undefined && isDm) staticUpdate.statblockRevealed = patch.statblockRevealed;
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
@@ -5309,6 +5350,7 @@ export class EncountersService {
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
+      staticUpdate.statblockRevealed !== undefined ||
       hpMaxChanged;
     if (changedNonHp) {
       await this.audit.log({
@@ -5328,6 +5370,18 @@ export class EncountersService {
     // endpoint stays member-visible without leaking issue #43's redaction.
     const round = encounterRow.round;
     const targetName = row.name;
+
+    // Issue #1926: log the statblock reveal toggle. `detail` deliberately omits the
+    // combatant's name (issue #869 convention — never interpolate names into `detail`,
+    // only `target`/`targetId`) so a non-DM's redacted listing composes the same
+    // "<name> ...detail" phrasing as every other combat-log line.
+    if (staticUpdate.statblockRevealed !== undefined && staticUpdate.statblockRevealed !== existing.statblockRevealed) {
+      await this.appendEvent(encounterId, round, 'note', {
+        target: targetName,
+        targetId: combatantId,
+        detail: staticUpdate.statblockRevealed ? "'s statblock is revealed to players" : "'s statblock is hidden again",
+      });
+    }
 
     // Issue #620: attribute HP/death events to the attacker so the log reads "Ember hit
     // Goblin 3 for 8" rather than just "Goblin 3 took 8 damage". Resolution order:
@@ -6087,6 +6141,7 @@ export class EncountersService {
     const initModel = initiativeModelForAdapter(adapter);
     let rolled: Array<{ id: number; initiative: number; breakdown: CombatantInitiativeBreakdown; name: string }> = [];
     let freshEncounter = encounterRow;
+    const recordedRolls: DiceRoll[] = [];
 
     // The roster read, initiative assignment, log rows, and any turn-index repair must be
     // one SQLite transaction. Otherwise two devices can both see the same unrolled roster,
@@ -6199,7 +6254,7 @@ export class EncountersService {
       // roll must never leak into it (matches the per-combatant roll's same rule below).
       if (!fresh.hidden) {
         for (const entry of diceLogEntries) {
-          this.rolls.recordInTransaction(
+          const rec = this.rolls.recordInTransaction(
             tx,
             fresh.campaignId,
             {
@@ -6213,6 +6268,7 @@ export class EncountersService {
             },
             user,
           );
+          recordedRolls.push(rec);
         }
       }
       const cases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`), sql` `);
@@ -6282,6 +6338,11 @@ export class EncountersService {
     });
 
     this.emitEncounterEvent('encounter.updated', freshEncounter.campaignId, encounterId, freshEncounter.hidden);
+    if (!freshEncounter.hidden) {
+      for (const rec of recordedRolls) {
+        this.rolls.emitDiceRolled?.(rec);
+      }
+    }
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     return { ...snapshot, rolledCount: rolled.length };
@@ -6554,6 +6615,9 @@ export class EncountersService {
         throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       }
       this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
+      if (roll && !freshEncounterRow.hidden) {
+        this.rolls.emitDiceRolled?.(roll);
+      }
       return { combatant: committed, roll };
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but before

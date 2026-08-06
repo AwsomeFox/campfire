@@ -149,6 +149,58 @@ test.describe('proposal payload editor', () => {
     await expect(page.getByRole('button', { name: 'Advanced: edit raw JSON' })).toHaveCount(0);
   });
 
+  test('fixing the raw JSON clears the stale mode-switch error without a second switch attempt', async ({ page }) => {
+    // Issue #2015: `modeSwitchError` used to be set only on a refused switch and cleared
+    // only on the two success paths, so repairing the JSON left the alert on screen
+    // asserting a problem that no longer existed until the reviewer clicked the toggle
+    // again. It must now clear itself the moment the JSON re-parses.
+    const { campaignId } = seed();
+    await mockProposalApi(page, [
+      proposal(506, { action: 'update', entityType: 'quest', payload: { title: 'Old title' } }),
+    ]);
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+    await page.getByRole('button', { name: 'Advanced: edit raw JSON' }).click();
+
+    const rawEditor = page.getByLabel('Raw JSON payload');
+    await rawEditor.fill('{ this is not json');
+    await page.getByRole('button', { name: 'Back to guided editor' }).click();
+
+    const error = page.getByRole('alert').filter({ hasText: 'Fix the JSON before switching to the guided editor.' });
+    await expect(error).toBeVisible();
+
+    // Repair the JSON WITHOUT clicking "Back to guided editor" again.
+    await rawEditor.fill('{ "title": "Fixed title" }');
+    await expect(error).toHaveCount(0);
+  });
+
+  test('fixing the offending guided field clears the stale mode-switch error without a second switch attempt', async ({ page }) => {
+    // Same defect as above, from the other direction: `switchToAdvanced` refuses and names
+    // the field whose typed value the draft does not hold yet. Fixing that field must clear
+    // the alert on its own.
+    const { campaignId } = seed();
+    // `create` so `title` is required — `QuestUpdate` makes every field optional and would
+    // never populate `buildProposalDraftPayload`'s `fieldErrors` for an emptied box.
+    await mockProposalApi(page, [
+      proposal(507, { action: 'create', entityType: 'quest', payload: { title: 'Old title' } }),
+    ]);
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+
+    const titleField = page.getByLabel('Title', { exact: true });
+    await titleField.fill('');
+    await page.getByRole('button', { name: 'Advanced: edit raw JSON' }).click();
+
+    const error = page.getByRole('alert').filter({ hasText: 'Fix Title before switching to raw JSON.' });
+    await expect(error).toBeVisible();
+
+    // Repair the field WITHOUT clicking "Advanced: edit raw JSON" again.
+    await titleField.fill('New title');
+    await expect(error).toHaveCount(0);
+  });
+
   test('a failed approve preserves the edited draft instead of resetting it', async ({ page }) => {
     const { campaignId } = seed();
     const api = await mockProposalApi(page, [
