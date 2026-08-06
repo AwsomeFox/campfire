@@ -35,7 +35,7 @@ describe('CampaignsService unit coverage tests', () => {
   let campaignsService: CampaignsService;
   let usersService: UsersService;
   let audit: AuditService;
-  let dummyGovernance: Pick<CampaignGovernanceService, 'resolveContext' | 'enforceTx'>;
+  let dummyGovernance: Pick<CampaignGovernanceService, 'resolveContext' | 'enforceTx' | 'assertPolicyAllowed'>;
 
   let creatorUserId: number;
 
@@ -105,6 +105,7 @@ describe('CampaignsService unit coverage tests', () => {
         defaultStorageQuotaBytes: null,
       }),
       enforceTx: jest.fn(),
+      assertPolicyAllowed: jest.fn(),
     };
     const dummyInvites = {
       suspendForCampaign: jest.fn().mockResolvedValue(undefined),
@@ -329,6 +330,34 @@ describe('CampaignsService unit coverage tests', () => {
       );
 
       expect(await campaignRowCount()).toBe(0);
+    });
+
+    // Review: enforceTx runs inside the insert transaction, which for an archive import is
+    // reached only after the whole zip is decompressed and staged to disk — so a caller the
+    // POLICY forbids could force that work on every attempt just to be handed a 403.
+    //
+    // The buffer below is deliberately not a zip at all. If the policy check runs first, the
+    // caller sees the governance denial; if it runs after JSZip.loadAsync, they see "not a
+    // valid zip archive" instead. The error identity is therefore a direct proof of ordering,
+    // with no need to time or instrument the decompression itself.
+    it('refuses a policy-forbidden archive import before the zip is ever opened', async () => {
+      (dummyGovernance.assertPolicyAllowed as jest.Mock).mockImplementation(() => {
+        throw new CampaignGovernanceDeniedError('policy_admins_only', 'admins only');
+      });
+
+      await expect(
+        campaignsService.importArchive(Buffer.from('this is not a zip'), creatorActor),
+      ).rejects.toThrow(CampaignGovernanceDeniedError);
+      expect(await campaignRowCount()).toBe(0);
+    });
+
+    it('opens the archive normally when the policy allows the caller', async () => {
+      // The other half of the same branch: assertPolicyAllowed is a no-op by default, so this
+      // must get PAST the policy gate and fail on the archive itself. Without it, a check that
+      // rejected everyone would still pass the test above.
+      await expect(
+        campaignsService.importArchive(Buffer.from('this is not a zip'), creatorActor),
+      ).rejects.toThrow(/not a valid zip/i);
     });
 
     it('applies the resolved default storage quota to a newly created campaign', async () => {

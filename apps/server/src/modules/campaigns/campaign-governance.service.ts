@@ -137,7 +137,23 @@ export class CampaignGovernanceService {
    * per-user/server-wide ceilings, because the point of a limit is disk/sprawl
    * control, not a privilege boundary.
    */
-  enforceTx(tx: SyncDb, ctx: CampaignGovernanceContext): void {
+  /**
+   * The POLICY half of {@link enforceTx}, split out because it needs no database reads —
+   * every input was already resolved by {@link resolveContext}.
+   *
+   * That matters for the ZIP import path (review). `enforceTx` runs inside the insert
+   * transaction, which for an archive import happens only AFTER the whole zip has been
+   * decompressed and every attachment staged to disk. A user the policy forbids from
+   * importing at all could therefore repeatedly upload archives that expand to hundreds of
+   * megabytes and are written to the uploads volume, purely to be handed a 403 and swept.
+   * Calling this first, before a single byte is expanded, refuses them at the door.
+   *
+   * The LIMIT checks deliberately do NOT move: they count rows, and they are only race-free
+   * because they run inside the synchronous transaction alongside the insert. `enforceTx`
+   * remains the authoritative gate — this is an early refusal for the cases that can be
+   * decided without counting anything, never a replacement for it.
+   */
+  assertPolicyAllowed(ctx: CampaignGovernanceContext): void {
     if (ctx.bypass) return;
 
     if (ctx.policy === 'admins_only' && !ctx.isServerAdmin) {
@@ -152,6 +168,12 @@ export class CampaignGovernanceService {
         'Campaign creation is restricted to approved organizers on this server. Request access from a server admin.',
       );
     }
+  }
+
+  enforceTx(tx: SyncDb, ctx: CampaignGovernanceContext): void {
+    if (ctx.bypass) return;
+
+    this.assertPolicyAllowed(ctx);
 
     if (ctx.userId != null) {
       if (ctx.limits.activePerUser != null) {

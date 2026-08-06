@@ -78,6 +78,11 @@ export function CampaignGovernanceCard({ settings, onChange }: { settings: Serve
     try {
       const rows = await api.get<CampaignCreationRequest[]>(`${API}/campaigns/creation-requests`);
       setRequests(rows);
+      // A success clears the previous failure (review). Without this, a transient 5xx on
+      // first load leaves the banner up forever: every later successful reload — a decision
+      // on another row, a remount — renders a good queue under a "could not load" warning,
+      // which is worse than no message, because the admin distrusts the list they are acting on.
+      setRequestsError(null);
     } catch (err) {
       setRequestsError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }

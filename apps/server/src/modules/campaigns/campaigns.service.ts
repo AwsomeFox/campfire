@@ -3675,6 +3675,34 @@ export class CampaignsService {
       throw new BadRequestException('Import archive is too large.');
     }
 
+    // Refuse a policy-forbidden caller BEFORE a single byte is expanded (review). The
+    // authoritative gate is enforceTx inside importCampaign's insert transaction, but that
+    // runs after the archive has been fully decompressed and every attachment staged to
+    // disk — so a user who may not import at all could still force hundreds of megabytes of
+    // expansion and disk writes on every attempt, just to be handed the 403 afterwards.
+    // Only the POLICY tiers can be decided this early; the count-based limits stay in the
+    // transaction, where they are race-free.
+    const earlyCtx = await this.governance.resolveContext(user);
+    try {
+      this.governance.assertPolicyAllowed(earlyCtx);
+    } catch (err) {
+      if (err instanceof CampaignGovernanceDeniedError) {
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            actor: auditActor(user),
+            actorRole: auditActorRole(user),
+            action: 'campaign.create.denied',
+            entityType: 'campaign',
+            detail: `reason=${err.code}, path=import-archive-preflight`,
+          },
+          (e) => `audit campaign.create.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      throw err;
+    }
+
     let zip: JSZip;
     try {
       zip = await JSZip.loadAsync(zipBuffer);

@@ -95,3 +95,33 @@ describe('#851 review — the manifest is not exempt from the pre-check', () => 
   });
 });
 
+
+// Kilo review: `declaredUncompressedBytes` reads a JSZip-internal `_data.uncompressedSize`.
+// If JSZip ever renames or restructures that, the function starts returning null for every
+// entry and the declared-size pre-check SILENTLY disappears — the post-decompression
+// accumulate still enforces the cap, so nothing fails; the peak-allocation defence just
+// stops existing, which is the whole reason the pre-check was added.
+//
+// A try/catch would not help (reading a missing property does not throw), and exporting the
+// function purely to test it is the test-only-export pattern AGENTS.md discourages. Pinning
+// the assumption directly is what turns a silent degradation into a loud failure: this test
+// asserts the exact private shape the production reader depends on, against a real archive.
+describe('#851 — the JSZip declared-size assumption the pre-check rests on', () => {
+  it('exposes a finite numeric uncompressed size on an entry loaded from a real archive', async () => {
+    const JSZip = (await import('jszip')).default;
+    const payload = 'x'.repeat(5_000); // compresses hugely — declared size must still read 5000
+    const archive = await new JSZip().file('campaign.json', payload).generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+    });
+
+    const entry = (await JSZip.loadAsync(archive)).file('campaign.json');
+    const declared = (entry as unknown as { _data?: { uncompressedSize?: unknown } })?._data?.uncompressedSize;
+
+    expect(typeof declared).toBe('number');
+    expect(declared).toBe(payload.length);
+    // And it is genuinely available BEFORE decompression — the property is populated by
+    // loadAsync, not by async('nodebuffer'), which is what makes the pre-check a pre-check.
+    expect(archive.length).toBeLessThan(payload.length);
+  });
+});
