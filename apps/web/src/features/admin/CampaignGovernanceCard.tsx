@@ -279,6 +279,22 @@ export function CampaignGovernanceCard({ settings, onChange }: { settings: Serve
 
       <div className="cf-inset p-3.5 space-y-2">
         <h3 className="text-sm font-semibold text-white">Pending campaign-creation requests</h3>
+        {/*
+          Approving grants organizer eligibility, which only the 'approved_organizers' policy
+          consults — assertPolicyAllowed refuses every non-admin under 'admins_only' without
+          reading the flag at all (review). The grant is not lost: it applies the moment the
+          policy is loosened. But an admin approving a row under 'admins_only' would otherwise
+          see it vanish from the queue while the requester stayed blocked, with nothing said.
+          HomePage already declines to offer the request path under 'admins_only', so this is
+          reachable mainly through a queue left over from tightening the policy.
+        */}
+        {settings?.campaignCreationPolicy === 'admins_only' && requests !== null && requests.length > 0 && (
+          <p className="text-[11px] text-amber-400">
+            The policy is currently &ldquo;Only server admins&rdquo;, which ignores organizer eligibility. Approving
+            still records the grant, but it takes effect only if you switch the policy to &ldquo;Approved
+            organizers&rdquo;.
+          </p>
+        )}
         {requestsError && <p className="text-xs text-rose-400">{requestsError}</p>}
         {requests === null && !requestsError && <Skeleton lines={2} />}
         {requests !== null && requests.length === 0 && (
