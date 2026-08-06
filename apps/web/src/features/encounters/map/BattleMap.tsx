@@ -27,8 +27,9 @@ import { gridCellRevealRect } from '../fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from '../aoeHitTest';
 import { buildAoeDamageApplications, normalizeDirectDamageType, type DamageSaveOutcome, type DirectDamageMetadata, type TargetDamageApplication } from '../directDamage';
 import { calibrationToPx, clampPercent, computeContainedRect, DEFAULT_GRID_OPACITY, layerPxToMapPercent, mapPercentToLayerPx, pointerToMapPercent, resolveGridCalibration, snapMapPercentCalibrated, type GridCalibration } from '../mapRenderedBounds';
-import { formatRulerReadout, gridCellUnitPlural, measureToolHelp } from '../rulerReadout';
+import { formatRulerReadout, gridCellUnitPlural, measureToolHelp, rulerDistanceFeet } from '../rulerReadout';
 import { hexAoeCirclePolygons, hexPolygons, hexKeyboardStepPx, mapPercentGridDistance, snapFogRectToHexGrid, snapMapPercentToHex, tokenFootprintDiameterPx } from '../hexGeometry';
+import { dragBudget, dragMoveFt, isCurrentActorDrag, type DragBudget } from '../dragDistance';
 import { scrollBehavior, prefersReducedMotion } from '../../../lib/prefersReducedMotion';
 import { armMapPingTap, decideMapPingTapRelease, isMapPingKeyboardActivation, mapPingTapExceededSlop, MAP_PING_KEYBOARD_POINT, type MapPingTapArm } from '../mapPingTap';
 import { applyPinch, applyWheelZoom, clampPan, DEFAULT_MAP_VIEWPORT, fitViewport, formatViewportZoomPercent, MAP_VIEWPORT_PAN_STEP_PX, MAP_VIEWPORT_ZOOM_STEP, panBy, resetViewport, surfaceToContentPoint, viewportTransformStyle, zoomByFactor, type MapViewportState, type PinchGesture } from '../mapViewport';
@@ -82,6 +83,11 @@ type CalibrateAnchor = 'origin' | 'cell';
 
 // Creature token footprints live in ./tokenFootprint; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
+
+// Issue #1911: a pause this long after the last arrow-key nudge ends a keyboard-drag "burst" and
+// commits its accumulated distance as one `moveFt` delta, mirroring a pointer drag's single
+// commit-on-drop rather than one POST per keypress.
+const KEYBOARD_DRAG_BURST_MS = 900;
 
 /** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
 function newAoeId(): string {
@@ -172,6 +178,16 @@ export type BattleMapProps = {
   canMoveToken: (c: Combatant) => boolean;
   onSetMap: (attachmentId: number | null, alignment?: MapReplaceAlignment) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
+  /** Issue #1911: the running encounter's current-actor combatant id, and their turn-workspace
+   * movement max (`TurnWorkspaceRead.movement.maxFt`) — already redacted server-side to the DM
+   * and that combatant's owner, so its mere presence is the client's whole secrecy gate for the
+   * drag budget line. `null` when there is no running turn, or the viewer cannot see it. */
+  currentTurnCombatantId?: number | null;
+  currentTurnMovementMaxFt?: number | null;
+  /** POST a `moveFt` turn-state delta for a completed token drag/keyboard-nudge burst on the
+   * current actor (issue #1911); negative to undo. No-op default for the cast projection, where
+   * dragging is already disabled via `canMoveToken`. */
+  onMoveFt?: (combatantId: number, moveFt: number) => void;
   onBatchTokens?: (placements: Array<{ combatantId: number; x: number; y: number }>, mapAspect: number) => Promise<{ undoToken: string }>;
   onUndoTokenBatch?: (undoToken: string) => Promise<void>;
   onBeginTokenBatchUndo?: () => boolean;
@@ -221,6 +237,9 @@ export function BattleMap({
   canMoveToken,
   onSetMap,
   onMoveToken,
+  currentTurnCombatantId = null,
+  currentTurnMovementMaxFt = null,
+  onMoveFt = () => undefined,
   onBatchTokens,
   onUndoTokenBatch,
   dismissTokenUndoNonce,
@@ -302,6 +321,19 @@ export function BattleMap({
 
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  // Issue #1911: a keyboard-nudge "burst" — arrow-key repeats on a focused token — tracked the
+  // same way a pointer drag tracks `dragPos`, so the live distance readout renders for both. The
+  // ref is the source of truth read by the burst-end timeout (a closure over state can be stale
+  // by the time the timeout fires); the state copy exists only to re-render the overlay.
+  const [keyboardDrag, setKeyboardDrag] = useState<{ combatantId: number; origin: MapPoint; current: MapPoint } | null>(null);
+  const keyboardDragRef = useRef<{ combatantId: number; origin: MapPoint; current: MapPoint } | null>(null);
+  const keyboardDragTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (keyboardDragTimeoutRef.current) clearTimeout(keyboardDragTimeoutRef.current);
+  }, []);
+  // Issue #1911: the inline "undo this move" chip after a drag/nudge posts a `moveFt` delta —
+  // reuses the same UndoSnackbar the DM's token-batch undo does, one pending move at a time.
+  const [dragMoveUndo, setDragMoveUndo] = useState<{ combatantId: number; origin: MapPoint; moveFt: number } | null>(null);
   const [tool, setTool] = useState<MapTool>('move');
   const [ruler, setRuler] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [revealCorners, setRevealCorners] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
@@ -895,6 +927,41 @@ export function BattleMap({
     return snapMapPercentCalibrated(pt, calibration, mapRect, gridOn && encounter.gridSnap);
   }
 
+  /**
+   * Issue #1911: on a completed single-token drag drop or keyboard-nudge burst, declare the
+   * straight-line distance as `moveFt` turn-state IF the dragged combatant is the current actor
+   * of a running encounter — off-turn drags and DM repositioning of any other combatant show the
+   * live readout (rendered separately) but write nothing, matching the acceptance criteria.
+   * Gridless/uncalibrated maps (`canMeasure` false) have no distance to declare at all.
+   */
+  function commitDragMovement(combatantId: number, origin: MapPoint, current: MapPoint): void {
+    if (!canMeasure || !mapRect) return;
+    if (!isCurrentActorDrag(encounter.status, currentTurnCombatantId, combatantId)) return;
+    const cells = mapPercentGridDistance(origin, current, mapRect, cellPx, gridType, calibration, hexOrientation, gridDistanceRule);
+    const moveFt = dragMoveFt(cells, gridScale ?? 0);
+    if (!(moveFt > 0)) return; // dropped back on the origin cell — nothing to declare or undo.
+    onMoveFt(combatantId, moveFt);
+    setDragMoveUndo({ combatantId, origin, moveFt });
+  }
+
+  /**
+   * Issue #1911: accumulate an arrow-key nudge "burst" on a focused token — each keypress
+   * extends the same in-progress move rather than declaring its own `moveFt` — then commit once
+   * as a single delta after a pause, the same way a pointer drag commits once on drop.
+   */
+  function scheduleKeyboardDragCommit(combatantId: number, origin: MapPoint, current: MapPoint): void {
+    const next = { combatantId, origin, current };
+    keyboardDragRef.current = next;
+    setKeyboardDrag(next);
+    if (keyboardDragTimeoutRef.current) clearTimeout(keyboardDragTimeoutRef.current);
+    keyboardDragTimeoutRef.current = setTimeout(() => {
+      const final = keyboardDragRef.current;
+      keyboardDragRef.current = null;
+      setKeyboardDrag(null);
+      if (final) commitDragMovement(final.combatantId, final.origin, final.current);
+    }, KEYBOARD_DRAG_BURST_MS);
+  }
+
   /** Commit a fog reveal rectangle, snapping corners to hex centres in hex grid mode (issue #467). */
   function commitFogReveal(start: MapPoint, end: MapPoint): void {
     let rect = fogRectFromCorners(start, end);
@@ -1200,7 +1267,15 @@ export function BattleMap({
         if (effectiveIsDm && group.length > 1 && onBatchTokens) void onBatchTokens(group.map(item => ({ combatantId: item.id, x: item.x, y: item.y })), tokenPlanningAspect).then(result => {
           beginTokenBatchUndo(result.undoToken); announce(`${group.length} tokens moved together`);
         }).catch(error => onError(error instanceof Error ? error.message : 'Unable to move selected tokens'));
-        else onMoveToken(gesture.tokenId, pt.x, pt.y);
+        else {
+          // Issue #1911: origin is the combatant's pre-drop position — read it BEFORE
+          // onMoveToken's patch lands, since a DM multi-select drag (above) never reaches here.
+          const draggedCombatant = encounter.combatants.find((c) => c.id === gesture.tokenId);
+          onMoveToken(gesture.tokenId, pt.x, pt.y);
+          if (draggedCombatant) {
+            commitDragMovement(gesture.tokenId, { x: draggedCombatant.tokenX ?? 0, y: draggedCombatant.tokenY ?? 0 }, pt);
+          }
+        }
       }
       return;
     }
@@ -1343,6 +1418,12 @@ export function BattleMap({
       const next = nudgeMapPoint({ x: c.tokenX ?? 0, y: c.tokenY ?? 0 }, e);
       onMoveToken(c.id, next.x, next.y);
       announce(`${c.name} moved to ${Math.round(next.x)} percent across, ${Math.round(next.y)} percent down`);
+      // Issue #1911: keep the SAME burst (and its origin) going while nudges keep landing on
+      // this token; a nudge on a different token, or after the previous burst already
+      // committed, starts a fresh one from this token's own pre-nudge position.
+      const burstOrigin =
+        keyboardDragRef.current?.combatantId === c.id ? keyboardDragRef.current.origin : { x: c.tokenX ?? 0, y: c.tokenY ?? 0 };
+      scheduleKeyboardDragCommit(c.id, burstOrigin, next);
       return;
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -1436,6 +1517,41 @@ export function BattleMap({
       gridDistanceRule,
     );
     return { cells };
+  })();
+
+  // Issue #1911: live distance readout for an in-progress token drag or keyboard-nudge burst —
+  // the SAME mapPercentGridDistance path the Measure tool's `rulerReadout` above uses, so a
+  // dragged token and a ruler drawn between the same two points read identically. `budget` is
+  // additionally gated on the dragged combatant being the current actor AND
+  // `currentTurnMovementMaxFt` being present — that prop is already redacted server-side to the
+  // DM and that combatant's owner, so its presence alone keeps this secrecy-safe by construction.
+  const dragDistancePreview = (() => {
+    if (!canMeasure || !mapRect) return null;
+    let combatantId: number | null = null;
+    let origin: MapPoint | null = null;
+    let current: MapPoint | null = null;
+    if (draggingId != null && dragPos != null) {
+      const dragged = encounter.combatants.find((c) => c.id === draggingId);
+      if (dragged) {
+        combatantId = dragged.id;
+        origin = { x: dragged.tokenX ?? 0, y: dragged.tokenY ?? 0 };
+        current = dragPos;
+      }
+    } else if (keyboardDrag) {
+      combatantId = keyboardDrag.combatantId;
+      origin = keyboardDrag.origin;
+      current = keyboardDrag.current;
+    }
+    if (combatantId == null || !origin || !current) return null;
+    const cells = mapPercentGridDistance(origin, current, mapRect, cellPx, gridType, calibration, hexOrientation, gridDistanceRule);
+    let budget: DragBudget | null = null;
+    if (currentTurnMovementMaxFt != null && isCurrentActorDrag(encounter.status, currentTurnCombatantId, combatantId)) {
+      const draggedCombatant = encounter.combatants.find((c) => c.id === combatantId);
+      if (draggedCombatant) {
+        budget = dragBudget(draggedCombatant.turnState.movementUsedFt, rulerDistanceFeet(cells, gridScale ?? 0), currentTurnMovementMaxFt);
+      }
+    }
+    return { origin, current, cells, budget };
   })();
 
   const revealPreview = revealCorners ? fogRectFromCorners(revealCorners.start, revealCorners.end) : null;
@@ -2936,6 +3052,60 @@ export function BattleMap({
                   </>
                 )}
 
+                {/* Live token-drag distance readout (issue #1911): same measurement path as the
+                    ruler above, plus the current actor's movement budget when the viewer may see it. */}
+                {dragDistancePreview && (
+                  <>
+                    <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 7 }}>
+                      <line
+                        data-testid="map-drag-distance-line"
+                        x1={`${dragDistancePreview.origin.x}%`}
+                        y1={`${dragDistancePreview.origin.y}%`}
+                        x2={`${dragDistancePreview.current.x}%`}
+                        y2={`${dragDistancePreview.current.y}%`}
+                        stroke="var(--color-accent)"
+                        strokeWidth={1.5}
+                        strokeDasharray="3 4"
+                        opacity={0.65}
+                      />
+                    </svg>
+                    <div
+                      data-testid="map-drag-distance-readout"
+                      className="absolute"
+                      style={{
+                        left: `${dragDistancePreview.current.x}%`,
+                        top: `${dragDistancePreview.current.y}%`,
+                        transform: 'translate(10px, -100%)',
+                        background: dragDistancePreview.budget?.overBudget ? 'var(--color-warning, #d97706)' : 'rgba(15,23,42,.9)',
+                        color: '#fff',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        whiteSpace: 'nowrap',
+                        zIndex: 9,
+                      }}
+                    >
+                      <div>
+                        {formatRulerReadout(
+                          { cells: dragDistancePreview.cells, scale: gridScale ?? 0, gridUnit, gridType },
+                          'display',
+                        )}
+                      </div>
+                      {dragDistancePreview.budget && (
+                        <div data-testid="map-drag-distance-budget">
+                          {t('encounters.map.dragDistance.budget', {
+                            used: dragDistancePreview.budget.usedFt,
+                            max: dragDistancePreview.budget.maxFt,
+                            unit: gridUnit,
+                          })}
+                          {dragDistancePreview.budget.overBudget ? ` · ${t('encounters.map.dragDistance.overSpeed')}` : ''}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
                 {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
                 {pings.map((p) => {
                   const isReduced = prefersReducedMotion();
@@ -3154,6 +3324,19 @@ export function BattleMap({
             setTokenBatchUndo(null);
           }}
           onExpire={() => setTokenBatchUndo(null)}
+        />
+      )}
+      {dragMoveUndo && (
+        <UndoSnackbar
+          key={`${dragMoveUndo.combatantId}-${dragMoveUndo.moveFt}`}
+          message={t('encounters.map.dragDistance.movedMessage', { feet: dragMoveUndo.moveFt, unit: gridUnit })}
+          successMessage={t('encounters.map.dragDistance.undoneMessage')}
+          onUndo={async () => {
+            onMoveToken(dragMoveUndo.combatantId, dragMoveUndo.origin.x, dragMoveUndo.origin.y);
+            onMoveFt(dragMoveUndo.combatantId, -dragMoveUndo.moveFt);
+            setDragMoveUndo(null);
+          }}
+          onExpire={() => setDragMoveUndo(null)}
         />
       )}
     </Card>
