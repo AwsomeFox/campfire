@@ -271,6 +271,58 @@ function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before shared-instance governance (issue #851):
+ * `users.can_create_campaigns` didn't exist. Plain NOT NULL DEFAULT 1 ADD COLUMN —
+ * defaulting every EXISTING user to true is deliberate: switching
+ * settings.campaignCreationPolicy to 'approved_organizers' must never silently
+ * revoke a user's pre-existing ability to create/import a campaign; an admin who
+ * wants to narrow it does so per-user afterwards.
+ */
+function migrateUsersTableForCanCreateCampaigns851(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasCanCreateCampaigns = columns.some((c) => c.name === 'can_create_campaigns');
+  if (hasCanCreateCampaigns) return;
+
+  // Two statements, deliberately (review). The COLUMN default is 0 so that any insert which
+  // forgets the field fails CLOSED, and the UPDATE then grants every PRE-EXISTING account the
+  // flag — an upgrade must never silently revoke someone's ability to create campaigns.
+  //
+  // Adding it with `DEFAULT 1` would do the backfill in one statement, but SQLite has no
+  // `ALTER COLUMN SET DEFAULT`, so the permissive default would be baked into every upgraded
+  // database forever, leaving the safe value dependent on every current and future
+  // account-insert path remembering to override it.
+  sqlite.exec('ALTER TABLE users ADD COLUMN can_create_campaigns INTEGER NOT NULL DEFAULT 0');
+  sqlite.exec('UPDATE users SET can_create_campaigns = 1');
+}
+
+/**
+ * Issue #851 — the campaign-creation request/approval flow's table. A single new
+ * CREATE TABLE / CREATE INDEX, so this is a recorded no-op on fresh DBs
+ * (BOOTSTRAP_SQL already declares it) and a one-time create on upgraded DBs.
+ * Mirrors bootstrap.sql.ts exactly.
+ */
+function migrateCampaignCreationRequestsTable851(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_creation_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT NOT NULL DEFAULT '',
+      requested_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_creation_requests_user
+      ON campaign_creation_requests(user_id, status);
+  `);
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -5106,6 +5158,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // against a real database under either name, so no installation can have recorded 0162 for
   // it, and upgrade compatibility is unaffected.
   { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
+  // #851 shared-instance governance: organizer eligibility flag + the creation
+  // request/approval table. Originally declared 0162/0163; #874 claimed 0162 on main
+  // (eca15e17) and #1502 claimed 0163 (002174ac), so both take the next free ordinals as a
+  // deliberate pre-merge step. Neither has run against a real database under its earlier
+  // name, so no installation can have recorded the old numbers.
+  { name: '0164_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
+  { name: '0165_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
 ];
 
 /**
