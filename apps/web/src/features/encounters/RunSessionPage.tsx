@@ -79,7 +79,7 @@ import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMo
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
-import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from './tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH, pingIdentityColor } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export { BattleMap } from './map/BattleMap';
@@ -702,17 +702,22 @@ export default function RunSessionPage() {
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
-  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
+  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null; label: string | null }>>([]);
   const pingSeq = useRef(0);
-  const addPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
+  const addPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null; label?: string | null }) => {
     const key = ++pingSeq.current;
-    if (ping.senderName) {
+    // Issue #1937: a labeled ping (an intent chosen from the long-press/right-click
+    // menu) announces the intent alongside the sender; a plain tap keeps the original
+    // wording unchanged.
+    if (ping.senderName && ping.label) {
+      announce(`${ping.senderName} pings: ${ping.label}`);
+    } else if (ping.senderName) {
       announce(`${ping.senderName} pinged the map`);
     } else {
       announce('A map ping arrived');
     }
     setPings((prev) => {
-      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null }];
+      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);
     });
     setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 10000);
@@ -2906,7 +2911,13 @@ export default function RunSessionPage() {
     mutationFn: (ping: MapPing) => api.post(`${API}/encounters/${eid}/ping`, ping),
     onError: reportError,
   });
-  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null, senderId: null, senderName: null } as unknown as MapPing);
+  // Issue #1937: color carries per-user identity (not per-combatant — the same person
+  // keeps the same ping color across every combatant they might be playing). label is
+  // set only when the caller chose an intent from the long-press/right-click menu; a
+  // plain tap keeps sending null, byte-identical to before this issue. senderId/senderName
+  // stay null — the server stamps the authenticated caller's identity (issue #869/#1636).
+  const sendPing = (x: number, y: number, label: string | null = null) =>
+    pingMap.mutate({ x, y, color: pingIdentityColor(String(myUserId ?? '')), label, senderId: null, senderName: null } as unknown as MapPing);
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).

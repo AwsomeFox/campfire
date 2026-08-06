@@ -54,6 +54,7 @@ import {
   LocationCreate,
   LocationStatus,
   LocationUpdate,
+  MapPing,
   MemberCreate,
   MemberUpdate,
   NoteVisibility,
@@ -1471,6 +1472,50 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.removeAoeTemplate(encounterId as number, templateId as string, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'ping_map',
+      'Broadcast a transient battle-map ping (issue #1937, building on #238). Requires campaign write membership — ' +
+        'any DM or player, a live table gesture, not DM-gated like fog. Emits a one-shot `encounter.ping` SSE signal ' +
+        'carrying the location (and optional label/color) that every open client flashes and fades; nothing is ' +
+        'persisted. x/y are 0-100 percent of the map surface. The server always stamps the caller as sender — ' +
+        'senderId/senderName cannot be supplied by the caller. A viewer (below the player role floor) is refused ' +
+        'with 403. A hidden encounter 404s for a non-DM caller, matching every other encounter route (issue #869); ' +
+        'the DM\'s own ping on a hidden encounter still succeeds but is never fanned out to the campaign stream.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        x: MapPing.shape.x.describe('Map x position, 0-100 percent of the map surface'),
+        y: MapPing.shape.y.describe('Map y position, 0-100 percent of the map surface'),
+        label: MapPing.shape.label.describe('Optional label (max 40 chars) — e.g. an AI-narrated intent such as "Danger"'),
+        color: MapPing.shape.color.describe('Optional marker color (max 24 chars)'),
+      },
+      async ({ encounterId, x, y, label, color }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        // Same order as REST (encounters.controller.ts `POST /encounters/:id/ping`):
+        // requireMemberOnWritableCampaign resolves membership + campaign-writable BEFORE
+        // pingMap's own hidden-visibility check and player-role floor run inside the
+        // service, so a hidden encounter stays a uniform 404 for every non-DM and a
+        // merely-visible one still 403s a viewer — issue #869 / #1636 parity.
+        const role = await this.access.requireMemberOnWritableCampaign(user, row.campaignId);
+        this.encounters.pingMap(
+          encounterId as number,
+          row.campaignId,
+          {
+            x: x as number,
+            y: y as number,
+            color: (color as string | null | undefined) ?? null,
+            label: (label as string | null | undefined) ?? null,
+            senderId: user.id,
+            senderName: user.name,
+          },
+          role,
+          row.hidden,
+        );
+        return { ok: true };
       },
     );
 

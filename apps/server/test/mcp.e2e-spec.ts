@@ -10,6 +10,7 @@ import { McpToolsService } from '../src/modules/mcp/mcp-tools';
 import { OPEN_LEGEND_PACK_SLUG, PF2E_PACK_SLUG } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { auditLog, campaigns } from '../src/db/schema';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 
 interface TextContent {
   type: 'text';
@@ -1276,6 +1277,71 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(
       parseResult(await client.callTool({ name: 'remove_aoe_template', arguments: { encounterId: encounter.id, templateId: 'mcp-cone' } })),
     ).toEqual({ ok: true });
+  });
+
+  it('ping_map mirrors REST: stamped sender + label/color, viewer 403, hidden 404/no-fan-out (issue #1937)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const encounter = parseResult(
+      await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Ping Fight', hidden: false } }),
+    ) as { id: number };
+
+    const broadcasts: Array<{
+      type: string;
+      encounterId?: number;
+      ping?: { x: number; y: number; label: string | null; color: string | null; senderId: string | null; senderName: string | null };
+    }> = [];
+    const subscription = ctx.app.get(CampaignEventsService).streamFor(campaignId).subscribe((event) => broadcasts.push(event));
+
+    try {
+      const pinged = await dmClient.callTool({
+        name: 'ping_map',
+        arguments: { encounterId: encounter.id, x: 40, y: 60, label: 'Danger', color: '#ff0000' },
+      });
+      expect(pinged.isError).toBeFalsy();
+      expect(parseResult(pinged)).toEqual({ ok: true });
+
+      const pingEvents = broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === encounter.id);
+      expect(pingEvents).toHaveLength(1);
+      expect(pingEvents[0].ping).toMatchObject({ x: 40, y: 60, label: 'Danger', color: '#ff0000' });
+      // The server always stamps the CALLER's own identity — the tool has no senderId/
+      // senderName argument at all, so there is nothing for a caller to spoof through.
+      expect(pingEvents[0].ping?.senderId).toBeTruthy();
+      expect(pingEvents[0].ping?.senderName).toBeTruthy();
+
+      // Every tool's args are strict (issue #567) — an unknown key like a caller-supplied
+      // senderId is a validation error, not a silently-dropped spoof attempt.
+      const spoof = await dmClient.callTool({
+        name: 'ping_map',
+        arguments: { encounterId: encounter.id, x: 10, y: 10, senderId: 'someone-else' },
+      });
+      expect(spoof.isError).toBe(true);
+      expect(parseResult(spoof)).toMatchObject({ error: { status: 400, code: 'validation_failed' } });
+
+      // A viewer-scoped PAT is below the ping route's player-role floor (issue #1636 parity):
+      // 403, and nothing new is broadcast.
+      const viewerClient = await mcpClient(viewerToken);
+      const viewerPing = await viewerClient.callTool({ name: 'ping_map', arguments: { encounterId: encounter.id, x: 20, y: 20 } });
+      expect(viewerPing.isError).toBe(true);
+      expect(parseResult(viewerPing)).toMatchObject({ error: { status: 403 } });
+      expect(broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === encounter.id)).toHaveLength(1);
+
+      // Hidden encounter: a non-DM caller gets 404 (never 403), so a hidden fight's existence
+      // never leaks (issue #869). The DM's own ping on it still succeeds but is never fanned
+      // out to the campaign stream (issue #754).
+      const hidden = parseResult(
+        await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Hidden Ping Fight', hidden: true } }),
+      ) as { id: number };
+      const hiddenViewerPing = await viewerClient.callTool({ name: 'ping_map', arguments: { encounterId: hidden.id, x: 30, y: 30 } });
+      expect(hiddenViewerPing.isError).toBe(true);
+      expect(parseResult(hiddenViewerPing)).toMatchObject({ error: { status: 404 } });
+
+      const hiddenDmPing = await dmClient.callTool({ name: 'ping_map', arguments: { encounterId: hidden.id, x: 30, y: 30 } });
+      expect(hiddenDmPing.isError).toBeFalsy();
+      expect(parseResult(hiddenDmPing)).toEqual({ ok: true });
+      expect(broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === hidden.id)).toHaveLength(0);
+    } finally {
+      subscription.unsubscribe();
+    }
   });
 
   it('get_encounter keeps a player declaration visible in unrevealed fog exactly like REST', async () => {

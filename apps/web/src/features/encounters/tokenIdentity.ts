@@ -26,6 +26,28 @@ export function tokenIdentityBackground(combatant: { id: number; characterId?: n
 }
 
 /**
+ * Per-user map-ping identity color (issue #1937).
+ *
+ * Deliberately separate from `tokenIdentityColor` (keyed off `combatantId`,
+ * a per-encounter numeric row id): a ping's identity is the sending USER —
+ * the same person keeps the same ping color across every encounter and
+ * every combatant they might be playing, which a combatant-keyed hash
+ * cannot express. A simple string hash onto the shared ramp keeps every
+ * ping-vs-token color drawn from one consistent palette without coupling
+ * the two identity systems together.
+ */
+export function pingIdentityColor(userId: string): string {
+  let hash = 0;
+  for (let i = 0; i < userId.length; i += 1) {
+    // `| 0` keeps the accumulator a 32-bit int so the hash never grows
+    // unbounded for a long id and stays deterministic across engines.
+    hash = (hash * 31 + userId.charCodeAt(i)) | 0;
+  }
+  const index = Math.abs(hash) % TOKEN_COLOR_RAMP.length;
+  return TOKEN_COLOR_RAMP[index] ?? TOKEN_COLOR_RAMP[0];
+}
+
+/**
  * Color-vision-assist secondary identity channel (issue #1942).
  *
  * Small fixed set of shapes, keyed off `combatantId` exactly like

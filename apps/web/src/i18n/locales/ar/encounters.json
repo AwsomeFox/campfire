@@ -183,6 +183,14 @@
         "clearPlayersHint": "أزل كل قوالب التأثير التي أعلنها اللاعبون",
         "declaredBy": "أعلنه {{name}}"
       },
+      "ping": {
+        "menuLabel": "نية الإشارة",
+        "intents": {
+          "look": "انظر",
+          "danger": "خطر",
+          "move": "تحرك هنا"
+        }
+      },
       "dragDistance": {
         "budget": "استُخدم {{used}} من {{max}} {{unit}}",
         "overSpeed": "تجاوز السرعة",
