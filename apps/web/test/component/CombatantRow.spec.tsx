@@ -67,6 +67,7 @@ function baseCombatant(overrides: Partial<Combatant> = {}): Combatant {
     conditionInstances: [],
     legendaryActions: null,
     statblock: null,
+    statblockRevealed: false,
     ...overrides,
   };
 }

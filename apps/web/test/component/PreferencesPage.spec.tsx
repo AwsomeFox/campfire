@@ -23,7 +23,7 @@ import { AuthContext, type AuthState } from '../../src/app/auth';
 // top-level const (which would still be in the temporal dead zone at hoist
 // time).
 const { patchMock, getMock } = vi.hoisted(() => ({
-  patchMock: vi.fn(async (_path: string, _json?: unknown) => ({}) as unknown),
+  patchMock: vi.fn(async (_path: string, _json?: Record<string, unknown>) => ({}) as unknown),
   getMock: vi.fn(async (_path: string) => ({ campaigns: [] }) as unknown),
 }));
 
@@ -68,6 +68,22 @@ function baseMe(overrides: Partial<Me['user']> = {}): Me {
 }
 
 function renderWithAuth(me: Me) {
+  // Model the real PATCH /me/preferences contract: the server always echoes
+  // back the persisted record (every field of `User`, not just the ones this
+  // request touched), not merely the fields the caller sent. `patchMock`
+  // returns the ORIGINAL user merged with the request body, so a field the
+  // component doesn't consume from the response — and any field it does,
+  // e.g. `displayName` — reflects what the server would actually have on
+  // file after this save, the same way a bare `{}` response never would.
+  // (Review finding on PR #2033: a bare `{}` response let a later
+  // `setColorVisionAssist(updated.colorVisionAssist ?? false)` silently
+  // revert the just-saved preference, and the test never noticed because it
+  // only asserted on the outgoing request, not the resulting UI state.)
+  patchMock.mockImplementation(async (_path: string, json?: Record<string, unknown>) => ({
+    ...me.user,
+    ...(json ?? {}),
+  }));
+
   const authState: AuthState = {
     me,
     ready: true,
@@ -97,10 +113,11 @@ describe('PreferencesPage colorVisionAssist wiring (issue #1942, harness issue #
 
   afterEach(() => cleanup());
 
-  test('toggling the checkbox and saving PATCHes colorVisionAssist: true', async () => {
+  test('toggling the checkbox and saving PATCHes colorVisionAssist: true, and the checkbox stays checked after save', async () => {
     renderWithAuth(baseMe({ colorVisionAssist: false }));
 
     const checkbox = document.getElementById('prefs-color-vision-assist') as HTMLInputElement;
+    const displayNameInput = document.getElementById('prefs-display-name') as HTMLInputElement;
     expect(checkbox).toBeTruthy();
     expect(checkbox.checked).toBe(false);
 
@@ -117,9 +134,17 @@ describe('PreferencesPage colorVisionAssist wiring (issue #1942, harness issue #
     const [path, body] = patchMock.mock.calls[0] as [string, Record<string, unknown>];
     expect(path).toBe('/api/v1/me/preferences');
     expect(body).toMatchObject({ colorVisionAssist: true });
+
+    // Post-save UI state: once the (realistic, merged) server response lands
+    // and the component re-syncs its local state from it, the just-saved
+    // checkbox must stay checked and the untouched displayName must stay
+    // put — with the old `{}` response, both would have silently reverted
+    // to their zero-value defaults (unchecked, empty) right here.
+    await waitFor(() => expect(checkbox.checked).toBe(true));
+    expect(displayNameInput.value).toBe('Tester');
   });
 
-  test('unchecking an already-on preference PATCHes colorVisionAssist: false', async () => {
+  test('unchecking an already-on preference PATCHes colorVisionAssist: false, and the checkbox stays unchecked after save', async () => {
     renderWithAuth(baseMe({ colorVisionAssist: true }));
 
     const checkbox = document.getElementById('prefs-color-vision-assist') as HTMLInputElement;
@@ -133,5 +158,10 @@ describe('PreferencesPage colorVisionAssist wiring (issue #1942, harness issue #
     await waitFor(() => expect(patchMock).toHaveBeenCalled());
     const [, body] = patchMock.mock.calls[0] as [string, Record<string, unknown>];
     expect(body).toMatchObject({ colorVisionAssist: false });
+
+    // Without the realistic merged mock response, `setColorVisionAssist(updated.colorVisionAssist ?? false)`
+    // would still land on `false` here by coincidence (`??` on `undefined`) — the first test above is the one
+    // that actually distinguishes a merged response from a bare `{}`, since it saves to `true`.
+    await waitFor(() => expect(checkbox.checked).toBe(false));
   });
 });
