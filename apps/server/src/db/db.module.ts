@@ -5119,9 +5119,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // against a real database under either name, so no installation can have recorded 0162 for
   // it, and upgrade compatibility is unaffected.
   { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
-  // 0164/0165 are reserved by PR #2002 (not yet on main as of this migration) — this one
-  // takes the next free ordinal above that reservation.
-  { name: '0166_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
+  // Migration ledger applied through 0168 on main; 0169/0170 are reserved by other
+  // in-flight PRs — this one claims the next free ordinal above that reservation.
+  { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
 ];
 
 /**
