@@ -6078,7 +6078,19 @@ export class EncountersService {
                   // DM is actively erasing. That is why this differs from `undoTurn`, which
                   // is a deliberate DM gameplay-rewind tool with its own documented "always
                   // restamp fresh" semantics — there is no accidental click to fully undo.
-                  turnStartedAt: before.turnStartedAt ?? null,
+                  //
+                  // Issue #1935 review round 4 (Devin) — upgrade-window bug: `before` is
+                  // parsed from a JSON blob a PRE-upgrade binary may have written, before
+                  // `turnStartedAt` existed in that snapshot shape at all. `?? null` cannot
+                  // tell "the snapshot recorded null" (a real prior state — restoring null is
+                  // correct) apart from "the snapshot has no such key" (nothing to restore —
+                  // the live column must be left alone), collapsing both to null and
+                  // clobbering a perfectly valid running stamp for up to 24h after upgrade
+                  // (undo rows persist that long for idempotency replay, though the undo
+                  // CAPABILITY itself only lives ~30s). Only include the key when the
+                  // snapshot genuinely recorded one; omitting it from this partial `.set`
+                  // leaves the live column exactly as it was.
+                  ...(before.turnStartedAt !== undefined ? { turnStartedAt: before.turnStartedAt } : {}),
                 }
               : {}),
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),

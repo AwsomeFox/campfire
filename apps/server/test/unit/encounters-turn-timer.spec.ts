@@ -27,8 +27,9 @@ import { AttachmentsService } from '../../src/modules/attachments/attachments.se
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import type { RequestUser } from '../../src/common/user.types';
-import { campaigns } from '../../src/db/schema';
+import { campaigns, combatantRemovalUndos } from '../../src/db/schema';
 import { nowIso } from '../../src/common/time';
+import { eq } from 'drizzle-orm';
 
 describe('EncountersService — turn timer stamping (issue #1935)', () => {
   let dataDir: string;
@@ -309,6 +310,56 @@ describe('EncountersService — turn timer stamping (issue #1935)', () => {
         expect(afterUndo.turnStartedAt).toBe(originalStamp);
         expect(afterUndo.turnStartedAt).not.toBe('2026-01-01T00:05:00.000Z');
         expect(afterUndo.turnStartedAt).not.toBe('2026-01-01T00:05:07.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    // Issue #1935 review round 4 (Devin) — upgrade-window bug. A pre-upgrade binary wrote
+    // combatant_removal_undos rows whose beforeEncounterJson has no turnStartedAt key at
+    // all (the field didn't exist in that snapshot shape yet). `?? null` cannot tell that
+    // apart from "the snapshot recorded null" and clobbers a perfectly valid running stamp.
+    // A test that merely sets the key to null proves nothing — that case was already
+    // correct — so this constructs a genuinely KEY-ABSENT snapshot by writing to the
+    // undo row directly, bypassing the service (which always writes the new shape).
+    it('undoRemoveCombatant leaves a live turnStartedAt untouched when the undo snapshot predates the field entirely (upgrade window)', async () => {
+      jest.useFakeTimers({ advanceTimers: false });
+      try {
+        jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+        const encounterId = await makeReadyEncounter('Pre-Upgrade Undo Snapshot');
+        const started = await encountersService.start(encounterId, dmActor, 'dm');
+        const currentId = started.currentCombatantId!;
+
+        jest.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
+        const removal = await encountersService.removeCombatant(encounterId, currentId, dmActor, 'dm');
+        const liveStampAfterRemoval = (await encountersService.getWithCombatantsOrThrow(encounterId, 'dm')).turnStartedAt;
+        expect(liveStampAfterRemoval).not.toBeNull();
+
+        // Simulate a pre-upgrade snapshot: strip the turnStartedAt key entirely (not set
+        // it to null — an ABSENT key is the bug this test targets) from the persisted
+        // beforeEncounterJson, exactly as a binary before this fix would have written it.
+        const [undoRow] = await db
+          .select()
+          .from(combatantRemovalUndos)
+          .where(eq(combatantRemovalUndos.token, removal.undoToken))
+          .limit(1);
+        const beforeShape = JSON.parse(undoRow.beforeEncounterJson) as Record<string, unknown>;
+        expect(beforeShape).toHaveProperty('turnStartedAt'); // sanity: the current binary DOES write it
+        delete beforeShape.turnStartedAt;
+        expect(beforeShape).not.toHaveProperty('turnStartedAt');
+        await db
+          .update(combatantRemovalUndos)
+          .set({ beforeEncounterJson: JSON.stringify(beforeShape) })
+          .where(eq(combatantRemovalUndos.token, removal.undoToken));
+
+        jest.setSystemTime(new Date('2026-01-01T00:05:07.000Z'));
+        await encountersService.undoRemoveCombatant(encounterId, removal.undoToken, dmActor, 'dm');
+
+        const afterUndo = await encountersService.getWithCombatantsOrThrow(encounterId, 'dm');
+        expect(afterUndo.currentCombatantId).toBe(currentId); // the pointer restore itself still worked
+        // The live stamp must survive untouched — not nulled, not collapsed to "no timer".
+        expect(afterUndo.turnStartedAt).toBe(liveStampAfterRemoval);
+        expect(afterUndo.turnStartedAt).not.toBeNull();
       } finally {
         jest.useRealTimers();
       }
