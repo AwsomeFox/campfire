@@ -4,7 +4,11 @@
  * Starter templates, completion checklist, and draft-vs-active resolution shared by
  * the API, the party roster form, and the character sheet.
  */
-import type { Character, CharacterAction, RuleSystemAdapter, SkillRank } from './index';
+import type { Character, CharacterAction, RuleSystemAdapter, SkillRank, SpellSlotLevel } from './index';
+// Value import from action-resolver.ts directly (not './index') — same reasoning as
+// combatant-statblock.ts: index.ts re-exports this module, so a runtime import FROM index.ts
+// here would be circular.
+import { ActionSpec } from './action-resolver';
 
 const DND5E_ADAPTER_ID = 'dnd5e';
 const OPEN_LEGEND_ADAPTER_ID = 'open-legend';
@@ -54,6 +58,13 @@ export interface CharacterStarterTemplate {
   actions: CharacterAction[];
   /** Human-readable breakdown lines shown in the creation UI. */
   breakdown: string[];
+  /**
+   * Starting spell slots (issue #1932), keyed "1".."9". Omitted entirely for a non-caster
+   * archetype — `characterCreateFromTemplate` only writes the field when a template sets it,
+   * so a martial template's sheet keeps the schema's empty-object default rather than an
+   * explicit `{}` that would falsely claim "this archetype was checked for slots".
+   */
+  spellSlots?: Record<string, SpellSlotLevel>;
 }
 
 export interface CharacterChecklistItem {
@@ -236,15 +247,45 @@ function dnd5eHpMax(level: number, conScore: number): number {
 }
 
 function dnd5eLongswordAction(prof: number, strMod: number): CharacterAction {
-  const toHit = prof + strMod;
+  const toHit = signed(prof + strMod);
   const dmgMod = strMod;
   return {
     name: 'Longsword',
     kind: 'melee',
-    toHit: signed(toHit),
+    toHit,
     damage: `1d8${dmgMod ? signed(dmgMod) : ''} slashing`,
     targetAc: 'AC',
     notes: 'Starter melee attack — edit on the sheet after creation.',
+    // Issue #1932: a resolvable spec (same bonus the toHit text already shows — one
+    // source, not a second hand-computed copy) so this action carries a one-tap Use
+    // button immediately, not just freeform prose.
+    spec: ActionSpec.parse({
+      mode: 'attack',
+      attack: { bonus: toHit },
+      cost: { slot: 'action', count: 1 },
+      targets: { count: 1, allow: 'enemy' },
+      outcomes: { hit: { damage: [{ formula: '1d8', flat: dmgMod, type: 'slashing' }] } },
+    }),
+  };
+}
+
+function dnd5eGreataxeAction(prof: number, strMod: number): CharacterAction {
+  const toHit = signed(prof + strMod);
+  const dmgMod = strMod;
+  return {
+    name: 'Greataxe',
+    kind: 'melee',
+    toHit,
+    damage: `1d12${dmgMod ? signed(dmgMod) : ''} slashing`,
+    targetAc: 'AC',
+    notes: 'Starter melee attack — edit on the sheet after creation.',
+    spec: ActionSpec.parse({
+      mode: 'attack',
+      attack: { bonus: toHit },
+      cost: { slot: 'action', count: 1 },
+      targets: { count: 1, allow: 'enemy' },
+      outcomes: { hit: { damage: [{ formula: '1d12', flat: dmgMod, type: 'slashing' }] } },
+    }),
   };
 }
 
@@ -257,12 +298,23 @@ function dnd5eTemplates(level: number): CharacterStarterTemplate[] {
   const fighterStats = { STR: 16, DEX: 14, CON: 14, INT: 10, WIS: 12, CHA: 8 };
   const wizardStats = { STR: 8, DEX: 14, CON: 14, INT: 16, WIS: 12, CHA: 10 };
   const rogueStats = { STR: 10, DEX: 16, CON: 14, INT: 12, WIS: 12, CHA: 10 };
+  const barbarianStats = { STR: 17, DEX: 13, CON: 16, INT: 8, WIS: 10, CHA: 8 };
   const fighterCon = fighterStats.CON;
   const fighterHp = dnd5eHpMax(level, fighterCon);
   const wizardHp = dnd5eHpMax(level, wizardStats.CON);
   const rogueHp = dnd5eHpMax(level, rogueStats.CON);
+  const barbarianHp = dnd5eHpMax(level, barbarianStats.CON);
   const fighterStrMod = Math.floor((fighterStats.STR - 10) / 2);
   const fighterDexMod = Math.floor((fighterStats.DEX - 10) / 2);
+  const rogueDexMod = Math.floor((rogueStats.DEX - 10) / 2);
+  const wizardIntMod = Math.floor((wizardStats.INT - 10) / 2);
+  const barbarianStrMod = Math.floor((barbarianStats.STR - 10) / 2);
+  const barbarianDexMod = Math.floor((barbarianStats.DEX - 10) / 2);
+  const barbarianConMod = Math.floor((barbarianStats.CON - 10) / 2);
+  const rapierToHit = signed(prof + rogueDexMod);
+  const fireBoltToHit = signed(prof + wizardIntMod);
+  // 5e spell save DC = 8 + proficiency + spellcasting ability modifier.
+  const wizardSpellSaveDc = 8 + prof + wizardIntMod;
 
   return [
     {
@@ -297,16 +349,48 @@ function dnd5eTemplates(level: number): CharacterStarterTemplate[] {
         {
           name: 'Fire Bolt',
           kind: 'spell',
-          toHit: signed(prof + Math.floor((wizardStats.INT - 10) / 2)),
+          toHit: fireBoltToHit,
           damage: '1d10 fire',
           targetAc: 'AC',
-          notes: 'Ranged spell attack — edit spell list on the sheet after creation.',
+          notes: 'Ranged spell attack cantrip — edit spell list on the sheet after creation.',
+          // Issue #1932: at-will cantrip — no spellLevel cost (uses.spellLevel defaults 0).
+          spec: ActionSpec.parse({
+            mode: 'attack',
+            attack: { bonus: fireBoltToHit },
+            cost: { slot: 'action', count: 1 },
+            targets: { count: 1, allow: 'enemy' },
+            outcomes: { hit: { damage: [{ formula: '1d10', flat: 0, type: 'fire' }] } },
+          }),
+        },
+        {
+          name: 'Burning Hands',
+          kind: 'spell',
+          toHit: `DC ${wizardSpellSaveDc} DEX`,
+          damage: '3d6 fire (half on save)',
+          targetAc: 'DEX save',
+          notes: '1st-level spell — a 15-ft cone; targets in it make a DEX save. Consumes a 1st-level spell slot.',
+          spec: ActionSpec.parse({
+            mode: 'save',
+            save: { ability: 'DEX', dc: { kind: 'fixed', dc: wizardSpellSaveDc } },
+            cost: { slot: 'action', count: 1 },
+            uses: { spellLevel: 1 },
+            range: { range: 'self', shape: 'cone', size: '15 ft' },
+            targets: { count: 0, allow: 'enemy' },
+            outcomes: {
+              failure: { damage: [{ formula: '3d6', flat: 0, type: 'fire' }] },
+              success: { halfDamage: true },
+            },
+          }),
         },
       ],
+      // Issue #1932: a level-1 wizard has two 1st-level slots — enough for Burning Hands
+      // above to show real slot pips (max/used), not just a described cost.
+      spellSlots: { '1': { max: 2, used: 0 } },
       breakdown: [
         `AC 12 = 10 + DEX modifier (+${Math.floor((wizardStats.DEX - 10) / 2)})`,
         `HP ${wizardHp} = level ${level} wizard hit dice + CON modifier`,
-        `Spell attack ${signed(prof + Math.floor((wizardStats.INT - 10) / 2))} = proficiency + INT`,
+        `Spell attack ${fireBoltToHit} = proficiency + INT`,
+        `Spell save DC ${wizardSpellSaveDc} = 8 + proficiency + INT`,
         'Saving throws: proficient in INT and WIS',
       ],
     },
@@ -324,17 +408,43 @@ function dnd5eTemplates(level: number): CharacterStarterTemplate[] {
         {
           name: 'Rapier',
           kind: 'melee',
-          toHit: signed(prof + Math.floor((rogueStats.DEX - 10) / 2)),
-          damage: `1d8${rogueStats.DEX >= 10 ? signed(Math.floor((rogueStats.DEX - 10) / 2)) : ''} piercing`,
+          toHit: rapierToHit,
+          damage: `1d8${rogueDexMod ? signed(rogueDexMod) : ''} piercing`,
           targetAc: 'AC',
           notes: 'Finesse melee attack using DEX.',
+          spec: ActionSpec.parse({
+            mode: 'attack',
+            attack: { bonus: rapierToHit },
+            cost: { slot: 'action', count: 1 },
+            targets: { count: 1, allow: 'enemy' },
+            outcomes: { hit: { damage: [{ formula: '1d8', flat: rogueDexMod, type: 'piercing' }] } },
+          }),
         },
       ],
       breakdown: [
         `AC 15 = leather armor (11) + DEX (+${fighterDexMod})`,
         `HP ${rogueHp} = level ${level} rogue hit dice + CON modifier`,
-        `Attack uses DEX (${signed(Math.floor((rogueStats.DEX - 10) / 2))}) + proficiency (+${prof})`,
+        `Attack ${rapierToHit} = DEX (${signed(rogueDexMod)}) + proficiency (+${prof})`,
         'Stealth starts at expertise; other skills at proficiency',
+      ],
+    },
+    {
+      id: '5e-barbarian',
+      label: 'Barbarian (reckless brute)',
+      description: 'A hard-hitting melee brute — the highest HP of the starting archetypes, unarmored but tough.',
+      className: 'Barbarian',
+      stats: barbarianStats,
+      // Unarmored Defense: 10 + DEX modifier + CON modifier.
+      ac: 10 + barbarianDexMod + barbarianConMod,
+      hpMax: barbarianHp,
+      saveProficiencies: ['STR', 'CON'],
+      skills: { Athletics: 'proficient', Perception: 'proficient' },
+      actions: [dnd5eGreataxeAction(prof, barbarianStrMod)],
+      breakdown: [
+        `AC ${10 + barbarianDexMod + barbarianConMod} = 10 (unarmored defense) + DEX (${signed(barbarianDexMod)}) + CON (${signed(barbarianConMod)})`,
+        `HP ${barbarianHp} = level ${level} barbarian hit dice + CON modifier (+${barbarianConMod})`,
+        `Attack ${signed(prof + barbarianStrMod)} = proficiency (+${prof}) + STR (${signed(barbarianStrMod)})`,
+        'Saving throws: proficient in STR and CON',
       ],
     },
   ];
@@ -515,6 +625,11 @@ export function characterCreateFromTemplate(
   saveProficiencies: string[];
   skills: Record<string, SkillRank>;
   actions: CharacterAction[];
+  // Issue #1932: only present when the template declares starting slots (the caster
+  // archetypes) — omitted entirely for a martial template, never an explicit `{}` that
+  // would falsely claim "checked, no slots" for an archetype the caster question never
+  // applies to.
+  spellSlots?: Record<string, SpellSlotLevel>;
 } {
   return {
     name: opts.name.trim(),
@@ -531,6 +646,7 @@ export function characterCreateFromTemplate(
     saveProficiencies: [...template.saveProficiencies],
     skills: { ...template.skills },
     actions: template.actions.map((a) => ({ ...a })),
+    ...(template.spellSlots ? { spellSlots: { ...template.spellSlots } } : {}),
   };
 }
 

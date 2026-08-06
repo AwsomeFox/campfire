@@ -64,6 +64,7 @@ describe('McpToolsService coverage unit tests', () => {
     const inboxSweep = overrides.inboxSweep ?? {};
     const throttlerStorage = overrides.throttlerStorage ?? {};
     const safetyCharterValidator = overrides.safetyCharterValidator ?? {};
+    const sampleEncounter = overrides.sampleEncounter ?? {};
 
     return new McpToolsService(
       access as any,
@@ -108,6 +109,7 @@ describe('McpToolsService coverage unit tests', () => {
       inboxSweep as any,
       throttlerStorage as any,
       safetyCharterValidator as any,
+      sampleEncounter as any,
     );
   }
 

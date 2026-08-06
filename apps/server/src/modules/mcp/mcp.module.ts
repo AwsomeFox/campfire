@@ -31,6 +31,7 @@ import { RevisionsModule } from '../revisions/revisions.module';
 import { RollsModule } from '../rolls/rolls.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { InboxSweepModule } from '../inbox-sweep/inbox-sweep.module';
+import { SampleEncounterModule } from '../sample-encounter/sample-encounter.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -69,6 +70,7 @@ import { McpController } from './mcp.controller';
     RollsModule,
     NotificationsModule,
     InboxSweepModule,
+    SampleEncounterModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],

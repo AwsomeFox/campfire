@@ -57,6 +57,8 @@
       "title": "No encounters yet",
       "hintDm": "Start one when combat kicks off.",
       "hintPlayer": "The DM hasn't started one yet.",
+      "sampleFight": "Try a sample fight",
+      "sampleFightLoading": "Seeding…",
       "noCombatants": "No combatants yet",
       "noCombatantsHintDmActive": "Add the party from the Party tab, then enemies.",
       "noCombatantsHintDmNoParty": "Add combatants below — this campaign has no active party to auto-add.",
@@ -93,6 +95,7 @@
     "errors": {
       "load": "Couldn't load encounters.",
       "create": "Couldn't create the encounter.",
+      "sampleFight": "Couldn't seed the sample fight.",
       "preview": "Couldn't build a preview.",
       "commit": "Couldn't commit the encounter.",
       "loadEncounter": "Couldn't load this encounter.",
