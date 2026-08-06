@@ -8262,6 +8262,174 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     });
   });
 
+  // Issue #1927: the generator/preview candidate queries widen to include the campaign's own
+  // homebrew monsters (rule_entries rows with a non-null campaignId) alongside globally
+  // installed pack entries — while never crossing campaign boundaries, never surfacing
+  // archived homebrew, and leaving `packSlug` pack-only exactly as before.
+  describe('encounter generator + preview — campaign homebrew monsters (issue #1927)', () => {
+    let homebrewCrId: number;
+    let homebrewNoCrId: number;
+    let otherCampaignId: number;
+    const HOMEBREW_TAG = 'umbral-marsh-wyrm-1927';
+    const OTHER_CAMPAIGN_TAG = 'other-campaign-tag-1927';
+    const NO_CR_TAG = 'no-cr-homebrew-1927';
+
+    async function createHomebrew(cid: number, header: typeof dm, slug: string, name: string, data: Record<string, unknown>) {
+      const res = await request(ctx.app.getHttpServer())
+        .post(`/api/v1/campaigns/${cid}/homebrew`)
+        .set(header)
+        .send({ slug, name, type: 'monster', summary: '', body: '', data, rightsStatus: 'private_original' });
+      expect(res.status).toBe(201);
+      return res.body.id as number;
+    }
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+
+      // A CR-bearing homebrew monster owned by the main test campaign.
+      homebrewCrId = await createHomebrew(campaignId, dm, 'umbral-marsh-wyrm', 'Umbral Marsh Wyrm', {
+        challengeRating: 5,
+        hitPoints: 60,
+        type: HOMEBREW_TAG,
+      });
+      // A homebrew monster with no parseable CR/HP (issue #1505's data problem, not this one).
+      homebrewNoCrId = await createHomebrew(campaignId, dm, 'campfire-wisp', 'Campfire Wisp', {
+        type: NO_CR_TAG,
+      });
+
+      // A second campaign with its OWN homebrew, tagged distinctly, to prove isolation.
+      const otherCampRes = await request(server).post('/api/v1/campaigns').set(otherDm).send({ name: 'Other Homebrew Campaign' });
+      otherCampaignId = otherCampRes.body.id;
+      await createHomebrew(otherCampaignId, otherDm, 'rival-dm-horror', 'Rival DM Horror', {
+        challengeRating: 5,
+        hitPoints: 60,
+        type: OTHER_CAMPAIGN_TAG,
+      });
+    });
+
+    it('a CR-bearing homebrew monster appears in a generated roster, tagged source:homebrew', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 11, filters: { creatureType: HOMEBREW_TAG } });
+      expect(res.status).toBe(200);
+      expect(res.body.combatants.length).toBeGreaterThan(0);
+      for (const c of res.body.combatants) {
+        expect(c.ruleEntryId).toBe(homebrewCrId);
+        expect(c.source).toBe('homebrew');
+      }
+    });
+
+    it('a CR-bearing homebrew monster appears in preview/tune roster results, tagged source:homebrew', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 12, filters: { creatureType: HOMEBREW_TAG } });
+      expect(res.status).toBe(200);
+      expect(res.body.roster.length).toBeGreaterThan(0);
+      for (const slot of res.body.roster) {
+        expect(slot.ruleEntryId).toBe(homebrewCrId);
+        expect(slot.source).toBe('homebrew');
+        // The inspection card resolved a real statblock (not the "no candidates" fallback).
+        expect(slot.inspection.hasStatblock).toBe(true);
+      }
+
+      // A reroll-all tune op re-resolves the SAME (only) homebrew candidate again.
+      const reroll = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 12, filters: { creatureType: HOMEBREW_TAG }, roster: res.body.plan, tune: { op: 'reroll-all' } });
+      expect(reroll.status).toBe(200);
+      expect(reroll.body.roster.every((s: { source: string }) => s.source === 'homebrew')).toBe(true);
+    });
+
+    it("campaign A's generation never selects campaign B's homebrew", async () => {
+      const server = ctx.app.getHttpServer();
+      // Filter for the OTHER campaign's unique tag from INSIDE this campaign — no candidate in
+      // this campaign's scope carries that tag, so nothing should ever be selected.
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 13, filters: { creatureType: OTHER_CAMPAIGN_TAG } });
+      expect(res.status).toBe(200);
+      expect(res.body.combatants).toEqual([]);
+
+      // And the reverse: campaign A's homebrew tag is invisible from campaign B.
+      const reverse = await request(server)
+        .post(`/api/v1/campaigns/${otherCampaignId}/encounters/generate`)
+        .set(otherDm)
+        .send({ difficulty: 'medium', seed: 14, filters: { creatureType: HOMEBREW_TAG } });
+      expect(reverse.status).toBe(200);
+      expect(reverse.body.combatants).toEqual([]);
+    });
+
+    it('archived homebrew is never a generation candidate', async () => {
+      const server = ctx.app.getHttpServer();
+      const archivedId = await createHomebrew(campaignId, dm, 'archived-lantern-ghast', 'Archived Lantern Ghast', {
+        challengeRating: 5,
+        hitPoints: 40,
+        type: 'archived-tag-1927',
+      });
+      const archiveRes = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/${archivedId}/archive`).set(dm);
+      expect(archiveRes.status).toBe(201);
+
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 15, filters: { creatureType: 'archived-tag-1927' } });
+      expect(res.status).toBe(200);
+      expect(res.body.combatants).toEqual([]);
+    });
+
+    it('filters.packSlug still yields pack-only candidates — homebrew is excluded even when it matches other filters', async () => {
+      const server = ctx.app.getHttpServer();
+      // 'gen-pack' was installed by the #304 describe above and lives in the SAME campaign.
+      // creatureType matches the homebrew tag, but packSlug narrows to the installed pack only,
+      // so the homebrew entry must never be returned regardless of the type filter.
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 16, filters: { packSlug: 'gen-pack', creatureType: HOMEBREW_TAG } });
+      expect(res.status).toBe(200);
+      expect(res.body.combatants).toEqual([]);
+    });
+
+    it('CR-less homebrew never enters an auto-budgeted pick, but is addable/pinnable and carries missing-statblock', async () => {
+      const server = ctx.app.getHttpServer();
+      // Auto-budgeted generation never picks it (xp=0 -> filtered out of `usable`).
+      const auto = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 17, filters: { creatureType: NO_CR_TAG } });
+      expect(auto.status).toBe(200);
+      expect(auto.body.combatants).toEqual([]);
+
+      // Explicitly pinned into a preview roster plan, it still resolves (source:homebrew) and
+      // is flagged missing-statblock rather than silently fabricated CR/XP.
+      const pinned = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 18, roster: [{ slotId: 's1', ruleEntryId: homebrewNoCrId, count: 1, pinned: true, seed: 1 }] });
+      expect(pinned.status).toBe(200);
+      expect(pinned.body.roster).toHaveLength(1);
+      expect(pinned.body.roster[0].ruleEntryId).toBe(homebrewNoCrId);
+      expect(pinned.body.roster[0].source).toBe('homebrew');
+      expect(pinned.body.roster[0].cr).toBeNull();
+      expect(pinned.body.warnings.some((w: { code: string }) => w.code === 'missing-statblock')).toBe(true);
+    });
+
+    it('same seed + same candidate set (mixed pack + homebrew) reproduces the same roster', async () => {
+      const server = ctx.app.getHttpServer();
+      const a = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/generate`).set(dm).send({ difficulty: 'medium', seed: 2027 });
+      const b = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/generate`).set(dm).send({ difficulty: 'medium', seed: 2027 });
+      expect(a.status).toBe(200);
+      expect(b.body.combatants).toEqual(a.body.combatants);
+      expect(b.body.seed).toBe(a.body.seed);
+    });
+  });
+
   // Issue #262: a DM's prepared, not-yet-sprung fight must not leak its combatant roster or
   // computed 5e difficulty to players. hidden gates the encounter WHOLESALE for a non-DM.
   describe('hidden encounter secrecy (issue #262)', () => {
