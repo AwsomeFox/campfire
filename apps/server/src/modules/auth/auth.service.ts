@@ -138,6 +138,11 @@ export class AuthService implements OnApplicationBootstrap {
             passwordHash,
             serverRole: 'admin',
             disabled: false,
+            // Explicit, now that the column fails closed (issue #851 review). The operator
+            // who claims a fresh install is the one person who must be able to create a
+            // campaign immediately — relying on a column default for that would be exactly
+            // the fragility the default was tightened to remove.
+            canCreateCampaigns: true,
             createdAt: ts,
             updatedAt: ts,
           })

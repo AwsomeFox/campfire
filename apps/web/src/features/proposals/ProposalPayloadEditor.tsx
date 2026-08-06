@@ -94,7 +94,10 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
     const [text, setText] = useState(() => initProposalFieldText(fields, jsonKeys, originalPayload));
     const [bool, setBool] = useState(() => initProposalFieldBool(fields, originalPayload));
     const [rawText, setRawText] = useState(() => JSON.stringify(originalPayload, null, 2));
-    const [modeSwitchError, setModeSwitchError] = useState<string | null>(null);
+    // Whether the LAST switch attempt from the current mode was refused. The displayed
+    // message itself is derived below from the live preview, not stored — see the
+    // `modeSwitchError` useMemo for why (issue #2015).
+    const [modeSwitchBlocked, setModeSwitchBlocked] = useState(false);
     // Only surface field-level errors after a failed submit attempt — matches the
     // codebase's on-submit validation convention (see QuestPage's title error).
     const [showErrors, setShowErrors] = useState(false);
@@ -121,6 +124,24 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
 
     const preview = mode === 'guided' ? guidedPreview : advancedPreview;
 
+    // Derived, not stored (issue #2015). The refused-switch message used to be a plain
+    // `useState<string | null>` set on failure and cleared only on the two success paths,
+    // so it never noticed the reviewer fixing the very field it named — every `onChange`
+    // below is otherwise silent about it, and the `role="alert"` paragraph kept asserting a
+    // problem that was already gone until the reviewer tried the switch again. Recomputing
+    // the message from the CURRENT build/parse result on every render makes that staleness
+    // unrepresentable: the moment the blocking condition it describes stops being true, the
+    // derived value is `null` and the alert disappears on its own, with no separate clearing
+    // logic to keep in sync across every guided control and the raw textarea.
+    const modeSwitchError = useMemo(() => {
+      if (!modeSwitchBlocked) return null;
+      if (mode === 'guided') {
+        const unrepresentedKey = Object.keys(guidedPreview.fieldErrors)[0];
+        return unrepresentedKey ? `Fix ${humanizeFieldKey(unrepresentedKey)} before switching to raw JSON.` : null;
+      }
+      return parseJsonObject(rawText).ok ? null : 'Fix the JSON before switching to the guided editor.';
+    }, [modeSwitchBlocked, mode, guidedPreview.fieldErrors, rawText]);
+
     function switchToAdvanced() {
       // Refuse the switch when the draft does NOT hold what the reviewer typed (review).
       //
@@ -145,11 +166,11 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
       const unrepresentedKey = Object.keys(build.fieldErrors)[0];
       if (unrepresentedKey) {
         setShowErrors(true);
-        setModeSwitchError(`Fix ${humanizeFieldKey(unrepresentedKey)} before switching to raw JSON.`);
+        setModeSwitchBlocked(true);
         return;
       }
       setRawText(JSON.stringify(guidedPreview.draft, null, 2));
-      setModeSwitchError(null);
+      setModeSwitchBlocked(false);
       setMode('advanced');
     }
 
@@ -157,7 +178,7 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
       const parsed = parseJsonObject(rawText);
       if (!parsed.ok) {
         // Preserve the raw draft — do not lose it just because switching modes failed.
-        setModeSwitchError('Fix the JSON before switching to the guided editor.');
+        setModeSwitchBlocked(true);
         return;
       }
       setText(initProposalFieldText(fields, jsonKeys, parsed.data));
@@ -166,7 +187,7 @@ export const ProposalPayloadEditor = forwardRef<ProposalPayloadEditorHandle, Pro
       // does not declare reflect what the user just typed rather than snapping back to
       // the original proposal (issue #769 review, Devin).
       setPassthroughBase(parsed.data);
-      setModeSwitchError(null);
+      setModeSwitchBlocked(false);
       setMode('guided');
     }
 

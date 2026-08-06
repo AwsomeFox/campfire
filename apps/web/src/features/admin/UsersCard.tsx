@@ -340,6 +340,7 @@ function UserRow({
   const [displayName, setDisplayName] = useState(user.displayName);
   const [serverRole, setServerRole] = useState<ServerRole>(user.serverRole);
   const [disabled, setDisabled] = useState(user.disabled);
+  const [canCreateCampaigns, setCanCreateCampaigns] = useState(user.canCreateCampaigns);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [removing, setRemoving] = useState(false);
@@ -351,6 +352,7 @@ function UserRow({
   const displayNameId = `${idPrefix}-display-name`;
   const roleId = `${idPrefix}-role`;
   const disabledId = `${idPrefix}-disabled`;
+  const canCreateCampaignsId = `${idPrefix}-can-create-campaigns`;
   const formErrorId = `${idPrefix}-error`;
   const displayNameRef = useRef<HTMLInputElement>(null);
 
@@ -365,6 +367,7 @@ function UserRow({
     setDisplayName(user.displayName);
     setServerRole(user.serverRole);
     setDisabled(user.disabled);
+    setCanCreateCampaigns(user.canCreateCampaigns);
     setFormError(null);
     onEdit();
   }
@@ -381,6 +384,7 @@ function UserRow({
         displayName: displayName.trim(),
         serverRole,
         disabled,
+        canCreateCampaigns,
       });
       announce(`Updated user ${user.username}.`);
       onClose();
@@ -537,6 +541,22 @@ function UserRow({
                         onChange={(e) => setDisabled(e.target.checked)}
                       />
                       Disabled for {user.username}
+                    </label>
+                  </div>
+                  <div className="field min-w-0 flex items-end">
+                    <label
+                      htmlFor={canCreateCampaignsId}
+                      className="flex items-center gap-2 text-sm text-slate-300"
+                      style={{ overflowWrap: 'anywhere' }}
+                    >
+                      <input
+                        id={canCreateCampaignsId}
+                        name={`can-create-campaigns-${user.id}`}
+                        type="checkbox"
+                        checked={canCreateCampaigns}
+                        onChange={(e) => setCanCreateCampaigns(e.target.checked)}
+                      />
+                      Approved organizer (can create/import campaigns under the &quot;approved organizers&quot; policy)
                     </label>
                   </div>
                 </div>

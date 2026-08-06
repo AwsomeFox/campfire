@@ -237,6 +237,13 @@ export class MeController {
           textSize: 'default',
           diceTheme: 'nocturne',
           timeFormat: 'system',
+          // Issue #851 — dev:* header users are synthetic (no DB row) and never subject to
+          // campaign-creation governance: CampaignGovernanceService returns bypass:true for
+          // them, so this field is never consulted for an authorization decision. It is
+          // reported true because it is what the client should render — the caller genuinely
+          // can create — not because true is a safe default anywhere else. The column and
+          // the shared contract both default FALSE.
+          canCreateCampaigns: true,
           colorVisionAssist: false,
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
