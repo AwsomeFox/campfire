@@ -433,6 +433,10 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     aoe: parseAoe(row.aoe),
     hidden: row.hidden,
     endedAt: row.endedAt,
+    // Turn timer (issue #1935) — server-stamped only; exposed for every role (never a secret)
+    // so the DM header, PlayerVitalsHeader, and PlayerDisplayPage compute the same elapsed time.
+    turnStartedAt: row.turnStartedAt ?? null,
+    turnTimerSeconds: row.turnTimerSeconds ?? 0,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -2069,6 +2073,14 @@ export class EncountersService {
     if (input.hidden !== undefined && input.hidden !== encounterRow.hidden) {
       set.hidden = input.hidden;
       changedPredicates.push(sql`${encounters.hidden} IS NOT ${input.hidden ? 1 : 0}`);
+    }
+    // Turn timer pacing limit (issue #1935) — dm only, like the rest of this endpoint.
+    // `turnStartedAt` is deliberately absent from EncounterUpdate/EncounterUpdateDto (strict
+    // schema), so it can never reach here at all — it is stamped only by the turn-transition
+    // methods themselves (start/advanceCurrentTurn/undoTurn/reopen), never via PATCH.
+    if (input.turnTimerSeconds !== undefined && input.turnTimerSeconds !== (encounterRow.turnTimerSeconds ?? 0)) {
+      set.turnTimerSeconds = input.turnTimerSeconds;
+      changedPredicates.push(sql`${encounters.turnTimerSeconds} IS NOT ${input.turnTimerSeconds}`);
     }
 
     if (changedPredicates.length === 0) {
@@ -6679,6 +6691,9 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
+          // Turn timer (issue #1935): stamp the fresh server "now" the very first turn
+          // begins, in the same transaction that flips status to running.
+          turnStartedAt: ts,
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
@@ -7159,6 +7174,11 @@ export class EncountersService {
             lairResumeCombatantId,
             escalationDie: escalation.escalationDie,
             escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
+            // Turn timer (issue #1935): a fresh stamp for the NEW current turn, inside the
+            // same serialized transaction as the pointer move. Guarded by the idempotency
+            // dedup above (an early `return` there skips this whole tx.update), so a replayed
+            // retry of the same intent never restamps a turn that already started.
+            turnStartedAt: nowIso(),
             updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
           })
           .where(eq(encounters.id, encounterId))
@@ -7527,6 +7547,10 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
+          // Turn timer (issue #1935): undo restores a FRESH stamp, not the pre-advance one —
+          // a documented restart. The prior elapsed time is intentionally gone; undo produces
+          // a new "now" for whichever turn it retreats to, inside this same transaction.
+          turnStartedAt: nowIso(),
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
@@ -8412,7 +8436,9 @@ export class EncountersService {
       }
       const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
-        .set({ status: 'ended', endedAt: ts, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
+        // Turn timer (issue #1935): null the stamp when the encounter ends — there is no
+        // "current turn" running any more, so no client should keep ticking a chip.
+        .set({ status: 'ended', endedAt: ts, turnStartedAt: null, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
         .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
         .run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
@@ -8603,6 +8629,10 @@ export class EncountersService {
           turnIndex,
           turnPhase: 'combatant',
           lairResumeCombatantId: null,
+          // Turn timer (issue #1935): a reopened encounter begins a fresh turn (see the
+          // turnVersion bump above), so the timer restarts too rather than resuming a stamp
+          // from before the encounter ended.
+          turnStartedAt: ts,
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))

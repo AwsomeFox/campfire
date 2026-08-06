@@ -1359,6 +1359,27 @@ function migrateEncountersTableForHexOrientation(sqlite: Database.Database): voi
 }
 
 /**
+ * Migration for DBs created before the turn timer (issue #1935): `encounters` gained
+ * `turn_started_at` (nullable — the server-stamped instant the CURRENT turn began; null
+ * when not actively mid-turn) and `turn_timer_seconds` (NOT NULL, DM-set pacing limit;
+ * 0 = off). Plain ADD COLUMNs — same shape as the grid-calibration migration above.
+ * Existing (already-running) encounters backfill `turn_started_at` to NULL, which is
+ * indistinguishable from "not running" until the next turn transition stamps a real
+ * value — acceptable because the elapsed chip only ever renders once a stamp exists.
+ */
+function migrateEncountersTableForTurnTimer(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('turn_started_at')) sqlite.exec('ALTER TABLE encounters ADD COLUMN turn_started_at TEXT');
+  if (!has('turn_timer_seconds')) sqlite.exec('ALTER TABLE encounters ADD COLUMN turn_timer_seconds INTEGER NOT NULL DEFAULT 0');
+}
+
+/**
  * Migration for DBs created before the optional DM-gated progression flag (issue #270):
  * `campaigns.dm_controls_progression` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN —
  * existing campaigns get 0 (false), preserving the pre-migration behavior where any
@@ -5201,6 +5222,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // compatibility is unaffected.
   { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
   { name: '0167_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
+  // 0168/0169 are claimed by other in-flight changes; this takes the next free ordinal.
+  { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
 ];
 
 /**

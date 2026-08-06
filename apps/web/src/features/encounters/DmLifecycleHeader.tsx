@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
 import { Btn } from '../../components/ui';
+import { GameIcon } from '../../components/GameIcon';
 import { GatedControl } from '../../components/GatedControl';
 import type { EncounterLifecycleActions } from './encounterLifecycleActions';
 import { ENCOUNTER_SYNC_BANNER_TESTID } from './encounterSyncState';
@@ -15,6 +16,51 @@ import {
 
 /** Ties the Start button to its standing roster instruction for assistive tech. */
 const START_ROSTER_HINT_ID = 'start-roster-hint';
+
+/** Turn timer (issue #1935) preset choices — 0 = off (elapsed-only, DM-facing chip). */
+const TURN_TIMER_PRESETS = [0, 60, 90, 120] as const;
+
+/** Small inline stopwatch popover: DM sets the pacing-limit preset via the existing PATCH. */
+function TurnTimerControl({
+  turnTimerSeconds,
+  onSetTurnTimerSeconds,
+  disabled,
+}: {
+  turnTimerSeconds: number;
+  onSetTurnTimerSeconds: (seconds: number) => void;
+  disabled: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <details className="cf-turn-timer-control">
+      <summary
+        className="btn btn-ghost cf-target-44"
+        aria-label={t('encounters.turnTimer.settingsLabel')}
+        title={t('encounters.turnTimer.settingsTitle')}
+      >
+        <GameIcon slug="stopwatch" size={14} className="inline align-text-bottom" />
+      </summary>
+      <div className="cf-turn-timer-control-menu flex flex-col gap-1.5">
+        <p className="text-muted text-xs m-0">{t('encounters.turnTimer.settingsHint')}</p>
+        <div className="flex gap-1 flex-wrap">
+          {TURN_TIMER_PRESETS.map((seconds) => (
+            <Btn
+              key={seconds}
+              ghost
+              density="xs"
+              disabled={disabled}
+              aria-pressed={turnTimerSeconds === seconds}
+              className={turnTimerSeconds === seconds ? 'cf-turn-timer-preset-active' : ''}
+              onClick={() => onSetTurnTimerSeconds(seconds)}
+            >
+              {seconds === 0 ? t('encounters.turnTimer.off') : t('encounters.turnTimer.presetSeconds', { seconds })}
+            </Btn>
+          ))}
+        </div>
+      </div>
+    </details>
+  );
+}
 
 export type Props = {
   canDmWrite: boolean;
@@ -38,6 +84,9 @@ export type Props = {
   onRequestEnd: () => void;
   onRequestReopen: () => void;
   onRequestDelete: () => void;
+  /** Turn timer (issue #1935) — current DM-set pacing limit, and how to change it. */
+  turnTimerSeconds: number;
+  onSetTurnTimerSeconds: (seconds: number) => void;
 };
 
 export type EncounterSyncBannerProps = {
@@ -65,6 +114,8 @@ export function DmLifecycleHeader({
   onRequestEnd,
   onRequestReopen,
   onRequestDelete,
+  turnTimerSeconds,
+  onSetTurnTimerSeconds,
 }: Props) {
   const { t } = useTranslation();
 
@@ -72,6 +123,11 @@ export function DmLifecycleHeader({
 
   return (
     <div className="flex gap-2 flex-wrap">
+      <TurnTimerControl
+        turnTimerSeconds={turnTimerSeconds}
+        onSetTurnTimerSeconds={onSetTurnTimerSeconds}
+        disabled={headerBusy}
+      />
       {lifecycle.rollInitiative && lifecycle.start && (
         <>
           {/* Issue #702: the server treats a fully-rolled roster as a no-op (no

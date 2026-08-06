@@ -6,6 +6,15 @@
       "maxHp": "Max HP",
       "setMax": "Set Max"
     },
+    "turnTimer": {
+      "elapsed": "Turn elapsed {{elapsed}}",
+      "elapsedOfLimit": "Turn elapsed {{elapsed}} of {{limit}}",
+      "settingsLabel": "Turn timer settings",
+      "settingsTitle": "Turn timer",
+      "settingsHint": "Social pacing cue only — never auto-advances or blocks anyone.",
+      "off": "Off",
+      "presetSeconds": "{{seconds}}s"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",

@@ -1572,6 +1572,13 @@ export const encounters = sqliteTable('encounters', {
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   endedAt: text('ended_at'),
+  // Turn timer (issue #1935): server-stamped instant the CURRENT turn began, so every
+  // connected client agrees on elapsed time — never client-computed. null when not actively
+  // mid-turn (preparing or ended). Added by migration on older DBs (see db/db.module.ts).
+  turnStartedAt: text('turn_started_at'),
+  // DM-set pacing limit in seconds; 0 = off (elapsed-only, DM-facing chip). Never enforced
+  // server-side. Added by migration on older DBs (see db/db.module.ts).
+  turnTimerSeconds: integer('turn_timer_seconds').notNull().default(0),
   // Issue #473: DM deferred the post-encounter aftermath panel (idempotent resume).
   aftermathDismissedAt: text('aftermath_dismissed_at'),
   // Issue #1448: Aftermath mutations tracking (XP award timestamp and stored loot list package).
