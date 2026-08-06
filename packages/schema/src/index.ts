@@ -42,6 +42,19 @@ import {
   type AttackRollInput,
   type AttackRollResult,
 } from './action-resolver';
+// Issue #1502/#765: imported early (ahead of the sibling-adapter registration block further
+// down, which still carries `export * from './osr-adapter'`) because `Campaign` below
+// references `HomebrewMechanicsProfile` directly, and CommonJS `require` — unlike ESM import —
+// is NOT hoisted, so a value used at this position must be required at or before this position.
+// osr-adapter.ts only imports TYPES from this file, so there is no runtime circular require.
+import {
+  HomebrewMechanicsProfile,
+  OsrAdapter,
+  OSR_RULE_SYSTEM_SLUGS,
+  OSR_VARIANT_ADAPTERS,
+  tryCreateHomebrewRuleSystemAdapter,
+  type OsrMechanicsProfile,
+} from './osr-adapter';
 import type { RestModel, RestOptionDef } from './rest';
 export { type RestOptionDef, DEFAULT_GENERIC_REST_OPTIONS, DEFAULT_STARFINDER_REST_OPTIONS, restOptionsForAdapter } from './rest';
 import { CharacterAction } from './character-action';
@@ -253,6 +266,15 @@ export const Campaign = z.object({
   // (after gaps or deletes) as the current session number. Denormalized and recomputed.
   latestSessionNumber: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
+  // Issue #1502: a per-campaign, DM-authored homebrew mechanics profile — the same closed-enum
+  // ability-table/AC-convention/initiative-model/tiebreak shape `createOsrVariantAdapter`
+  // already builds a complete RuleSystemAdapter from for the six built-in OSR retroclones
+  // (issue #765), runtime-validated so a persisted profile can never smuggle in unvetted code.
+  // Only meaningful when `ruleSystem` is NOT a built-in registered slug and its own `slug` must
+  // equal `ruleSystem` (both enforced server-side, not by this schema alone) — see
+  // `ruleSystemAdapter(ruleSystem, customMechanicsProfile)`. null (default) — no homebrew
+  // profile stored, and every existing campaign has this column NULL after migration.
+  customMechanicsProfile: HomebrewMechanicsProfile.nullable().default(null),
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
   // Per-campaign upload quota in bytes, or null for no limit (issue #24). Set by a
   // server admin via the storage console — NOT part of CampaignCreate/Update, so a
@@ -268,7 +290,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true, customMechanicsProfile: true });
 export const CampaignUpdate = CampaignCreate.partial().extend({
   // Map replacement lifecycle (issue #870). 'reset' clears location pin coordinates
   // in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.
@@ -5987,7 +6009,9 @@ import { StarfinderAdapter, STARFINDER_ADAPTER_ID } from './starfinder-adapter';
 export * from './starfinder-adapter';
 import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
 export * from './adapters/archmage';
-import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS, OSR_VARIANT_ADAPTERS } from './osr-adapter';
+// OsrAdapter, OSR_RULE_SYSTEM_SLUGS, OSR_VARIANT_ADAPTERS, tryCreateHomebrewRuleSystemAdapter, and
+// OsrMechanicsProfile are imported near the top of this file (see the #1502/#765 note there) —
+// `Campaign` needs HomebrewMechanicsProfile from the same module ahead of this block.
 export * from './osr-adapter';
 import { StarforgedAdapter, STARFORGED_ADAPTER_ID, STARFORGED_PACK_SLUG } from './adapters/starforged';
 export * from './adapters/starforged';
@@ -6036,10 +6060,45 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) {
  * (or ''); it is matched against the adapter registry and falls back to the 5e adapter
  * for anything unrecognized — so every existing campaign keeps 5e behavior. The default
  * is deliberate, not a stopgap: 5e is the built-in system.
+ *
+ * `customMechanicsProfile` (issue #1502) is the widened factory seam: a campaign's own
+ * persisted, already-validated homebrew profile (`Campaign.customMechanicsProfile`). It is
+ * consulted ONLY when `ruleSystem` does not match a built-in registered slug AND the
+ * profile's own `slug` equals `ruleSystem` — so it can never override a known system's
+ * mechanics, and a stale profile left over from a since-changed `ruleSystem` is silently
+ * ignored rather than misapplied. Omitting the second argument is byte-identical to the
+ * pre-#1502 behavior — every existing call site keeps working unchanged.
  */
-export function ruleSystemAdapter(ruleSystem?: string | null): RuleSystemAdapter {
-  if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem];
+export function ruleSystemAdapter(
+  ruleSystem?: string | null,
+  customMechanicsProfile?: OsrMechanicsProfile | null,
+): RuleSystemAdapter {
+  // `isRegisteredRuleSystemSlug`, not `ADAPTERS[ruleSystem]` truthiness: bracket access walks
+  // the prototype chain, so a campaign whose slug is 'constructor' / 'toString' / 'valueOf'
+  // would resolve an Object.prototype member as its combat adapter. Using the same predicate
+  // the server's homebrew-override guard uses also keeps the two definitions of "this is a
+  // built-in system" from drifting apart.
+  if (ruleSystem && isRegisteredRuleSystemSlug(ruleSystem)) return ADAPTERS[ruleSystem];
+  if (ruleSystem && customMechanicsProfile && customMechanicsProfile.slug === ruleSystem) {
+    // VALIDATED, not cast (review). The server reads this column with an unchecked
+    // `JSON.parse`, so a row from an older version, a restored backup, a hand repair, or an
+    // untrusted export document reaches here unchecked. Building from it directly meant an
+    // out-of-enum `abilityTable` silently degraded to `bx-banded` — wrong maths presented as
+    // the table's own. A profile that fails validation is treated exactly like no profile at
+    // all, falling through to the default below rather than throwing on a hot read path.
+    const adapter = tryCreateHomebrewRuleSystemAdapter(customMechanicsProfile);
+    if (adapter) return adapter;
+  }
   return Dnd5eAdapter;
+}
+
+/**
+ * Whether `ruleSystem` matches a built-in registered adapter slug (issue #1502) — used
+ * server-side to keep a persisted `customMechanicsProfile` from overriding a KNOWN system's
+ * mechanics (5e, PF2e, OSR, …) through the homebrew-profile side door.
+ */
+export function isRegisteredRuleSystemSlug(ruleSystem: string): boolean {
+  return Object.prototype.hasOwnProperty.call(ADAPTERS, ruleSystem);
 }
 
 /**

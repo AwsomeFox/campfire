@@ -23,11 +23,12 @@ import {
   StoryBeatProposalCreate,
   ruleSystemAdapter,
 } from '@campfire/schema';
-import type { AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, NarrationLanguage, Proposal, Role, RuleSystemAdapter } from '@campfire/schema';
+import type { AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, HomebrewMechanicsProfile, NarrationLanguage, Proposal, Role, RuleSystemAdapter } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaigns, storyArcs, rulePacks } from '../../db/schema';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
+import { fromJsonText } from '../../common/json';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
 import { ProposalRecordsService, type ProposableEntityType } from '../proposals/proposal-records.service';
@@ -138,12 +139,15 @@ export class CoDmService {
     // so a configured provider's drafts were served by the no-op scaffold — which fails
     // JSON parsing (422). When no provider is configured, fall back to the legacy seam.
     const [campaign] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1);
-    
-    const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+
+    const adapter = ruleSystemAdapter(
+      campaign?.ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+    );
 
     let packVersion: string | null = null;
     if (campaign?.ruleSystem) {

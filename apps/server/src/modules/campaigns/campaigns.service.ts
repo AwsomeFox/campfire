@@ -21,8 +21,11 @@ import {
   CompendiumSnapshot,
   normalizeOffsetIsoDateTime,
   CharacterAction,
+  isRegisteredRuleSystemSlug,
+  HomebrewMechanicsProfile,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
+import { fromJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
@@ -439,6 +442,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     sessionCount: row.sessionCount,
     latestSessionNumber: row.latestSessionNumber,
     ruleSystem: row.ruleSystem,
+    customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row.customMechanicsProfile, null),
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
     deletedAt: row.deletedAt ?? null,
@@ -629,12 +633,49 @@ export class CampaignsService {
    * downstream (Compendium lookups scoped by pack slug) that assumes it resolves.
    * Empty string ('' — "no rule system picked") is always allowed, both on create and
    * when clearing it back via PATCH.
+   *
+   * Issue #1502: a homebrew campaign that carries its OWN validated customMechanicsProfile
+   * (checked separately by validateCustomMechanicsProfile, always in the same write) is the
+   * one exception — its slug need not match an installed rule pack, since the profile IS
+   * the rule system rather than imported content.
    */
-  private async validateRuleSystem(ruleSystem: string | undefined): Promise<void> {
+  private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
     if (!ruleSystem) return;
+    if (hasCustomMechanicsProfile) return;
     const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
     if (!pack) {
-      throw new BadRequestException(`ruleSystem "${ruleSystem}" does not match any installed rule pack`);
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" does not match any installed rule pack (or provide a matching customMechanicsProfile)`,
+      );
+    }
+  }
+
+  /**
+   * Validate a homebrew mechanics profile against the ruleSystem slug it is being stored
+   * against (issue #1502). `HomebrewMechanicsProfile` itself already rejects out-of-enum
+   * strategy values at the zod boundary (CampaignCreate/CampaignUpdate parsing, both REST
+   * and MCP); this covers the cross-field business rules zod alone can't express:
+   *  - a profile requires a non-empty ruleSystem slug to attach to;
+   *  - that slug must NOT be a built-in registered adapter (5e/PF2e/OSR/…) — a homebrew
+   *    profile can never override a known system's mechanics through this side door;
+   *  - profile.slug must equal ruleSystem, so `ruleSystemAdapter(ruleSystem, profile)` can
+   *    trust the pairing without a second lookup at every resolve call site.
+   */
+  private validateCustomMechanicsProfile(
+    ruleSystem: string | null | undefined,
+    profile: HomebrewMechanicsProfile | null | undefined,
+  ): void {
+    if (profile == null) return;
+    if (!ruleSystem) {
+      throw new BadRequestException('customMechanicsProfile requires a non-empty ruleSystem slug');
+    }
+    if (isRegisteredRuleSystemSlug(ruleSystem)) {
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" is a built-in rule system and cannot carry a customMechanicsProfile`,
+      );
+    }
+    if (profile.slug !== ruleSystem) {
+      throw new BadRequestException(`customMechanicsProfile.slug ("${profile.slug}") must match ruleSystem ("${ruleSystem}")`);
     }
   }
 
@@ -683,7 +724,8 @@ export class CampaignsService {
    * Creator is auto-inserted as 'dm' (skipped for dev:* users).
    */
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
-    await this.validateRuleSystem(input.ruleSystem);
+    this.validateCustomMechanicsProfile(input.ruleSystem ?? '', input.customMechanicsProfile ?? null);
+    await this.validateRuleSystem(input.ruleSystem, input.customMechanicsProfile != null);
     // A brand-new campaign has no locations/attachments of its own yet, so any
     // non-null currentLocationId/mapAttachmentId on create can never be valid.
     if (input.currentLocationId != null) {
@@ -718,6 +760,7 @@ export class CampaignsService {
             sessionCount: 0,
             latestSessionNumber: 0,
             ruleSystem: input.ruleSystem ?? '',
+            customMechanicsProfile: input.customMechanicsProfile ? JSON.stringify(input.customMechanicsProfile) : null,
             mapAttachmentId: input.mapAttachmentId ?? null,
             // Issue #851: the operator's default quota, inherited atomically with the row
             // itself. null (unlimited) unless an admin has configured one — never touches
@@ -780,7 +823,10 @@ export class CampaignsService {
   ): Promise<Campaign> {
     const existing = await this.getOrThrow(id);
     // mapAlignment is a request-time directive (issue #870), not a stored column.
-    const { mapAlignment, ...campaignInput } = input;
+    // customMechanicsProfile is pulled out too (issue #1502) — it needs cross-field validation
+    // against the EFFECTIVE ruleSystem and JSON serialization before it can join campaignInput,
+    // which is spread directly into `.set()` below.
+    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, ...campaignInput } = input;
     const shouldResetPins =
       mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
@@ -794,7 +840,55 @@ export class CampaignsService {
         );
       }
     }
-    await this.validateRuleSystem(input.ruleSystem);
+    // Issue #1502: resolve the EFFECTIVE ruleSystem this write applies against — the incoming
+    // value, or the campaign's existing one when this request doesn't touch ruleSystem — so a
+    // customMechanicsProfile write is validated against the slug it will actually pair with.
+    const effectiveRuleSystem = input.ruleSystem !== undefined ? input.ruleSystem : existing.ruleSystem;
+    // #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule pack, so
+    // the rule-pack requirement has to be satisfied by the profile the campaign will actually
+    // have after this write — not only by one re-sent in the same request. Without the second
+    // clause a homebrew campaign becomes un-PATCHable the moment any request echoes its own
+    // `ruleSystem` (a full-object PUT-style update from the settings form does exactly that):
+    // no rule pack carries that slug, so it 400s on a value it already holds.
+    // An explicit `customMechanicsProfile: null` deliberately does NOT satisfy it — that
+    // request is removing the profile, and leaving the slug unbacked is the error this check
+    // exists to catch.
+    const profileBacksEffectiveRuleSystem =
+      customMechanicsProfileInput != null ||
+      (customMechanicsProfileInput === undefined &&
+        existing.customMechanicsProfile != null &&
+        existing.customMechanicsProfile.slug === effectiveRuleSystem);
+    await this.validateRuleSystem(input.ruleSystem, profileBacksEffectiveRuleSystem);
+    // ...and the same check against the EFFECTIVE slug on the one path where the call above
+    // cannot run (review). `validateRuleSystem` short-circuits on a falsy first argument, so a
+    // PATCH of just `{ customMechanicsProfile: null }` never reached it: the profile column was
+    // cleared while `ruleSystem` kept the homebrew slug, and every read site then resolved 5e —
+    // exactly the unbacked-slug state the comment above says this check exists to catch, reached
+    // by omitting the field rather than echoing it.
+    //
+    // Deliberately narrowed to that path instead of always validating `effectiveRuleSystem`:
+    // doing the latter would start rejecting every unrelated PATCH on a campaign whose rule
+    // pack has since been uninstalled, which is a behaviour change this fix has no business
+    // making.
+    if (customMechanicsProfileInput === null && input.ruleSystem === undefined) {
+      await this.validateRuleSystem(effectiveRuleSystem, false);
+    }
+    let nextCustomMechanicsProfile: string | null | undefined;
+    if (customMechanicsProfileInput !== undefined) {
+      // Explicitly set (or cleared with null) in this request.
+      this.validateCustomMechanicsProfile(effectiveRuleSystem, customMechanicsProfileInput);
+      nextCustomMechanicsProfile = customMechanicsProfileInput ? JSON.stringify(customMechanicsProfileInput) : null;
+    } else if (existing.customMechanicsProfile && existing.customMechanicsProfile.slug !== effectiveRuleSystem) {
+      // ruleSystem changed away from the slug the stored profile belongs to, in this SAME
+      // request, without this request also touching customMechanicsProfile. The stale profile
+      // can never resolve again (ruleSystemAdapter only honors an exact slug match against the
+      // CURRENT ruleSystem), so clear it rather than leave silently-orphaned data behind.
+      nextCustomMechanicsProfile = null;
+    } else {
+      nextCustomMechanicsProfile = undefined; // leave the column untouched
+    }
+    const customMechanicsProfilePatch =
+      nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of
@@ -845,7 +939,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -930,7 +1024,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, updatedAt: ts })
+          .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -971,7 +1065,7 @@ export class CampaignsService {
 
       [updatedRow] = await this.db
         .update(campaigns)
-        .set({ ...campaignInput, updatedAt: ts })
+        .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
         .where(eq(campaigns.id, id))
         .returning();
     }
@@ -1432,6 +1526,10 @@ export class CampaignsService {
           sessionCount: template ? 0 : source.sessionCount,
           latestSessionNumber: template ? 0 : source.latestSessionNumber,
           ruleSystem: source.ruleSystem,
+          // Issue #1502: carry the paired homebrew mechanics profile with its ruleSystem slug —
+          // otherwise a clone of a homebrew campaign would silently resolve to the 5e adapter
+          // fallback (no ADAPTERS entry for the slug, no profile to pair it with).
+          customMechanicsProfile: source.customMechanicsProfile ? JSON.stringify(source.customMechanicsProfile) : null,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
           // Issue #851: the operator's default quota, inherited atomically with the
           // row — deliberately NOT the source campaign's own storageQuotaBytes.
@@ -2214,8 +2312,10 @@ export class CampaignsService {
    *    row is recreated under the new campaign with a fresh id + its file written to
    *    disk, and every reference to it — campaign.mapAttachmentId, character.portraitUrl,
    *    encounter.mapAttachmentId — is remapped to that new id instead of being reset.
-   *  - ruleSystem: kept only if that rule pack is installed on THIS server; otherwise
-   *    cleared to '' so a dangling slug can't break compendium lookups.
+   *  - ruleSystem: kept only if that rule pack is installed on THIS server, OR if the
+   *    document carries a valid customMechanicsProfile that names the same slug (issue
+   *    #1502 — a homebrew system is defined by its profile, not by an installed pack);
+   *    otherwise cleared to '' so a dangling slug can't break compendium lookups.
    *  - status: forced to 'active' so a freshly imported campaign is editable even if
    *    the source was archived (paused/completed, read-only).
    *  - members / audit / proposals: not imported — install-specific; only the caller
@@ -2273,7 +2373,26 @@ export class CampaignsService {
     // dangling slug would silently break Compendium lookups scoped by pack.
     const ruleSystemSrc = str(campaignSrc.ruleSystem);
     let ruleSystem = '';
-    if (ruleSystemSrc) {
+    // Issue #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule
+    // pack, so the pack lookup alone dropped it — an exported homebrew campaign came back on
+    // the 5e fallback with its entire rule system silently gone. The clone path already
+    // carries the pair for exactly this reason.
+    //
+    // An export document is untrusted input, so the profile goes through the SAME rules a
+    // create/update write does — full schema validation, non-empty slug, never a built-in
+    // registered slug, and profile.slug === ruleSystem — and anything that fails is dropped
+    // rather than persisted, leaving the campaign on the ordinary cleared-slug path.
+    let customMechanicsProfile: string | null = null;
+    const profileParsed = HomebrewMechanicsProfile.safeParse(campaignSrc.customMechanicsProfile);
+    if (
+      ruleSystemSrc &&
+      profileParsed.success &&
+      profileParsed.data.slug === ruleSystemSrc &&
+      !isRegisteredRuleSystemSlug(ruleSystemSrc)
+    ) {
+      ruleSystem = ruleSystemSrc;
+      customMechanicsProfile = JSON.stringify(profileParsed.data);
+    } else if (ruleSystemSrc) {
       const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystemSrc)).limit(1);
       if (pack) ruleSystem = ruleSystemSrc;
     }
@@ -2483,6 +2602,7 @@ export class CampaignsService {
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           latestSessionNumber: Math.max(0, intOr(campaignSrc.latestSessionNumber, 0)),
           ruleSystem,
+          customMechanicsProfile,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
           // Issue #851: the operator's default quota, inherited atomically with the
           // row — never touches an existing campaign's own storageQuotaBytes.

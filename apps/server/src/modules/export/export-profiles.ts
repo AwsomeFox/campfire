@@ -229,7 +229,11 @@ export function resolveExportPolicy(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const PUBLISHABLE_FIELDS = {
-  campaign: ['id', 'name', 'description', 'status', 'dangerLevel', 'narrationLanguage', 'ruleSystem', 'mapAttachmentId', 'currentLocationId'],
+  // Issue #1502 review: `customMechanicsProfile` rides with `ruleSystem`, not apart from it.
+  // A homebrew system IS its profile — carrying the slug while stripping the profile exported
+  // a campaign whose rule system silently reverted to 5e on import, the same class of omission
+  // the `character` entry below documents for `speed`.
+  campaign: ['id', 'name', 'description', 'status', 'dangerLevel', 'narrationLanguage', 'ruleSystem', 'customMechanicsProfile', 'mapAttachmentId', 'currentLocationId'],
   quest: ['id', 'campaignId', 'parentId', 'title', 'body', 'giverNpcId', 'reward', 'sortOrder', 'objectives'],
   questObjective: ['id', 'questId', 'text', 'sortOrder'],
   npc: ['id', 'campaignId', 'name', 'role', 'disposition', 'locationId', 'factionId', 'body', 'portraitUrl', 'iconSlug'],

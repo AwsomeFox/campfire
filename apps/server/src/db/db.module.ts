@@ -1016,6 +1016,26 @@ function migrateCharacterCombatantSpeed1910(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before homebrew mechanics profiles (issue #1502):
+ * `campaigns.custom_mechanics_profile` didn't exist. Plain nullable ADD COLUMN — no
+ * table rebuild needed, same idiom as migrateCampaignsTableForActiveEncounter (0057).
+ * Existing campaigns get NULL (no homebrew profile), so `ruleSystemAdapter()` resolves
+ * exactly as it did before this column existed. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForCustomMechanicsProfile1502(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'custom_mechanics_profile')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN custom_mechanics_profile TEXT');
+}
+
+/**
  * Migration for DBs created before trash consistency (issue #701): factions,
  * story_arcs, story_beats, and encounters gained the same nullable `deleted_at`
  * timestamp the other trashable entities carry. Idempotent per-table ADD COLUMNs.
@@ -5124,11 +5144,16 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
   { name: '0161_character_combatant_speed_1910', run: migrateCharacterCombatantSpeed1910 },
   { name: '0162_ai_dm_seats_comprehension_profile_874', run: migrateAiDmSeatsTableForComprehensionProfile874 },
+  // #1502 originally declared 0162, which #874 claimed first on main (eca15e17). Renumbered
+  // to the next free ordinal as a deliberate pre-merge step — this migration has never run
+  // against a real database under either name, so no installation can have recorded 0162 for
+  // it, and upgrade compatibility is unaffected.
+  { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
   // #851 shared-instance governance: organizer eligibility flag + the creation
   // request/approval table. Originally declared 0162/0163; #874 claimed 0162 on main
-  // (eca15e17) and #1502 has 0163 reserved ahead of this branch, so both take the next free
-  // ordinals as a deliberate pre-merge step. Neither has run against a real database under
-  // its earlier name, so no installation can have recorded the old numbers.
+  // (eca15e17) and #1502 claimed 0163 (002174ac), so both take the next free ordinals as a
+  // deliberate pre-merge step. Neither has run against a real database under its earlier
+  // name, so no installation can have recorded the old numbers.
   { name: '0164_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
   { name: '0165_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
 ];
