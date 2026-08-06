@@ -233,7 +233,8 @@
       "none": "— none —",
       "noStatblock": "No statblock detail — HP/CR may be incomplete.",
       "heuristicDifficultyBadge": "الفئة المستهدفة: تقديرية",
-      "heuristicDifficultyHint": "تم تحديد حجم الفئة المستهدفة وفق ميزانية نقاط الخبرة الخاصة بـ D&D 5e — لا يمتلك نظام القواعد هذا حسابات صعوبة خاصة به."
+      "heuristicDifficultyHint": "تم تحديد حجم الفئة المستهدفة وفق ميزانية نقاط الخبرة الخاصة بـ D&D 5e — لا يمتلك نظام القواعد هذا حسابات صعوبة خاصة به.",
+      "homebrewBadge": "محتوى منزلي"
     },
     "duplicate": "تكرار",
     "duplicateCombatant": "تكرار {{name}}",

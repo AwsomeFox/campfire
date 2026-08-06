@@ -1402,8 +1402,11 @@ export const rulePacks = sqliteTable('rule_packs', {
 export const ruleEntries = sqliteTable('rule_entries', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   packId: integer('pack_id').notNull(),
-  // NULL for globally installed/open-pack entries. Non-null rows are private to
-  // this campaign and must only be read through campaign homebrew endpoints.
+  // NULL for globally installed/open-pack entries. Non-null rows are the owning campaign's
+  // own homebrew — readable through the campaign homebrew endpoints AND (issue #1927) through
+  // the encounter generator/preview candidate queries, scoped by campaign membership and
+  // `isNull(archivedAt)` there; every reader must still scope by this column (or archivedAt),
+  // never read cross-campaign.
   campaignId: integer('campaign_id'),
   slug: text('slug').notNull(),
   name: text('name').notNull(),
