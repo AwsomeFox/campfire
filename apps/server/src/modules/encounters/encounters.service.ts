@@ -4433,6 +4433,7 @@ export class EncountersService {
       fingerprint: encounterOpFingerprint(operationFingerprint),
     };
     const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll } | null => {
+      if (!response || typeof response !== 'object') return null;
       const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll }>;
       return candidate.combatant && candidate.roll ? { combatant: candidate.combatant, roll: candidate.roll } : null;
     };
@@ -4825,6 +4826,7 @@ export class EncountersService {
       !deathStateTouched &&
       patch.statblock === undefined
     ) {
+      this.assertMutable(encounterRow);
       return combatantToDomain(existing);
     }
 
@@ -4913,9 +4915,14 @@ export class EncountersService {
     let combatantSheetMirrored = false;
 
     const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant | null> => {
-      const parsed = options?.replayCombatant
-        ? options.replayCombatant(prior.response)
-        : ((prior.response as Combatant | null) ?? null);
+      let parsed: Combatant | null = null;
+      try {
+        parsed = options?.replayCombatant
+          ? options.replayCombatant(prior.response)
+          : ((prior.response as Combatant | null) ?? null);
+      } catch {
+        parsed = null;
+      }
       if (parsed && prior.responseRole === role) return parsed;
       // A stored body may be missing or unparseable while the combatant still exists
       // (race/winner wrote a null response). Fall back to a current, role-filtered
