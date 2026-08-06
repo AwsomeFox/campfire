@@ -236,7 +236,20 @@ interface DdbSpellEntry {
 export interface DdbCharacterData {
   id?: number;
   name?: string;
-  race?: { fullName?: string; baseName?: string } | null;
+  race?: {
+    fullName?: string;
+    baseName?: string;
+    weightSpeeds?: {
+      normal?: {
+        walk?: number | null;
+        fly?: number | null;
+        swim?: number | null;
+        climb?: number | null;
+        burrow?: number | null;
+      } | null;
+    } | null;
+  } | null;
+  customSpeeds?: Array<{ movementId?: number | null; distance?: number | null }> | null;
   classes?: DdbClass[] | null;
   stats?: DdbStat[] | null;
   bonusStats?: DdbStat[] | null;
@@ -433,6 +446,42 @@ export function computeArmorClass(data: DdbCharacterData, dexScore: number | und
     base = 10 + dexMod; // unarmored
   }
   return base + shieldBonus;
+}
+
+/**
+ * Best-effort character movement speed (issue #1985).
+ * Resolves base walking speed from DDB's `customSpeeds` override or `race.weightSpeeds.normal.walk`,
+ * plus speed/unarmored-movement modifiers, falling back to 30 when unstated.
+ */
+export function computeSpeed(data: DdbCharacterData): number | null {
+  const custom = Array.isArray(data.customSpeeds)
+    ? data.customSpeeds.find((s) => typeof s?.distance === 'number' && s.distance >= 0 && (s.movementId === 1 || s.movementId === 0 || s.movementId == null))
+    : null;
+  if (custom && typeof custom.distance === 'number' && Number.isFinite(custom.distance)) {
+    return Math.max(0, Math.floor(custom.distance));
+  }
+
+  let baseSpeed: number | null = null;
+  const raceWalk = data.race?.weightSpeeds?.normal?.walk;
+  if (typeof raceWalk === 'number' && Number.isFinite(raceWalk) && raceWalk >= 0) {
+    baseSpeed = raceWalk;
+  }
+
+  const mods = allModifiers(data);
+  let bonus = 0;
+  for (const m of mods) {
+    const subType = typeof m.subType === 'string' ? m.subType.toLowerCase() : '';
+    if (subType === 'speed' || subType === 'unarmored-movement' || subType === 'walking-speed' || subType === 'innate-speed') {
+      if (m.type === 'set' && typeof m.value === 'number' && Number.isFinite(m.value) && m.value >= 0) {
+        baseSpeed = m.value;
+      } else if (m.type === 'bonus' && typeof m.value === 'number' && Number.isFinite(m.value)) {
+        bonus += m.value;
+      }
+    }
+  }
+
+  const resolved = (baseSpeed ?? 30) + bonus;
+  return Math.max(0, Math.floor(resolved));
 }
 
 /** Species/race display name. */
@@ -1379,6 +1428,7 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
     background: computeBackground(data),
     stats,
     ac: computeArmorClass(data, stats.DEX),
+    speed: computeSpeed(data),
     hpMax,
     hpCurrent,
     saveProficiencies: computeSaveProficiencies(mods),

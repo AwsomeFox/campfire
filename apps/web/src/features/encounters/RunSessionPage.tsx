@@ -3626,7 +3626,10 @@ export default function RunSessionPage() {
             const actorId = hpLogActorId(currentCombatantId, id);
             hpDelta.mutate({ combatantId: id, delta, actorId });
           }}
-          onSetHpMax={(id, max) => patchCombatant(id, { hpMax: max })}
+          onSetHpMax={(id, max) => {
+            if (reconcileBlocks) return;
+            patchCombatant(id, { hpMax: max });
+          }}
         />
       )}
 

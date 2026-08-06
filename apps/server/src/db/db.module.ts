@@ -990,6 +990,26 @@ function migrateCharacterCombatantSpeed1910(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before homebrew mechanics profiles (issue #1502):
+ * `campaigns.custom_mechanics_profile` didn't exist. Plain nullable ADD COLUMN — no
+ * table rebuild needed, same idiom as migrateCampaignsTableForActiveEncounter (0057).
+ * Existing campaigns get NULL (no homebrew profile), so `ruleSystemAdapter()` resolves
+ * exactly as it did before this column existed. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForCustomMechanicsProfile1502(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'custom_mechanics_profile')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN custom_mechanics_profile TEXT');
+}
+
+/**
  * Migration for DBs created before trash consistency (issue #701): factions,
  * story_arcs, story_beats, and encounters gained the same nullable `deleted_at`
  * timestamp the other trashable entities carry. Idempotent per-table ADD COLUMNs.
@@ -5098,7 +5118,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
   { name: '0161_character_combatant_speed_1910', run: migrateCharacterCombatantSpeed1910 },
   { name: '0162_ai_dm_seats_comprehension_profile_874', run: migrateAiDmSeatsTableForComprehensionProfile874 },
-  { name: '0163_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
+  { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
+  { name: '0164_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
 ];
 
 /**

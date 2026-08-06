@@ -779,7 +779,7 @@ export const UsableAction = z.object({
    * a hand-authored sheet action or a monster/NPC statblock action. Lets the UI tag which
    * combat action came from gear vs. the sheet without a second lookup.
    */
-  source: z.string().max(40).default(''),
+  source: z.string().max(220).default(''),
 });
 export type UsableAction = z.infer<typeof UsableAction>;
 

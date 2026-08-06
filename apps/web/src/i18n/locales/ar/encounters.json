@@ -1,6 +1,11 @@
 {
   "encounters": {
     "title": "المواجهات",
+    "vitals": {
+      "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
+      "maxHp": "الحد الأقصى لنقاط الحياة",
+      "setMax": "تعيين الحد الأقصى"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",

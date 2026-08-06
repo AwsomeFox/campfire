@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -1034,8 +1034,12 @@ export class EncountersService {
    * as before. Adding a second rule system is a new adapter in the registry, not edits here.
    */
   private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
-    const [row] = await this.db.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
-    return ruleSystemAdapter(row?.ruleSystem);
+    const [row] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return ruleSystemAdapter(row?.ruleSystem, fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null));
   }
 
   /** Statblock-derived damage defences for direct tracker damage (issue #605). */
@@ -2616,12 +2620,15 @@ export class EncountersService {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
     const [campaignRow] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, encounterRow.campaignId))
       .limit(1);
     const ruleSystem = campaignRow?.ruleSystem ?? null;
-    const adapter = ruleSystemAdapter(ruleSystem);
+    const adapter = ruleSystemAdapter(
+      ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(campaignRow?.customMechanicsProfile, null),
+    );
     const combatantRows = await this.listCombatantRows(encounterId);
 
     // Party levels: from each character-combatant's linked character sheet.
@@ -3293,8 +3300,8 @@ export class EncountersService {
     // the adapter from it locally — `ruleSystemAdapter` is pure — rather than calling both
     // `adapterForCampaign` (which re-reads `campaigns.ruleSystem` itself) and
     // `ruleSystemForCampaign`, which would run the same SELECT twice on this hot path.
-    const ruleSystem = await this.ruleSystemForCampaign(campaignId);
-    const adapter = ruleSystemAdapter(ruleSystem);
+    const { ruleSystem, customMechanicsProfile } = await this.ruleSystemForCampaign(campaignId);
+    const adapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
     const candidates = await this.loadMonsterCandidates(adapter, input.filters);
 
@@ -3393,14 +3400,22 @@ export class EncountersService {
   // supplies candidates from the compendium, resolves statblocks, and owns persistence.
   // ---------------------------------------------------------------------------
 
-  /** Look up a campaign's rule system slug (for adapter-owned difficulty + support status). */
-  private async ruleSystemForCampaign(campaignId: number): Promise<string | null> {
+  /**
+   * Look up a campaign's rule system slug (for adapter-owned difficulty + support status)
+   * alongside its persisted homebrew mechanics profile (issue #1502), in the one SELECT.
+   */
+  private async ruleSystemForCampaign(
+    campaignId: number,
+  ): Promise<{ ruleSystem: string | null; customMechanicsProfile: HomebrewMechanicsProfile | null }> {
     const [row] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1);
-    return row?.ruleSystem ?? null;
+    return {
+      ruleSystem: row?.ruleSystem ?? null,
+      customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null),
+    };
   }
 
   /**
@@ -3508,8 +3523,12 @@ export class EncountersService {
    * NOTHING — any member (or AI) may preview; committing is the separate write path.
    */
   async previewEncounter(campaignId: number, input: EncounterPreviewInput, _viewerRole?: Role): Promise<EncounterPreview> {
+    // #1502: resolve through the campaign's persisted homebrew profile, not the slug alone.
+    // main added this call site while this branch was converting every adapter lookup to the
+    // profile-aware path; a slug-only `ruleSystemAdapter` here would silently give a homebrew
+    // campaign 5e's monster/difficulty maths for generated encounters.
     const adapter = await this.adapterForCampaign(campaignId);
-    const ruleSystem = await this.ruleSystemForCampaign(campaignId);
+    const { ruleSystem } = await this.ruleSystemForCampaign(campaignId);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
     const candidates = await this.loadMonsterCandidates(adapter, input.filters);
     const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
@@ -4570,8 +4589,16 @@ export class EncountersService {
   }
 
   private assertDeathSavesSupportedForCampaign(campaignId: number, tx: SyncDb): void {
-    const [campaign] = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1).all();
-    const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+    const [campaign] = tx
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1)
+      .all();
+    const adapter = ruleSystemAdapter(
+      campaign?.ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+    );
     if (!hasDeathSavesForAdapter(adapter)) {
       throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
     }
@@ -5554,8 +5581,15 @@ export class EncountersService {
       }
       this.assertMutable(freshEncounter);
       this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
-      const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, freshEncounter.campaignId)).get();
-      const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+      const campaign = tx
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+        .from(campaigns)
+        .where(eq(campaigns.id, freshEncounter.campaignId))
+        .get();
+      const adapter = ruleSystemAdapter(
+        campaign?.ruleSystem,
+        fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+      );
       const roster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const snapshot = roster.find((row) => row.id === combatantId);
       if (!snapshot) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
@@ -5850,8 +5884,15 @@ export class EncountersService {
         }
         this.assertMutable(current);
         this.assertCampaignWritableInTx(tx, current.campaignId);
-        const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, current.campaignId)).get();
-        const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+        const campaign = tx
+          .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+          .from(campaigns)
+          .where(eq(campaigns.id, current.campaignId))
+          .get();
+        const adapter = ruleSystemAdapter(
+          campaign?.ruleSystem,
+          fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+        );
         // A rule-pack uninstall nulls live combatants before deleting its entries, but
         // a removed combatant only exists in this snapshot during the undo window.
         // Restore the same ON DELETE SET NULL state rather than inserting a dangling FK.
@@ -7824,7 +7865,7 @@ export class EncountersService {
     if (c.ruleEntryId !== null) {
       const encounterRow = await this.getRowOrThrow(c.encounterId);
       const adapter = await this.adapterForCampaign(encounterRow.campaignId);
-      const ruleSystem = await this.ruleSystemForCampaign(encounterRow.campaignId);
+      const { ruleSystem } = await this.ruleSystemForCampaign(encounterRow.campaignId);
       const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, c.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       const data = fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {});
       const expanded = expandStatblockActions(data, adapter, ruleSystem ?? '');
