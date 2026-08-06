@@ -11,6 +11,8 @@ import {
   startGateReason,
   startRosterHintReason,
   syncOnlyGateReason,
+  turnTimerControlDisabled,
+  turnTimerControlVisible,
   undoTurnGateReason,
 } from './lifecycleGate';
 
@@ -123,11 +125,18 @@ export function DmLifecycleHeader({
 
   return (
     <div className="flex gap-2 flex-wrap">
-      <TurnTimerControl
-        turnTimerSeconds={turnTimerSeconds}
-        onSetTurnTimerSeconds={onSetTurnTimerSeconds}
-        disabled={headerBusy}
-      />
+      {/* Issue #1935 review: gated like every sibling control here — hidden once the
+          encounter is 'ended' (PATCH would 409 via assertMutable, producing an
+          unexplained error banner for a tap that can never succeed), and disabled
+          alongside the other conflict-prone writes when the sync state is stale
+          (riskyBlocked), not just while a request is already in flight. */}
+      {turnTimerControlVisible(lifecycle.reopen) && (
+        <TurnTimerControl
+          turnTimerSeconds={turnTimerSeconds}
+          onSetTurnTimerSeconds={onSetTurnTimerSeconds}
+          disabled={turnTimerControlDisabled({ headerBusy, riskyBlocked })}
+        />
+      )}
       {lifecycle.rollInitiative && lifecycle.start && (
         <>
           {/* Issue #702: the server treats a fully-rolled roster as a no-op (no

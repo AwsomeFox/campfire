@@ -228,4 +228,90 @@ describe('EncountersService — turn timer stamping (issue #1935)', () => {
     expect(patched.turnTimerSeconds).toBe(90);
     expect(patched.turnStartedAt).toBe(stampBeforePatch);
   });
+
+  // Issue #1935 review (Devin, round 2): removeCombatant is not NAMED like a turn-advance
+  // method, but removing the CURRENT combatant performs a genuine turn transition —
+  // advanceEncounterTurn runs, turnVersion bumps, a new combatant's turn starts, and
+  // encounter.turn_changed fires. That transition must restamp turnStartedAt exactly like
+  // start/nextTurn/undoTurn do, or the new turn's elapsed chip keeps counting the REMOVED
+  // combatant's time (and can show a fresh turn as already over a DM-set limit).
+  describe('removeCombatant / undoRemoveCombatant — turn timer (issue #1935 review)', () => {
+    it('removing the CURRENT combatant restamps turnStartedAt to a fresh value', async () => {
+      jest.useFakeTimers({ advanceTimers: false });
+      try {
+        jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+        const encounterId = await makeReadyEncounter('Remove Current Restamp');
+        const started = await encountersService.start(encounterId, dmActor, 'dm');
+        const startStamp = started.turnStartedAt as string;
+        expect(startStamp).toBe('2026-01-01T00:00:00.000Z');
+        const currentId = started.currentCombatantId!;
+
+        jest.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
+        await encountersService.removeCombatant(encounterId, currentId, dmActor, 'dm');
+
+        const after = await encountersService.getWithCombatantsOrThrow(encounterId, 'dm');
+        // Assert on the persisted/returned payload only — never on rendered UI.
+        expect(after.turnStartedAt).not.toBe(startStamp);
+        expect(after.turnStartedAt).toBe('2026-01-01T00:05:00.000Z');
+        expect(after.currentCombatantId).not.toBe(currentId);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('removing a combatant who is NOT current does not touch turnStartedAt', async () => {
+      jest.useFakeTimers({ advanceTimers: false });
+      try {
+        jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+        const encounterId = await makeReadyEncounter('Remove Bystander No Restamp');
+        const started = await encountersService.start(encounterId, dmActor, 'dm');
+        const startStamp = started.turnStartedAt as string;
+        const currentId = started.currentCombatantId!;
+        const combatants = started.combatants;
+        const bystander = combatants.find((c) => c.id !== currentId)!;
+
+        jest.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
+        await encountersService.removeCombatant(encounterId, bystander.id, dmActor, 'dm');
+
+        const after = await encountersService.getWithCombatantsOrThrow(encounterId, 'dm');
+        expect(after.currentCombatantId).toBe(currentId);
+        expect(after.turnStartedAt).toBe(startStamp);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('undoRemoveCombatant restores the ORIGINAL pre-removal turnStartedAt — not a fresh stamp', async () => {
+      // Decision (see the code comment at the undo restore site): this undo is a
+      // short-lived "erase my mistaken removal" capability, not a deliberate gameplay
+      // rewind like undoTurn — every other piece of state here is restored exactly, so
+      // the clock is too, rather than being given a visible fresh-restart side effect.
+      jest.useFakeTimers({ advanceTimers: false });
+      try {
+        jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+        const encounterId = await makeReadyEncounter('Undo Remove Restores Stamp');
+        const started = await encountersService.start(encounterId, dmActor, 'dm');
+        const originalStamp = started.turnStartedAt as string;
+        const currentId = started.currentCombatantId!;
+
+        jest.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
+        const removal = await encountersService.removeCombatant(encounterId, currentId, dmActor, 'dm');
+        const afterRemoval = await encountersService.getWithCombatantsOrThrow(encounterId, 'dm');
+        expect(afterRemoval.turnStartedAt).toBe('2026-01-01T00:05:00.000Z');
+
+        jest.setSystemTime(new Date('2026-01-01T00:05:07.000Z'));
+        await encountersService.undoRemoveCombatant(encounterId, removal.undoToken, dmActor, 'dm');
+
+        const afterUndo = await encountersService.getWithCombatantsOrThrow(encounterId, 'dm');
+        expect(afterUndo.currentCombatantId).toBe(currentId);
+        // Restored to the ORIGINAL stamp — neither the removal's stamp nor a fresh
+        // undo-time stamp.
+        expect(afterUndo.turnStartedAt).toBe(originalStamp);
+        expect(afterUndo.turnStartedAt).not.toBe('2026-01-01T00:05:00.000Z');
+        expect(afterUndo.turnStartedAt).not.toBe('2026-01-01T00:05:07.000Z');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
 });

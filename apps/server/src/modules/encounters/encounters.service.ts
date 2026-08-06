@@ -5746,6 +5746,12 @@ export class EncountersService {
       const afterTurnVersion = freshEncounter.turnVersion + (runningAdapter && freshEncounter.currentCombatantId === combatantId ? 1 : 0);
       const afterCombatantStateVersion = freshEncounter.combatantStateVersion + (runningAdapter ? 1 : 0);
       let turnVersionUpdate: { turnVersion?: SQL } = {};
+      // Turn timer (issue #1935 review — Devin): removing the CURRENT combatant is a genuine
+      // turn transition (advanceEncounterTurn runs, turnVersion bumps, encounter.turn_changed
+      // fires) even though this method isn't named like a turn-advance one. Restamp alongside
+      // turnVersionUpdate below — same gate, same reasoning — so the new turn's chip doesn't
+      // keep accumulating the removed combatant's elapsed time.
+      let turnRestampUpdate: { turnStartedAt?: string } = {};
       let escalation: ReturnType<EncountersService['nextEscalationState']> | null = null;
       if (runningAdapter) {
         const sortedAfter = this.sortCombatantsWithAdapter(
@@ -5769,6 +5775,7 @@ export class EncountersService {
         // Keep this SQL expression out of the persisted undo snapshot.
         if (freshEncounter.currentCombatantId === combatantId) {
           turnVersionUpdate = { turnVersion: sql`${encounters.turnVersion} + 1` };
+          turnRestampUpdate = { turnStartedAt: now };
           // A removal can advance the active actor just like endTurn. Preserve that
           // turn edge for connected clients, including a lair transition with no
           // current combatant, while ordinary roster edits remain updated-only.
@@ -5857,6 +5864,7 @@ export class EncountersService {
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
+        ...turnRestampUpdate,
         turnPhase,
         ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
         updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
@@ -5879,6 +5887,10 @@ export class EncountersService {
           escalationDieHistory: freshEncounter.escalationDieHistory,
           lairResumeCombatantId: freshEncounter.lairResumeCombatantId,
           turnPhase: (freshEncounter.turnPhase as EncounterTurnPhase) ?? 'combatant',
+          // Turn timer (issue #1935 review): captured so undo can restore the ORIGINAL
+          // stamp, not a fresh one — see the restore side in undoRemoveCombatant for why
+          // this differs from undoTurn's deliberate "always fresh" restart.
+          turnStartedAt: freshEncounter.turnStartedAt,
         }),
         afterEncounterJson: toJsonText({ ...afterEncounter, turnVersion: afterTurnVersion, combatantStateVersion: afterCombatantStateVersion, escalationEventId }),
         expiresAt,
@@ -6025,7 +6037,7 @@ export class EncountersService {
           snapshot.turnState = toJsonText(restoredTurnState);
         }
         tx.insert(combatants).values(snapshot).run();
-        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
+        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase; turnStartedAt?: string | null }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
         const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase; turnVersion?: number; combatantStateVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
         const runningAdapter = current.status === 'running' ? adapter : null;
         if (current.currentCombatantId === after.currentCombatantId && current.turnIndex === after.turnIndex && current.round === after.round && current.escalationDie === after.escalationDie && current.escalationDieHistory === after.escalationDieHistory && current.lairResumeCombatantId === after.lairResumeCombatantId && current.turnPhase === after.turnPhase && after.turnVersion === current.turnVersion && after.combatantStateVersion === current.combatantStateVersion) {
@@ -6054,7 +6066,21 @@ export class EncountersService {
             escalationDieHistory: before.escalationDieHistory,
             lairResumeCombatantId: before.lairResumeCombatantId,
             turnPhase: before.turnPhase,
-            ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
+            ...(before.currentCombatantId !== current.currentCombatantId
+              ? {
+                  turnVersion: sql`${encounters.turnVersion} + 1`,
+                  // Turn timer (issue #1935 review): restore the ORIGINAL pre-removal stamp,
+                  // not a fresh one. This undo is a short-lived (~30s) "erase my mistake"
+                  // capability — every other piece of state here (HP, conditions, escalation
+                  // die, turn pointer, lair resume, legendary usage) is restored to exactly
+                  // what it was, so a removal-then-undo is a true no-op. Giving the reverted
+                  // turn a fresh 0:00 instead would be a visible side effect of an action the
+                  // DM is actively erasing. That is why this differs from `undoTurn`, which
+                  // is a deliberate DM gameplay-rewind tool with its own documented "always
+                  // restamp fresh" semantics — there is no accidental click to fully undo.
+                  turnStartedAt: before.turnStartedAt ?? null,
+                }
+              : {}),
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
             updatedAt: nextUpdatedAt(currentEnc1?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
