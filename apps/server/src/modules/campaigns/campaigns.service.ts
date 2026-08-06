@@ -97,7 +97,7 @@ import { MembersService } from '../membership/members.service';
 import { InvitesService } from '../membership/invites.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { auditActor } from '../../common/user.types';
+import { auditActor, auditActorRole } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
 import { copyAttachmentBytes, remapAttachmentFileUrl, attachmentUploadPath } from '../attachments/attachment-copy';
@@ -791,8 +791,14 @@ export class CampaignsService {
           this.audit,
           this.logger,
           {
+            // The caller's REAL role, not 'dm' (review). Every other audit in this file
+            // stamps 'dm' because the actor is acting as, or becoming, the campaign's DM.
+            // A DENIED create is the opposite: nobody became anything. Limits are
+            // deliberately not admin-exempt (see enforceTx's doc), so a server admin
+            // refused by a ceiling is a reachable case — and logging it as 'dm' erases
+            // exactly the distinction an incident reviewer needs.
             actor: auditActor(user),
-            actorRole: 'dm',
+            actorRole: auditActorRole(user),
             action: 'campaign.create.denied',
             entityType: 'campaign',
             detail: `reason=${err.code}`,
@@ -2242,8 +2248,9 @@ export class CampaignsService {
           this.audit,
           this.logger,
           {
+            // The caller's real role — see the note on the create() denial audit.
             actor: auditActor(user),
-            actorRole: 'dm',
+            actorRole: auditActorRole(user),
             action: 'campaign.create.denied',
             entityType: 'campaign',
             detail: `reason=${err.code}, path=clone, sourceCampaignId=${id}`,
@@ -3627,8 +3634,9 @@ export class CampaignsService {
           this.audit,
           this.logger,
           {
+            // The caller's real role — see the note on the create() denial audit.
             actor: auditActor(user),
-            actorRole: 'dm',
+            actorRole: auditActorRole(user),
             action: 'campaign.create.denied',
             entityType: 'campaign',
             detail: `reason=${err.code}, path=import`,

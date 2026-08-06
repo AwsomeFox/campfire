@@ -294,6 +294,43 @@ describe('CampaignsService unit coverage tests', () => {
       );
     });
 
+    // Review: the three denial audits hard-coded actorRole:'dm'. Limits are deliberately
+    // NOT admin-exempt (enforceTx's doc), so an admin refused by a ceiling is reachable —
+    // and 'dm' erases exactly the distinction an incident reviewer needs. The assertions
+    // below discriminate: an admin must log 'admin', and a viewer-scoped PAT held BY that
+    // same admin must still log 'dm', because adminEnabled=false caps the power the role
+    // is meant to record. A `user.serverRole === 'admin'` shortcut would fail the second.
+    it('records the denied actor\'s real role, not a hard-coded dm', async () => {
+      (dummyGovernance.enforceTx as jest.Mock).mockImplementation(() => {
+        throw new CampaignGovernanceDeniedError('limit_active_per_user', 'no more for you');
+      });
+      const auditSpy = jest.spyOn(audit, 'log');
+
+      const adminActor: RequestUser = { id: String(creatorUserId), name: 'Admin', serverRole: 'admin' };
+      await expect(campaignsService.create({ name: 'Blocked By Ceiling' }, adminActor)).rejects.toThrow(
+        CampaignGovernanceDeniedError,
+      );
+      expect(auditSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'campaign.create.denied', actorRole: 'admin' }),
+      );
+
+      auditSpy.mockClear();
+      const cappedPatActor: RequestUser = {
+        id: String(creatorUserId),
+        name: 'Admin',
+        serverRole: 'admin',
+        tokenContext: { name: 'viewer-pat', scope: 'viewer', adminEnabled: false },
+      } as RequestUser;
+      await expect(campaignsService.create({ name: 'Blocked By Ceiling 2' }, cappedPatActor)).rejects.toThrow(
+        CampaignGovernanceDeniedError,
+      );
+      expect(auditSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'campaign.create.denied', actorRole: 'dm' }),
+      );
+
+      expect(await campaignRowCount()).toBe(0);
+    });
+
     it('applies the resolved default storage quota to a newly created campaign', async () => {
       (dummyGovernance.resolveContext as jest.Mock).mockResolvedValue({
         bypass: false,
