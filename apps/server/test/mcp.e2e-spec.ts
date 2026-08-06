@@ -2882,6 +2882,69 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     );
   });
 
+  // Issue #1926: update_combatant sets the DM-only statblockRevealed flag, and a
+  // player/viewer-scoped get_encounter reflects the same server-enforced redaction
+  // REST uses (both routes share EncountersService.getWithCombatantsOrThrow).
+  it('update_combatant sets statblockRevealed (DM-only); a viewer-scoped get_encounter withholds the statblock until then', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+    const playerTokenRes = await dmAgent
+      .post('/api/v1/tokens')
+      .send({ name: 'mcp-1926-player', scope: 'player', campaignId, writeScope: 'direct' });
+    expect(playerTokenRes.status).toBe(201);
+    const playerClient = await mcpClient(playerTokenRes.body.token);
+
+    const encounter = parseResult(
+      await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Reveal Fight', hidden: false } }),
+    ) as { id: number };
+
+    const added = parseResult(
+      await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId: encounter.id,
+          kind: 'monster',
+          name: 'MCP Troll',
+          hpMax: 20,
+          statblock: { ac: 14, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
+        },
+      }),
+    ) as { id: number };
+
+    const beforeReveal = parseResult(
+      await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: unknown }> };
+    const beforeBoss = beforeReveal.combatants.find((c) => c.id === added.id)!;
+    expect(beforeBoss.statblockRevealed).toBe(false);
+    expect(beforeBoss.statblock).toBeNull();
+    expect(JSON.stringify(beforeBoss)).not.toMatch(/mcp secret notes/);
+
+    const rejected = await playerClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: added.id, statblockRevealed: true },
+    });
+    expect(rejected.isError).toBe(true);
+    const rejectedBody = parseResult(rejected) as { error?: { status?: number; code?: string } };
+    expect(rejectedBody.error?.status).toBe(403);
+    expect(rejectedBody.error?.code).toBe('COMBATANT_FIELD_DM_ONLY');
+
+    const revealed = parseResult(
+      await dmClient.callTool({
+        name: 'update_combatant',
+        arguments: { encounterId: encounter.id, combatantId: added.id, statblockRevealed: true },
+      }),
+    ) as { statblockRevealed: boolean };
+    expect(revealed.statblockRevealed).toBe(true);
+
+    const afterReveal = parseResult(
+      await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number } | null }> };
+    const afterBoss = afterReveal.combatants.find((c) => c.id === added.id)!;
+    expect(afterBoss.statblockRevealed).toBe(true);
+    expect(afterBoss.statblock).not.toBeNull();
+    expect(afterBoss.statblock!.ac).toBe(14);
+  });
+
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {
     const client = await mcpClient(dmToken);
 
