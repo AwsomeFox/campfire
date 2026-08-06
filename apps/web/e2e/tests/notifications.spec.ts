@@ -590,6 +590,7 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
   });
+  void second.getByRole('link', { name: 'Quests', exact: true }).click();
   await expect.poll(() => staleCountStarted, { timeout: 25000 }).toBe(true);
   await first.getByRole('button', { name: /Notifications/ }).click();
   await first.getByRole('button', { name: 'Mark all (2) read' }).click();
