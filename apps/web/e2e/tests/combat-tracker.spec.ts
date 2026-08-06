@@ -100,8 +100,36 @@ test.describe('combat tracker — DM view', () => {
     const page = await context.newPage();
     await openEncounter(page);
     for (const name of ['Open display', 'Copy link', 'Reconnect/focus']) {
-      await expect(page.getByRole('button', { name, exact: true })).toBeVisible();
-      await expect(page.getByRole('button', { name, exact: true })).toBeInViewport();
+      const control = page.getByRole('button', { name, exact: true });
+      await expect(control).toBeVisible();
+      // Assert REACHABILITY, not scroll position (issue #1994).
+      //
+      // What goes wrong without this: the encounter document is 4-6x the viewport tall at
+      // this size, these controls sit near its top, and the page auto-scrolls shortly after
+      // load — measured, `window.scrollY` settles around 1786, putting all three roughly
+      // 1600px above the fold. `toBeVisible` still passes (they are rendered); a viewport
+      // check reports ratio 0 and keeps reporting it, because once scrolled that state is
+      // stable. So the assertion was really testing whether it had won a race against the
+      // auto-scroll, which is why it failed intermittently rather than consistently.
+      //
+      // Why the scroll is INSIDE the poll: the auto-scroll fires at an unpredictable moment,
+      // so scrolling once before a retrying assertion just moves the same race later — the
+      // retry re-measures but never re-scrolls. Each attempt re-establishes position.
+      //
+      // Why full containment rather than a viewport ratio: `toBeInViewport` passes on any
+      // non-zero overlap, so a partially clipped control satisfied it. `left >= 0 &&
+      // right <= innerWidth` is what preserves #762's actual guarantee — these controls were
+      // unusable at tablet width — and scrolling cannot paper over it, because this layout
+      // does not scroll horizontally.
+      await expect
+        .poll(async () => {
+          await control.scrollIntoViewIfNeeded();
+          return control.evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            return r.top >= 0 && r.bottom <= window.innerHeight && r.left >= 0 && r.right <= window.innerWidth;
+          });
+        })
+        .toBe(true);
     }
     await expect(page.getByTestId('player-display-status')).toBeVisible();
     await expect(page).toHaveURL(encounterUrl());
@@ -183,14 +211,43 @@ test.describe('combat tracker — non-DM views', () => {
   }
 });
 
+/**
+ * Matches ONLY the map-bytes endpoint (`GET .../map` or `.../map?revision=...`),
+ * never `.../map/derivatives` (issue #1996). The battle map fires both requests
+ * on mount — `useDerivativeManifest` polls the responsive-ladder manifest at
+ * `.../map/derivatives` alongside the `<img>` request for `.../map` itself — and
+ * a substring match like `url().includes('.../map')` matches both, since
+ * `.../map/derivatives` also contains `.../map` as a prefix. Whichever of the two
+ * responses lands first then wins `waitForResponse`, so the assertion can silently
+ * read headers off the JSON manifest (no explicit `Cache-Control`, so `undefined`)
+ * instead of the image response (always `private, no-store, max-age=0`) — a
+ * harness-side race, not a missing server header. Anchoring on `map` followed by
+ * `?` or end-of-string excludes the `/derivatives` child route.
+ */
+function isMapBytesUrl(url: string, encounterId: number): boolean {
+  return new RegExp(`/api/v1/encounters/${encounterId}/map(?:\\?|$)`).test(url);
+}
+
 test.describe('combat tracker — fog-safe map delivery (#463)', () => {
   test.use({ storageState: stateFor('player') });
 
   test('player canvas uses the encounter map endpoint and the raw attachment stays inaccessible', async ({ page }) => {
     const { encounterId, mapAttachmentId } = seed();
-    const mapResponse = page.waitForResponse((response) =>
-      response.url().includes(`/api/v1/encounters/${encounterId}/map`),
-    );
+
+    // Regression for issue #1996: `useDerivativeManifest` polls `.../map/derivatives`
+    // concurrently with the `<img>` request for `.../map`, and the small JSON manifest
+    // normally resolves first. Delaying the map-bytes response makes that ordering
+    // deterministic (rather than a timing-dependent flake), so this test reliably
+    // proves the predicate below reads the map-bytes response even when the manifest
+    // wins the race.
+    // A RegExp route matcher (not a glob) so `?` is a literal query-string anchor
+    // rather than a single-character wildcard that would also swallow `/derivatives`.
+    await page.route(new RegExp(`/api/v1/encounters/${encounterId}/map\\?`), async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await route.continue();
+    });
+
+    const mapResponse = page.waitForResponse((response) => isMapBytesUrl(response.url(), encounterId));
     await openEncounter(page);
 
     const map = page.getByRole('img', { name: 'Battle map' });
@@ -216,9 +273,7 @@ test.describe('combat tracker — fog-safe map delivery (#463)', () => {
     await page.evaluate(async () => {
       if ('serviceWorker' in navigator) await navigator.serviceWorker.ready;
     });
-    const reloadedMap = page.waitForResponse((res) =>
-      res.url().includes(`/api/v1/encounters/${encounterId}/map`),
-    );
+    const reloadedMap = page.waitForResponse((res) => isMapBytesUrl(res.url(), encounterId));
     await page.reload();
     expect((await reloadedMap).status()).toBe(200);
     const cachedUrls = await page.evaluate(async () => {

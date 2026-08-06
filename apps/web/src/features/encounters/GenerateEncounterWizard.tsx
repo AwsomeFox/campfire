@@ -510,6 +510,9 @@ function RosterSlotRow({
             </span>
           </Chip>
         )}
+        {slot.source === 'homebrew' && (
+          <span className="tag tag-accent text-3xs">{t('encounters.wizard.homebrewBadge', 'Homebrew')}</span>
+        )}
         <span className="tag tag-neutral" style={{ fontSize: 10 }}>
           {slot.cr !== null ? `CR ${slot.cr}` : 'CR ?'} · {slot.xp} XP
         </span>

@@ -18,6 +18,14 @@ const DEFAULTS: z.infer<typeof ServerSettings> = {
   allowSignup: false,
   experimentalAiDm: false,
   aiServerTokenCap: 0,
+  // Issue #851 — upgrade-safe defaults: unrestricted creation policy, no limits,
+  // no default quota. Identical to every pre-#851 install's actual behavior.
+  campaignCreationPolicy: 'everyone',
+  maxActiveCampaignsPerUser: null,
+  maxTotalCampaignsPerUser: null,
+  maxActiveCampaignsServerWide: null,
+  maxTotalCampaignsServerWide: null,
+  defaultCampaignStorageQuotaBytes: null,
 };
 
 @Injectable()

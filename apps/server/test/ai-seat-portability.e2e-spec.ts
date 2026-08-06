@@ -43,6 +43,13 @@ const PROACTIVE = {
   cooldownSeconds: 600,
   maxProactiveTokensPerHour: 1_500,
 } as const;
+// #874 — every axis on a non-default value, same reasoning as STYLE above.
+const COMPREHENSION = {
+  readingComplexity: 'simple',
+  paragraphLength: 'short',
+  sensoryIntensity: 'vivid',
+  choiceCount: 'two',
+} as const;
 
 const TOKEN_BUDGET_MAX = (() => {
   const max = AiDmSeat.shape.tokenBudget.removeDefault().maxValue;
@@ -75,6 +82,7 @@ const NON_DEFAULT = {
   tokenBudget: 12_345,
   proactiveSettings: PROACTIVE,
   stylePresets: STYLE,
+  comprehensionProfile: COMPREHENSION,
   actionQueueDepth: 3,
 } satisfies Record<keyof PortableAiSeat, unknown>;
 
@@ -540,6 +548,10 @@ describe('the seat portability classification (#1049)', () => {
     expect(AI_SEAT_FIELD_ROLE.stylePresets).toBe('config');
     expect(AI_SEAT_FIELD_ROLE.proactiveSettings).toBe('config');
     expect(AI_SEAT_FIELD_ROLE.actionQueueDepth).toBe('config');
+  });
+
+  it('classifies the comprehension profile (#874) as config, following stylePresets', () => {
+    expect(AI_SEAT_FIELD_ROLE.comprehensionProfile).toBe('config');
   });
 
   it('keeps every token counter out of the portable set', () => {

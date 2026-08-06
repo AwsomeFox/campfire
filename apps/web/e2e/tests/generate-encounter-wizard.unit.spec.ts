@@ -84,4 +84,20 @@ test.describe('Generate-encounter wizard surface (issue #412)', () => {
     // pre-existing strings untranslated, but new strings must not add to that debt).
     expect(ar.encounters?.wizard?.heuristicDifficultyBadge).not.toBe(en.encounters?.wizard?.heuristicDifficultyBadge);
   });
+
+  // Issue #1927: the generator/preview candidate set now includes the campaign's own homebrew
+  // monsters alongside the installed compendium. Each roster slot is labelled with a `source`
+  // ('pack' | 'homebrew') so the DM can tell which is which at a glance.
+  test('renders a Homebrew chip for a slot with source "homebrew" (issue #1927)', () => {
+    const src = readFileSync(WIZARD, 'utf8');
+    expect(src).toMatch(/slot\.source === 'homebrew'/);
+    expect(src).toMatch(/t\(['"]encounters\.wizard\.homebrewBadge['"]/);
+    const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: { wizard?: Record<string, unknown> } };
+    expect(en.encounters?.wizard?.homebrewBadge).toBe('Homebrew');
+    const ar = JSON.parse(readFileSync(resolve(__dirname, '../../src/i18n/locales/ar/encounters.json'), 'utf8')) as {
+      encounters?: { wizard?: Record<string, unknown> };
+    };
+    expect(ar.encounters?.wizard?.homebrewBadge).toBeTruthy();
+    expect(ar.encounters?.wizard?.homebrewBadge).not.toBe(en.encounters?.wizard?.homebrewBadge);
+  });
 });
