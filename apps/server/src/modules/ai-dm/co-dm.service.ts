@@ -23,7 +23,7 @@ import {
   StoryBeatProposalCreate,
   ruleSystemAdapter,
 } from '@campfire/schema';
-import type { AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, HomebrewMechanicsProfile, NarrationLanguage, Proposal, Role, RuleSystemAdapter } from '@campfire/schema';
+import type { AiExternalContentPolicy, AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, HomebrewMechanicsProfile, NarrationLanguage, Proposal, Role, RuleSystemAdapter } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaigns, storyArcs, rulePacks } from '../../db/schema';
 import { auditActor, type RequestUser } from '../../common/user.types';
@@ -76,6 +76,15 @@ const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'ques
  * seat with remaining budget. Role gating (dm-only) is enforced by the controller/MCP tool.
  * The draft's token cost is metered against the seat budget (#272), and the proposer is
  * attributed to the AI seat + model — not the DM's name or a raw token.
+ *
+ * REST (`POST /campaigns/:id/ai-dm/draft`, `CoDmController`) and MCP (the equivalent tool
+ * in `mcp-tools.ts`) both call `draft()` below directly — one method, so there is no second
+ * copy of the consent/provenance logic to drift out of sync between the two surfaces.
+ *
+ * External-AI provenance (issue #1993): see the doc comment on `buildGenerationProvenance`
+ * for the audited finding that this path carries no member-identifying surface, and why
+ * `consent` is still recorded (truthfully, never omitted) on every draft rather than
+ * gated — reusing the same campaign-level `aiExternalContentPolicy` scribe reads (#501).
  */
 @Injectable()
 export class CoDmService {
@@ -139,10 +148,20 @@ export class CoDmService {
     // so a configured provider's drafts were served by the no-op scaffold — which fails
     // JSON parsing (422). When no provider is configured, fall back to the legacy seam.
     const [campaign] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .select({
+        ruleSystem: campaigns.ruleSystem,
+        customMechanicsProfile: campaigns.customMechanicsProfile,
+        aiExternalContentPolicy: campaigns.aiExternalContentPolicy,
+      })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1);
+    // Issue #1993: the SAME campaign-level policy scribe reads (#501) — reused here rather
+    // than invented anew, and recorded truthfully on every draft's provenance (never left
+    // undefined) so a reviewer can't confuse "the policy question was never asked" with
+    // "it was asked and nothing was excluded". See the doc comment on `buildGenerationProvenance`
+    // for why co-DM's answer to "what was excluded" is always zero.
+    const campaignPolicy = (campaign?.aiExternalContentPolicy ?? 'member_consent') as AiExternalContentPolicy;
 
     const adapter = ruleSystemAdapter(
       campaign?.ruleSystem,
@@ -193,6 +212,11 @@ export class CoDmService {
     let providerType: string | null = null;
     let endpointScope: AiGenerationProvenance['endpoint']['scope'] = 'injected';
     let endpointBaseUrl: string | null = null;
+    // Issue #1993: whether this draft actually left the server. True exactly on the
+    // `config` branch below (a real OpenAI/Anthropic/Gemini/mock provider resolved via
+    // `createAiProvider`, which always reports `endpointScope` 'campaign' or 'server');
+    // false on the injected/no-op legacy seam, which never leaves the deployment.
+    let externalSend = false;
 
     try {
       if (config) {
@@ -220,6 +244,7 @@ export class CoDmService {
         resolvedModel = result.model || config.model;
         providerName = aiProvider.name;
         providerType = config.providerType;
+        externalSend = true;
         // The scope that OWNS the endpoint, so a keyless campaign override running against
         // the server endpoint is recorded as 'server' — both truthful and the condition
         // the baseUrl gate below keys off (#501 review).
@@ -308,6 +333,8 @@ export class CoDmService {
       endpointScope,
       endpointBaseUrl,
       ruleset: { id: adapter.id, pack: campaign?.ruleSystem || null, version: packVersion },
+      campaignPolicy,
+      externalSend,
     });
     const attribution = {
       proposer: `AI DM (${modelLabel})`,
@@ -350,6 +377,32 @@ export class CoDmService {
     };
   }
 
+  /**
+   * Issue #1993 — co-DM's member-identifying surface, audited against the #501/#1520
+   * standard scribe's `consent` block was built for (see `scribe-consent.ts`).
+   *
+   * Enumerating what actually reaches the provider on this path: `input.prompt` (the
+   * REQUESTING DM's own free-text brief — never another member's authored words),
+   * `instructions` (the seat persona the DM configured, plus target-shape/ruleset/language
+   * boilerplate this server generates), and `sourceIds: { target }` (a fixed enum label).
+   * Unlike scribe, nothing here is assembled by the server FROM other members' rows —
+   * there is no note, dice roll, or `performedBy`/`rollerUserId` join key anywhere in this
+   * payload, because co-DM never reads campaign source material to build it. The DM's own
+   * brief needs no consent gate for the same reason a dice roll's in-fiction `actor` doesn't
+   * (`scribe-consent.ts`): it is canon the acting party owns, not another member's private
+   * disclosure.
+   *
+   * Finding: co-DM's assembled payload carries no member-identifying surface at all, so
+   * there is nothing for a per-member consent-conditional filter to strip (applying one
+   * here would be exactly the "machinery the problem doesn't need" #1993 warns against).
+   * What WAS missing is that `consent` was silently omitted from every co-DM provenance
+   * record — indistinguishable, to a DM reading the proposal review UI
+   * (`GenerationProvenanceView` in ProposalsPage.tsx) or a future auditor, from a path
+   * where this question was never asked. `campaignPolicy` + `externalSend` are now always
+   * recorded truthfully (reusing the exact campaign-level policy scribe reads — no new
+   * settings surface), with the note-consent counters fixed at zero because they are
+   * structurally always zero on this path, not merely observed to be so this run.
+   */
   private buildGenerationProvenance(input: {
     target: CoDmDraftTarget;
     prompt: string;
@@ -360,6 +413,8 @@ export class CoDmService {
     endpointScope: AiGenerationProvenance['endpoint']['scope'];
     endpointBaseUrl?: string | null;
     ruleset: { id: string; pack: string | null; version: string | null };
+    campaignPolicy: AiExternalContentPolicy;
+    externalSend: boolean;
   }): AiGenerationProvenance {
     const promptHash = crypto
       .createHash('sha256')
@@ -381,6 +436,15 @@ export class CoDmService {
       promptVersion: CO_DM_PROMPT_VERSION,
       promptHash,
       ruleset: input.ruleset,
+      consent: {
+        campaignPolicy: input.campaignPolicy,
+        externalSend: input.externalSend,
+        includedAuthorUserIds: [],
+        excludedAuthorUserIds: [],
+        includedInboxCount: 0,
+        excludedInboxByConsent: 0,
+        excludedInboxPrivate: 0,
+      },
       retentionNotice: AI_EXTERNAL_PROVIDER_PRIVACY.retentionNote,
       createdAt: nowIso(),
     };
