@@ -21,6 +21,15 @@
       "spectatorOutcomeSuccess": "نجاح",
       "spectatorOutcomeFailure": "إخفاق"
     },
+    "turnTimer": {
+      "elapsed": "الوقت المنقضي للدور {{elapsed}}",
+      "elapsedOfLimit": "الوقت المنقضي للدور {{elapsed}} من {{limit}}",
+      "settingsLabel": "إعدادات مؤقت الدور",
+      "settingsTitle": "مؤقت الدور",
+      "settingsHint": "مجرد تذكير اجتماعي بالوتيرة — لا يقدّم الدور تلقائيًا أبدًا ولا يمنع أحدًا.",
+      "off": "إيقاف",
+      "presetSeconds": "{{seconds}} ثانية"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",

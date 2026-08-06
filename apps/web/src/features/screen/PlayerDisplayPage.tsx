@@ -48,6 +48,7 @@ import { useDialog } from '../../components/useDialog';
 import { SafetyHoldDisplayOverlay, SafetyHoldOverlayView } from '../../components/SafetyHoldBar';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { BattleMap } from '../encounters/RunSessionPage';
+import { TurnElapsedChip } from '../encounters/TurnElapsedChip';
 import { useAuth } from '../../app/auth';
 import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
@@ -1225,6 +1226,14 @@ export default function PlayerDisplayPage() {
             <span className="cf-status-round" data-testid="cf-status-round">
               Round {encounter.round}
             </span>
+            {/* Turn timer (issue #1935): same "players only see it with a limit set" rule as
+                PlayerVitalsHeader — turnStartedAt/turnTimerSeconds are not secrets, so no
+                playerSafe re-shaping is needed here. */}
+            <TurnElapsedChip
+              turnStartedAt={encounter.turnStartedAt}
+              turnTimerSeconds={encounter.turnTimerSeconds}
+              audience="player"
+            />
             <span className="cf-status-turn" data-testid="cf-status-current">
               <span className="cf-status-turn-label">Now</span>
               <span className="cf-status-turn-name cf-clamp-1">{currentActor?.name ?? '—'}</span>
@@ -2135,6 +2144,9 @@ const SCREEN_CSS = `
 }
 .cf-screen .cf-status-enc { font-weight: 700; color: var(--color-accent-2); max-width: 30cqw; }
 .cf-screen .cf-status-round { font-weight: 600; }
+/* Turn timer chip (issue #1935) — scaled up to the same across-the-room legibility
+   as the rest of the status band, same reasoning as .cf-screen-chip above. */
+.cf-screen .cf-turn-timer-chip { font-size: max(15px, 2cqh); padding: 0.4cqh 1.2cqw; }
 .cf-screen .cf-status-turn { display: inline-flex; align-items: baseline; gap: 0.8cqw; min-width: 0; }
 .cf-screen .cf-status-turn-label {
   font-size: max(15px, 1.9cqh);

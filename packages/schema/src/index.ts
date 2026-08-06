@@ -9633,6 +9633,17 @@ export const Encounter = z.object({
   // Enforced server-side in redactMonsterHp — this field itself is readable by players (it drives
   // their own rendering) and leaks nothing about any combatant's HP.
   monsterHpDisplay: MonsterHpDisplay.default('band'),
+  // Turn timer (issue #1935): a server-stamped instant so every connected client agrees on
+  // when the CURRENT turn began, without any client computing or guessing it. Stamped fresh
+  // inside the same serialized transaction as start/nextTurn/endTurn/undoTurn; null when the
+  // encounter isn't actively mid-turn — EncounterStatus has no separate paused state, so this
+  // covers 'preparing' (not yet started) and 'ended' alike. Undo restamps fresh too — the
+  // prior elapsed time is intentionally not restored, it's a new "now" for the same turn.
+  // Purely informational: no server-side enforcement, auto-advance, or blocking ever reads it.
+  turnStartedAt: IsoDate.nullable().default(null),
+  // Optional DM-set pacing limit in seconds; 0 = off (elapsed-only, DM-facing only). DM-editable
+  // via EncounterUpdate. Never enforced server-side — purely drives client chip color (issue #1935).
+  turnTimerSeconds: z.number().int().nonnegative().default(0),
   // Role-safe resolved link labels (issue #480) — present on list/get/summary reads.
   locationLink: EncounterLinkMeta.nullable().optional(),
   questLink: EncounterLinkMeta.nullable().optional(),
@@ -9692,6 +9703,10 @@ export const EncounterUpdate = z.object({
   // Monster-HP display dial (issue #1925) — dm only, enforced server-side. Switching modes
   // mid-fight takes effect on the next non-DM read (SSE refetch); no combatant data changes.
   monsterHpDisplay: MonsterHpDisplay.optional(),
+  // Turn timer pacing limit (issue #1935) — dm only, like the rest of this shape. 0 turns the
+  // limit off (elapsed-only, DM-facing). `turnStartedAt` is intentionally NOT here: it is
+  // server-managed only and can never be set via PATCH.
+  turnTimerSeconds: z.number().int().nonnegative().optional(),
 });
 
 /** DM control for the 13th Age escalation die: hold automatic advancement and/or override it. */

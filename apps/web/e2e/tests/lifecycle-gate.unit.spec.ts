@@ -16,6 +16,8 @@ import {
   startGateReason,
   startRosterHintReason,
   syncOnlyGateReason,
+  turnTimerControlDisabled,
+  turnTimerControlVisible,
   undoTurnGateReason,
 } from '../../src/features/encounters/lifecycleGate';
 
@@ -264,5 +266,43 @@ test.describe('syncOnlyGateReason (issue #1933) — end/reopen/delete are not sa
   });
   test('sync-blocked: syncBlocked', () => {
     expect(syncOnlyGateReason(true)).toBe('syncBlocked');
+  });
+});
+
+test.describe('turnTimerControlVisible / turnTimerControlDisabled (issue #1935 review) — gated like its siblings', () => {
+  test('visible while preparing/running (reopen not yet allowed)', () => {
+    expect(turnTimerControlVisible(false)).toBe(true);
+  });
+
+  test('hidden once ended (reopen allowed) — a PATCH there would 409 via assertMutable', () => {
+    expect(turnTimerControlVisible(true)).toBe(false);
+  });
+
+  test('enabled when nothing is blocking', () => {
+    expect(turnTimerControlDisabled({ headerBusy: false, riskyBlocked: false })).toBe(false);
+  });
+
+  test('disabled while a request is already in flight', () => {
+    expect(turnTimerControlDisabled({ headerBusy: true, riskyBlocked: false })).toBe(true);
+  });
+
+  test('disabled on a stale sync state, same as the other conflict-prone writes in this header', () => {
+    expect(turnTimerControlDisabled({ headerBusy: false, riskyBlocked: true })).toBe(true);
+  });
+});
+
+test.describe('DmLifecycleHeader wiring (issue #1935 review) — the turn-timer control is actually gated, not just the pure functions', () => {
+  const header = readFileSync(
+    resolve(__dirname, '../../src/features/encounters/DmLifecycleHeader.tsx'),
+    'utf8',
+  );
+
+  test('the control is rendered behind turnTimerControlVisible(lifecycle.reopen)', () => {
+    expect(header).toMatch(/\{turnTimerControlVisible\(lifecycle\.reopen\)\s*&&\s*\(/);
+  });
+
+  test('its disabled prop comes from turnTimerControlDisabled, not a bare headerBusy', () => {
+    const controlBlock = header.slice(header.indexOf('<TurnTimerControl'), header.indexOf('<TurnTimerControl') + 300);
+    expect(controlBlock).toMatch(/disabled=\{turnTimerControlDisabled\(\{\s*headerBusy,\s*riskyBlocked\s*\}\)\}/);
   });
 });

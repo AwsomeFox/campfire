@@ -1359,6 +1359,27 @@ function migrateEncountersTableForHexOrientation(sqlite: Database.Database): voi
 }
 
 /**
+ * Migration for DBs created before the turn timer (issue #1935): `encounters` gained
+ * `turn_started_at` (nullable — the server-stamped instant the CURRENT turn began; null
+ * when not actively mid-turn) and `turn_timer_seconds` (NOT NULL, DM-set pacing limit;
+ * 0 = off). Plain ADD COLUMNs — same shape as the grid-calibration migration above.
+ * Existing (already-running) encounters backfill `turn_started_at` to NULL, which is
+ * indistinguishable from "not running" until the next turn transition stamps a real
+ * value — acceptable because the elapsed chip only ever renders once a stamp exists.
+ */
+function migrateEncountersTableForTurnTimer(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('turn_started_at')) sqlite.exec('ALTER TABLE encounters ADD COLUMN turn_started_at TEXT');
+  if (!has('turn_timer_seconds')) sqlite.exec('ALTER TABLE encounters ADD COLUMN turn_timer_seconds INTEGER NOT NULL DEFAULT 0');
+}
+
+/**
  * Migration for DBs created before the optional DM-gated progression flag (issue #270):
  * `campaigns.dm_controls_progression` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN —
  * existing campaigns get 0 (false), preserving the pre-migration behavior where any
@@ -5232,17 +5253,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // compatibility is unaffected.
   { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
   { name: '0167_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
-  // Renumbered twice while this branch was open: #1942 took 0166, then #1899 took 0167
-  // on main. 0168 is the next free ordinal. This migration has never run against a real
-  // database under 0166 or 0167, so no installation can have recorded either name and
-  // upgrade compatibility is unaffected.
+  // Renumbered twice while that branch was open: #1942 took 0166, then #1899 took 0167
+  // on main. This migration has never run against a real database under either earlier
+  // name, so no installation can have recorded them and upgrade compatibility holds.
   { name: '0168_combatants_statblock_revealed_1926', run: migrateCombatantsTableForStatblockRevealed1926 },
-  // Ledger is applied through 0168 on main; 0169 (#1943 group checks) and 0170 (#1935
-  // turn timer) are claimed by other in-flight PRs, so this takes 0171. Whichever of
-  // this branch and #1992's statblock-revision migration lands second gets renumbered
-  // by the coordinator before merge — neither has run against a real database under
-  // 0171, so no installation can have recorded the name and upgrade compatibility is
-  // unaffected either way.
+  // #1935's turn timer landed on main (e910bda0) taking 0170; 0169 is claimed by the
+  // in-flight #1943 (group checks). This branch takes 0171. (#1992 briefly reserved 0172
+  // and then removed its migration entirely, so 0172 is free again.)
+  { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
 ];
 
