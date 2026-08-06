@@ -87,7 +87,7 @@ import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMo
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, gateForWrite, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
-import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH, pingIdentityColor } from './tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityColor, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH, pingIdentityColor } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export { BattleMap } from './map/BattleMap';
@@ -732,6 +732,31 @@ const InitiativeStrip = memo(function InitiativeStrip({
                     boxShadow: '0 0 0 1px rgba(15,23,42,.7)',
                   }}
                 />
+              )}
+              {c.controllerUserId != null && (
+                <span
+                  data-testid={`strip-controller-badge-${c.id}`}
+                  title={`Controlled by user #${c.controllerUserId}`}
+                  style={{
+                    position: 'absolute',
+                    top: -3,
+                    left: -3,
+                    width: 16,
+                    height: 16,
+                    borderRadius: '50%',
+                    background: tokenIdentityColor(c.controllerUserId),
+                    border: '1.5px solid var(--color-surface)',
+                    fontSize: 9,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#fff',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.5)',
+                    zIndex: 2,
+                  }}
+                >
+                  🎮
+                </span>
               )}
             </div>
             <FloatingNumbers events={feedback} />
@@ -2035,9 +2060,11 @@ export default function RunSessionPage() {
       if (encounter?.status === 'ended') return false;
       if (canDmWrite) return true;
       if (!canPlayerWrite) return false;
-      return c.characterId != null && ownedCharacterIds.has(c.characterId);
+      if (c.characterId != null && ownedCharacterIds.has(c.characterId)) return true;
+      if (c.controllerUserId != null && myUserId != null && String(c.controllerUserId) === String(myUserId)) return true;
+      return false;
     },
-    [encounter?.status, canDmWrite, canPlayerWrite, ownedCharacterIds],
+    [encounter?.status, canDmWrite, canPlayerWrite, ownedCharacterIds, myUserId],
   );
 
   const canEditCombatant = useCallback(
@@ -2051,6 +2078,7 @@ export default function RunSessionPage() {
   /** Issue #1914: the combatant the ACTING viewer owns (a player's own character link). */
   function isOwnCombatant(c: Combatant): boolean {
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
+  }
   }
 
   /**
@@ -3778,7 +3806,11 @@ export default function RunSessionPage() {
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
-  const myCombatants = orderedCombatants.filter(c => c.characterId != null && ownedCharacterIds.has(c.characterId));
+  const myCombatants = orderedCombatants.filter(
+    (c) =>
+      (c.characterId != null && ownedCharacterIds.has(c.characterId)) ||
+      (c.controllerUserId != null && myUserId != null && String(c.controllerUserId) === String(myUserId)),
+  );
   // Prefer a combatant the viewer can resolve. Fall back only to character combatants
   // (party HP is shared table knowledge); never surface monster/NPC concentration
   // queues to non-resolvers — those embed secret exact damage/DC (#43 / #606).
@@ -4936,6 +4968,8 @@ export default function RunSessionPage() {
                   onSetHpMax={(value) => patchCombatant(eid, c.id, { hpMax: value })}
                   onSetTokenSize={(size) => setTokenSize(c.id, size)}
                   onPatchCombatant={(patch, targetEncounterId) => patchCombatant(targetEncounterId, c.id, patch)}
+                  members={membersQuery.data}
+                  onSetControllerUserId={canDmWrite ? (userId) => patchCombatant(eid, c.id, { controllerUserId: userId }) : undefined}
                   onPatchSourceTurnState={
                     canDmWrite || c.id === currentCombatantId
                       ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)
