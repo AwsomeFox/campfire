@@ -12,7 +12,7 @@ import { CampaignLibraryService } from '../../src/modules/campaign-library/campa
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { eq } from 'drizzle-orm';
-import { campaigns, characters, encounterOpIdempotency, npcs } from '../../src/db/schema';
+import { campaigns, characters, encounterOpIdempotency, encounters, npcs } from '../../src/db/schema';
 import { UNKNOWN_COMBATANT_LABEL } from '../../src/modules/encounters/encounters.logic';
 import { nowIso } from '../../src/common/time';
 
@@ -471,5 +471,29 @@ describe('EncountersService unit coverage tests', () => {
       'dm',
     );
     expect(replay.hpCurrent).toBe(7);
+  });
+
+  it('rejects a keyed no-op updateCombatant for a soft-deleted encounter', async () => {
+    const enc = await encountersService.create(campaignId, { name: 'Deleted Fight', hidden: false }, dmActor, 'dm');
+    const goblin = await encountersService.addCombatant(
+      enc.id,
+      { name: 'Goblin', kind: 'monster', hpMax: 10 },
+      dmActor,
+      'dm',
+    );
+    await encountersService.rollInitiative(enc.id, dmActor, 'dm');
+    await encountersService.start(enc.id, dmActor, 'dm');
+
+    await db.update(encounters).set({ deletedAt: nowIso() }).where(eq(encounters.id, enc.id));
+
+    await expect(
+      encountersService.updateCombatant(
+        enc.id,
+        goblin.id,
+        { idempotencyKey: 'deleted-noop' },
+        dmActor,
+        'dm',
+      ),
+    ).rejects.toThrow(/not found/i);
   });
 });
