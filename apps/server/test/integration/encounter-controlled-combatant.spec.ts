@@ -12,7 +12,6 @@ import { EncountersService, redactMonsterHp } from '../../src/modules/encounters
 import { MembersService } from '../../src/modules/membership/members.service';
 import { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { UsersService } from '../../src/modules/users/users.service';
-import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
