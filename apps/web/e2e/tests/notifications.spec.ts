@@ -516,17 +516,19 @@ test('coordinates polling and read state between tabs', async ({ browser }) => {
 
   await first.bringToFront();
   await first.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  await first.getByRole('link', { name: 'Quests', exact: true }).click();
 
   await second.bringToFront();
   await second.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  await second.getByRole('link', { name: 'Quests', exact: true }).click();
 
   await expect.poll(() => countRequests, { timeout: 15000 }).toBe(2);
   await expect.poll(() => activeRequests, { timeout: 15000 }).toBe(0);
@@ -583,7 +585,9 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   holdNextCount = true;
   await second.bringToFront();
   await second.evaluate(() => {
-    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     document.dispatchEvent(new Event('visibilitychange'));
   });
   void second.getByRole('link', { name: 'Quests', exact: true }).click();
