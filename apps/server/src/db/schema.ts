@@ -1018,12 +1018,13 @@ export const users = sqliteTable('users', {
   // Per-player dice overlay skin (issue #1315).
   diceTheme: text('dice_theme').notNull().default('nocturne'),
   // Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
-  // campaign-creation policy (settings.campaignCreationPolicy). Defaults TRUE so an
-  // upgrade never revokes an existing user's ability to create/import a campaign —
-  // only an admin who deliberately switches the policy AND revokes this per-user can
-  // narrow it. Ignored entirely under the 'everyone'/'admins_only' policies.
-  // Defaults to false so an insert that omits it fails CLOSED (review) — see the matching
+  // campaign-creation policy (settings.campaignCreationPolicy). Ignored entirely under
+  // the 'everyone'/'admins_only' policies.
+  //
+  // Defaults FALSE so an insert that omits it fails CLOSED (review) — see the matching
   // note in bootstrap.sql.ts. Every path that should grant it says so explicitly.
+  // Upgrade safety is migration 0164's job, not this default's: it backfills every
+  // account that predates the flag to true, so no existing user loses an ability they had.
   canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),

@@ -6572,11 +6572,16 @@ export const User = z.object({
   timeFormat: TimeFormat.default('system'),
   /**
    * Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
-   * campaign-creation policy. Defaults true (upgrade-safe: an existing user's
-   * ability to create/import a campaign is never silently revoked). Ignored under
-   * the 'everyone'/'admins_only' policies.
+   * campaign-creation policy. Defaults FALSE, matching the database column and every
+   * account-creation path: a brand-new account is not an approved organizer.
+   *
+   * Upgrade safety lives in migration 0164's one-off backfill of accounts that predate
+   * the flag — it is a property of that migration, not of this shape. Stating it as the
+   * contract's default told every client the opposite of what the server does, and any
+   * consumer filling in the missing field from the declared default would have flipped
+   * the permission on. Ignored under the 'everyone'/'admins_only' policies.
    */
-  canCreateCampaigns: z.boolean().default(true),
+  canCreateCampaigns: z.boolean().default(false),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
