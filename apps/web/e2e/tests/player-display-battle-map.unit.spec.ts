@@ -42,6 +42,7 @@ function encounter(partial: Partial<EncounterWithCombatants>): EncounterWithComb
     mapAttachmentId: 9,
     updatedAt: '2026-01-01T00:00:00.000Z',
     combatants: [],
+    monsterHpDisplay: 'band',
     fog: null,
     aoe: [],
     ...partial,

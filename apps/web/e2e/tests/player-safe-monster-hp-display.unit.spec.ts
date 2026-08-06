@@ -8,11 +8,29 @@
  * all three modes, including the always-shipped 'down' band in 'hidden' mode.
  */
 import { expect, test } from '@playwright/test';
-import type { Combatant } from '@campfire/schema';
-import { safeCombatant, safeCombatants } from '../../src/features/screen/playerSafe';
+import type { Combatant, EncounterWithCombatants } from '@campfire/schema';
+import { safeCombatant, safeCombatants, safeEncounterForCast } from '../../src/features/screen/playerSafe';
 
 function monster(fields: Partial<Combatant>): Combatant {
   return { id: 1, kind: 'monster', name: 'Ogre', initiative: 3, conditions: [], ...fields } as Combatant;
+}
+
+function encounterFixture(fields: Partial<EncounterWithCombatants>): EncounterWithCombatants {
+  return {
+    id: 1,
+    campaignId: 1,
+    name: 'Fight',
+    status: 'running',
+    round: 1,
+    currentCombatantId: null,
+    turnPhase: 'combatant',
+    mapAttachmentId: null,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    combatants: [],
+    fog: null,
+    aoe: [],
+    ...fields,
+  } as EncounterWithCombatants;
 }
 
 test.describe('safeCombatant — monsterHpDisplay mode matrix (issue #1925)', () => {
@@ -25,11 +43,27 @@ test.describe('safeCombatant — monsterHpDisplay mode matrix (issue #1925)', ()
     expect(safe.down).toBe(false);
   });
 
-  test("omitting the mode defaults to 'band' — unchanged behavior for existing callers", () => {
-    const c = monster({ hpCurrent: null, hpMax: null, hpBand: 'critical' });
-    const safe = safeCombatant(c);
+  // Issue #1925 review (finding #2): a client that "repairs" a server-side numbers
+  // leak into a plausible band would destroy the only visible evidence of that leak.
+  // In 'hidden' mode, safeCombatant must NEVER derive a band (or a down state) from
+  // hpCurrent/hpMax, even if those numbers happen to be present on the wire object —
+  // it must render as if it received nothing, not invent something plausible.
+  test("'hidden' mode ignores hpCurrent/hpMax entirely, even if the server accidentally sent them (defense in depth)", () => {
+    const c = monster({ hpCurrent: 40, hpMax: 100, hpBand: null });
+    const safe = safeCombatant(c, 'hidden');
     expect(safe.hpCurrent).toBeNull();
-    expect(safe.hpBand).toBe('critical');
+    expect(safe.hpMax).toBeNull();
+    // Must NOT derive 'bloodied' from 40/100 — that would mask the leak.
+    expect(safe.hpBand).toBeNull();
+    expect(safe.down).toBe(false);
+  });
+
+  test("'hidden' mode does not derive 'down' from a leaked hpCurrent<=0 either — only an explicit 'down' band counts", () => {
+    const c = monster({ hpCurrent: 0, hpMax: 100, hpBand: null });
+    const safe = safeCombatant(c, 'hidden');
+    expect(safe.hpCurrent).toBeNull();
+    expect(safe.hpBand).toBeNull();
+    expect(safe.down).toBe(false);
   });
 
   test("'exact' mode: the server-sent real numbers are carried through, not stripped", () => {
@@ -101,5 +135,69 @@ test.describe('safeCombatant — monsterHpDisplay mode matrix (issue #1925)', ()
     expect(safe).toHaveLength(1);
     expect(safe[0]!.hpCurrent).toBe(22);
     expect(safe[0]!.hpMax).toBe(22);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1925 review (finding #1, PR #2040): the Cast map scene projects combatants
+// through `safeEncounterForCast` -> `redactCombatantForCast` -> `safeCombatant`,
+// a SEPARATE path from the initiative scene's `safeCombatants`. Before this fix,
+// `redactCombatantForCast` called `safeCombatant(c)` with no mode, silently taking
+// the (then-default) 'band' branch regardless of the encounter's actual mode — so on
+// an 'exact' table the map scene's tokens disagreed with the initiative scene on the
+// very same screen. These tests prove both scenes now agree, in all three modes.
+test.describe("safeEncounterForCast agrees with safeCombatants on monsterHpDisplay (issue #1925 finding #1)", () => {
+  test("'exact' mode: the map scene ships real numbers, matching the initiative scene", () => {
+    const enc = encounterFixture({
+      monsterHpDisplay: 'exact',
+      combatants: [monster({ id: 1, hpCurrent: 40, hpMax: 100, hpBand: 'bloodied' })],
+    });
+    const mapScene = safeEncounterForCast(enc);
+    const initiativeScene = safeCombatants(enc.combatants, enc.monsterHpDisplay);
+    const mapCombatant = mapScene.combatants[0]!;
+    expect(mapCombatant.hpCurrent).toBe(40);
+    expect(mapCombatant.hpMax).toBe(100);
+    expect(mapCombatant.hpBand).toBeNull();
+    // The two scenes must agree exactly, not just individually look "safe".
+    expect(mapCombatant.hpCurrent).toBe(initiativeScene[0]!.hpCurrent);
+    expect(mapCombatant.hpMax).toBe(initiativeScene[0]!.hpMax);
+  });
+
+  test("'band' mode: the map scene ships only the coarse band, matching the initiative scene", () => {
+    const enc = encounterFixture({
+      monsterHpDisplay: 'band',
+      combatants: [monster({ id: 1, hpCurrent: null, hpMax: null, hpBand: 'critical' })],
+    });
+    const mapScene = safeEncounterForCast(enc);
+    const initiativeScene = safeCombatants(enc.combatants, enc.monsterHpDisplay);
+    const mapCombatant = mapScene.combatants[0]!;
+    expect(mapCombatant.hpCurrent).toBeNull();
+    expect(mapCombatant.hpBand).toBe('critical');
+    expect(mapCombatant.hpBand).toBe(initiativeScene[0]!.hpBand);
+  });
+
+  test("'hidden' mode: the map scene ships neither number nor band, matching the initiative scene", () => {
+    const enc = encounterFixture({
+      monsterHpDisplay: 'hidden',
+      combatants: [monster({ id: 1, hpCurrent: null, hpMax: null, hpBand: null })],
+    });
+    const mapScene = safeEncounterForCast(enc);
+    const initiativeScene = safeCombatants(enc.combatants, enc.monsterHpDisplay);
+    const mapCombatant = mapScene.combatants[0]!;
+    expect(mapCombatant.hpCurrent).toBeNull();
+    expect(mapCombatant.hpBand).toBeNull();
+    expect(mapCombatant.hpBand).toBe(initiativeScene[0]!.hpBand);
+  });
+
+  test("'hidden' mode: a downed monster still shows 'down' on the map scene, matching the initiative scene", () => {
+    const enc = encounterFixture({
+      monsterHpDisplay: 'hidden',
+      combatants: [monster({ id: 1, hpCurrent: null, hpMax: null, hpBand: 'down' })],
+    });
+    const mapScene = safeEncounterForCast(enc);
+    const initiativeScene = safeCombatants(enc.combatants, enc.monsterHpDisplay);
+    const mapCombatant = mapScene.combatants[0]!;
+    expect(mapCombatant.hpBand).toBe('down');
+    expect(mapCombatant.hpBand).toBe(initiativeScene[0]!.hpBand);
   });
 });

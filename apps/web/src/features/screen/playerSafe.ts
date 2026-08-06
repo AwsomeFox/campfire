@@ -176,40 +176,63 @@ export interface SafeCombatant {
  * Issue #1925: monster/NPC HP follows the encounter's `monsterHpDisplay` dial. The
  * server has ALREADY applied that mode to `c` before it ever reaches this client code
  * (real numbers in 'exact', band-only in 'band', neither in 'hidden' except 'down') —
- * this function mirrors that server decision through to the cast-window projection,
- * it never makes its own hiding decision. Defaults to 'band' (today's behavior) for
- * any caller that hasn't threaded the encounter's mode through yet.
+ * this function mirrors that server decision through to the cast-window projection; it
+ * never makes its own hiding decision. `monsterHpDisplay` is REQUIRED (no default): two
+ * separate reviews on this feature found call sites that silently fell back to a stale
+ * default and disagreed with the server's actual mode — a required parameter forces
+ * every call site (present and future) to state which mode it means.
+ *
+ * `'hidden'` mode never derives a band (or a down state) from `hpCurrent`/`hpMax`, even
+ * when those numbers happen to be present on `c`. A client that "repairs" a server-side
+ * leak into a plausible-looking band would hide the leak's only visible evidence — the
+ * whole point of secrecy being enforced server-side is that this code has nothing to
+ * repair; if the server ever regresses, hidden mode must render as nothing, not as a
+ * band. The one exception is an explicitly-provided `'down'` band, which the server
+ * ships in every mode so the table always knows who dropped.
  */
-export function safeCombatant(c: Combatant, monsterHpDisplay: MonsterHpDisplay = 'band'): SafeCombatant {
-  const base = {
+export function safeCombatant(c: Combatant, monsterHpDisplay: MonsterHpDisplay): SafeCombatant {
+  const idBase = {
     id: c.id,
     kind: c.kind,
     name: c.name,
     initiative: c.initiative,
     conditions: c.conditions,
-    down: c.hpCurrent != null ? c.hpCurrent <= 0 : c.hpBand === 'down',
   };
   // Characters expose exact HP to the table; party HP is shared table knowledge.
   if (c.kind === 'character') {
-    return { ...base, hpCurrent: c.hpCurrent, hpMax: c.hpMax, hpBand: null };
+    return {
+      ...idBase,
+      hpCurrent: c.hpCurrent,
+      hpMax: c.hpMax,
+      hpBand: null,
+      down: c.hpCurrent != null ? c.hpCurrent <= 0 : c.hpBand === 'down',
+    };
   }
-  // 'exact' mode: the server already sent the real numbers on `c` — carry them
-  // through rather than stripping them (the historical monster-only behavior below).
-  // hpBand stays null here: numbers and band are mutually exclusive on SafeCombatant,
-  // and the exact numbers already convey everything the band would.
+  // 'exact' mode: the server already sent the real numbers on `c` — carry them through
+  // rather than stripping them. hpBand stays null: numbers and band are mutually
+  // exclusive on SafeCombatant, and the exact numbers already convey everything a band
+  // would.
   if (monsterHpDisplay === 'exact' && c.hpCurrent != null && c.hpMax != null) {
-    return { ...base, hpCurrent: c.hpCurrent, hpMax: c.hpMax, hpBand: null };
+    return { ...idBase, hpCurrent: c.hpCurrent, hpMax: c.hpMax, hpBand: null, down: c.hpCurrent <= 0 };
   }
+  if (monsterHpDisplay === 'hidden') {
+    const down = c.hpBand === 'down';
+    return { ...idBase, hpCurrent: null, hpMax: null, hpBand: down ? 'down' : null, down };
+  }
+  // 'band' mode: the coarse status the server already computed, or (defense in depth,
+  // for a caller that somehow reached here with un-redacted numbers and no band) derived
+  // from the raw numbers — 'band' mode has no numbers to protect from being echoed back
+  // as a band, unlike 'hidden' above.
   const band =
     c.hpBand ?? (c.hpCurrent != null && c.hpMax != null ? hpBandFor(c.hpCurrent, c.hpMax) : null);
-  return { ...base, hpCurrent: null, hpMax: null, hpBand: band, down: base.down || band === 'down' };
+  return { ...idBase, hpCurrent: null, hpMax: null, hpBand: band, down: band === 'down' };
 }
 
 export function filterPlayerSafeCombatants<T>(combatants: T[]): T[] {
   return combatants.filter((c) => (c as { hidden?: boolean }).hidden !== true);
 }
 
-export function safeCombatants(combatants: Combatant[], monsterHpDisplay: MonsterHpDisplay = 'band'): SafeCombatant[] {
+export function safeCombatants(combatants: Combatant[], monsterHpDisplay: MonsterHpDisplay): SafeCombatant[] {
   return filterPlayerSafeCombatants(combatants).map((c) => safeCombatant(c, monsterHpDisplay));
 }
 
@@ -232,9 +255,15 @@ function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
  * BattleMap needs the combatant shape for map placement, but the Player Display
  * still runs in an authenticated DM browser. Reapply the player-safe HP and
  * turn-state projection before rendering any token state.
+ *
+ * Issue #1925 (Devin review on #2040): this used to call `safeCombatant(c)` with no
+ * mode, silently defaulting to 'band' — so on an 'exact' table the map scene's tokens
+ * disagreed with the initiative scene on the very same screen. `monsterHpDisplay` is
+ * now required (see `safeCombatant`'s doc comment), so `safeEncounterForCast` below
+ * must thread the encounter's own mode through here.
  */
-function redactCombatantForCast(c: Combatant): Combatant {
-  const safe = safeCombatant(c);
+function redactCombatantForCast(c: Combatant, monsterHpDisplay: MonsterHpDisplay): Combatant {
+  const safe = safeCombatant(c, monsterHpDisplay);
   return {
     ...c,
     hpCurrent: safe.hpCurrent,
@@ -256,12 +285,14 @@ function redactCombatantForCast(c: Combatant): Combatant {
 /**
  * Player-safe encounter slice for the Cast map scene. Combatants and AoE are
  * filtered; grid/fog fields are kept so the read-only BattleMap can render the
- * same projection a player sees on the run-session page.
+ * same projection a player sees on the run-session page. Threads the encounter's own
+ * `monsterHpDisplay` through to `redactCombatantForCast` so the map scene agrees with
+ * the initiative scene (both ultimately mirror the same server-set mode).
  */
 export function safeEncounterForCast(encounter: EncounterWithCombatants): EncounterWithCombatants {
   const fog = encounter.fog;
   const combatants = encounter.combatants
-    .map(redactCombatantForCast)
+    .map((c) => redactCombatantForCast(c, encounter.monsterHpDisplay))
     .map((c) => (fog?.enabled === true ? redactTokenInFog(c, fog) : c));
   const aoe: AoeTemplate[] = filterAoeTemplatesForViewer(encounter.aoe ?? [], fog);
   return { ...encounter, combatants, aoe };
