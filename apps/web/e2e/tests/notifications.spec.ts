@@ -515,6 +515,7 @@ test('coordinates polling and read state between tabs', async ({ browser }) => {
   expect(countRequests).toBe(1);
 
   await first.bringToFront();
+  await first.waitForFunction(() => !document.hidden);
   await first.getByRole('link', { name: 'Quests', exact: true }).click();
   await expect.poll(() => countRequests, { timeout: 15000 }).toBe(2);
   await expect.poll(() => activeRequests, { timeout: 15000 }).toBe(0);
@@ -570,6 +571,7 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   // positive response after the read-all broadcast arrives.
   holdNextCount = true;
   await second.bringToFront();
+  await second.waitForFunction(() => !document.hidden);
   void second.getByRole('link', { name: 'Quests', exact: true }).click();
   await expect.poll(() => staleCountStarted, { timeout: 15000 }).toBe(true);
   await first.getByRole('button', { name: /Notifications/ }).click();
