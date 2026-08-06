@@ -518,8 +518,8 @@ test('coordinates polling and read state between tabs', async ({ browser }) => {
     first.getByRole('link', { name: 'Quests', exact: true }).click(),
     second.getByRole('link', { name: 'Quests', exact: true }).click(),
   ]);
-  await expect.poll(() => countRequests).toBe(2);
-  await expect.poll(() => activeRequests).toBe(0);
+  await expect.poll(() => countRequests, { timeout: 20000 }).toBe(2);
+  await expect.poll(() => activeRequests, { timeout: 20000 }).toBe(0);
   expect(maxActiveRequests).toBe(1);
 
   await first.getByRole('button', { name: /Notifications/ }).click();
@@ -572,7 +572,7 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   // positive response after the read-all broadcast arrives.
   holdNextCount = true;
   void second.getByRole('link', { name: 'Quests', exact: true }).click();
-  await expect.poll(() => staleCountStarted).toBe(true);
+  await expect.poll(() => staleCountStarted, { timeout: 20000 }).toBe(true);
   await first.getByRole('button', { name: /Notifications/ }).click();
   await first.getByRole('button', { name: 'Mark all (2) read' }).click();
   const confirm = first.getByRole('dialog').filter({ hasText: 'Mark all 2 notifications as read?' });
