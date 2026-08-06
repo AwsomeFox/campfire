@@ -4700,12 +4700,12 @@ export class EncountersService {
       // now; manual initiative PATCHes (set or clear) are DM-only, same as name/hpMax/
       // initMod/tokenSize. Absolute rule, same reasoning as actorId above: a player
       // never needs to send this field, so it is rejected outright rather than ignored.
-      // `statblock`, `eac`, and `kac` join the list for the same reason, and because
-      // omitting them was actively harmful rather than merely permissive: each is written
-      // only under `isDm`, so a non-DM patch carrying one of them alone reached the write
-      // transaction with an empty `writeSet` and drizzle threw "No values to set" — a 500
-      // where the caller deserved a 403. Rejecting outright beats silently no-opping: a
-      // player who edits a statblock should be told they may not, not told it worked.
+      // `statblock`, `statblockRevealed`, `eac`, and `kac` join the list for the same reason,
+      // and because omitting them was actively harmful rather than merely permissive: each
+      // is written only under `isDm`, so a non-DM patch carrying one of them alone reached
+      // the write transaction with an empty `writeSet` and drizzle threw "No values to set"
+      // — a 500 where the caller deserved a 403. Rejecting outright beats silently no-opping:
+      // a player who edits a statblock should be told they may not, not told it worked.
       if (
         patch.name !== undefined ||
         patch.hpMax !== undefined ||
