@@ -4432,6 +4432,9 @@ export class EncountersService {
       campaignId: encounter.campaignId,
       fingerprint: encounterOpFingerprint(operationFingerprint),
     };
+    // Set by `replayCombatant` below when updateCombatant finds a prior claim for this
+    // key — i.e. this invocation did not perform the write and must not re-broadcast.
+    let replayedPriorClaim = false;
     const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll } | null => {
       if (!response || typeof response !== 'object') return null;
       const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll }>;
@@ -4577,14 +4580,29 @@ export class EncountersService {
           },
           deathSaveEventsInTransaction: true,
           operationResponse: (committed) => ({ combatant: committed, roll: roll! }),
-          replayCombatant: (response) => replayResponse(response)?.combatant ?? null,
+          replayCombatant: (response) => {
+            // `replayCombatant` is invoked ONLY when a prior claim for this key already
+            // exists — both on the in-transaction prior-claim path and after the
+            // EncounterOpRaceMarker. Either way another invocation owns the committed roll
+            // and has already broadcast it, so this one must not emit again. Recording the
+            // fact here rather than inferring it from `roll` being set: `roll` is assigned
+            // in beforeWriteInTransaction and SURVIVES the rolled-back race-loser
+            // transaction, which is exactly why it is not a usable signal (see the null-body
+            // replay finding earlier on this PR).
+            replayedPriorClaim = true;
+            return replayResponse(response)?.combatant ?? null;
+          },
         },
       );
       // `roll` may be the loser's discarded die if `updateCombatant` lost a same-key
       // race, so the authoritative response is always the stored replay.
       const replay = await replayCommittedDeathSave();
       if (replay) {
-        this.rolls.emitDiceRolled?.(replay.roll);
+        // Emit only when THIS invocation actually committed the roll. A retry that was
+        // satisfied by a prior claim still returns the stored response as its body, but
+        // the winner already broadcast that die — emitting again put the same d20 in the
+        // shared dice tray twice, making one death save look like two.
+        if (!replayedPriorClaim) this.rolls.emitDiceRolled?.(replay.roll);
         return replay;
       }
       throw new Error('Death-save dice roll was not persisted');
