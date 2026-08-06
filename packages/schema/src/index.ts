@@ -10617,6 +10617,11 @@ export const Combatant = z.object({
   // Inline homebrew statblock for manual monsters (issue #425). Null when HP/init-only
   // or when actions are expanded from a linked compendium entry at read time.
   statblock: CombatantStatblock.nullable().default(null),
+  // Issue #1926: DM-controlled reveal for a monster/npc's statblock. Server-enforced —
+  // when false, the non-DM read path (redactMonsterHp) nulls `statblock` the same way
+  // it already bands exact HP; the ruleEntryId link itself is not gated by this flag
+  // (compendium reads stay their own authorization surface, unchanged by this issue).
+  statblockRevealed: z.boolean().default(false),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -10757,6 +10762,11 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
   // Inline homebrew statblock edits (issue #425) — dm only, enforced server-side.
   statblock: CombatantStatblock.optional(),
+  // Reveal/hide this monster/npc's statblock to non-DM viewers (issue #1926) — dm
+  // only, enforced server-side (rejected outright for a non-DM patch, alongside
+  // name/hpMax/initMod/tokenSize/initiative above). Toggling logs a combat-log
+  // 'note' event and an audit row.
+  statblockRevealed: z.boolean().optional(),
   // Issue #580: per-intent operation id. `hpDelta` / `spDelta` / `rpDelta` are
   // relative writes — replaying one double-damages. Send a key
   // minted at the click and a retry after a lost response replays the ORIGINAL

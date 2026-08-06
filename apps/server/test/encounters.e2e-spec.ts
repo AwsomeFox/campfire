@@ -2205,6 +2205,201 @@ describe('encounters (e2e)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Issue #1926 — reveal a monster/npc's statblock to players. Server-enforced:
+// `redactMonsterHp` withholds the inline `statblock` from a non-DM read unless
+// the DM-only `statblockRevealed` flag is set, matching the issue #43 monster-HP
+// band pattern (a client-side gate is rejectable — the payload itself must omit
+// the field pre-reveal, not merely the UI).
+// ---------------------------------------------------------------------------
+describe('encounters — issue #1926: statblock reveal to players (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Statblock Reveal Campaign' })).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  const SECRET_STATBLOCK = {
+    ac: 15,
+    abilityScores: { STR: 18, DEX: 10, CON: 16, INT: 6, WIS: 8, CHA: 5 },
+    actions: [],
+    resources: {},
+    spellSlots: {},
+    traits: [],
+    notes: 'secret DM notes never sent to a player pre-reveal',
+  };
+
+  async function addRevealBoss(server: unknown, hpMax = 20): Promise<{ encounterId: number; combatantId: number }> {
+    const encRes = await request(server as never)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Reveal Fight', hidden: false });
+    const encounterId = encRes.body.id;
+    const add = await request(server as never)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Troll', hpMax, statblock: SECRET_STATBLOCK });
+    expect(add.status).toBe(201);
+    return { encounterId, combatantId: add.body.id as number };
+  }
+
+  it('defaults to statblockRevealed=false; a non-DM read omits the inline statblock entirely, the DM always sees it', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId, combatantId } = await addRevealBoss(server);
+
+    const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const dmBoss = (dmRes.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: unknown }>).find(
+      (c) => c.id === combatantId,
+    )!;
+    expect(dmBoss.statblockRevealed).toBe(false);
+    expect(dmBoss.statblock).not.toBeNull();
+
+    for (const headers of [player, viewer]) {
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
+      const boss = (res.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: unknown }>).find(
+        (c) => c.id === combatantId,
+      )!;
+      expect(boss.statblockRevealed).toBe(false);
+      expect(boss.statblock).toBeNull();
+      // Assert on the raw payload, not just the parsed field — a leak nested
+      // anywhere else in the JSON must fail this too.
+      expect(JSON.stringify(boss)).not.toMatch(/secret DM notes/);
+    }
+  });
+
+  it('a non-DM PATCH carrying statblockRevealed is rejected 403 COMBATANT_FIELD_DM_ONLY and leaves the flag untouched', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId, combatantId } = await addRevealBoss(server);
+
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(player)
+      .send({ statblockRevealed: true });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('COMBATANT_FIELD_DM_ONLY');
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const boss = (after.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: unknown }>).find(
+      (c) => c.id === combatantId,
+    )!;
+    expect(boss.statblockRevealed).toBe(false);
+    expect(boss.statblock).toBeNull();
+  });
+
+  it('a DM toggle reveals the statblock to non-DM readers, logs a combat-log note event and an audit row with the real actor; hiding it again removes it from the next read', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const { encounterId, combatantId } = await addRevealBoss(server);
+
+    const auditBefore = (await db.select().from(auditLog).where(eq(auditLog.entityId, combatantId))).length;
+
+    const reveal = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ statblockRevealed: true });
+    expect(reveal.status).toBe(200);
+    expect(reveal.body.statblockRevealed).toBe(true);
+
+    // The core regression: a genuinely non-DM GET now carries the statblock.
+    const playerRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const playerBoss = (
+      playerRes.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number } | null }>
+    ).find((c) => c.id === combatantId)!;
+    expect(playerBoss.statblockRevealed).toBe(true);
+    expect(playerBoss.statblock).not.toBeNull();
+    expect(playerBoss.statblock!.ac).toBe(15);
+
+    const events = await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId));
+    const revealEvent = events.find((e) => e.type === 'note' && e.detail.includes('revealed to players'));
+    expect(revealEvent).toBeDefined();
+    expect(revealEvent!.target).toBe('Troll');
+    expect(revealEvent!.targetId).toBe(combatantId);
+
+    const auditRows = await db.select().from(auditLog).where(eq(auditLog.entityId, combatantId));
+    expect(auditRows.length).toBe(auditBefore + 1);
+    const lastAudit = auditRows[auditRows.length - 1];
+    expect(lastAudit.action).toBe('encounter.combatant.update');
+    expect(lastAudit.actor).toContain('dm-1');
+
+    const hide = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ statblockRevealed: false });
+    expect(hide.status).toBe(200);
+    expect(hide.body.statblockRevealed).toBe(false);
+
+    const playerAfterHide = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const bossAfterHide = (
+      playerAfterHide.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: unknown }>
+    ).find((c) => c.id === combatantId)!;
+    expect(bossAfterHide.statblockRevealed).toBe(false);
+    expect(bossAfterHide.statblock).toBeNull();
+
+    const hideEvent = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId))
+    ).find((e) => e.type === 'note' && e.detail.includes('hidden again'));
+    expect(hideEvent).toBeDefined();
+
+    // A no-op re-send (already false) does not append a second hide event or audit row.
+    const auditAfterHide = (await db.select().from(auditLog).where(eq(auditLog.entityId, combatantId))).length;
+    const noop = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ statblockRevealed: false });
+    expect(noop.status).toBe(200);
+    expect((await db.select().from(auditLog).where(eq(auditLog.entityId, combatantId))).length).toBe(auditAfterHide + 1);
+    const noteEventsAfterNoop = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId))
+    ).filter((e) => e.type === 'note' && e.detail.includes('hidden again'));
+    expect(noteEventsAfterNoop.length).toBe(1);
+  });
+
+  it('reveal never affects HP banding — exact HP stays redacted for a non-DM regardless of statblockRevealed', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId, combatantId } = await addRevealBoss(server, 100);
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ hpSet: 40 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ statblockRevealed: true });
+
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const boss = (
+      res.body.combatants as Array<{ id: number; statblock: unknown; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>
+    ).find((c) => c.id === combatantId)!;
+    expect(boss.statblock).not.toBeNull();
+    expect(boss.hpCurrent).toBeNull();
+    expect(boss.hpMax).toBeNull();
+    expect(boss.hpBand).toBe('bloodied');
+  });
+
+  it('a hidden encounter still 404s a non-DM regardless of statblockRevealed', async () => {
+    const server = ctx.app.getHttpServer();
+    const encRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Hidden Reveal Fight', hidden: true });
+    const encounterId = encRes.body.id;
+    const add = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Shadow Troll', hpMax: 10, statblock: SECRET_STATBLOCK });
+    const combatantId = add.body.id;
+    const reveal = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ statblockRevealed: true });
+    expect(reveal.status).toBe(200);
+
+    expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(player)).status).toBe(404);
+    expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(viewer)).status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Issue #532 — optimistic concurrency for encounters. Live combat is the
 // highest-contention entity (the same encounter open across multiple DM devices
 // — a laptop + a tablet at the table), so PATCH /encounters/:id enforces the

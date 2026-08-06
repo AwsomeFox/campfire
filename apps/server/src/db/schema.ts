@@ -2139,6 +2139,10 @@ export const combatants = sqliteTable('combatants', {
   conditionInstances: text('condition_instances'),
   // Issue #425: inline homebrew statblock JSON (CombatantStatblock) for manual monsters.
   statblockJson: text('statblock_json'),
+  // Issue #1926: DM-controlled reveal of this combatant's statblock to non-DM viewers.
+  // NOT NULL DEFAULT false — added by migration on older DBs (see
+  // db/db.module.ts migrateCombatantsTableForStatblockRevealed1926).
+  statblockRevealed: integer('statblock_revealed', { mode: 'boolean' }).notNull().default(false),
 });
 
 /** One-shot, short-lived exact-row snapshots for combatant removal undo (issue #1469). */

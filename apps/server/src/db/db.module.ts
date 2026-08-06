@@ -2820,6 +2820,24 @@ function migrateCombatantsTableForStatblockJson(sqlite: Database.Database): void
   }
 }
 
+/**
+ * Issue #1926 — DM-controlled reveal of a monster/npc's statblock to non-DM viewers.
+ * Single ADD COLUMN (no follow-up UPDATE): DEFAULT 0 (not revealed) is already the
+ * correct/safe backfill for every pre-existing combatant, not merely a permissive
+ * placeholder — an upgrade must never retroactively reveal a monster's statblock
+ * that was withheld before this column existed.
+ */
+function migrateCombatantsTableForStatblockRevealed1926(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'statblock_revealed')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN statblock_revealed INTEGER NOT NULL DEFAULT 0');
+  }
+}
+
 function migrateCombatantsTableForNpcDispositionSnapshot(sqlite: Database.Database): void {
   const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
   if (!hasTable) return;
@@ -5165,6 +5183,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // name, so no installation can have recorded the old numbers.
   { name: '0164_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
   { name: '0165_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
+  // 0166 is reserved by a concurrent backlog worker's in-flight migration on another
+  // branch; this claims the next free ordinal to avoid a collision at merge time.
+  { name: '0167_combatants_statblock_revealed_1926', run: migrateCombatantsTableForStatblockRevealed1926 },
 ];
 
 /**
