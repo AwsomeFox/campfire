@@ -238,6 +238,8 @@ export class MeController {
           diceTheme: 'nocturne',
           timeFormat: 'system',
           animateOthersRolls: true,
+          canCreateCampaigns: true,
+          colorVisionAssist: false,
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },

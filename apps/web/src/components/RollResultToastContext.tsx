@@ -215,6 +215,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
           dice={overlayDice}
           phase={overlay.phase}
           theme={me?.user?.diceTheme}
+          colorVisionAssist={me?.user?.colorVisionAssist ?? false}
           onSettled={handleOverlaySettled}
         />
       )}

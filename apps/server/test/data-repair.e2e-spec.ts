@@ -80,8 +80,32 @@ describe('Issue #729 data repair safety', () => {
     await service.undo(applied.actionId, 'admin', 'admin');
     expect(db.prepare('SELECT location_id FROM encounters WHERE id=10').get()).toEqual({ location_id: 777 });
     expect(audit.log).toHaveBeenCalledWith(expect.objectContaining({ action: 'data-repair.undo' }));
-    expect(JSON.stringify(service.bundle())).not.toContain('777');
-    expect(JSON.stringify(service.bundle())).not.toContain(action.backup_path);
+    // Structural, not a substring match against the serialized blob (#2018). The bundle
+    // carries roughly ten ISO timestamps, and `JSON.stringify(...).not.toContain('777')`
+    // matched any of them whose milliseconds read `.777Z` — so it failed at random, on
+    // branches that could not have caused it, while passing for the wrong reason the rest
+    // of the time: the bundle has no location_id in it at all, so the assertion never
+    // exercised the leak it names.
+    //
+    // What it means to say is that the bundle omits the two fields carrying sensitive
+    // detail — the raw referenced value and the on-disk backup location — both of which
+    // ARE present on the service's own findings()/actions rows.
+    const bundle = service.bundle() as {
+      findings: Array<Record<string, unknown>>;
+      repairs: Array<Record<string, unknown>>;
+    };
+    // Without these two, the loops below pass vacuously on an empty bundle.
+    expect(bundle.findings.length).toBeGreaterThan(0);
+    expect(bundle.repairs.length).toBeGreaterThan(0);
+    for (const finding of bundle.findings) expect(Object.keys(finding)).not.toContain('reference_value');
+    for (const repair of bundle.repairs) expect(Object.keys(repair)).not.toContain('backup_path');
+    // Value equality, not substring, so a leak under some OTHER key is still caught while a
+    // timestamp that merely contains those digits is not: no string is equal to '777' by
+    // accident the way one can contain it.
+    const emitted = [...bundle.findings, ...bundle.repairs].flatMap((row) => Object.values(row));
+    expect(emitted).not.toContain(777);
+    expect(emitted).not.toContain('777');
+    expect(emitted).not.toContain(action.backup_path);
 
     const cross = (service.findings('open') as any[]).find(f => f.child_row_id === 11)!;
     expect(() => service.preview({ findingId: cross.id, action: 'relink', replacementParentId: 20, expectedVersion: cross.version })).toThrow(BadRequestException);

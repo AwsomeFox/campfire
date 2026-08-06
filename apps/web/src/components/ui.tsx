@@ -263,7 +263,16 @@ export function hpTone(current: number, max: number): '' | 'low' | 'crit' {
   return pct < 25 ? 'crit' : pct < 50 ? 'low' : '';
 }
 
-export function HpBar({ current, max }: { current: number; max: number }) {
+/**
+ * Color-vision-assist glyph for an HP danger tone (issue #1942). `low` and
+ * `crit` each get a distinct glyph so the escalation reads without color;
+ * healthy (`''`) has none — there is nothing to warn about.
+ */
+export function hpToneGlyph(tone: '' | 'low' | 'crit'): string | null {
+  return tone === 'crit' ? '▲▲' : tone === 'low' ? '▲' : null;
+}
+
+export function HpBar({ current, max, colorVisionAssist = false }: { current: number; max: number; colorVisionAssist?: boolean }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (current / max) * 100)) : 0;
   const tone = hpTone(current, max);
   // Flash + shake on HP change (issue #67). Track the previous value across
@@ -278,13 +287,26 @@ export function HpBar({ current, max }: { current: number; max: number }) {
     prev.current = current;
   }, [current]);
   const flashClass = pulse === 'damage' ? 'cf-hp-flash-damage' : pulse === 'heal' ? 'cf-hp-flash-heal' : '';
+  const glyph = colorVisionAssist ? hpToneGlyph(tone) : null;
   return (
-    <div className={`cf-hp ${tone} ${pulse === 'damage' ? 'cf-anim-hp-damage' : ''}`}>
-      <div
-        className={flashClass}
-        style={{ width: `${pct}%` }}
-        onAnimationEnd={() => setPulse(null)}
-      />
+    <div className="flex items-center" style={{ gap: 4 }}>
+      <div className={`cf-hp ${tone} ${pulse === 'damage' ? 'cf-anim-hp-damage' : ''}`} style={{ flex: 1 }}>
+        <div
+          className={flashClass}
+          style={{ width: `${pct}%` }}
+          onAnimationEnd={() => setPulse(null)}
+        />
+      </div>
+      {glyph && (
+        <span
+          data-testid="hp-tone-glyph"
+          data-tone={tone}
+          aria-hidden="true"
+          style={{ fontSize: 8, lineHeight: 1, flex: 'none', color: tone === 'crit' ? 'var(--cf-danger)' : 'var(--color-accent)' }}
+        >
+          {glyph}
+        </span>
+      )}
     </div>
   );
 }

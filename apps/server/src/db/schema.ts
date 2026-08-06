@@ -1019,6 +1019,12 @@ export const users = sqliteTable('users', {
   diceTheme: text('dice_theme').notNull().default('nocturne'),
   // Whether to play spectator tumble/crit animations for other players' rolls (issue #1899).
   animateOthersRolls: integer('animate_others_rolls', { mode: 'boolean' }).notNull().default(true),
+  // Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
+  // campaign-creation policy (settings.campaignCreationPolicy). Ignored entirely under
+  // the 'everyone'/'admins_only' policies.
+  canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(false),
+  // Color-vision-assist mode: adds non-color channels to combat indicators (issue #1942).
+  colorVisionAssist: integer('color_vision_assist', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -1051,6 +1057,19 @@ export const passwordResetRequests = sqliteTable('password_reset_requests', {
 export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
+});
+
+// Issue #851 — the safe request/approval flow for a restricted campaign-creation
+// policy. Mirrors passwordResetRequests above: a user files a 'pending' row, an
+// admin approves or denies it (approving flips users.canCreateCampaigns to true).
+export const campaignCreationRequests = sqliteTable('campaign_creation_requests', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  status: text('status').notNull().default('pending'), // 'pending' | 'approved' | 'denied'
+  note: text('note').notNull().default(''),
+  requestedAt: text('requested_at').notNull(),
+  decidedAt: text('decided_at'),
+  decidedBy: text('decided_by'), // audit actor string (auditActor()), null until decided
 });
 
 /**
@@ -1382,8 +1401,11 @@ export const rulePacks = sqliteTable('rule_packs', {
 export const ruleEntries = sqliteTable('rule_entries', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   packId: integer('pack_id').notNull(),
-  // NULL for globally installed/open-pack entries. Non-null rows are private to
-  // this campaign and must only be read through campaign homebrew endpoints.
+  // NULL for globally installed/open-pack entries. Non-null rows are the owning campaign's
+  // own homebrew — readable through the campaign homebrew endpoints AND (issue #1927) through
+  // the encounter generator/preview candidate queries, scoped by campaign membership and
+  // `isNull(archivedAt)` there; every reader must still scope by this column (or archivedAt),
+  // never read cross-campaign.
   campaignId: integer('campaign_id'),
   slug: text('slug').notNull(),
   name: text('name').notNull(),

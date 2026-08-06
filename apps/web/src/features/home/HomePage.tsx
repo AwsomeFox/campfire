@@ -3,9 +3,9 @@
  * design's "Campaign hub" screen (card grid with cover strip + dashed
  * "New campaign" tile). Grid of campaign tiles plus a create-campaign tile
  * that launches the full NewCampaignWizard overlay (details -> rule system
- * -> POST + PATCH ruleSystem). Any user may create a campaign.
+ * -> POST + PATCH ruleSystem). Campaign creation and import are gated by instance governance (issue #851) — policy tier, per-user and server-wide limits, and the organizer request flow. The tiles below reflect the caller's allowance; the server re-enforces it on every write regardless.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
@@ -22,15 +22,26 @@ import {
   type CampaignChooserFilters,
 } from '../../lib/campaignSwitcherRoute';
 import { confirmDiscardUnsavedWork } from '../../lib/unsavedWork';
-import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
+import { Btn, Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
-import type { Campaign, PermanentDeletionResult, Role } from '@campfire/schema';
+import type { Campaign, CampaignAllowance, CampaignAllowanceReason, PermanentDeletionResult, Role } from '@campfire/schema';
 import { PageTitle } from '../../components/PageTitle';
 import { CampaignCover } from '../../components/CampaignCover';
 import { timeAgo, useTimeTick } from '../../lib/format';
 import { formatCampaignSessionPosition } from '../../lib/sessionPosition';
 import { UIIcon } from '../../components/UIIcon';
+
+/** Issue #851 — plain-language reason a blocked create/import shows. */
+const CAMPAIGN_ALLOWANCE_REASON_COPY: Record<CampaignAllowanceReason, string> = {
+  ok: '',
+  policy_admins_only: 'Only server admins may create or import a campaign on this server.',
+  policy_requires_approval: 'Campaign creation is restricted to approved organizers on this server.',
+  limit_active_per_user: "You have reached this server's limit on active campaigns per user.",
+  limit_total_per_user: "You have reached this server's limit on total campaigns per user.",
+  limit_active_server_wide: 'This server has reached its limit on active campaigns.',
+  limit_total_server_wide: 'This server has reached its limit on total campaigns.',
+};
 
 /** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
 function NewCampaignTile({ onClick }: { onClick: () => void }) {
@@ -175,6 +186,84 @@ function ImportCampaignTile({
         {importing ? 'Importing…' : 'Import from export (.zip / .json)'}
       </button>
     </>
+  );
+}
+
+/**
+ * Issue #851 — the create/import entry points, gated by the caller's effective
+ * campaign-creation allowance. Renders the normal tiles (with a small usage line
+ * when a limit is configured) when allowed; otherwise a blocked notice, and — only
+ * when the block is the policy's approval requirement (not a numeric limit, and not
+ * "admins only", neither of which a request can fix) — a Request access button.
+ * The server re-enforces all of this regardless; this is a display aid only.
+ */
+function CampaignCreationEntryPoints({
+  allowance,
+  onWizardOpen,
+  onImported,
+  onError,
+  onRequestFiled,
+}: {
+  allowance: CampaignAllowance | null;
+  onWizardOpen: () => void;
+  onImported: (c: Campaign) => void | Promise<void>;
+  onError: (message: string) => void;
+  onRequestFiled: () => void;
+}) {
+  const [requesting, setRequesting] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
+
+  async function requestAccess() {
+    setRequesting(true);
+    setRequestError(null);
+    try {
+      await api.post(`${API}/campaigns/creation-requests`, {});
+      onRequestFiled();
+    } catch (err) {
+      setRequestError(err instanceof ApiError ? err.message : 'Could not file the request.');
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  // Allowance not loaded yet (or the fetch failed) — don't block on a display aid;
+  // show the tiles as usual and let the server be the real gate.
+  if (!allowance || allowance.canCreate) {
+    const usageLine =
+      allowance && allowance.activePerUser.max != null
+        ? `${allowance.activePerUser.used} of ${allowance.activePerUser.max} active campaigns used`
+        : null;
+    return (
+      <>
+        <NewCampaignTile onClick={onWizardOpen} />
+        <ImportCampaignTile onImported={onImported} onError={onError} />
+        {usageLine && (
+          <p className="text-muted col-span-full" style={{ fontSize: 11, margin: 0 }}>
+            {usageLine}
+          </p>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <div className="col-span-full space-y-2 text-sm text-slate-300" style={{ fontSize: 12.5 }}>
+      <p style={{ margin: 0 }}>{CAMPAIGN_ALLOWANCE_REASON_COPY[allowance.reason] || 'Campaign creation is currently restricted on this server.'}</p>
+      {allowance.reason === 'policy_requires_approval' && (
+        <>
+          {allowance.hasPendingRequest ? (
+            <p className="text-muted" style={{ margin: 0 }}>
+              Your request is pending review by a server admin.
+            </p>
+          ) : (
+            <Btn density="compact" className="text-xs" onClick={() => void requestAccess()} disabled={requesting}>
+              {requesting ? 'Requesting…' : 'Request organizer access'}
+            </Btn>
+          )}
+        </>
+      )}
+      {requestError && <ErrorNote message={requestError} />}
+    </div>
   );
 }
 
@@ -397,6 +486,21 @@ export function HomePage() {
     status: 'all',
   });
 
+  // Issue #851 — the caller's effective campaign-creation allowance, fetched once
+  // (and refreshed after a create/import/request) so the wizard/import entry
+  // points can show real numbers or a blocked notice before the caller commits to
+  // the flow. Display aid only — the server re-enforces this regardless.
+  const [allowance, setAllowance] = useState<CampaignAllowance | null>(null);
+  const refreshAllowance = useCallback(() => {
+    void api
+      .get<CampaignAllowance>(`${API}/campaigns/allowance`)
+      .then(setAllowance)
+      .catch(() => setAllowance(null));
+  }, []);
+  useEffect(() => {
+    refreshAllowance();
+  }, [refreshAllowance]);
+
   const sourcePath = switchFromPath(location.state);
 
   function closeWizard() {
@@ -477,6 +581,7 @@ export function HomePage() {
     // refresh (issue #103). allSettled so an API hiccup on one refresh still
     // lets us proceed rather than trapping the user on the wizard.
     await Promise.allSettled([refresh(), refreshAuth()]);
+    refreshAllowance();
     closeWizard();
     navigate(`/c/${c.id}`);
   }
@@ -510,10 +615,12 @@ export function HomePage() {
             New here as a player? Follow a campaign invite, or ask a DM or server admin to add your account — no
             need to create a campaign.
           </p>
-          <NewCampaignTile onClick={() => setWizardOpen(true)} />
-          <ImportCampaignTile
+          <CampaignCreationEntryPoints
+            allowance={allowance}
+            onWizardOpen={() => setWizardOpen(true)}
             onImported={onCampaignCreated}
             onError={(m) => setImportError(m)}
+            onRequestFiled={refreshAllowance}
           />
           {importError && <ErrorNote message={importError} />}
         </div>
@@ -616,13 +723,13 @@ export function HomePage() {
               />
             ))}
             {!filtersActive && (
-              <>
-                <NewCampaignTile onClick={() => setWizardOpen(true)} />
-                <ImportCampaignTile
-                  onImported={onCampaignCreated}
-                  onError={(m) => setImportError(m)}
-                />
-              </>
+              <CampaignCreationEntryPoints
+                allowance={allowance}
+                onWizardOpen={() => setWizardOpen(true)}
+                onImported={onCampaignCreated}
+                onError={(m) => setImportError(m)}
+                onRequestFiled={refreshAllowance}
+              />
             )}
           </div>
           {filtersActive && filtered.length === 0 && (

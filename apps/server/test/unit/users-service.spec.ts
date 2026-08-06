@@ -100,11 +100,33 @@ describe('UsersService unit tests', () => {
         textSize: 'large',
         diceTheme: 'cyberpunk_neon',
         timeFormat: '24h',
+        colorVisionAssist: true,
       },
       adminActor,
     );
     expect(prefUpdated.accentColor).toBe('#123456');
     expect(prefUpdated.textSize).toBe('large');
+    expect(prefUpdated.colorVisionAssist).toBe(true);
+  });
+
+  it('defaults colorVisionAssist to false and round-trips it independently of other preferences (#1942)', async () => {
+    const created = await usersService.create({
+      username: 'ely',
+      displayName: 'Ely',
+      password: 'password123',
+    });
+    expect(created.colorVisionAssist).toBe(false);
+
+    const enabled = await usersService.updatePreferences(created.id, { colorVisionAssist: true }, adminActor);
+    expect(enabled.colorVisionAssist).toBe(true);
+    // Untouched preferences are not disturbed by a partial update.
+    expect(enabled.textSize).toBe('default');
+
+    const fetched = await usersService.getOrThrow(created.id);
+    expect(fetched.colorVisionAssist).toBe(true);
+
+    const disabled = await usersService.updatePreferences(created.id, { colorVisionAssist: false }, adminActor);
+    expect(disabled.colorVisionAssist).toBe(false);
   });
 
   it('creates SSO user and syncs OIDC role', async () => {
