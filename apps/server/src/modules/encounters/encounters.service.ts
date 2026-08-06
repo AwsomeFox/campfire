@@ -4575,6 +4575,7 @@ export class EncountersService {
       if (replayed) return replayed;
       if (roll === null) throw new Error('Death-save dice roll was not persisted');
       const persistedRoll = roll as DiceRoll;
+      this.rolls.emitDiceRolled?.(persistedRoll);
 
       return { combatant: updated, roll: persistedRoll };
     } catch (err) {
@@ -6111,6 +6112,7 @@ export class EncountersService {
     const initModel = initiativeModelForAdapter(adapter);
     let rolled: Array<{ id: number; initiative: number; breakdown: CombatantInitiativeBreakdown; name: string }> = [];
     let freshEncounter = encounterRow;
+    const recordedRolls: DiceRoll[] = [];
 
     // The roster read, initiative assignment, log rows, and any turn-index repair must be
     // one SQLite transaction. Otherwise two devices can both see the same unrolled roster,
@@ -6223,7 +6225,7 @@ export class EncountersService {
       // roll must never leak into it (matches the per-combatant roll's same rule below).
       if (!fresh.hidden) {
         for (const entry of diceLogEntries) {
-          this.rolls.recordInTransaction(
+          const rec = this.rolls.recordInTransaction(
             tx,
             fresh.campaignId,
             {
@@ -6237,6 +6239,7 @@ export class EncountersService {
             },
             user,
           );
+          recordedRolls.push(rec);
         }
       }
       const cases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`), sql` `);
@@ -6306,6 +6309,11 @@ export class EncountersService {
     });
 
     this.emitEncounterEvent('encounter.updated', freshEncounter.campaignId, encounterId, freshEncounter.hidden);
+    if (!freshEncounter.hidden) {
+      for (const rec of recordedRolls) {
+        this.rolls.emitDiceRolled?.(rec);
+      }
+    }
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     return { ...snapshot, rolledCount: rolled.length };
@@ -6578,6 +6586,9 @@ export class EncountersService {
         throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       }
       this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
+      if (roll && !freshEncounterRow.hidden) {
+        this.rolls.emitDiceRolled?.(roll);
+      }
       return { combatant: committed, roll };
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but before

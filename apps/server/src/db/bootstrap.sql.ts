@@ -920,10 +920,7 @@ CREATE TABLE IF NOT EXISTS users (
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
   dice_theme TEXT NOT NULL DEFAULT 'nocturne',
-  -- Fails CLOSED on a fresh install (review): an insert that forgets this field must not
-  -- silently grant organizer eligibility under the 'approved_organizers' policy. The
-  -- permissive value is correct only for the ADD COLUMN backfill of pre-existing accounts,
-  -- which migration 0164 does with an explicit UPDATE rather than a column default.
+  animate_others_rolls INTEGER NOT NULL DEFAULT 1,
   can_create_campaigns INTEGER NOT NULL DEFAULT 0,
   color_vision_assist INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,

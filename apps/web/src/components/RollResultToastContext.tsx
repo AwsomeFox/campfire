@@ -191,8 +191,12 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     dismiss();
   }, [roll, rollApplyHandler, rollApplyDisabled, dismiss]);
 
+  const { me } = useAuth();
+  const isOwnRoll = roll != null && me?.user?.id != null && String(roll.rollerUserId) === String(me.user.id);
+
   const canApply =
     !rollApplyDisabled &&
+    isOwnRoll &&
     roll != null &&
     activeApplyHandler != null &&
     (rollApplyHandler != null || looksLikeDamageRoll(roll));
@@ -200,8 +204,6 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const overlayDice = overlay
     ? buildOverlayDice(overlay.sides, overlay.values, overlay.kept)
     : [];
-
-  const { me } = useAuth();
 
   return (
     <RollResultToastContext.Provider

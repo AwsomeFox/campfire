@@ -267,7 +267,24 @@ function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
   const hasDiceTheme = columns.some((c) => c.name === 'dice_theme');
   if (hasDiceTheme) return;
 
-  sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+}
+
+/**
+ * Migration for DBs created before spectator roll animation toggle (issue #1899):
+ * `users.animate_others_rolls` didn't exist. Plain NOT NULL DEFAULT 1 ADD COLUMN.
+ */
+function migrateUsersTableForAnimateOthersRolls(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasAnimate = columns.some((c) => c.name === 'animate_others_rolls');
+  if (hasAnimate) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN animate_others_rolls INTEGER NOT NULL DEFAULT 1');
 }
 
 /**
@@ -5188,10 +5205,6 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
   { name: '0161_character_combatant_speed_1910', run: migrateCharacterCombatantSpeed1910 },
   { name: '0162_ai_dm_seats_comprehension_profile_874', run: migrateAiDmSeatsTableForComprehensionProfile874 },
-  // #1502 originally declared 0162, which #874 claimed first on main (eca15e17). Renumbered
-  // to the next free ordinal as a deliberate pre-merge step — this migration has never run
-  // against a real database under either name, so no installation can have recorded 0162 for
-  // it, and upgrade compatibility is unaffected.
   { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
   // #851 shared-instance governance: organizer eligibility flag + the creation
   // request/approval table. Originally declared 0162/0163; #874 claimed 0162 on main
@@ -5205,9 +5218,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // real database under 0164, so no installation can have recorded it, and upgrade
   // compatibility is unaffected.
   { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
-  // #1942 landed 0166 (30536189) while this branch was open; 0167 is the next free
-  // ordinal per the run ledger. Never applied under any other name.
-  { name: '0167_combatants_statblock_revealed_1926', run: migrateCombatantsTableForStatblockRevealed1926 },
+  { name: '0167_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
+  // Renumbered twice while this branch was open: #1942 took 0166, then #1899 took 0167
+  // on main. 0168 is the next free ordinal. This migration has never run against a real
+  // database under 0166 or 0167, so no installation can have recorded either name and
+  // upgrade compatibility is unaffected.
+  { name: '0168_combatants_statblock_revealed_1926', run: migrateCombatantsTableForStatblockRevealed1926 },
 ];
 
 /**

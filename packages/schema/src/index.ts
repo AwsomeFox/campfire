@@ -6570,6 +6570,8 @@ export const User = z.object({
   diceTheme: DiceTheme.default('nocturne'),
   /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
   timeFormat: TimeFormat.default('system'),
+  /** Whether to play spectator tumble/crit animations for other players' rolls (issue #1899). */
+  animateOthersRolls: z.boolean().default(true),
   /**
    * Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
    * campaign-creation policy. Defaults FALSE, matching the database column and every
@@ -6613,6 +6615,7 @@ export const PreferencesUpdate = z.object({
   textSize: TextSize.optional(),
   diceTheme: DiceTheme.optional(),
   timeFormat: TimeFormat.optional(),
+  animateOthersRolls: z.boolean().optional(),
   colorVisionAssist: z.boolean().optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
@@ -11606,6 +11609,9 @@ export const CampaignEventType = z.enum([
   // permission-checked REST endpoints, never carried on the wire.
   'check.requested',
   'check.resolved',
+  // Issue #1899: shared dice roll feed tick. Thin id-only variant so connected clients can
+  // refetch the roll log and trigger spectator animations without carrying faces on wire.
+  'dice.rolled',
   // Issue #867: campaign moved to Trash. SSE controllers tear down EVERY open
   // stream on the campaign (control signal — filtered from the data path like
   // membership.revoked). A reconnect hits requireMember and 404s.
@@ -11640,6 +11646,13 @@ export const CampaignEventType = z.enum([
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('dice.rolled'),
+    campaignId: Id,
+    rollId: Id,
+    encounterId: Id.optional(),
+    at: IsoDate,
+  }),
   z.object({ type: z.literal('party.rest.updated'), campaignId: Id, batchId: Id, characterIds: z.array(Id), at: IsoDate }),
   z.object({
     type: z.literal('encounter.updated'),
