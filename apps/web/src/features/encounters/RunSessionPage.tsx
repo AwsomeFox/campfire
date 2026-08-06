@@ -40,6 +40,7 @@ import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
+import { TurnElapsedChip } from './TurnElapsedChip';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
 import { detectSseTurnBeat, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
@@ -3299,6 +3300,16 @@ export default function RunSessionPage() {
             {encounter.turnPhase === 'lair' ? ` · Lair (init ${LAIR_INITIATIVE_COUNT})` : ''}
           </span>
         )}
+        {/* Turn timer (issue #1935): DM-cockpit elapsed chip next to the round tag. Players
+            get the same information (only once a limit is set) via PlayerVitalsHeader below,
+            not here — see TurnElapsedChip's audience doc. */}
+        {isDm && (
+          <TurnElapsedChip
+            turnStartedAt={encounter.turnStartedAt}
+            turnTimerSeconds={encounter.turnTimerSeconds}
+            audience="dm"
+          />
+        )}
         <DifficultyBadge difficulty={difficulty} />
         {isDm && <PrintControl resetKey={encounter.id} className="ml-auto" />}
         <span
@@ -3391,6 +3402,10 @@ export default function RunSessionPage() {
             setConfirmReopen(true);
           }}
           onRequestDelete={() => setConfirmDelete(true)}
+          turnTimerSeconds={encounter.turnTimerSeconds}
+          onSetTurnTimerSeconds={(seconds) => {
+            void queueEncounterPatch({ turnTimerSeconds: seconds });
+          }}
         />
       </div>
 
@@ -3746,6 +3761,8 @@ export default function RunSessionPage() {
           currentCombatantId={currentCombatantId}
           movementDefault={movementDefault}
           colorVisionAssist={me?.user.colorVisionAssist ?? false}
+          turnStartedAt={encounter.turnStartedAt}
+          turnTimerSeconds={encounter.turnTimerSeconds}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);

@@ -9846,3 +9846,85 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #1935 — turn timer: turnTimerSeconds PATCH authorization + turnStartedAt's
+// PATCH-proofing and REST/MCP-shared exposure on every role's GET. The stamping
+// itself (start/next-turn/undo/end/reopen) is covered at the service layer in
+// test/unit/encounters-turn-timer.spec.ts — this block only exercises what needs
+// the real HTTP/DTO layer: role gating and the strict-schema PATCH rejection.
+// ---------------------------------------------------------------------------
+describe('encounters — turn timer (issue #1935, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Turn Timer Campaign' })).body.id;
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Timer Drill', hidden: false });
+    encounterId = created.body.id;
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Goblin', hpMax: 10 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('DM PATCH turnTimerSeconds succeeds and is reflected on GET', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ turnTimerSeconds: 90 });
+    expect(res.status).toBe(200);
+    expect(res.body.turnTimerSeconds).toBe(90);
+
+    const got = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(got.body.turnTimerSeconds).toBe(90);
+  });
+
+  it('non-DM PATCH of turnTimerSeconds is rejected 403', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ turnTimerSeconds: 60 });
+    expect(res.status).toBe(403);
+
+    // Unchanged — the rejected caller's value never landed.
+    const got = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(got.body.turnTimerSeconds).toBe(90);
+  });
+
+  it('a negative turnTimerSeconds is rejected 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ turnTimerSeconds: -30 });
+    expect(res.status).toBe(400);
+  });
+
+  it('turnStartedAt in a PATCH body is rejected 400 — it is not part of EncounterUpdate at all (strict DTO)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ turnStartedAt: '2020-01-01T00:00:00.000Z' });
+    expect(res.status).toBe(400);
+  });
+
+  it('turnStartedAt and turnTimerSeconds are exposed identically to a DM and a player GET (not a secret)', async () => {
+    const server = ctx.app.getHttpServer();
+    const start = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(start.status).toBe(201);
+    // Typed assertions, not just "not null" — an absent (undefined) field would
+    // otherwise pass a bare `.not.toBeNull()` check just as well as a real stamp.
+    expect(typeof start.body.turnStartedAt).toBe('string');
+    expect(Number.isNaN(Date.parse(start.body.turnStartedAt))).toBe(false);
+
+    const dmGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const playerGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(playerGet.status).toBe(200);
+    expect(typeof playerGet.body.turnTimerSeconds).toBe('number');
+    expect(playerGet.body.turnStartedAt).toBe(dmGet.body.turnStartedAt);
+    expect(playerGet.body.turnTimerSeconds).toBe(dmGet.body.turnTimerSeconds);
+  });
+});

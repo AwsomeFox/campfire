@@ -1352,6 +1352,8 @@ CREATE TABLE IF NOT EXISTS encounters (
   aftermath_dismissed_at TEXT,
   aftermath_xp_awarded_at TEXT,
   aftermath_loot TEXT,
+  turn_started_at TEXT,
+  turn_timer_seconds INTEGER NOT NULL DEFAULT 0,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
