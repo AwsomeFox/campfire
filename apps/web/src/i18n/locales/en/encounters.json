@@ -263,15 +263,26 @@
     },
     "checks": {
       "requestCheck": "Request a check",
-      "character": "Character",
-      "chooseCharacter": "Choose a character…",
+      "targets": "Targets",
+      "wholeParty": "Whole party ({{count}})",
+      "noCharacters": "No characters to target.",
       "check": "Check",
       "chooseCheck": "Choose a check…",
-      "pickCharacterFirst": "Pick a character first",
+      "pickCharacterFirst": "Pick a target first",
       "dc": "DC",
       "consequenceOptional": "Consequence (optional)",
       "rolled": "Rolled ",
-      "consequence": "Consequence: "
+      "consequence": "Consequence: ",
+      "board": {
+        "title": "Group checks",
+        "tallyPassed": "{{pass}} of {{total}} passed",
+        "tallyResolved": "{{resolved}} of {{total}} resolved",
+        "pending": "Pending",
+        "passed": "Passed",
+        "failed": "Failed",
+        "resolved": "Resolved",
+        "majoritySucceeds": "Group succeeds (half or more)"
+      }
     },
     "wizard": {
       "step1": "1. Parameters",

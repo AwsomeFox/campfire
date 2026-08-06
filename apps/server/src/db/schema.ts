@@ -1789,6 +1789,7 @@ export const checkRequests = sqliteTable('check_requests', {
   rollId: integer('roll_id'), // dice_rolls.id once resolved; null while pending
   createdAt: text('created_at').notNull(),
   resolvedAt: text('resolved_at'),
+  groupId: text('group_id'), // issue #1943: shared across every row one requestChecks() call creates; null for pre-existing rows
 });
 
 // Inventory & loot — see modules/inventory. Items belong to the party stash

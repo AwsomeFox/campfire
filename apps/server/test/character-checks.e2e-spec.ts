@@ -399,3 +399,128 @@ describe('DM check requests (e2e)', () => {
     expect(rolled.body.request.status).toBe('resolved');
   });
 });
+
+/**
+ * Group checks (issue #1943): `requestChecks` mints one `groupId` per call and stamps it on
+ * every row the call creates, so a "whole party" submit is recoverable as one group. Single-
+ * target behavior is the same code path (a size-1 group) — these tests pin both directions.
+ */
+describe('Group check requests (issue #1943, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let charA: number;
+  let charB: number;
+  let charC: number;
+  const playerA = { 'x-dev-role': 'player', 'x-dev-user': 'group-owner-a' };
+  const playerB = { 'x-dev-role': 'player', 'x-dev-user': 'group-owner-b' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Group Checks Campaign' });
+    campaignId = camp.body.id;
+
+    // Three characters owned by two different players, so list-scoping across a group can be
+    // exercised with more than one non-DM owner in the same submit.
+    const a = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Party A', ownerUserId: 'dev:group-owner-a', level: 3, hpMax: 20, hpCurrent: 20, stats: { DEX: 14 } });
+    charA = a.body.id;
+    const b = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Party B', ownerUserId: 'dev:group-owner-b', level: 3, hpMax: 20, hpCurrent: 20, stats: { DEX: 12 } });
+    charB = b.body.id;
+    const c = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Party C', ownerUserId: 'dev:group-owner-a', level: 3, hpMax: 20, hpCurrent: 20, stats: { DEX: 10 } });
+    charC = c.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('one submit targeting several characters creates that many pending rows sharing one non-null groupId', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB, charC], checkId: 'save:DEX', dc: 12 });
+    expect(res.status).toBe(201);
+    expect(res.body).toHaveLength(3);
+
+    const groupIds = new Set(res.body.map((r: { groupId: string | null }) => r.groupId));
+    expect(groupIds.size).toBe(1);
+    const [groupId] = [...groupIds];
+    expect(groupId).toEqual(expect.any(String));
+    expect(groupId).not.toBeNull();
+  });
+
+  it('distinct submits (even targeting the exact same characters) get distinct groupIds', async () => {
+    const server = ctx.app.getHttpServer();
+    const first = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB], checkId: 'save:DEX' });
+    const second = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB], checkId: 'save:DEX' });
+
+    expect(first.body[0].groupId).toEqual(expect.any(String));
+    expect(second.body[0].groupId).toEqual(expect.any(String));
+    expect(first.body[0].groupId).not.toBe(second.body[0].groupId);
+  });
+
+  it('a single-target submit is the same code path — still one row with a non-null groupId, otherwise unchanged', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA], checkId: 'save:DEX', dc: 8, consequence: 'Solo save.' });
+    expect(res.status).toBe(201);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].characterId).toBe(charA);
+    expect(res.body[0].dc).toBe(8);
+    expect(res.body[0].consequence).toBe('Solo save.');
+    expect(res.body[0].groupId).toEqual(expect.any(String));
+  });
+
+  it('a group send targeting two different players\' characters: each player sees only their own row, never the other\'s (list-scoping, extended for #1943)', async () => {
+    const server = ctx.app.getHttpServer();
+    const sent = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB], checkId: 'save:DEX', dc: 10 });
+    expect(sent.status).toBe(201);
+    const groupId = sent.body[0].groupId;
+
+    const aList = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/check-requests?status=pending`)
+      .set(playerA);
+    expect(aList.status).toBe(200);
+    const aGroupRows = aList.body.filter((r: { groupId: string | null }) => r.groupId === groupId);
+    expect(aGroupRows).toHaveLength(1);
+    expect(aGroupRows[0].characterId).toBe(charA);
+
+    const bList = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/check-requests?status=pending`)
+      .set(playerB);
+    expect(bList.status).toBe(200);
+    const bGroupRows = bList.body.filter((r: { groupId: string | null }) => r.groupId === groupId);
+    expect(bGroupRows).toHaveLength(1);
+    expect(bGroupRows[0].characterId).toBe(charB);
+
+    // Neither player's list ever contains the OTHER's row from this same group.
+    expect(aList.body.some((r: { characterId: number }) => r.characterId === charB)).toBe(false);
+    expect(bList.body.some((r: { characterId: number }) => r.characterId === charA)).toBe(false);
+
+    // The DM sees both rows of the group.
+    const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+    const dmGroupRows = dmList.body.filter((r: { groupId: string | null }) => r.groupId === groupId);
+    expect(dmGroupRows).toHaveLength(2);
+  });
+});

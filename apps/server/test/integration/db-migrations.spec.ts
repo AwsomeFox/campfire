@@ -2721,4 +2721,30 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       sqlite.close();
     }
   });
+
+  it('0169 adds check_requests.group_id on upgrade; a pre-existing (pre-#1943) row reads back null (#1943)', () => {
+    expect(MIGRATION_NAMES).toContain('0169_check_requests_group_id_1943');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'check_requests')).toContain('group_id');
+
+      // Simulate a row a pre-#1943 server would have written — no group_id column existed
+      // yet, so this INSERT (campaign 1 / character 1 are seeded by writeOldSchemaDb) omits it.
+      sqlite.exec(`
+        INSERT INTO check_requests
+          (campaign_id, character_id, check_id, check_label, mode, status, requested_by_user_id, created_at)
+        VALUES (1, 1, 'save:DEX', 'DEX save', 'flat', 'pending', 'dev:dm-1', '2020-01-01T00:00:00.000Z')
+      `);
+      const row = sqlite.prepare('SELECT group_id FROM check_requests ORDER BY id DESC LIMIT 1').get() as {
+        group_id: string | null;
+      };
+      expect(row.group_id).toBeNull();
+    } finally {
+      sqlite.close();
+    }
+  });
 });

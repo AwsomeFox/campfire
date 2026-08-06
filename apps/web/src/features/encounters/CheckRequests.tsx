@@ -3,10 +3,15 @@ import { useTranslation } from 'react-i18next';
  * DM-initiated check requests (issue #415) — the interactive
  * DM-request → player-prompt → consequence loop, surfaced inside the run-session view.
  *
- * Two surfaces share this file:
- *  - {@link CheckRequestPanel} (DM only): pick a character + a catalog check, optionally a DC and
- *    consequence text, and send it. POSTs /campaigns/:id/check-requests; each targeted player is
- *    nudged over SSE (a thin `check.requested` tick) to read it back and roll once.
+ * Three surfaces share this file:
+ *  - {@link CheckRequestPanel} (DM only): pick one or more characters (or one-tap "whole party")
+ *    and a catalog check, optionally a DC and consequence text, and send it. POSTs
+ *    /campaigns/:id/check-requests, which persists one row per target sharing one `groupId`
+ *    (issue #1943); each targeted player is nudged over SSE (a thin `check.requested` tick) to
+ *    read it back and roll once.
+ *  - {@link GroupCheckBoard} (DM only, issue #1943): one card per `groupId`, tallying
+ *    pending/pass/fail per targeted character as the group's rows resolve, driven by the same
+ *    `check.requested`/`check.resolved` SSE invalidations — no reload.
  *  - {@link CheckRequestPrompts} (the targeted player): renders an in-page prompt for every pending
  *    request against a character the viewer owns. Rolling posts /check-requests/:id/roll, which
  *    reuses the server-resolved catalog-roll path (shared dice log + transparent breakdown), and
@@ -17,11 +22,14 @@ import { useTranslation } from 'react-i18next';
  */
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Character, CheckRequest, CheckRequestResolution, RollCheckDefinition } from '@campfire/schema';
+import type { Character, CheckRequest, CheckRequestResolution, DiceRoll, RollCheckDefinition } from '@campfire/schema';
+import { ruleSystemAdapter, groupCheckMajorityAdvisoryForAdapter } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateCampaignCheckRequests } from '../../lib/query';
-import { Card, Btn, TextInput } from '../../components/ui';
+import { Card, Btn, Chip, TextInput } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { useCampaign } from '../../app/CampaignContext';
+import { buildGroupCheckSummaries, groupCheckMajoritySucceeds } from './groupCheckBoard';
 
 /** Human summary of a resolved outcome for the announcer + result line. */
 function outcomeText(res: CheckRequestResolution): string {
@@ -33,9 +41,12 @@ function outcomeText(res: CheckRequestResolution): string {
 }
 
 /**
- * DM control: request a check/save from a single character. Kept intentionally small — a
- * character picker, a check picker (populated from that character's catalog), a DC and a
- * consequence field. DM-only; the parent gates rendering on role.
+ * DM control: request a check/save from one or more characters at once (issue #1943). A
+ * checkbox per character plus a one-tap "whole party" preset, a check picker (populated from
+ * the first selected character's catalog — every character shares the same catalog IDs under
+ * one rule system, only the modifiers differ), a DC and a consequence field. One box checked
+ * behaves exactly like the original single-target flow. DM-only; the parent gates rendering on
+ * role.
  */
 export function CheckRequestPanel({
   campaignId,
@@ -51,7 +62,7 @@ export function CheckRequestPanel({
   const { t } = useTranslation();
   const announce = useAnnounce();
   const queryClient = useQueryClient();
-  const [characterId, setCharacterId] = useState<number | ''>('');
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<number>>(new Set());
   const [checkId, setCheckId] = useState('');
   const [dc, setDc] = useState('');
   const [consequence, setConsequence] = useState('');
@@ -65,18 +76,36 @@ export function CheckRequestPanel({
 
   const availableCharacters = characters ?? campaignCharactersQuery.data ?? [];
 
-  // The picked character's catalog drives the check dropdown (favorites first, server math).
+  const toggleCharacter = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setCheckId('');
+  };
+
+  const selectWholeParty = () => {
+    setSelectedIds(new Set(availableCharacters.map((c) => c.id)));
+    setCheckId('');
+  };
+
+  // The catalog is the same set of ids for every character under one rule system (only the
+  // modifiers differ) — the first selected character's catalog drives the check dropdown.
+  const representativeId = availableCharacters.find((c) => selectedIds.has(c.id))?.id;
+
   const checksQuery = useQuery({
-    queryKey: ['characters', characterId, 'checks'],
-    queryFn: () => api.get<RollCheckDefinition[]>(`${API}/characters/${characterId}/checks`),
-    enabled: typeof characterId === 'number',
+    queryKey: ['characters', representativeId, 'checks'],
+    queryFn: () => api.get<RollCheckDefinition[]>(`${API}/characters/${representativeId}/checks`),
+    enabled: typeof representativeId === 'number',
   });
   const checks = useMemo(() => checksQuery.data ?? [], [checksQuery.data]);
 
   const send = useMutation({
     mutationFn: () =>
       api.post<CheckRequest[]>(`${API}/campaigns/${campaignId}/check-requests`, {
-        characterIds: [characterId],
+        characterIds: Array.from(selectedIds),
         checkId,
         ...(dc.trim() ? { dc: Number(dc) } : {}),
         ...(consequence.trim() ? { consequence: consequence.trim() } : {}),
@@ -87,9 +116,14 @@ export function CheckRequestPanel({
       onError?.(null);
     },
     onSuccess: (created) => {
-      const req = created[0];
-      if (req) {
-        announce(`Requested ${req.checkLabel} from ${req.characterName}${req.dc != null ? ` at DC ${req.dc}` : ''}.`);
+      const [first] = created;
+      if (first) {
+        const dcSuffix = first.dc != null ? ` at DC ${first.dc}` : '';
+        announce(
+          created.length === 1
+            ? `Requested ${first.checkLabel} from ${first.characterName}${dcSuffix}.`
+            : `Requested ${first.checkLabel} from ${created.length} characters${dcSuffix}.`,
+        );
       }
       invalidateCampaignCheckRequests(queryClient, campaignId);
       setCheckId('');
@@ -103,35 +137,52 @@ export function CheckRequestPanel({
     },
   });
 
-  const canSend = typeof characterId === 'number' && checkId.trim().length > 0 && !send.isPending;
+  const canSend = selectedIds.size > 0 && checkId.trim().length > 0 && !send.isPending;
 
   return (
     <Card className="space-y-2.5" data-testid="request-check-panel">
       <span className="card-kicker">{t('encounters.checks.requestCheck')}</span>
       <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
-        Ask a player to roll a check or save. They get an in-page prompt and roll once; the result
-        lands in the shared dice log with your consequence text.
+        Ask one or more players to roll a check or save. They get an in-page prompt and roll
+        once; each result lands in the shared dice log with your consequence text.
       </p>
       {localError && <p className="text-sm text-rose-400">{localError}</p>}
       <div className="flex gap-2 flex-wrap items-end">
-        <div className="field" style={{ flex: 1, minWidth: 150 }}>
-          <label htmlFor="check-request-character">{t('encounters.checks.character')}</label>
-          <select
-            id="check-request-character"
-            className="cf-select"
-            value={characterId === '' ? '' : String(characterId)}
-            onChange={(e) => {
-              setCharacterId(e.target.value ? Number(e.target.value) : '');
-              setCheckId('');
-            }}
-          >
-            <option value="">{t('encounters.checks.chooseCharacter')}</option>
-            {availableCharacters.map((c) => (
-              <option key={c.id} value={String(c.id)}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+        <div className="field" style={{ flex: 2, minWidth: 220 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <span id="check-request-targets-label">{t('encounters.checks.targets')}</span>
+            <Btn
+              type="button"
+              ghost
+              density="compact"
+              disabled={availableCharacters.length === 0}
+              onClick={selectWholeParty}
+              data-testid="check-request-whole-party"
+            >
+              {t('encounters.checks.wholeParty', { count: availableCharacters.length })}
+            </Btn>
+          </div>
+          {availableCharacters.length === 0 ? (
+            <p className="text-muted" style={{ fontSize: 12 }}>{t('encounters.checks.noCharacters')}</p>
+          ) : (
+            <div
+              role="group"
+              aria-labelledby="check-request-targets-label"
+              style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 130, overflowY: 'auto' }}
+            >
+              {availableCharacters.map((c) => (
+                <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(c.id)}
+                    onChange={() => toggleCharacter(c.id)}
+                    data-testid={`check-request-target-${c.id}`}
+                  />
+                  {c.name}
+                </label>
+              ))}
+            </div>
+          )}
         </div>
         <div className="field" style={{ flex: 1, minWidth: 150 }}>
           <label htmlFor="check-request-check">{t('encounters.checks.check')}</label>
@@ -139,11 +190,11 @@ export function CheckRequestPanel({
             id="check-request-check"
             className="cf-select"
             value={checkId}
-            disabled={typeof characterId !== 'number' || checksQuery.isLoading}
+            disabled={typeof representativeId !== 'number' || checksQuery.isLoading}
             onChange={(e) => setCheckId(e.target.value)}
           >
             <option value="">
-              {typeof characterId === 'number' ? t('encounters.checks.chooseCheck') : t('encounters.checks.pickCharacterFirst')}
+              {typeof representativeId === 'number' ? t('encounters.checks.chooseCheck') : t('encounters.checks.pickCharacterFirst')}
             </option>
             {checks.map((def) => (
               <option key={def.id} value={def.id}>
@@ -180,6 +231,87 @@ export function CheckRequestPanel({
           {send.isPending ? 'Sending…' : 'Send request'}
         </Btn>
       </div>
+    </Card>
+  );
+}
+
+/**
+ * DM results board (issue #1943): one card per `groupId`, listing each targeted character's
+ * pending/pass/fail state and a live "X of N" tally, so a party-wide save no longer dissolves
+ * into scrollback — the DM reads the outcome at a glance instead of tallying by hand.
+ *
+ * DM-only (the parent gates rendering on role, same as {@link CheckRequestPanel}); the visibility
+ * scoping that keeps a player from seeing another player's rows lives entirely server-side in
+ * `listCheckRequests` — this component adds no client-side widening, it just groups+tallies
+ * whatever the campaign's DM-scoped feed already returns.
+ *
+ * Per-character pass/fail is recovered by joining each resolved row's `rollId` against the
+ * shared dice-roll feed (`GET /campaigns/:id/rolls`, the same one `SharedDiceLog` renders) —
+ * `CheckRequest` itself only carries the REQUESTED dc, not the roll's outcome. See
+ * `groupCheckBoard.ts` for the pure grouping/tally logic.
+ */
+export function GroupCheckBoard({ campaignId }: { campaignId: number }) {
+  const { t } = useTranslation();
+  const campaign = useCampaign(campaignId);
+  const adapterHasMajorityAdvisory = groupCheckMajorityAdvisoryForAdapter(ruleSystemAdapter(campaign?.ruleSystem));
+
+  const requestsQuery = useQuery({
+    queryKey: queryKeys.campaignCheckRequests(campaignId),
+    queryFn: () => api.get<CheckRequest[]>(`${API}/campaigns/${campaignId}/check-requests`),
+    enabled: Number.isFinite(campaignId),
+  });
+  const rollsQuery = useQuery({
+    queryKey: queryKeys.campaignDiceLog(campaignId),
+    queryFn: () => api.get<DiceRoll[]>(`${API}/campaigns/${campaignId}/rolls?limit=50`),
+    enabled: Number.isFinite(campaignId),
+  });
+
+  const summaries = useMemo(
+    () => buildGroupCheckSummaries(requestsQuery.data ?? [], rollsQuery.data ?? []),
+    [requestsQuery.data, rollsQuery.data],
+  );
+
+  if (summaries.length === 0) return null;
+
+  return (
+    <Card className="space-y-2.5" data-testid="group-check-board">
+      <span className="card-kicker">{t('encounters.checks.board.title')}</span>
+      {summaries.map((summary) => {
+        const succeeds = groupCheckMajoritySucceeds(summary, adapterHasMajorityAdvisory);
+        return (
+          <div key={summary.groupId} className="cf-inset" data-testid={`group-check-${summary.groupId}`} style={{ padding: '10px 12px' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+              <strong>{summary.checkLabel}</strong>
+              <span className="text-muted" style={{ fontSize: 12 }}>
+                {summary.dc != null
+                  ? t('encounters.checks.board.tallyPassed', { pass: summary.passCount, total: summary.totalCount })
+                  : t('encounters.checks.board.tallyResolved', { resolved: summary.resolvedCount, total: summary.totalCount })}
+              </span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 6 }}>
+              {summary.members.map((member) => (
+                <div key={member.characterId} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 13 }}>
+                  <span>{member.characterName}</span>
+                  {member.status === 'pending' ? (
+                    <Chip variant="neutral" density="compact">{t('encounters.checks.board.pending')}</Chip>
+                  ) : member.success === true ? (
+                    <Chip variant="completed" density="compact">{t('encounters.checks.board.passed')}</Chip>
+                  ) : member.success === false ? (
+                    <Chip variant="failed" density="compact">{t('encounters.checks.board.failed')}</Chip>
+                  ) : (
+                    <Chip variant="neutral" density="compact">{t('encounters.checks.board.resolved')}</Chip>
+                  )}
+                </div>
+              ))}
+            </div>
+            {succeeds && (
+              <p className="text-muted" style={{ fontSize: 12, marginTop: 6, marginBottom: 0 }} data-testid={`group-check-advisory-${summary.groupId}`}>
+                {t('encounters.checks.board.majoritySucceeds')}
+              </p>
+            )}
+          </div>
+        );
+      })}
     </Card>
   );
 }

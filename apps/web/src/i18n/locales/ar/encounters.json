@@ -259,15 +259,26 @@
     },
     "checks": {
       "requestCheck": "Request a check",
-      "character": "Character",
-      "chooseCharacter": "Choose a character…",
+      "targets": "الأهداف",
+      "wholeParty": "الفريق بأكمله ({{count}})",
+      "noCharacters": "لا توجد شخصيات لاستهدافها.",
       "check": "Check",
       "chooseCheck": "Choose a check…",
-      "pickCharacterFirst": "Pick a character first",
+      "pickCharacterFirst": "اختر هدفًا أولاً",
       "dc": "DC",
       "consequenceOptional": "Consequence (optional)",
       "rolled": "Rolled ",
-      "consequence": "Consequence: "
+      "consequence": "Consequence: ",
+      "board": {
+        "title": "الفحوصات الجماعية",
+        "tallyPassed": "{{pass}} من {{total}} نجحوا",
+        "tallyResolved": "{{resolved}} من {{total}} تم حسمها",
+        "pending": "قيد الانتظار",
+        "passed": "نجاح",
+        "failed": "فشل",
+        "resolved": "محسوم",
+        "majoritySucceeds": "تنجح المجموعة (نصفها أو أكثر)"
+      }
     },
     "actionFlow": {
       "noTargets": "No legal targets.",

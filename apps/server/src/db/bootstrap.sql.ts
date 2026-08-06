@@ -1481,7 +1481,8 @@ CREATE TABLE IF NOT EXISTS check_requests (
   requested_by_name TEXT NOT NULL DEFAULT '',
   roll_id INTEGER,
   created_at TEXT NOT NULL,
-  resolved_at TEXT
+  resolved_at TEXT,
+  group_id TEXT -- issue #1943: shared across every row one requestChecks() call creates
 );
 
 CREATE TABLE IF NOT EXISTS inventory_items (

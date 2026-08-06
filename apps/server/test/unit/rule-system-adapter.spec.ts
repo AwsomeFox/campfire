@@ -5,6 +5,7 @@ import {
   ruleSystemAdapter,
   listRuleSystemAdapters,
   hasDeathSavesForAdapter,
+  groupCheckMajorityAdvisoryForAdapter,
   initiativeModelForAdapter,
   gridDistanceForAdapter,
   actionEconomyForAdapter,
@@ -329,6 +330,10 @@ describe('RuleSystemAdapter — adapter capabilities for player-visible rules', 
       const gridDistance = gridDistanceForAdapter(adapter);
       const initiativeModel = initiativeModelForAdapter(adapter);
       const actionEconomy = actionEconomyForAdapter(adapter);
+      // Issue #1943 — the group-check majority ("half or more succeeds") advisory is a 5e-only
+      // table convention; every other registered adapter must default to false so the
+      // group-check board shows the X/N tally with no verdict text.
+      const groupCheckMajorityAdvisory = groupCheckMajorityAdvisoryForAdapter(adapter);
 
       if (id === 'dnd5e') {
         expect(hasDeathSaves).toBe(true);
@@ -336,11 +341,13 @@ describe('RuleSystemAdapter — adapter capabilities for player-visible rules', 
         expect(initiativeModel.mode).toBe('individual');
         expect(initiativeModel.usesDexModifier).toBe(true);
         expect(actionEconomy.slots.map((s) => s.key)).toEqual(['action', 'bonus', 'reaction', 'movement']);
+        expect(groupCheckMajorityAdvisory).toBe(true);
       } else if (id === 'pf2e' || id === 'sf2e') {
         expect(hasDeathSaves).toBe(false);
         expect(gridDistance.square).toBe('euclidean');
         expect(initiativeModel.mode).toBe('individual');
         expect(actionEconomy.slots.map((s) => s.key)).toEqual(['actions', 'reaction']);
+        expect(groupCheckMajorityAdvisory).toBe(false);
       } else if (
         id === 'osr' ||
         id === 'basic-fantasy' ||
@@ -354,11 +361,13 @@ describe('RuleSystemAdapter — adapter capabilities for player-visible rules', 
         expect(gridDistance.square).toBe('euclidean');
         expect(initiativeModel.mode).toBeDefined();
         expect(actionEconomy.slots.map((s) => s.key)).toEqual(['action']);
+        expect(groupCheckMajorityAdvisory).toBe(false);
       } else {
         expect(hasDeathSaves).toBe(false);
         expect(gridDistance.square).toBe('euclidean');
         expect(initiativeModel.mode).toBe('individual');
         expect(actionEconomy.slots.map((s) => s.key)).toEqual(['action']);
+        expect(groupCheckMajorityAdvisory).toBe(false);
       }
     },
   );
@@ -366,6 +375,11 @@ describe('RuleSystemAdapter — adapter capabilities for player-visible rules', 
   it('hasDeathSavesForAdapter defaults to true when adapter is null or undefined', () => {
     expect(hasDeathSavesForAdapter(null)).toBe(true);
     expect(hasDeathSavesForAdapter(undefined)).toBe(true);
+  });
+
+  it('groupCheckMajorityAdvisoryForAdapter defaults to false when adapter is null or undefined (issue #1943)', () => {
+    expect(groupCheckMajorityAdvisoryForAdapter(null)).toBe(false);
+    expect(groupCheckMajorityAdvisoryForAdapter(undefined)).toBe(false);
   });
 });
 

@@ -861,6 +861,43 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(again.isError).toBe(true);
   });
 
+  it('group checks (issue #1943): request_check with several characterIds returns one shared groupId; list_check_requests surfaces it identically', async () => {
+    const dmClient = await mcpClient(dmToken);
+
+    const first = parseResult(
+      await dmClient.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, name: 'MCP Group Target 1', level: 3, stats: { DEX: 14 }, saveProficiencies: ['DEX'] },
+      }),
+    ) as { id: number };
+    const second = parseResult(
+      await dmClient.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, name: 'MCP Group Target 2', level: 3, stats: { DEX: 12 }, saveProficiencies: ['DEX'] },
+      }),
+    ) as { id: number };
+
+    // REST and MCP both return the domain CheckRequest object straight from the same service
+    // method, so groupId parity is automatic once the schema/service carry it — this pins that.
+    const requested = parseResult(
+      await dmClient.callTool({
+        name: 'request_check',
+        arguments: { campaignId, characterIds: [first.id, second.id], checkId: 'save:DEX', dc: 10 },
+      }),
+    ) as Array<{ id: number; characterId: number; groupId: string | null }>;
+    expect(requested).toHaveLength(2);
+    const groupIds = new Set(requested.map((r) => r.groupId));
+    expect(groupIds.size).toBe(1);
+    const [groupId] = [...groupIds];
+    expect(groupId).toEqual(expect.any(String));
+
+    const list = parseResult(
+      await dmClient.callTool({ name: 'list_check_requests', arguments: { campaignId, status: 'pending' } }),
+    ) as Array<{ id: number; groupId: string | null }>;
+    const listedGroupIds = list.filter((r) => requested.some((req) => req.id === r.id)).map((r) => r.groupId);
+    expect(listedGroupIds).toEqual([groupId, groupId]);
+  });
+
   it('scheduling (issue #257): dm schedules a session, viewer RSVPs, viewer cannot cancel', async () => {
     const dmClient = await mcpClient(dmToken);
     const viewerClient = await mcpClient(viewerToken);

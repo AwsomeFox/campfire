@@ -106,10 +106,14 @@ export function invalidateEncounterActions(client: QueryClient, encounterId: num
 /**
  * Invalidate the DM check-request feed (issue #415). Called from the run-session SSE handler on
  * `check.requested` / `check.resolved` so the DM's request panel and the targeted player's prompt
- * reconcile without a manual reload.
+ * reconcile without a manual reload. Also busts the dice-log cache (issue #1943): resolving a
+ * check request persists a new roll, and the group-check board joins its rows against that same
+ * roll feed to recover pass/fail — without this, the board's tally would flip to "resolved"
+ * immediately but its pass/fail chip could lag behind a stale roll list.
  */
 export function invalidateCampaignCheckRequests(client: QueryClient, campaignId: number): void {
   void client.invalidateQueries({ queryKey: queryKeys.campaignCheckRequests(campaignId) });
+  void client.invalidateQueries({ queryKey: queryKeys.campaignDiceLog(campaignId) });
 }
 
 // ---------------------------------------------------------------------------

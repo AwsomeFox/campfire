@@ -501,6 +501,7 @@ export class CharactersService {
       rollId: row.rollId ?? null,
       createdAt: row.createdAt,
       resolvedAt: row.resolvedAt ?? null,
+      groupId: row.groupId ?? null,
     };
   }
 
@@ -509,11 +510,18 @@ export class CharactersService {
    * exists in EACH target's adapter-owned catalog (so a request can never name a check the sheet
    * can't roll), persists one row per character, and emits a thin `check.requested` tick per row
    * so each targeted player's client refetches and shows the prompt. Controller gates this to dm.
+   *
+   * Issue #1943: one `groupId` is minted PER CALL (not per row) and stamped on every row this
+   * call creates, so a DM's single "whole party" submit is recoverable as one group by the
+   * web/MCP group-check board — distinct submits (even targeting the same characters again)
+   * always get distinct ids. A single-target submit takes this same path and still gets a
+   * (size-1) groupId; nothing about the per-row behavior below changes.
    */
   async requestChecks(campaignId: number, input: CheckRequestCreate, user: RequestUser, role: Role): Promise<CheckRequest[]> {
     const adapter = await this.adapterForCampaign(campaignId);
     const mode = input.mode ?? 'flat';
     const ts = nowIso();
+    const groupId = randomUUID();
     const created: CheckRequest[] = [];
     for (const characterId of input.characterIds) {
       const charRow = await this.getRowOrThrow(characterId);
@@ -539,6 +547,7 @@ export class CharactersService {
           rollId: null,
           createdAt: ts,
           resolvedAt: null,
+          groupId,
         })
         .returning();
       await this.audit.log({

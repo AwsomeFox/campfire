@@ -52,7 +52,7 @@ import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { shouldRevealInitiative } from './initiativeReveal';
-import { CheckRequestPanel } from './CheckRequests';
+import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
 import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
 import { ActionUsePanel, legalTargets } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -4490,6 +4490,8 @@ export default function RunSessionPage() {
           <EncounterQuickWhisperPanel campaignId={cid} myUserId={myUserId} onError={surfaceActionError} />
         </>
       )}
+
+      {canDmWrite && <GroupCheckBoard campaignId={cid} />}
 
       <EntityDiscussion campaignId={cid} entityType="encounter" entityId={encounter.id} />
 
