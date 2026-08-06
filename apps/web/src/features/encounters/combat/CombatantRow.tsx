@@ -17,6 +17,7 @@ import { TOKEN_SIZE_OPTIONS } from '../map/BattleMap';
 import { FloatingNumbers } from '../FloatingNumbers';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { DEATH_STATE_LABEL, DeathSaveTracker } from './DeathSaves';
+import type { DeathSaveOutcome } from './deathSaveOutcome';
 import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, conditionDraftFromInstance, conditionSourceLabel, emptyConditionDraft, type ConditionDraft, type ConditionSourceOption, type ConditionTiming } from './conditionDraft';
 
 const HP_BAND_LABEL: Record<string, string> = { healthy: 'Healthy', bloodied: 'Bloodied', critical: 'Critical', down: 'Down' };
@@ -98,6 +99,8 @@ export type CombatantRowProps = {
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   /** Roll a death save through the server-authoritative d20 + shared dice-log action. */
   onRollDeathSave: () => void;
+  /** Issue #1919: this combatant's just-settled death-save outcome, or null once faded. */
+  deathSaveOutcome?: DeathSaveOutcome | null;
   /**
    * Roll this combatant's own initiative through the server-authoritative die + shared
    * dice-log action (issue #1904). Rendered only for a null-initiative combatant the
@@ -128,6 +131,14 @@ export type CombatantRowProps = {
    * accent border/tint, and an HP danger glyph beside the color-only bar tone.
    */
   colorVisionAssist?: boolean;
+  /**
+   * Issue #1926: a monster/npc just dropped to 0 HP with its statblock still hidden — show
+   * the one-tap "reveal to players?" prompt on this (DM) row. Never shown for a non-DM;
+   * the parent derives this from `shouldShowKillPrompt` + its own per-session dismissed set.
+   */
+  showKillPrompt?: boolean;
+  /** Dismiss the kill prompt for this combatant for the rest of the session (client-local only). */
+  onDismissKillPrompt?: () => void;
 };
 
 export function CombatantRow({
@@ -160,6 +171,7 @@ export function CombatantRow({
   onSetTempHp,
   onSetDeathSaves,
   onRollDeathSave,
+  deathSaveOutcome,
   onRollInitiative,
   onSetInitiative,
   onClearInitiative,
@@ -177,6 +189,8 @@ export function CombatantRow({
   onRemove,
   targeting = null,
   colorVisionAssist = false,
+  showKillPrompt = false,
+  onDismissKillPrompt,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   // Issue #1746: one shared reason string for every write control this row disables while
@@ -645,6 +659,52 @@ export function CombatantRow({
             )}
           </div>
         )}
+        {/* Issue #1926: one-tap kill prompt — a monster/npc just dropped to 0 HP with its
+            statblock still hidden. Never automatic: the DM must tap Reveal or Dismiss.
+            Dismissing sticks for this combatant for the rest of the session (see
+            `shouldShowKillPrompt`/`dismissKillPrompt`) and leaves the manual toggle below
+            available regardless. */}
+        {showKillPrompt && (
+          <div
+            role="status"
+            data-testid={`kill-prompt-${combatant.id}`}
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              marginTop: 4,
+              marginBottom: 4,
+              padding: '6px 8px',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-divider)',
+              fontSize: 12,
+            }}
+          >
+            <span>{t('encounters.statblock.killPrompt', { name: combatant.name })}</span>
+            <button
+              type="button"
+              className="btn btn-ghost !min-h-8 text-xs"
+              disabled={busy || syncBlocked}
+              aria-describedby={syncBlockedDescribedBy}
+              title={syncBlockedReason}
+              onClick={() => {
+                onPatchCombatant?.({ statblockRevealed: true });
+                onDismissKillPrompt?.();
+              }}
+            >
+              {t('encounters.statblock.reveal')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost !min-h-8 text-xs"
+              aria-label={t('encounters.statblock.dismissKillPrompt')}
+              onClick={onDismissKillPrompt}
+            >
+              {t('encounters.statblock.dismiss')}
+            </button>
+          </div>
+        )}
         {/* Death-save tracker (issue #57): shown for a character that is dying/stable/dead,
             or any character sitting at 0 HP. Monsters never roll death saves. */}
         {combatant.kind === 'character' &&
@@ -663,6 +723,7 @@ export function CombatantRow({
               syncBlockedReason={syncBlockedReason}
               onSet={onSetDeathSaves}
               onRoll={onRollDeathSave}
+              outcome={deathSaveOutcome}
             />
           )}
         {(combatant.conditionInstances?.length ?? 0) > 0 ? (
@@ -1183,6 +1244,20 @@ export function CombatantRow({
             />
           </details>
         )}
+        {/* Issue #1926: a revealed inline statblock, read-only, for a viewer without edit
+            rights (a player, or the DM once the encounter has ended and identity edits are
+            gone). Mutually exclusive with the editable form above (that one requires
+            canEditIdentity); the compendium (ruleEntryId) case is handled by the parent's
+            `statblock` prop instead — see RunSessionPage's reveal-aware condition. */}
+        {!canEditIdentity &&
+          combatant.statblockRevealed &&
+          combatant.statblock &&
+          (combatant.kind === 'monster' || combatant.kind === 'npc') && (
+            <details className="mt-2" data-combatant-detail data-testid={`combatant-statblock-revealed-${combatant.id}`}>
+              <summary className="text-xs text-muted cursor-pointer">{t('encounters.statblock.revealedSummary')}</summary>
+              <CombatantStatblockEditor value={combatant.statblock} onChange={() => {}} disabled ruleSystem={ruleSystem} />
+            </details>
+          )}
         {/* Character card (in-encounter sheet): a player sees only their own combat stats,
             while the DM sees the whole party. */}
         {combatant.kind === 'character' && character && (
@@ -1390,6 +1465,33 @@ export function CombatantRow({
             </button>
           </div>
         </div>
+      )}
+      {canEditIdentity && (combatant.kind === 'monster' || combatant.kind === 'npc') && onPatchCombatant && (
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-44 text-xs"
+          style={{ minWidth: 44, height: 44, flex: 'none' }}
+          disabled={busy || syncBlocked}
+          aria-pressed={combatant.statblockRevealed}
+          aria-describedby={syncBlockedDescribedBy}
+          data-testid={`statblock-reveal-toggle-${combatant.id}`}
+          // The visible label is just "Reveal"/"Revealed" to fit the row, which on its own
+          // says nothing about WHAT is revealed — and the battle map already has a fog
+          // "Reveal" tool, so a bare accessible name of "Reveal" is ambiguous both to a
+          // screen-reader user and to any role+name query.
+          aria-label={
+            combatant.statblockRevealed
+              ? t('encounters.statblock.hideFromPlayers')
+              : t('encounters.statblock.revealToPlayers')
+          }
+          title={
+            syncBlockedReason ??
+            (combatant.statblockRevealed ? t('encounters.statblock.hideFromPlayers') : t('encounters.statblock.revealToPlayers'))
+          }
+          onClick={() => onPatchCombatant({ statblockRevealed: !combatant.statblockRevealed })}
+        >
+          {combatant.statblockRevealed ? t('encounters.statblock.revealed') : t('encounters.statblock.reveal')}
+        </button>
       )}
       {onDuplicate && (
         <button

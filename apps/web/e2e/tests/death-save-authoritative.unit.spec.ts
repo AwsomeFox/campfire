@@ -19,7 +19,24 @@ test('TurnWorkspace keeps the server-authoritative death save single-flight', ()
 
 test('death-save requests carry one retry-safe action key', () => {
   expect(runSessionSource).toContain('const deathSaveRoll = useKeyedMutation({');
-  expect(runSessionSource).toContain('api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey })');
+  expect(runSessionSource).toContain(
+    'api.post<{ combatant: Combatant; roll: DiceRoll }>(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey })',
+  );
+});
+
+// Issue #1919 — the death save must be a table-holds-breath moment: the roller sees the
+// SAME tumble/settle/toast pipeline every other campaign roll uses (never a client-guessed
+// face — `showRoll(data.roll)` always settles on the server's own response), and its
+// outcome (nat 20 revive / fresh death / fresh stabilization / plain success-failure) is
+// classified from that same server response, not re-derived rules math.
+test('a death-save roll animates through the shared dice overlay/toast pipeline, never a client-guessed face', () => {
+  expect(runSessionSource).toContain("beginRollAnimation('1d20');");
+  expect(runSessionSource).toContain('showRoll(data.roll);');
+  expect(runSessionSource).toContain('cancelRollAnimation();');
+  expect(runSessionSource).toContain(
+    'kind: classifyDeathSaveOutcome(data.roll.total, before, data.combatant.deathState),',
+  );
+  expect(runSessionSource).not.toContain('Math.random()');
 });
 
 test('a death-save request only disables its own combatant', () => {
