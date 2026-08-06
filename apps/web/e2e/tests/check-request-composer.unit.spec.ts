@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test';
 import type { Character, CharacterStatus, RollCheckDefinition } from '@campfire/schema';
-import { CHECK_REQUEST_MAX_TARGETS, commonChecks, exceedsCheckRequestCap, wholePartyTargetIds } from '../../src/features/encounters/checkRequestComposer';
+import {
+  CHECK_REQUEST_MAX_TARGETS,
+  commonChecks,
+  commonChecksFromQueries,
+  exceedsCheckRequestCap,
+  wholePartyTargetIds,
+  type CheckCatalogQueryState,
+} from '../../src/features/encounters/checkRequestComposer';
 
 /** Minimal RollCheckDefinition fixture — only `id`/`label` vary per call in these tests. */
 function mkCheckDef(id: string, overrides: Partial<RollCheckDefinition> = {}): RollCheckDefinition {
@@ -103,5 +110,71 @@ test.describe('wholePartyTargetIds / exceedsCheckRequestCap — "Whole party" pr
     const ids = wholePartyTargetIds(roster);
     expect(ids).toHaveLength(CHECK_REQUEST_MAX_TARGETS + 5);
     expect(exceedsCheckRequestCap(ids)).toBe(true);
+  });
+});
+
+/** A query in a given state — mirrors the three shapes a TanStack Query result actually takes. */
+function loadingQuery(): CheckCatalogQueryState {
+  return { data: undefined, isSuccess: false, isError: false };
+}
+function errorQuery(): CheckCatalogQueryState {
+  // The real bug (issue #1943 review): an errored query has isLoading: false AND data:
+  // undefined — indistinguishable from a legitimately-empty catalog by `data ?? []` alone.
+  return { data: undefined, isSuccess: false, isError: true };
+}
+function loadedQuery(checks: readonly RollCheckDefinition[]): CheckCatalogQueryState {
+  return { data: checks, isSuccess: true, isError: false };
+}
+
+test.describe('commonChecksFromQueries — loading/failed/loaded tri-state (issue #1943 review follow-up)', () => {
+  test('LOADING: any query still pending — no intersection computed, no error, no "no common check" claim', () => {
+    const result = commonChecksFromQueries([loadedQuery([mkCheckDef('save:DEX')]), loadingQuery()]);
+    expect(result.checks).toEqual([]);
+    expect(result.noCommonCheck).toBe(false);
+    expect(result.anyError).toBe(false);
+  });
+
+  test('FAILED (the exact regression): one query errors while the other genuinely has no checks in common — must NOT report noCommonCheck', () => {
+    // This is the dramatic case the bug conflated: character A's catalog fetch failed (network
+    // hiccup), character B's catalog loaded fine with save:DEX. A naive `data ?? []` reads A as
+    // "rolls nothing", so the intersection with B's [save:DEX] silently collapses to [] — visually
+    // IDENTICAL to a genuine empty intersection, blocking the DM from sending anything and lying
+    // about why.
+    const result = commonChecksFromQueries([errorQuery(), loadedQuery([mkCheckDef('save:DEX')])]);
+    expect(result.anyError).toBe(true);
+    // The dramatic assertion: noCommonCheck must be false here — an error is not a disjoint
+    // catalog, and the caller must not render the "no check in common" hint for it.
+    expect(result.noCommonCheck).toBe(false);
+    expect(result.checks).toEqual([]);
+  });
+
+  test('FAILED: an error alongside an ACTUALLY-empty-catalog character still reports anyError, not noCommonCheck', () => {
+    const result = commonChecksFromQueries([errorQuery(), loadedQuery([])]);
+    expect(result.anyError).toBe(true);
+    expect(result.noCommonCheck).toBe(false);
+  });
+
+  test('LOADED, disjoint: every query succeeded and they share nothing — THIS is when noCommonCheck is genuinely true', () => {
+    const result = commonChecksFromQueries([loadedQuery([mkCheckDef('skill:Climbing')]), loadedQuery([mkCheckDef('spell:MagicMissile')])]);
+    expect(result.anyError).toBe(false);
+    expect(result.noCommonCheck).toBe(true);
+    expect(result.checks).toEqual([]);
+  });
+
+  test('LOADED, shared check: every query succeeded and the intersection is non-empty', () => {
+    const result = commonChecksFromQueries([
+      loadedQuery([mkCheckDef('save:DEX'), mkCheckDef('skill:Climbing')]),
+      loadedQuery([mkCheckDef('save:DEX'), mkCheckDef('skill:PickLocks')]),
+    ]);
+    expect(result.anyError).toBe(false);
+    expect(result.noCommonCheck).toBe(false);
+    expect(result.checks.map((d) => d.id)).toEqual(['save:DEX']);
+  });
+
+  test('empty query list (nothing selected): no error, no false "no common check" claim', () => {
+    const result = commonChecksFromQueries([]);
+    expect(result.anyError).toBe(false);
+    expect(result.noCommonCheck).toBe(false);
+    expect(result.checks).toEqual([]);
   });
 });

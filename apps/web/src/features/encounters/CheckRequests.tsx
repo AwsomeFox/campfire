@@ -20,7 +20,7 @@ import { useTranslation } from 'react-i18next';
  * Live-region announcements route through the app-wide Announcer (useAnnounce) — never a second
  * aria-live region. Visible copy is scoped with data-testid to keep strict Playwright locators happy.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, CheckRequest, CheckRequestResolution, DiceRoll, RollCheckDefinition } from '@campfire/schema';
 import { ruleSystemAdapter, groupCheckMajorityAdvisoryForAdapter } from '@campfire/schema';
@@ -30,7 +30,7 @@ import { Card, Btn, Chip, TextInput } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { useCampaign } from '../../app/CampaignContext';
 import { buildGroupCheckSummaries, groupCheckMajoritySucceeds, shouldShowPassedTally } from './groupCheckBoard';
-import { CHECK_REQUEST_MAX_TARGETS, commonChecks, exceedsCheckRequestCap, wholePartyTargetIds } from './checkRequestComposer';
+import { CHECK_REQUEST_MAX_TARGETS, commonChecksFromQueries, exceedsCheckRequestCap, wholePartyTargetIds } from './checkRequestComposer';
 
 /**
  * Bounds the group-check board's own check-requests fetch (issue #1943 review): `listCheckRequests`
@@ -67,7 +67,10 @@ function outcomeText(res: CheckRequestResolution): string {
  * offering a check the DM's pick has but another target lacks would 404 that target after
  * already committing the others (see `requestChecks`'s own atomicity fix for the write-time
  * half of that). An empty intersection (no check every selected character can roll) shows an
- * explicit message rather than silently offering nothing.
+ * explicit message rather than silently offering nothing — but ONLY once every per-character
+ * catalog fetch has genuinely SUCCEEDED (see `commonChecksFromQueries`'s doc comment): a failed
+ * fetch surfaces a retryable error through the panel's usual error display instead, since a
+ * missing catalog is not the same claim as a known-empty one.
  *
  * The "whole party" PRESET, unlike the checkboxes, is scoped to `status === 'active'` characters
  * only (issue #1943 review) — its entire purpose is "everyone currently playing," and it is
@@ -141,12 +144,30 @@ export function CheckRequestPanel({
     })),
   });
   const checksLoading = checksQueries.some((q) => q.isLoading);
-  const checks = useMemo(() => {
-    if (selectedCharacterIds.length === 0 || checksLoading) return [];
-    return commonChecks(checksQueries.map((q) => q.data ?? []));
-  }, [checksQueries, checksLoading, selectedCharacterIds.length]);
-  // True once every selected character's catalog has loaded but they share no rollable check.
-  const noCommonCheck = selectedCharacterIds.length > 0 && !checksLoading && checks.length === 0;
+  // Three states, not two (issue #1943 review): loading, failed, or loaded — see
+  // commonChecksFromQueries's doc comment for why collapsing "failed" into "loaded with an
+  // empty catalog" is the worst place to conflate "no data" with "known-empty data".
+  const { checks, noCommonCheck, anyError: checksAnyError } = useMemo(
+    () => commonChecksFromQueries(checksQueries),
+    [checksQueries],
+  );
+  const retryChecksQueries = () => {
+    for (const q of checksQueries) if (q.isError) void q.refetch();
+  };
+  // Surfaces a failed catalog fetch through the panel's existing error display (issue #1943
+  // review) rather than silently blocking send with a false "no check in common" claim. Only
+  // fires on the loading -> error TRANSITION (checksAnyError is stable across renders that stay
+  // in the same state), so it never fights the send mutation's own error handling below.
+  useEffect(() => {
+    if (!checksAnyError) return;
+    const firstErrored = checksQueries.find((q) => q.isError);
+    const msg = firstErrored
+      ? translateApiError(firstErrored.error, t, { fallbackKey: 'encounters.errors.loadChecks' })
+      : t('encounters.errors.loadChecks');
+    setLocalError(msg);
+    onError?.(msg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once per loading->error transition, not per render
+  }, [checksAnyError]);
 
   const send = useMutation({
     mutationFn: () =>
@@ -192,7 +213,19 @@ export function CheckRequestPanel({
         Ask one or more players to roll a check or save. They get an in-page prompt and roll
         once; each result lands in the shared dice log with your consequence text.
       </p>
-      {localError && <p className="text-sm text-rose-400">{localError}</p>}
+      {localError && (
+        <p className="text-sm text-rose-400">
+          {localError}
+          {checksAnyError && (
+            <>
+              {' '}
+              <Btn type="button" ghost density="compact" onClick={retryChecksQueries} data-testid="check-request-retry-catalog">
+                {t('encounters.checks.retryLoadChecks')}
+              </Btn>
+            </>
+          )}
+        </p>
+      )}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ flex: 2, minWidth: 220 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
@@ -242,7 +275,7 @@ export function CheckRequestPanel({
             id="check-request-check"
             className="cf-select"
             value={checkId}
-            disabled={selectedCharacterIds.length === 0 || checksLoading || noCommonCheck}
+            disabled={selectedCharacterIds.length === 0 || checksLoading || checksAnyError || noCommonCheck}
             onChange={(e) => setCheckId(e.target.value)}
           >
             <option value="">

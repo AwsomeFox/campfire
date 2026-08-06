@@ -17,6 +17,8 @@
  *    ever created — a retired/dead/draft/inactive character targeted by the preset would get a
  *    pending prompt nobody can meaningfully answer — and must never mint a request the server
  *    would 400 on for exceeding `CheckRequestCreate.characterIds.max(20)`.
+ *  - {@link commonChecksFromQueries} (follow-up to #7): a failed per-character catalog fetch
+ *    must never be read as "this character rolls nothing" — see its own doc comment.
  */
 import type { Character, RollCheckDefinition } from '@campfire/schema';
 
@@ -31,6 +33,46 @@ export function commonChecks(checksLists: readonly (readonly RollCheckDefinition
   const [first, ...rest] = checksLists;
   if (!first) return [];
   return first.filter((def) => rest.every((list) => list.some((d) => d.id === def.id)));
+}
+
+/** The subset of a TanStack Query result {@link commonChecksFromQueries} actually reads. */
+export interface CheckCatalogQueryState {
+  data: readonly RollCheckDefinition[] | undefined;
+  isSuccess: boolean;
+  isError: boolean;
+}
+
+export interface CommonChecksResult {
+  /** The intersection — meaningful ONLY when every query has loaded; `[]` otherwise. */
+  checks: RollCheckDefinition[];
+  /** True once EVERY query succeeded but they share no rollable check — a genuine empty intersection. */
+  noCommonCheck: boolean;
+  /** True when at least one query is in an error state. The caller must surface a retryable error and must NOT read `noCommonCheck` as "the catalogs are disjoint" — they may simply be unknown. */
+  anyError: boolean;
+}
+
+/**
+ * Distinguishes three states a set of per-character catalog queries can be in (issue #1943
+ * review): LOADING (any query still pending) — nothing to show yet; FAILED (any query
+ * `isError`) — the caller must surface a retryable error and NOT compute an intersection at all;
+ * LOADED (every query `isSuccess`) — intersect for real, and an empty result genuinely means the
+ * selected characters share no check.
+ *
+ * The bug this closes: naively reading `query.data ?? []` conflates "this character has no
+ * checks" with "we don't know what this character has" — a query that failed (or is offline/
+ * paused) has `isLoading: false` and `data: undefined` exactly like one that legitimately
+ * resolved to an empty catalog. Feeding that `[]` into an INTERSECTION is the worst place for
+ * that conflation: one unknown collapses the whole result to empty regardless of what every
+ * OTHER selected character can roll, silently telling the DM their party shares nothing in
+ * common and blocking every send — self-healing only on a full page reload. An explicit error
+ * is both more honest (it says what actually happened) and more recoverable (retryable in place).
+ */
+export function commonChecksFromQueries(queries: readonly CheckCatalogQueryState[]): CommonChecksResult {
+  const anyError = queries.some((q) => q.isError);
+  const allLoaded = queries.length > 0 && queries.every((q) => q.isSuccess);
+  if (!allLoaded) return { checks: [], noCommonCheck: false, anyError };
+  const checks = commonChecks(queries.map((q) => q.data ?? []));
+  return { checks, noCommonCheck: checks.length === 0, anyError };
 }
 
 /** `CheckRequestCreate.characterIds` is capped server-side at 20 (`packages/schema/src/index.ts`). */
