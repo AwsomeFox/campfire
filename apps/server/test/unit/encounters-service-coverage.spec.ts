@@ -12,7 +12,7 @@ import { CampaignLibraryService } from '../../src/modules/campaign-library/campa
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { eq } from 'drizzle-orm';
-import { campaigns, characters, encounterOpIdempotency, encounters, npcs } from '../../src/db/schema';
+import { campaigns, characters, combatants, encounterOpIdempotency, encounters, npcs } from '../../src/db/schema';
 import { ForbiddenException } from '@nestjs/common';
 import { UNKNOWN_COMBATANT_LABEL } from '../../src/modules/encounters/encounters.logic';
 import { nowIso } from '../../src/common/time';
@@ -424,17 +424,23 @@ describe('EncountersService unit coverage tests', () => {
       combatants: [{ ...dmResult, name: 'Redacted' }],
     } as any);
 
-    const playerResult = await encountersService.updateCombatant(
-      enc.id,
-      hero.id,
-      { hpDelta: -2, idempotencyKey: key },
-      dmActor,
-      'player',
-    );
+    // try/finally: a failing assertion below would otherwise skip `mockRestore` and leak
+    // this spy into every later test in the file, turning one real failure into a cascade
+    // of unrelated ones that obscures it.
+    try {
+      const playerResult = await encountersService.updateCombatant(
+        enc.id,
+        hero.id,
+        { hpDelta: -2, idempotencyKey: key },
+        dmActor,
+        'player',
+      );
 
-    expect(playerResult.name).toBe('Redacted');
-    expect(spy).toHaveBeenCalledWith(enc.id, 'player', undefined, true);
-    spy.mockRestore();
+      expect(playerResult.name).toBe('Redacted');
+      expect(spy).toHaveBeenCalledWith(enc.id, 'player', undefined, true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('replays a keyed updateCombatant from current state when the stored response body is missing', async () => {
@@ -472,6 +478,51 @@ describe('EncountersService unit coverage tests', () => {
       'dm',
     );
     expect(replay.hpCurrent).toBe(7);
+  });
+
+  // Copilot review on #2043. The twin of the test above, one path over: that one covers a
+  // PRIOR invocation's claim having a null stored body; this covers THIS invocation's own
+  // body being the missing one. Left unhandled, `replayCommittedDeathSave` returned null and
+  // `rollDeathSave` threw — a 500 for a death save that had actually committed, and every
+  // retry re-found the same bodiless claim and threw again, so the roll was unreachable
+  // forever. Same asymmetry-between-symmetric-paths shape as the rest of this PR.
+  it('returns the committed death save when THIS invocation wrote it and its own stored body is missing', async () => {
+    const enc = await encountersService.create(campaignId, { name: 'Own Null Body', hidden: false }, dmActor, 'dm');
+    const hero = await encountersService.addCombatant(
+      enc.id,
+      { name: 'Fighter', kind: 'character', initMod: 0, hpMax: 15 },
+      dmActor,
+      'dm',
+    );
+    await encountersService.rollInitiative(enc.id, dmActor, 'dm');
+    await encountersService.start(enc.id, dmActor, 'dm');
+    await encountersService.updateCombatant(enc.id, hero.id, { hpSet: 0, deathState: 'dying' }, dmActor, 'dm');
+
+    const key = 'own-null-body-key';
+    // Null the claim's body the instant the write commits and before `rollDeathSave` looks
+    // it up — i.e. no PRIOR claim was replayed, so `replayedPriorClaim` stays false and the
+    // recovery path under test is the one exercised.
+    const original = encountersService.updateCombatant.bind(encountersService);
+    const spy = jest
+      .spyOn(encountersService, 'updateCombatant')
+      .mockImplementation(async (...args: Parameters<typeof original>) => {
+        const result = await original(...args);
+        await db.update(encounterOpIdempotency).set({ responseJson: null }).where(eq(encounterOpIdempotency.key, key));
+        return result;
+      });
+
+    try {
+      const save = await encountersService.rollDeathSave(enc.id, hero.id, key, dmActor, 'dm');
+      expect(save.combatant.id).toBe(hero.id);
+      expect(save.roll).toBeDefined();
+      // The roll really did land: the death-save counters moved off their starting state.
+      const stored = db.select().from(combatants).where(eq(combatants.id, hero.id)).all()[0];
+      expect((stored.deathSaveSuccesses ?? 0) + (stored.deathSaveFailures ?? 0) > 0 || stored.deathState !== 'dying').toBe(
+        true,
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('rejects a keyed no-op updateCombatant for a soft-deleted encounter', async () => {

@@ -4605,6 +4605,31 @@ export class EncountersService {
         if (!replayedPriorClaim) this.rolls.emitDiceRolled?.(replay.roll);
         return replay;
       }
+      // A null replay here does NOT always mean nothing was persisted. `replayCommittedDeathSave`
+      // also returns null when a claim exists whose stored body was never backfilled — the exact
+      // window that produced the null-body dereference fixed earlier on this PR. That fix covered
+      // the case where a PRIOR invocation owned the claim; this is its twin, where THIS invocation
+      // committed the roll and its own body is the one missing. Left as a bare throw, a successful
+      // write answered 500, and every retry re-found the same bodiless claim and 500'd again — a
+      // committed death save the caller could never see.
+      //
+      // The re-derivation is gated on `!replayedPriorClaim`, which is precisely the condition under
+      // which `roll` is trustworthy: `replayCombatant` fires whenever a prior claim exists, so if it
+      // did not fire, this invocation is the writer and `roll` is its own committed die rather than
+      // a race-loser's discarded one. That is the same distinction the emit guard above depends on.
+      if (!replayedPriorClaim && roll != null) {
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const committed = snapshot.combatants.find((c) => c.id === combatantId);
+        if (committed) {
+          // `roll` is returned as-is, NOT redacted. This reconstructs the body that
+          // `operationResponse` would have stored for THIS role, and the stored-body path
+          // returns it unredacted whenever `prior.responseRole === role` — redaction there
+          // is reserved for the changed-role re-derivation. Redacting here would make the
+          // recovery answer differ from the answer the same caller gets on the normal path.
+          this.rolls.emitDiceRolled?.(roll);
+          return { combatant: committed, roll };
+        }
+      }
       throw new Error('Death-save dice roll was not persisted');
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but
@@ -4720,7 +4745,7 @@ export class EncountersService {
         throw new ForbiddenException({
           code: 'COMBATANT_FIELD_DM_ONLY',
           message:
-            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, or defenses — roll your own initiative via the dedicated roll-initiative action.',
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, eac, or kac — roll your own initiative via the dedicated roll-initiative action.',
         });
       }
       if (!existing.characterId) {

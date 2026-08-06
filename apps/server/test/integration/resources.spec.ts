@@ -744,8 +744,12 @@ describe('inline spell slots & character resources (issue #422)', () => {
       .all();
 
     const original = encountersService.getRowOrThrow.bind(encountersService);
-    const spy = jest.spyOn(encountersService, 'getRowOrThrow').mockImplementation(async (...args: unknown[]) => {
-      const result = await original(...(args as [number]));
+    // Typed against the real signature rather than cast to `[number]`. The spread already
+    // forwarded `includeDeleted` at runtime, so the old cast was a compile-time lie rather
+    // than a behavioral bug — but it read as though the flag were being dropped, which is
+    // exactly the ambiguity a deleted-row regression could hide behind.
+    const spy = jest.spyOn(encountersService, 'getRowOrThrow').mockImplementation(async (...args: Parameters<typeof original>) => {
+      const result = await original(...args);
       // Simulate a concurrent DM hiding the encounter in the window between the outer
       // visibility check (which already read this now-stale, non-hidden snapshot) and the
       // transaction below re-reading it fresh.
@@ -798,8 +802,12 @@ describe('inline spell slots & character resources (issue #422)', () => {
       .all();
 
     const original = encountersService.getRowOrThrow.bind(encountersService);
-    const spy = jest.spyOn(encountersService, 'getRowOrThrow').mockImplementation(async (...args: unknown[]) => {
-      const result = await original(...(args as [number]));
+    // Typed against the real signature rather than cast to `[number]`. The spread already
+    // forwarded `includeDeleted` at runtime, so the old cast was a compile-time lie rather
+    // than a behavioral bug — but it read as though the flag were being dropped, which is
+    // exactly the ambiguity a deleted-row regression could hide behind.
+    const spy = jest.spyOn(encountersService, 'getRowOrThrow').mockImplementation(async (...args: Parameters<typeof original>) => {
+      const result = await original(...args);
       db.update(encounters).set({ hidden: true }).where(eq(encounters.id, enc.id)).run();
       return result;
     });
