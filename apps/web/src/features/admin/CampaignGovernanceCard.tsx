@@ -5,7 +5,7 @@
  * Mirrors SettingsCard.tsx's structure (same admin surface, same patch pattern).
  */
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CampaignCreationPolicy, CampaignCreationRequest, ServerSettings } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Btn, Card, Skeleton } from '../../components/ui';
@@ -60,8 +60,34 @@ export function CampaignGovernanceCard({ settings, onChange }: { settings: Serve
   const [maxTotalServerWide, setMaxTotalServerWide] = useState(limitToInput(settings?.maxTotalCampaignsServerWide ?? null));
   const [defaultQuotaMb, setDefaultQuotaMb] = useState(bytesToMbInput(settings?.defaultCampaignStorageQuotaBytes ?? null));
 
+  /**
+   * Re-seed the form only when the STORED values actually change (review).
+   *
+   * This effect keys on the `settings` PROP, and AdminUsersPage.load() hands down a brand-new
+   * object on every reload — including the one decide() triggers after approving or denying a
+   * request. So an admin who typed new limits and then actioned a pending request on this same
+   * card watched their unsaved edits silently revert.
+   *
+   * Not calling onChange() from decide() would be the smaller change, but it is wrong here:
+   * load() refetches users AS WELL AS settings, and approving a request flips that user's
+   * canCreateCampaigns, so the "Approved organizer" toggle on their row would go stale.
+   *
+   * Comparing values rather than object identity keeps both behaviors — a reload that returns
+   * identical settings is inert, and a genuine external change still re-seeds.
+   */
+  const seededRef = useRef<string | null>(null);
   useEffect(() => {
     if (!settings) return;
+    const stored = JSON.stringify([
+      settings.campaignCreationPolicy,
+      settings.maxActiveCampaignsPerUser,
+      settings.maxTotalCampaignsPerUser,
+      settings.maxActiveCampaignsServerWide,
+      settings.maxTotalCampaignsServerWide,
+      settings.defaultCampaignStorageQuotaBytes,
+    ]);
+    if (seededRef.current === stored) return;
+    seededRef.current = stored;
     setPolicy(settings.campaignCreationPolicy);
     setMaxActivePerUser(limitToInput(settings.maxActiveCampaignsPerUser));
     setMaxTotalPerUser(limitToInput(settings.maxTotalCampaignsPerUser));

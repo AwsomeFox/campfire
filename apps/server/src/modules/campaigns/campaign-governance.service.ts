@@ -125,10 +125,20 @@ export class CampaignGovernanceService {
    * row (create/importCampaign/clone) — see the class doc above for why the count
    * queries below have to live in that transaction rather than in resolveContext.
    * Node is single-threaded and a better-sqlite3 transaction callback never yields,
-   * so two concurrent callers cannot both pass this check for the same limit before
-   * either one's insert commits (issue #851 acceptance criterion: concurrent
-   * creates/imports must not exceed a limit, and a denial must roll back cleanly —
-   * throwing here, before any row is inserted, aborts the whole transaction).
+   * so two concurrent callers in ONE process cannot both pass this check for the same
+   * limit before either one's insert commits (issue #851 acceptance criterion:
+   * concurrent creates/imports must not exceed a limit, and a denial must roll back
+   * cleanly — throwing here, before any row is inserted, aborts the whole transaction).
+   *
+   * Single-process is not the whole story, and this doc used to stop there (review).
+   * The counts below are reads, and drizzle's default `db.transaction(...)` is
+   * BEGIN DEFERRED — the read takes a shared lock and the write lock is only acquired
+   * at the insert. Two Campfire processes on the same SQLite file could therefore both
+   * finish counting before either upgraded, and land two rows past the cap. So all three
+   * call sites open their transaction with `{ behavior: 'immediate' }`, reserving the
+   * writer slot BEFORE the counts are read. That is the same treatment AuthService.setup
+   * and InvitesService.accept already give their read-then-write claims, and for the
+   * same documented reason.
    *
    * Policy: 'admins_only'/'approved_organizers' NEVER exempt a real server admin —
    * hasServerAdminPower() is the same check AGENTS.md calls out (PAT adminEnabled

@@ -779,7 +779,7 @@ export class CampaignsService {
           }
         }
         return inserted;
-      });
+      }, { behavior: 'immediate' });
     } catch (err) {
       if (err instanceof CampaignGovernanceDeniedError) {
         // Best-effort, outside the rolled-back transaction (see AuditService.log's doc).
@@ -2235,7 +2235,7 @@ export class CampaignsService {
       this.sessions.recomputeSessionStatsInTx(tx, cloneId);
 
       return cloneId;
-    });
+    }, { behavior: 'immediate' });
     } catch (err) {
       // Issue #851: a governance denial rolled back the transaction (no row committed) —
       // best-effort audit it outside that rolled-back tx, then rethrow unchanged.
@@ -3548,7 +3548,7 @@ export class CampaignsService {
       }
 
       return cid;
-    });
+    }, { behavior: 'immediate' });
 
     // COMMITTED — every entity row + the dm membership + the audit row are
     // durable together. Now PUBLISH the staged attachment bytes by renaming each
