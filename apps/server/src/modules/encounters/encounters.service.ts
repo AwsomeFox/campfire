@@ -478,6 +478,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditionInstances: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
     legendaryActions: null,
     statblock: parseCombatantStatblock(row.statblockJson),
+    statblockRevealed: row.statblockRevealed,
   };
 }
 
@@ -722,12 +723,16 @@ function deathSaveRollEventDetail(
 function redactMonsterHp(c: Combatant): Combatant {
   if (c.kind !== 'monster' && c.kind !== 'npc') return c;
   // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
-  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43).
+  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43),
+  // UNLESS the DM has explicitly revealed this combatant's statblock (issue #1926) —
+  // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
+  // never carries the field until the DM turns it on. HP banding itself is entirely
+  // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
   // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
   // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
   const redacted: Combatant = {
     ...c,
-    statblock: null,
+    statblock: c.statblockRevealed ? c.statblock : null,
     turnState: {
       ...c.turnState,
       pendingConcentrationChecks: [],
@@ -4696,12 +4701,13 @@ export class EncountersService {
         patch.hpMax !== undefined ||
         patch.initMod !== undefined ||
         patch.tokenSize !== undefined ||
-        patch.initiative !== undefined
+        patch.initiative !== undefined ||
+        patch.statblockRevealed !== undefined
       ) {
         throw new ForbiddenException({
           code: 'COMBATANT_FIELD_DM_ONLY',
           message:
-            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, or initiative — roll your own initiative via the dedicated roll-initiative action.',
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, or statblockRevealed — roll your own initiative via the dedicated roll-initiative action.',
         });
       }
       if (!existing.characterId) {
@@ -4792,6 +4798,8 @@ export class EncountersService {
     if (patch.statblock !== undefined && isDm) {
       staticUpdate.statblockJson = toJsonText(CombatantStatblock.parse(patch.statblock));
     }
+    // Statblock reveal toggle (issue #1926) — DM-only (see the ForbiddenException above).
+    if (patch.statblockRevealed !== undefined && isDm) staticUpdate.statblockRevealed = patch.statblockRevealed;
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
@@ -5313,6 +5321,7 @@ export class EncountersService {
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
+      staticUpdate.statblockRevealed !== undefined ||
       hpMaxChanged;
     if (changedNonHp) {
       await this.audit.log({
@@ -5332,6 +5341,18 @@ export class EncountersService {
     // endpoint stays member-visible without leaking issue #43's redaction.
     const round = encounterRow.round;
     const targetName = row.name;
+
+    // Issue #1926: log the statblock reveal toggle. `detail` deliberately omits the
+    // combatant's name (issue #869 convention — never interpolate names into `detail`,
+    // only `target`/`targetId`) so a non-DM's redacted listing composes the same
+    // "<name> ...detail" phrasing as every other combat-log line.
+    if (staticUpdate.statblockRevealed !== undefined && staticUpdate.statblockRevealed !== existing.statblockRevealed) {
+      await this.appendEvent(encounterId, round, 'note', {
+        target: targetName,
+        targetId: combatantId,
+        detail: staticUpdate.statblockRevealed ? "'s statblock is revealed to players" : "'s statblock is hidden again",
+      });
+    }
 
     // Issue #620: attribute HP/death events to the attacker so the log reads "Ember hit
     // Goblin 3 for 8" rather than just "Goblin 3 took 8 damage". Resolution order:

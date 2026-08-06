@@ -272,6 +272,16 @@
       "loading": "Searching…",
       "typeToSearch": "Start typing to search rules & homebrew…",
       "searchError": "Failed to search rules."
+    },
+    "statblock": {
+      "reveal": "Reveal",
+      "revealed": "Revealed",
+      "revealToPlayers": "Reveal statblock to players",
+      "hideFromPlayers": "Hide statblock from players",
+      "revealedSummary": "Statblock (revealed to players)",
+      "killPrompt": "{{name}} dropped to 0 HP — reveal its statblock to players?",
+      "dismiss": "Dismiss",
+      "dismissKillPrompt": "Dismiss the statblock reveal prompt"
     }
   }
 }
