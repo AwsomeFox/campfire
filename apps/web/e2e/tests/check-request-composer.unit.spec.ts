@@ -6,6 +6,7 @@ import {
   commonChecks,
   commonChecksFromQueries,
   exceedsCheckRequestCap,
+  syncCatalogErrorDisplay,
   wholePartyTargetIds,
   type CheckCatalogQueryState,
 } from '../../src/features/encounters/checkRequestComposer';
@@ -190,5 +191,46 @@ test.describe('commonChecksFromQueries — loading/failed/loaded tri-state (issu
     expect(result.anyError).toBe(false);
     expect(result.noCommonCheck).toBe(false);
     expect(result.checks).toEqual([]);
+  });
+});
+
+test.describe('syncCatalogErrorDisplay — ownership-scoped clearing (issue #1943 review, round 4)', () => {
+  test('entering the error state claims the slot and writes the message to both localError and the parent channel', () => {
+    const result = syncCatalogErrorDisplay(true, 'Boom', false);
+    expect(result).toEqual({ ownsParentSlot: true, localError: 'Boom', parentError: 'Boom' });
+  });
+
+  test('recovering while OWNING the slot clears both — the original round-3 fix, still intact', () => {
+    const result = syncCatalogErrorDisplay(false, 'Boom', true);
+    expect(result).toEqual({ ownsParentSlot: false, localError: null, parentError: null });
+  });
+
+  test('(a) MOUNT: no catalog error has ever occurred (prevOwnsParentSlot false) — touches NEITHER slot at all', () => {
+    // This is the exact shape of a fresh useEffect(..., [checksAnyError]) mount: checksAnyError
+    // starts false, and the ref backing prevOwnsParentSlot starts false too. A naive
+    // `if (anyError) {...} else { clear }` calls the clear unconditionally right here — wiping
+    // whatever the parent (RunSessionPage's shared action-error banner) was already showing,
+    // even though this panel never produced any error. The fix must return `undefined` for BOTH
+    // fields — not `null` — so the caller knows to skip the setter calls entirely.
+    const result = syncCatalogErrorDisplay(false, '', false);
+    expect(result.localError).toBeUndefined();
+    expect(result.parentError).toBeUndefined();
+    expect(result.ownsParentSlot).toBe(false);
+  });
+
+  test('(b) RECOVERY WHILE NOT OWNING: the catalog clears, but a concurrently-surfaced send-mutation error must be left alone', () => {
+    // Same call shape as the mount case above, and DELIBERATELY so: this is the scenario where
+    // the send mutation has since taken over the shared slot (it reset the ownership ref to
+    // `false` when it wrote its own message — see CheckRequests.tsx's send.onMutate/onError).
+    // The catalog query now recovers (checksAnyError flips back to false), but because this
+    // effect no longer holds the slot, it must not touch it — the send mutation's message must
+    // survive. A fix that only guards the mount case (e.g. an "is this the first render" flag)
+    // but still clears unconditionally on every later false-transition would pass test (a) above
+    // and still fail this one — which is why both are asserted separately even though they
+    // exercise the identical function call: the two real-world triggers must map to the SAME
+    // "leave alone" outcome, not just happen to share a code path in this one test.
+    const result = syncCatalogErrorDisplay(false, '', false);
+    expect(result.localError).toBeUndefined();
+    expect(result.parentError).toBeUndefined();
   });
 });

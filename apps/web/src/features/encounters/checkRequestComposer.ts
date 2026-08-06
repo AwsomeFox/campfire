@@ -102,3 +102,43 @@ export function wholePartyTargetIds(characters: readonly Pick<Character, 'id' | 
 export function exceedsCheckRequestCap(targetIds: readonly number[]): boolean {
   return targetIds.length > CHECK_REQUEST_MAX_TARGETS;
 }
+
+/** What {@link syncCatalogErrorDisplay} tells its caller to write. `undefined` means "leave alone". */
+export interface CatalogErrorSyncResult {
+  /** Whether the panel's shared parent `onError` slot now holds THIS effect's message. */
+  ownsParentSlot: boolean;
+  /** `undefined`: do not call `setLocalError` at all. Otherwise the exact value to set. */
+  localError: string | null | undefined;
+  /** `undefined`: do not call `onError` at all. Otherwise the exact value to pass it. */
+  parentError: string | null | undefined;
+}
+
+/**
+ * Governs whether a catalog-load error effect may write to `localError`/the shared parent
+ * `onError` channel (issue #1943 review, third instance on this PR of "correct about its own
+ * case, wrong about what else shares the channel"): entering the error state always claims the
+ * slot and writes the message, but LEAVING it must clear ONLY what this effect itself put there
+ * — never on mount (nothing was ever set), and never a message some other writer (the panel's
+ * own send mutation, or anything upstream) has since put in the same slot.
+ *
+ * `prevOwnsParentSlot` starts `false` (a plain `useRef(false)`, nothing claimed yet) and MUST be
+ * set back to `false` by any other writer that takes over the slot (this module doesn't own that
+ * handoff — see `CheckRequests.tsx`'s send mutation, which resets the ref whenever it writes its
+ * own message so a later catalog recovery can't reach in and clear what the send mutation owns).
+ *
+ * Naive alternative this replaces: `if (anyError) { ...set... } else { ...clear... }` — the
+ * `else` branch runs unconditionally on every `anyError === false` render, INCLUDING the very
+ * first one (mount), silently wiping whatever the parent was already displaying that this
+ * effect never set and has no business touching.
+ */
+export function syncCatalogErrorDisplay(anyError: boolean, message: string, prevOwnsParentSlot: boolean): CatalogErrorSyncResult {
+  if (anyError) {
+    return { ownsParentSlot: true, localError: message, parentError: message };
+  }
+  if (prevOwnsParentSlot) {
+    return { ownsParentSlot: false, localError: null, parentError: null };
+  }
+  // Not in error, and this effect never held (or no longer holds) the slot — mount, or a
+  // recovery that happened after someone else took the slot over. Touch nothing.
+  return { ownsParentSlot: false, localError: undefined, parentError: undefined };
+}

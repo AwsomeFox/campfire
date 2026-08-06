@@ -20,7 +20,7 @@ import { useTranslation } from 'react-i18next';
  * Live-region announcements route through the app-wide Announcer (useAnnounce) — never a second
  * aria-live region. Visible copy is scoped with data-testid to keep strict Playwright locators happy.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, CheckRequest, CheckRequestResolution, DiceRoll, RollCheckDefinition } from '@campfire/schema';
 import { ruleSystemAdapter, groupCheckMajorityAdvisoryForAdapter } from '@campfire/schema';
@@ -30,7 +30,13 @@ import { Card, Btn, Chip, TextInput } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { useCampaign } from '../../app/CampaignContext';
 import { buildGroupCheckSummaries, groupCheckMajoritySucceeds, shouldShowPassedTally } from './groupCheckBoard';
-import { CHECK_REQUEST_MAX_TARGETS, commonChecksFromQueries, exceedsCheckRequestCap, wholePartyTargetIds } from './checkRequestComposer';
+import {
+  CHECK_REQUEST_MAX_TARGETS,
+  commonChecksFromQueries,
+  exceedsCheckRequestCap,
+  syncCatalogErrorDisplay,
+  wholePartyTargetIds,
+} from './checkRequestComposer';
 
 /**
  * Bounds the group-check board's own check-requests fetch (issue #1943 review): `listCheckRequests`
@@ -155,25 +161,30 @@ export function CheckRequestPanel({
     for (const q of checksQueries) if (q.isError) void q.refetch();
   };
   // Surfaces a failed catalog fetch through the panel's existing error display (issue #1943
-  // review) rather than silently blocking send with a false "no check in common" claim. Handles
-  // BOTH transitions this effect owns, not just one: entering the error state sets the message,
-  // and RECOVERING from it (via Retry or by deselecting the failing character) clears the same
-  // message again — otherwise a DM who successfully retries still sees a stale "couldn't load"
-  // banner forever, which is worse than not having a Retry button at all. Fires once per
-  // loading/failed-<->-loaded TRANSITION (checksAnyError is stable across renders that stay in
-  // the same state), so it never fights the send mutation's own error handling below.
+  // review) rather than silently blocking send with a false "no check in common" claim, AND
+  // clears it again on recovery (via Retry or deselecting the failing character) so a
+  // successfully-retried fetch doesn't leave a stale "couldn't load" banner forever.
+  //
+  // Neither half may touch `localError`/the shared parent `onError` channel unconditionally,
+  // though (issue #1943 review, third instance on this PR of "correct about its own case, wrong
+  // about what else shares the channel"): `onError` is `RunSessionPage`'s page-wide
+  // `surfaceActionError`, fed by many unrelated actions, and `localError` is ALSO written by
+  // this panel's own send mutation below. A naive `else { setLocalError(null); onError?.(null) }`
+  // runs on every render where `checksAnyError` is `false` — including the very first one
+  // (mount) — silently wiping whichever of those an unrelated write left there. This ref +
+  // `syncCatalogErrorDisplay` make the clearing conditional on OWNERSHIP: this effect may only
+  // clear a message it itself most recently set — never on mount, and never one the send
+  // mutation (or a future writer) has since taken over. See that function's doc comment.
+  const catalogErrorOwnsParentSlotRef = useRef(false);
   useEffect(() => {
-    if (checksAnyError) {
-      const firstErrored = checksQueries.find((q) => q.isError);
-      const msg = firstErrored
-        ? translateApiError(firstErrored.error, t, { fallbackKey: 'encounters.errors.loadChecks' })
-        : t('encounters.errors.loadChecks');
-      setLocalError(msg);
-      onError?.(msg);
-    } else {
-      setLocalError(null);
-      onError?.(null);
-    }
+    const firstErrored = checksQueries.find((q) => q.isError);
+    const msg = firstErrored
+      ? translateApiError(firstErrored.error, t, { fallbackKey: 'encounters.errors.loadChecks' })
+      : t('encounters.errors.loadChecks');
+    const result = syncCatalogErrorDisplay(checksAnyError, msg, catalogErrorOwnsParentSlotRef.current);
+    catalogErrorOwnsParentSlotRef.current = result.ownsParentSlot;
+    if (result.localError !== undefined) setLocalError(result.localError);
+    if (result.parentError !== undefined) onError?.(result.parentError);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once per loading/failed<->loaded transition, not per render
   }, [checksAnyError]);
 
@@ -189,6 +200,10 @@ export function CheckRequestPanel({
     onMutate: () => {
       setLocalError(null);
       onError?.(null);
+      // This clear is the send mutation's own, user-initiated one (pre-dates issue #1943 — see
+      // the original single-target implementation) — not a catalog write, so the catalog effect
+      // above must not later believe it still owns (and may clear) whatever appears here next.
+      catalogErrorOwnsParentSlotRef.current = false;
     },
     onSuccess: (created) => {
       const [first] = created;
@@ -209,6 +224,9 @@ export function CheckRequestPanel({
       const msg = translateApiError(err, t, { fallbackKey: 'encounters.errors.sendCheck' });
       setLocalError(msg);
       onError?.(msg);
+      // The send mutation now owns the shared slot with ITS OWN message — a later catalog
+      // recovery (checksAnyError flipping back to false) must not clear this out from under it.
+      catalogErrorOwnsParentSlotRef.current = false;
     },
   });
 
