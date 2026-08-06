@@ -4630,7 +4630,25 @@ export class EncountersService {
           return { combatant: committed, roll };
         }
       }
-      throw new Error('Death-save dice roll was not persisted');
+      // The remaining case is a PRIOR invocation's claim whose stored body is missing — the
+      // other half of the twin above, and it cannot be answered the same way. The recovery
+      // above works only because `roll` is this invocation's own committed die; on the
+      // prior-claim path the winner's die was never handed to us, and this repo has no
+      // per-encounter/per-combatant roll lookup to recover it from (`RollsService` exposes
+      // only `listForCampaign`). Inventing a face to fill the response would be strictly
+      // worse than failing: it would put a d20 in the dice record that nobody ever rolled,
+      // in a subsystem whose entire purpose is being the evidence of what was rolled.
+      //
+      // So the failure stands — but as a deterministic, client-actionable one rather than a
+      // bare `Error` surfacing as a 500 the client can only retry into forever. The write
+      // DID land, so the combatant state is authoritative and a re-read recovers everything
+      // except the die face. A 409 with a code says exactly that; the previous 500 said
+      // "server broken, try again", which was both wrong and unactionable.
+      throw new ConflictException({
+        code: 'DEATH_SAVE_RESULT_UNAVAILABLE',
+        message:
+          'The death save was applied, but its dice record is unavailable — reload the encounter for the authoritative combatant state. Retrying this request will not recover the roll.',
+      });
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but
       // before a mutable-row preflight (for example, before another DM removes the
@@ -5396,12 +5414,23 @@ export class EncountersService {
     // still log the meaningful state changes — conditions, initiative, and the
     // identity edits (rename / hpMax / initMod, issue #114) — which are rare and
     // worth a trail. An update that ONLY touched HP/death-save fields is skipped.
+    // `statblock`, `eac`, and `kac` are listed off `patch`, not `staticUpdate`: they are the
+    // writable fields that never enter `staticUpdate` at all (they go straight onto `writeSet`
+    // inside the transaction), which is the same asymmetry that let an armour-class-only PATCH
+    // silently persist nothing before this PR. Fixing that made such a patch a real domain
+    // write, and a real domain write must be audited — AGENTS.md is unconditional about that,
+    // and #74's exemption is scoped to high-frequency HP/death-save ticks, which identity-like
+    // defence and statblock edits are not. Gated on `isDm` to match the write exactly, so a
+    // rejected non-DM patch cannot mint an audit row for a change that never happened.
+    const defenseOrStatblockChanged =
+      isDm && (patch.statblock !== undefined || patch.eac !== undefined || patch.kac !== undefined);
     const changedNonHp =
       conditionFieldsTouched ||
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
       staticUpdate.statblockRevealed !== undefined ||
+      defenseOrStatblockChanged ||
       hpMaxChanged;
     if (changedNonHp) {
       await this.audit.log({

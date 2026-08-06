@@ -13,7 +13,7 @@ import { ModerationService } from '../../src/modules/moderation/moderation.servi
 import type { RequestUser } from '../../src/common/user.types';
 import { eq } from 'drizzle-orm';
 import { campaigns, characters, combatants, encounterOpIdempotency, encounters, npcs } from '../../src/db/schema';
-import { ForbiddenException } from '@nestjs/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { UNKNOWN_COMBATANT_LABEL } from '../../src/modules/encounters/encounters.logic';
 import { nowIso } from '../../src/common/time';
 
@@ -522,6 +522,69 @@ describe('EncountersService unit coverage tests', () => {
       );
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  // Devin review on #2043, and the other half of the twin above — which I had fixed only on
+  // the writer's own side, in a PR whose whole thesis is that fixing one symmetric path does
+  // not fix its partner. When a PRIOR invocation owns the claim and ITS body is missing, the
+  // roll is unrecoverable (this repo has no per-combatant roll lookup) so the request must
+  // still fail — but as a deterministic 409 the client can act on, not a bare 500 it can only
+  // retry into forever.
+  it('fails a retried death save with an actionable 409, not a 500, when a prior claim has no stored body', async () => {
+    const enc = await encountersService.create(campaignId, { name: 'Prior Null Body', hidden: false }, dmActor, 'dm');
+    const hero = await encountersService.addCombatant(
+      enc.id,
+      { name: 'Fighter', kind: 'character', initMod: 0, hpMax: 15 },
+      dmActor,
+      'dm',
+    );
+    await encountersService.rollInitiative(enc.id, dmActor, 'dm');
+    await encountersService.start(enc.id, dmActor, 'dm');
+    await encountersService.updateCombatant(enc.id, hero.id, { hpSet: 0, deathState: 'dying' }, dmActor, 'dm');
+
+    const key = 'prior-null-body-key';
+    // First call commits the claim for this key normally.
+    await encountersService.rollDeathSave(enc.id, hero.id, key, dmActor, 'dm');
+    // Now blank the stored body, so the RETRY below finds a prior claim it cannot replay.
+    await db.update(encounterOpIdempotency).set({ responseJson: null }).where(eq(encounterOpIdempotency.key, key));
+
+    // Asserted by catching the rejection and interrogating it directly, NOT via
+    // `rejects.toMatchObject({ status: 409, ... })`. Jest compares Error objects by message
+    // and ignores extra own properties, so that form passes against a bare
+    // `new Error('Death-save dice roll was not persisted')` — it pins nothing. (Found by
+    // mutating the fix and watching the test stay green, which is the only way this kind of
+    // vacuous assertion ever surfaces.)
+    const err = await encountersService.rollDeathSave(enc.id, hero.id, key, dmActor, 'dm').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    expect((err as ConflictException).getStatus()).toBe(409);
+    expect((err as ConflictException).getResponse()).toMatchObject({ code: 'DEATH_SAVE_RESULT_UNAVAILABLE' });
+  });
+
+  // Devin review on #2043: making an eac/kac-only PATCH actually persist turned it into a real
+  // domain write, and AGENTS.md requires every domain write to be audited. #74's exemption is
+  // scoped to high-frequency HP ticks; defence values are identity-like and rare.
+  it('audits a DM patch that touches only eac/kac', async () => {
+    const enc = await encountersService.create(campaignId, { name: 'Audited Defenses', hidden: false }, dmActor, 'dm');
+    const goblin = await encountersService.addCombatant(
+      enc.id,
+      { name: 'Goblin', kind: 'monster', hpMax: 10 },
+      dmActor,
+      'dm',
+    );
+    await encountersService.rollInitiative(enc.id, dmActor, 'dm');
+    await encountersService.start(enc.id, dmActor, 'dm');
+
+    const logSpy = jest.spyOn((encountersService as any).audit as AuditService, 'log');
+    try {
+      await encountersService.updateCombatant(enc.id, goblin.id, { eac: 12, kac: 14 }, dmActor, 'dm');
+      const combatantUpdates = logSpy.mock.calls.filter(
+        ([entry]) => (entry as { action?: string }).action === 'encounter.combatant.update',
+      );
+      expect(combatantUpdates.length).toBe(1);
+      expect(combatantUpdates[0][0]).toMatchObject({ entityType: 'combatant', entityId: goblin.id, actorRole: 'dm' });
+    } finally {
+      logSpy.mockRestore();
     }
   });
 
