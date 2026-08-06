@@ -34,10 +34,13 @@ import {
   CharacterUpdate,
   CombatantCreate,
   CombatantRemoveRequest, CombatantRemoveUndo,
+  CombatantResourceAdjust,
   CombatantTurnStatePatch,
   CombatantUpdate,
   DifficultyBand,
   EncounterShape,
+  AoeTemplateDeclare,
+  AoeTemplateUpdate,
   EncounterUpdate,
   EncounterEndTurn,
   EncounterNextTurn,
@@ -300,6 +303,62 @@ const BulkNotificationArgs = {
   ids: z.array(Id).optional().describe('Specific notification ids (from list_notifications)'),
   campaignId: z.number().int().positive().optional().describe('All notifications in this campaign'),
   all: z.boolean().optional().describe('Every notification owned by the caller'),
+};
+
+/**
+ * `declare_aoe_template` has two distinct state transitions. Keeping them
+ * discriminated makes the MCP schema honest: creation requires a complete
+ * template, while an update can remain a one-field patch.
+ */
+const AoeTemplateMcpCreate = AoeTemplateDeclare.omit({ id: true })
+  .extend({
+    operation: z.literal('create').describe('Create a new template; shape, x, y, and sizeFt are required.'),
+    encounterId: Id.describe('Encounter id — from list_encounters'),
+    templateId: AoeTemplateDeclare.shape.id.describe('Stable caller-chosen id for the new template'),
+  })
+  .strict();
+const AoeTemplateMcpUpdate = AoeTemplateUpdate.extend({
+  operation: z.literal('update').describe('Patch an existing template; provide at least one editable field.'),
+  encounterId: Id.describe('Encounter id — from list_encounters'),
+  templateId: AoeTemplateDeclare.shape.id.describe('Id of the existing template to patch'),
+})
+  .strict();
+const AoeTemplateMcpInput = z
+  .discriminatedUnion('operation', [AoeTemplateMcpCreate, AoeTemplateMcpUpdate])
+  .refine(
+    (input) =>
+      input.operation !== 'update' ||
+      (() => {
+        const { shape, x, y, sizeFt, angleDeg, color } = input;
+        return shape !== undefined || x !== undefined || y !== undefined || sizeFt !== undefined || angleDeg !== undefined || color !== undefined;
+      })(),
+    'An update must include at least one editable template field.',
+  );
+const AoeTemplateMcpShape = {
+  operation: z.enum(['create', 'update']).describe('Create a new template or patch an existing one.'),
+  encounterId: Id.describe('Encounter id — from list_encounters'),
+  templateId: AoeTemplateDeclare.shape.id.describe('Stable caller-chosen template id'),
+  ...AoeTemplateUpdate.shape,
+};
+// The MCP protocol requires each advertised tool schema to be a top-level
+// object. Represent the runtime discriminated union as an object plus standard
+// JSON-Schema conditionals, rather than publishing the SDK's empty-object
+// fallback for unions.
+const AoeTemplateMcpListingSchema = {
+  ...zodToJsonSchema(
+    z.object(AoeTemplateMcpShape).strict(),
+    { $refStrategy: 'none' },
+  ),
+  allOf: [
+    {
+      if: { properties: { operation: { const: 'create' } }, required: ['operation'] },
+      then: { required: ['shape', 'x', 'y', 'sizeFt'] },
+    },
+    {
+      if: { properties: { operation: { const: 'update' } }, required: ['operation'] },
+      then: { anyOf: ['shape', 'x', 'y', 'sizeFt', 'angleDeg', 'color'].map((field) => ({ required: [field] })) },
+    },
+  ],
 };
 
 /**
@@ -589,21 +648,28 @@ export class McpToolsService {
    * `strictUnions:true`), which emits nullable constrained-number FKs as an untyped
    * `anyOf` union — see flattenNullableNumericFks(). We can't change the SDK's
    * converter, so wrap its already-registered ListTools handler and flatten each
-   * tool's inputSchema on the way out. Defensive: if the SDK's internals ever move,
-   * we simply leave the handler untouched rather than break tools/list.
+   * tool's inputSchema on the way out. The SDK only serializes object schemas for
+   * tools/list; `declare_aoe_template` deliberately uses a discriminated union so
+   * its create and update requirements are truthful, so supply that union's JSON
+   * Schema here instead of letting the SDK advertise an empty object. Defensive: if
+   * the SDK's internals ever move, we simply leave the handler untouched rather than
+   * break tools/list.
    */
   private patchListToolsSchemas(server: McpServer): void {
     const low = (server as unknown as { server?: { _requestHandlers?: Map<string, unknown> } }).server;
     const handlers = low?._requestHandlers;
     const original = handlers?.get('tools/list') as
-      | ((request: unknown, extra: unknown) => Promise<{ tools?: { inputSchema?: unknown }[] }>)
+      | ((request: unknown, extra: unknown) => Promise<{ tools?: { name?: string; inputSchema?: unknown }[] }>)
       | undefined;
     if (!handlers || !original) return;
     handlers.set('tools/list', async (request: unknown, extra: unknown) => {
       const result = await original(request, extra);
       if (result && Array.isArray(result.tools)) {
         for (const tool of result.tools) {
-          if (tool && tool.inputSchema) tool.inputSchema = flattenNullableNumericFks(tool.inputSchema);
+          if (!tool?.inputSchema) continue;
+          tool.inputSchema = tool.name === 'declare_aoe_template'
+            ? flattenNullableNumericFks(AoeTemplateMcpListingSchema)
+            : flattenNullableNumericFks(tool.inputSchema);
         }
       }
       return result;
@@ -722,10 +788,9 @@ export class McpToolsService {
         // zod type to avoid TS2589 (the deep conditional generics zodToJsonSchema infers).
         // #371: flatten nullable numeric FK unions to a top-level numeric type so the
         // provider tool registry advertises the same concrete types as tools/list.
-        inputSchema: flattenNullableNumericFks(zodToJsonSchema(strictShape, { $refStrategy: 'none' })) as Record<
-          string,
-          unknown
-        >,
+        inputSchema: (name === 'declare_aoe_template'
+          ? flattenNullableNumericFks(AoeTemplateMcpListingSchema)
+          : flattenNullableNumericFks(zodToJsonSchema(strictShape, { $refStrategy: 'none' }))) as Record<string, unknown>,
         proposalCapable: Object.prototype.hasOwnProperty.call(shape, 'propose'),
         mutating,
         invoke: async (args) => {
@@ -1331,7 +1396,7 @@ export class McpToolsService {
         // band (#43) and fog-hidden token positions nulled (#40). Omitting the
         // role defaulted to full-DM view, leaking both to any player-scoped PAT.
         const role = await this.access.requireMember(user, row.campaignId);
-        return this.encounters.getWithCombatantsOrThrow(encounterId as number, role);
+        return this.encounters.getWithCombatantsOrThrow(encounterId as number, role, user.id);
       },
     );
 
@@ -1362,6 +1427,50 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.encounters.getAftermath(encounterId as number, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'declare_aoe_template',
+      'Create or update an area-of-effect template in an encounter (issue #1913). Any DM or player may call this. ' +
+        'Use operation=create with a complete template, or operation=update with one or more editable fields on an existing template. ' +
+        'The server stamps a player creator as declarer while DM templates remain unattributed; a DM may update any template but never changes its original declarer. ' +
+      'Callers cannot supply declarer identity. Player templates remain visible only to their owner and DMs in unrevealed fog.',
+      AoeTemplateMcpShape,
+      async (args) => {
+        const { operation, encounterId, templateId, ...template } = AoeTemplateMcpInput.parse(args);
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        // Keep the hidden encounter's 404 behavior inside EncountersService before
+        // archive enforcement, just like REST.
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.declareAoeTemplate(
+          encounterId as number,
+          // Preserve which optional keys the MCP caller actually supplied. The service
+          // validates the declaration before creating and uses that raw presence on upsert.
+          { ...template, id: templateId },
+          user,
+          role,
+          operation,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'remove_aoe_template',
+      'Remove an area-of-effect template (issue #1913). A player may remove only their own declaration; a DM may remove any template. ' +
+        'Hidden encounter, archived campaign, and ended encounter protections match declare_aoe_template and REST.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        templateId: AoeTemplateDeclare.shape.id.describe('AoE template id supplied when it was declared'),
+      },
+      async ({ encounterId, templateId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.removeAoeTemplate(encounterId as number, templateId as string, user, role);
       },
     );
 
@@ -1599,12 +1708,26 @@ export class McpToolsService {
     this.tool(
       server,
       'generate_encounter',
-      'Generate a balanced monster group from the installed compendium to hit a target 5e difficulty band for the ' +
-        'party (issue #304) — a first-party, offline, DETERMINISTIC builder (no external data). NON-MUTATING: returns ' +
-        'a read-only suggestion { combatants:[{ruleEntryId,name,entryType,cr,xp,hpMax,count}], difficulty, totalXp, shape, seed, ' +
-        'matchedBand } and persists NOTHING. `difficulty` is the target band (trivial|easy|medium|hard|deadly). Party ' +
-        'is inferred from the campaign\'s active PCs unless `party` (explicit PC levels) is passed. Optional filters: ' +
-        'creatureType/environment (substring), minCr/maxCr, packSlug, includeHazards (add traps/environmental dangers); `shape` (solo|pair|group|horde) and `count` (max ' +
+      'Generate a balanced monster group from the installed compendium PLUS the campaign\'s own homebrew monsters ' +
+        '(issue #1927) to hit a target difficulty band for the party (issue #304) — a first-party, offline, ' +
+        'DETERMINISTIC builder (no external data) sized by a 5e-shaped count/CR heuristic for every rule system. ' +
+        'NON-MUTATING: returns a read-only suggestion ' +
+        '{ combatants:[{ruleEntryId,name,entryType,cr,xp,hpMax,count,source}], difficulty, totalXp, shape, seed, matchedBand, difficultySupport } ' +
+        'and persists NOTHING. Each line\'s `source` is \'homebrew\' for the campaign\'s own creature or \'pack\' for a ' +
+        'globally installed one; a homebrew monster with no parseable CR is never auto-picked here (add it manually ' +
+        'via commit\'s roster/add_combatant instead). Installing, removing, or archiving a rule pack or homebrew entry ' +
+        'changes the candidate set the SAME `seed` reproduces from, exactly like a pack install always has. ' +
+        '`difficulty` is the target band (trivial|easy|medium|hard|deadly) — accepted and used ' +
+        'to size the roster for every system, but the REPORTED `difficulty` result is only the rule system\'s own ' +
+        'audited XP/CR math when `difficultySupport:\'supported\'` (5e and an empty/homebrew slug); a registered ' +
+        'non-5e system (PF2e, OSR, …) returns `difficultySupport:\'heuristic\'` with `difficulty.status:\'unsupported\'` ' +
+        '— issue #1928, label don\'t block: the roster is still valid, judge its balance yourself for that system. ' +
+        '`matchedBand` describes the ROSTER-SIZING pass only (always 5e-shaped) and is NOT a claim about the ' +
+        'reported `difficulty`: under `difficultySupport:\'heuristic\'` it can be `true` while `difficulty.band` is ' +
+        'null, meaning "the 5e-shaped sizing hit the band you asked for", NOT "this system rates the fight that ' +
+        'hard". Do not report a matched band as an achieved difficulty for a heuristic system. ' +
+        'Party is inferred from the campaign\'s active PCs unless `party` (explicit PC levels) is passed. Optional ' +
+        'filters: creatureType/environment (substring), minCr/maxCr, packSlug, includeHazards (add traps/environmental dangers); `shape` (solo|pair|group|horde) and `count` (max ' +
         'monsters) bound the group. Reproduce a group by passing back its `seed`; re-roll by changing/omitting it. ' +
         'TO COMMIT: call create_encounter (hidden:true keeps it DM-only prep) then add_combatant once per line with ' +
         'its ruleEntryId + count — those tools honor write-mode (#158)/proposals (#124), so this preview→commit split ' +
@@ -1657,9 +1780,17 @@ export class McpToolsService {
     this.tool(
       server,
       'preview_encounter',
-      'Preview & TUNE a generated encounter (issue #412) — NON-MUTATING. Returns a multi-slot roster with ' +
+      'Preview & TUNE a generated encounter (issue #412) — NON-MUTATING. Roster candidates include the installed ' +
+        'compendium PLUS the campaign\'s own homebrew monsters (issue #1927); each returned slot carries `source` ' +
+        '(\'homebrew\' or \'pack\'). Returns a multi-slot roster with ' +
         'per-creature inspection (AC/HP/actions/saves/traits), an XP/difficulty EXPLANATION (headline + detail, not ' +
-        'just a band), actionable warnings (role duplication, action-economy mismatch, missing statblocks, ' +
+        'just a band), a `difficultySupport` flag (\'supported\' for 5e/homebrew, \'heuristic\' for a registered ' +
+        'non-5e system, where the roster was SIZED by the 5e-shaped heuristic but the reported `difficulty` is ' +
+        '`status:\'unsupported\'` with a null band — it is NOT a 5e-shaped difficulty rating, it is the absence of ' +
+        'one, so do not report a band for it — issue #1928; `matchedBand` refers to that 5e-shaped roster-SIZING ' +
+        'pass and can be `true` beside an `unsupported` difficulty, so never report it as an achieved difficulty ' +
+        'when `difficultySupport` is \'heuristic\'), ' +
+        'actionable warnings (role duplication, action-economy mismatch, missing statblocks, ' +
         'unsupported-system math, swinginess), and actionable fallbacks when the compendium is empty or the system ' +
         'lacks budget math. First call with just `difficulty` (+ optional party/filters/shape/count/seed) to generate; ' +
         'then pass back `roster` (the returned plan[]) with a `tune` op to reroll-all / reroll-slot / swap-slot / ' +
@@ -2176,7 +2307,7 @@ export class McpToolsService {
         'child row intact. 404 if not actually in the trash.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
-        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true, allowTrashed: true });
         return this.campaigns.restore(campaignId as number, user);
       },
     );
@@ -3661,14 +3792,18 @@ export class McpToolsService {
       server,
       user,
       'update_campaign_status',
-      'DM only: update campaign state — status (active|paused|completed), current location, and/or danger level. ' +
+      'DM only: update campaign state — status (active|paused|completed), current location, and/or campaign-wide ' +
+        'danger level (a persistent tone/challenge backdrop, not a live threat state — see the `dangerLevel` arg). ' +
         '(sessionCount and latestSessionNumber are intentionally NOT settable here — they\'re denormalized ' +
         'stats auto-recomputed by add_session_recap/session delete/restore, not free-form fields.)',
       {
         campaignId: CampaignIdArg,
         status: z.enum(['active', 'paused', 'completed']).optional().describe('Campaign status'),
         currentLocationId: Id.nullable().optional().describe('Current location id (null to clear)'),
-        dangerLevel: DangerLevel.optional().describe('low | moderate | high | deadly'),
+        dangerLevel: DangerLevel.optional().describe(
+          'low | moderate | high | deadly — campaign-wide narrative tone/challenge backdrop, not a ' +
+            'live threat state, encounter difficulty, or HP status (issue #871).',
+        ),
       },
       async ({ campaignId, status, currentLocationId, dangerLevel }) => {
         // allowArchived: this is the un-archive path (status back to 'active') —
@@ -4125,7 +4260,7 @@ export class McpToolsService {
         const rollMode = (advantage as 'normal' | 'advantage' | 'disadvantage' | undefined) ?? 'normal';
 
         const campaign = await this.campaigns.getOrThrow(character.campaignId);
-        const adapter = ruleSystemAdapter(campaign.ruleSystem);
+        const adapter = ruleSystemAdapter(campaign.ruleSystem, campaign.customMechanicsProfile);
         const resolved = resolveSavingThrow({
           stats: fromJsonText<Record<string, number>>(character.stats, {}),
           saveProficiencies: fromJsonText<string[]>(character.saveProficiencies, []),
@@ -4351,7 +4486,10 @@ export class McpToolsService {
         '(issue #39: mapAttachmentId = an uploaded image attachment id, kind map|image, rendered as the run-session ' +
         'background; combatant token positions are set with update_combatant tokenX/tokenY, 0–100). Toggle hidden to ' +
         'hide/reveal the encounter as DM-only prep (issue #262: hidden=true withholds its roster + difficulty from ' +
-        'players; hidden=false reveals it). Pass null to clear a link or the map; omit a field to leave it unchanged. ' +
+        'players; hidden=false reveals it). Set turnTimerSeconds to a DM-chosen pacing limit in seconds (issue #1935; ' +
+        '0 = off) — purely a social/visual cue for the elapsed-time chip, never enforced server-side. turnStartedAt is ' +
+        'NOT settable here: it is a server-stamped timestamp, refreshed automatically whenever the turn advances. ' +
+        'Pass null to clear a link or the map; omit a field to leave it unchanged. ' +
         'Pass expectedUpdatedAt (the updatedAt you last read for this encounter) to opt into optimistic concurrency ' +
         '(issue #532): a stale value 409s rather than silently clobbering a co-DM\'s fresher edit.',
       { encounterId: Id.describe('Encounter id — from list_encounters'), expectedUpdatedAt: ExpectedUpdatedAt, ...EncounterUpdate.shape },
@@ -4520,7 +4658,7 @@ export class McpToolsService {
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
         'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted. For kind="npc" ' +
         'pass npcId to link a campaign NPC (its name is used); give hpMax or a ruleEntryId statblock for its HP. Pass ' +
-        '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N".',
+        '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N". Optional `tokenSize` controls the token footprint.',
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
         ...CombatantCreate.shape,
@@ -4552,7 +4690,9 @@ export class McpToolsService {
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
-        'fields: initiative, and the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat). ' +
+        'fields: initiative, the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat), and ' +
+        'statblockRevealed (reveals/hides this monster or npc\'s statblock to players; a non-DM read genuinely omits ' +
+        'the statblock until this is true — logs a combat-log note event and an audit row). ' +
         'Battle-map token position tokenX/tokenY (0–100 percent overlay, clamped) moves the combatant\'s token on the ' +
         'encounter map. DM may modify any combatant; a player may only touch hp/temp-hp/death-saves/conditions/token ' +
         'on a combatant linked to a character they own.',
@@ -4586,6 +4726,75 @@ export class McpToolsService {
           user,
           role,
         );
+      },
+    );
+
+    // Issue #1909: the delta-based, transactional counterpart to update_combatant's
+    // `statblock` field above — flipping one Ki pip or one spell-slot checkbox no longer
+    // requires this tool (or a human via REST) to resend the ENTIRE statblock/character
+    // JSON, which raced last-writer-wins against a second writer (another DM tab, a
+    // concurrent MCP call) and silently reverted their unrelated edits.
+    this.writeTool(
+      server,
+      user,
+      'adjust_combatant_resource',
+      'Spend or restore ONE bounded resource or spell-slot level on a combatant mid-fight — a character-linked ' +
+        'combatant OR a monster/NPC combatant with an inline statblock. Exactly one of `key` (feature resource) or ' +
+        '`spellLevel` (1-9); `delta` is relative to the resource\'s current `used` (default +1). `key` must name a ' +
+        'resource that ALREADY exists on the combatant/character (from get_encounter/get_character) — an unknown ' +
+        'key FAILS with a 400 naming it rather than silently creating a new one, the same as an out-of-range ' +
+        '`spellLevel`. Spending past 0 or restoring past `max` FAILS with a 400 — never a silent clamp — so success ' +
+        'can be trusted as "the resource was actually spent/restored." dm may adjust any combatant; a player only a ' +
+        'combatant linked to a character they own; a statblock combatant (no linked character) is dm-only, ' +
+        'matching update_combatant\'s statblock rule. Records a resource_changed encounter event. `idempotencyKey`: ' +
+        'a lost-response retry with the SAME key replays the original outcome instead of double-spending. Returns ' +
+        'the combatant: for a statblock combatant this shows the new value directly (the statblock lives on the ' +
+        'combatant); for a character-linked combatant the resource lives on the CHARACTER sheet instead, so this ' +
+        'response does not show the new value — call get_character separately to confirm it.',
+      // CombatantResourceAdjust is a ZodEffects (.superRefine requiring exactly one of
+      // key|spellLevel), so it has no `.shape` to spread — list the wire fields here and
+      // re-validate with .parse below, matching adjust_character_condition_level's pattern.
+      {
+        encounterId: Id.describe('Encounter id'),
+        combatantId: Id.describe('Combatant id — from get_encounter'),
+        key: z.string().min(1).max(80).optional().describe('Feature resource key (exactly one of key or spellLevel required)'),
+        spellLevel: z.number().int().min(1).max(9).optional().describe('Spell slot level 1-9 (exactly one of key or spellLevel required)'),
+        delta: z.number().int().optional().describe('Relative to current used; +1 spends, -1 restores (default +1)'),
+        expectedUsed: z.number().int().min(0).optional().describe(
+          'Optional per-resource CAS guard: the `used` value get_encounter/get_character last showed for this ' +
+            'resource. If another writer changed it since, the request 409s instead of silently applying delta on ' +
+            'top of the new value. Omit for a purely relative intent (e.g. "restore 2 charges") with no rendered baseline.',
+        ),
+        idempotencyKey: IdempotencyKey.describe('Client-minted intent key; reuse for retries of this exact spend/restore'),
+      },
+      async ({ encounterId, combatantId, ...fields }) => {
+        // Same-key retries replay a stored response without writing, even after the
+        // encounter is trashed; the service still rejects a fresh key transactionally.
+        const row = await this.encounters.getRowOrThrow(encounterId as number, true);
+        // Issue #1909 review (Devin): mirror roll_combatant_initiative's own viewer-role
+        // visibility pre-check just below — `requireRole(..., 'player')` alone throws 403
+        // for a viewer BEFORE the service's own `isVisibleTo` gate is ever reached, so a
+        // viewer hitting a HIDDEN encounter's real id would get 403, distinguishable from
+        // the 404 a nonexistent id gets (an enumeration oracle). Pre-check at the VIEWER
+        // floor first so a hidden encounter is 404 for every non-DM.
+        //
+        // Issue #1909 review round 2 (Codex): `allowArchived: true` on both this check and
+        // the role gate below — without it, `requireRole(..., 'viewer')` 403'd EVERY member
+        // on a paused/completed campaign before `isVisibleTo` ever ran, reopening the same
+        // oracle keyed on campaign archival instead of role. The service's own
+        // `assertCampaignWritableInTx` still rejects a fresh write against an archived
+        // campaign; see the REST controller's identical fix for the full rationale.
+        if (
+          !isVisibleTo(
+            { hidden: row.hidden },
+            await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }),
+          )
+        ) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
+        const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
+        const validated = CombatantResourceAdjust.parse(fields);
+        return this.encounters.adjustCombatantResource(encounterId as number, combatantId as number, validated, user, role);
       },
     );
 
@@ -4810,7 +5019,19 @@ export class McpToolsService {
         'player can finish an attack against a monster end-to-end. Pass commit:true to apply atomically in the same ' +
         'call when the campaign policy permits (automatic); otherwise the result is a declaration the DM applies via ' +
         'apply_action (dm-confirmed / player-declares). An unsupported action shape is refused (fall back to its ' +
-        'statblock). Returns { resolution, applied, canApply, policy, undoToken }.',
+        'statblock). Returns { resolution, applied, canApply, policy, undoToken, systemMathSupported, mathProfile }. ' +
+        '`systemMathSupported` is false whenever this campaign\'s system has NOT been audited end-to-end against the ' +
+        'resolver\'s maths — it does NOT mean 5e math was necessarily used. Some adapters (OSR, Open Legend) supply ' +
+        'their own `resolveAttack` (descending-AC comparison, exploding dice pools) and are still reported unsupported ' +
+        'because the combined attack/save profile is unaudited. Read `mathProfile` for what actually ran: it names the ' +
+        'audited profile when one is in force, and is null otherwise. Only when it names the 5e profile are the d20 ' +
+        'roll, ascending-AC comparison and proficiency bonus below the 5e-shaped ones; ' +
+        '`systemMathSupported` is true only when the campaign\'s rule system is 5e or an empty/unrecognized slug ' +
+        '(the same 5e fallback combat math already uses) — false for a registered non-5e system (PF2e, OSR, …) that ' +
+        'has not been audited against this maths (issue #1928, label don\'t block: resolution still runs and, under ' +
+        '`commit:true`, still applies — the flag only marks the system UNAUDITED end-to-end, and does NOT tell you ' +
+        'which maths ran). `mathProfile` names the audited profile in force, or null when unsupported — read it, not ' +
+        'the flag, to learn what actually executed.',
       { encounterId: Id.describe('Encounter id'), ...ActionResolveRequest.shape },
       async ({ encounterId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

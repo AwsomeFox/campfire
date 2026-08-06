@@ -2,9 +2,14 @@ import { CombatLog } from './CombatLog';
 import { ApplyDamageBar, BattleMap, type EncounterGridPatch } from './map/BattleMap';
 import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
+import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
+import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
+import { GatedControl } from '../../components/GatedControl';
+import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
+import { classifyDeathSaveOutcome, deathSaveSpectatorToastInfo, type DeathSaveOutcome } from './combat/deathSaveOutcome';
 import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -12,13 +17,13 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
-import { ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
+import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions, invalidateTableSafety, useTableSafety } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import { beginReconcile, blocksFurtherActions, clearReconcile, completeReconcile, IDLE_RECONCILE, isAmbiguousOutcome, type ReconcileState } from '../../lib/ambiguousMutation';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
@@ -35,6 +40,7 @@ import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
+import { TurnElapsedChip } from './TurnElapsedChip';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
 import { detectSseTurnBeat, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
@@ -42,10 +48,11 @@ import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { CheckRequestPanel } from './CheckRequests';
-import { ActionUsePanel } from './ActionUseFlow';
+import { ActionUsePanel, legalTargets } from './ActionUseFlow';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { NotFoundState } from '../../components/NotFoundState';
@@ -72,7 +79,7 @@ import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMo
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
-import { tokenIdentityBackground } from './tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export { BattleMap } from './map/BattleMap';
@@ -425,12 +432,15 @@ function InitiativeStrip({
   charactersById,
   turnPulse = false,
   hpFeedbackByCombatant,
+  colorVisionAssist = false,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
   turnPulse?: boolean;
   hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
+  /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
+  colorVisionAssist?: boolean;
 }) {
   const combatantRefs = useRef(new Map<number, HTMLDivElement>());
 
@@ -476,10 +486,20 @@ function InitiativeStrip({
               else combatantRefs.current.delete(c.id);
             }}
           >
+            {colorVisionAssist && isCurrent && (
+              <span
+                data-testid="strip-token-turn-chevron"
+                aria-hidden="true"
+                style={{ fontSize: 11, lineHeight: 1, color: 'var(--color-accent)' }}
+              >
+                ▾
+              </span>
+            )}
             <div
               aria-current={isCurrent ? 'true' : undefined}
               className={`flex items-center justify-center overflow-hidden bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
               style={{
+                position: 'relative',
                 width: isCurrent ? 48 : 40,
                 height: isCurrent ? 48 : 40,
                 transition: 'all 0.2s ease',
@@ -497,6 +517,23 @@ function InitiativeStrip({
                 <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
                   {tokenInitials(c.name)}
                 </span>
+              )}
+              {colorVisionAssist && (
+                <span
+                  data-testid="strip-token-identity-shape"
+                  data-token-shape={tokenIdentityShape(c.id)}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    right: 2,
+                    bottom: 2,
+                    width: 9,
+                    height: 9,
+                    background: '#fff',
+                    clipPath: TOKEN_IDENTITY_SHAPE_CLIP_PATH[tokenIdentityShape(c.id)],
+                    boxShadow: '0 0 0 1px rgba(15,23,42,.7)',
+                  }}
+                />
               )}
             </div>
             <FloatingNumbers events={feedback} />
@@ -578,6 +615,11 @@ export default function RunSessionPage() {
   canDmWriteRef.current = canDmWrite;
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
+  // #599/#1933: mirrors the server's assertNoSafetyHold rejection on start/nextTurn/
+  // undoTurn/endTurn as a GatedControl reason — no server or authorization change, just
+  // reading the same table-wide safety-hold state SafetyHoldBar already shows everyone.
+  const { data: tableSafety } = useTableSafety(Number.isFinite(cid) ? cid : undefined);
+  const safetyHoldActive = tableSafety?.active === true;
 
   // Resolve the rule-system adapter FROM THE ACTIVE CAMPAIGN (issue #234) rather than at
   // module scope with no argument — so a future non-5e adapter's condition vocabulary and
@@ -587,6 +629,13 @@ export default function RunSessionPage() {
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
   const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
+  // Issue #1910 review: the vitals header's speed fallback must read the ACTIVE
+  // campaign's own adapter default, not a hardcoded 30 — a system without a
+  // movement slot at all (e.g. PF2e) has no adapter default to fall back to.
+  const movementDefault = useMemo(
+    () => actionEconomyForAdapter(activeAdapter).slots.find((s) => s.kind === 'movement')?.max,
+    [activeAdapter],
+  );
 
   const queryClient = useQueryClient();
 
@@ -647,12 +696,19 @@ export default function RunSessionPage() {
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
   const [pendingActionUse, setPendingActionUse] = useState<{
+    id: number;
     combatantId: number;
     actorName: string;
     actionIndex: number;
     actionName: string;
     spec: ActionSpec;
   } | null>(null);
+  const pendingActionUseSequence = useRef(0);
+  const pendingActionUseIdRef = useRef<number | null>(null);
+  const [actionTargetIds, setActionTargetIds] = useState<number[]>([]);
+  const [actionTargetsDeclared, setActionTargetsDeclared] = useState(false);
+  const [actionImpactTargetIds, setActionImpactTargetIds] = useState<number[]>([]);
+  const actionImpactTimerRef = useRef<number | null>(null);
   const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
@@ -675,11 +731,22 @@ export default function RunSessionPage() {
   const dismissPing = useCallback((key: number) => {
     setPings((prev) => prev.filter((p) => p.key !== key));
   }, []);
+  useEffect(() => () => {
+    if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);
+  }, []);
   // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
   // flag so one combatant's slower edit (rename, condition, initiative…) disables only
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
   // optimistic and stay live even while a request is in flight.
   const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  // Issue #1926: combatants for which the DM has resolved (revealed from, or dismissed)
+  // the one-tap kill prompt this session. Client-local only — a page reload resets it,
+  // same as every other transient run-session UI state; the server-persisted
+  // `statblockRevealed` flag itself is the only thing that's actually authoritative.
+  const [dismissedKillPromptIds, setDismissedKillPromptIds] = useState<ReadonlySet<number>>(() => new Set());
+  // React state disables the source row after render; the ref closes the same-tick
+  // double-click window before that render can happen.
+  const pendingDuplicateCombatantIds = useRef(new Set<number>());
   const markCombatantPending = useCallback((combatantId: number, on: boolean) => {
     setPendingCombatantIds((prev) => {
       const next = new Set(prev);
@@ -1374,6 +1441,19 @@ export default function RunSessionPage() {
           invalidateCampaignCharactersForOwnership();
           return;
         }
+        // Issue #1933 review finding: this event has no encounterId (it is campaign-wide,
+        // like character/membership frames above) and was falling into the encounterId
+        // filter below, which drops it — so another participant's hold activate/release
+        // only reached this page via useTableSafety's own 20s poll. safetyHoldActive
+        // gates real writes (start/nextTurn/undoTurn/endTurn), so a stale mirror meant the
+        // exact failure this feature exists to prevent: the server rejects and the UI
+        // cannot say why, for up to a poll interval. Refetch the safety row immediately
+        // instead — the anonymity rules stay enforced there, this frame carries only
+        // `active` (see useCampaignEvents' own doc comment on 'safety.hold').
+        if (event.type === 'safety.hold') {
+          invalidateTableSafety(queryClient, cid);
+          return;
+        }
         // Sheet / membership frames have no encounterId — must not fall into the
         // encounterId filter below (that was the #421 bug: character events ignored).
         if (shouldInvalidateInlineCharacters(event)) {
@@ -1486,6 +1566,13 @@ export default function RunSessionPage() {
         // `sheetMirrored`, so this only piggybacks the invalidation when it's actually
         // needed.
         if (event.sheetMirrored) invalidateCampaignCharactersForOwnership();
+        // Issue #1919 — a death-save roll (like any other combatant write) emits only
+        // `encounter.updated`; the persisted combat-log/dice-log event it also wrote would
+        // otherwise wait for the events feed's own 5s backstop poll before another viewer's
+        // spectator toast (and CombatLog highlight) could appear. Piggybacking this cheap
+        // refetch on the SAME frame that already invalidates the encounter itself is enough
+        // to satisfy "after the encounter.updated-driven refetch (or within one poll cycle)".
+        void queryClient.invalidateQueries({ queryKey: queryKeys.encounterEvents(eid) });
       },
       [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
     ),
@@ -1499,6 +1586,12 @@ export default function RunSessionPage() {
       // review): a dropped-then-recovered stream must not leave the Spellbook's
       // /turn-sourced slots/spells stale either.
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      // Issue #1933 review: handling the delivered `safety.hold` frame is not enough on
+      // its own — a hold activated or released WHILE the stream was down produces no
+      // frame to deliver on reconnect. safetyHoldActive now gates Start/Next/Undo/End
+      // turn, so without this the controls stay wrongly enabled (or wrongly gated) until
+      // useTableSafety's 20s poll happens to land.
+      invalidateTableSafety(queryClient, cid);
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -1507,9 +1600,24 @@ export default function RunSessionPage() {
       invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      invalidateTableSafety(queryClient, cid);
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
+
+  // Issue #1919 — the roller's own settled death-save outcome (nat 20 revive / fresh
+  // death / fresh stabilization / plain success-or-failure), fed to the ONE combatant's
+  // tracker whose roll it belongs to. `deathSaveBeforeStateRef` captures the pre-roll
+  // deathState at the roll mutation's `onMutate` time (the classifier needs a before/after
+  // pair; the server response only carries "after"). `recentDeathSaveSelfRollRef` marks
+  // this client as the one that just rolled for a combatant, briefly, so the spectator-
+  // toast diff below (which reads the same persisted event this roll produces) does not
+  // also toast the roller their own roll a second time.
+  const deathSaveBeforeStateRef = useRef(new Map<number, string>());
+  const recentDeathSaveSelfRollRef = useRef(new Map<number, number>());
+  const [deathSaveOutcome, setDeathSaveOutcome] = useState<{ combatantId: number; outcome: DeathSaveOutcome } | null>(null);
+  const deathSaveOutcomeTimerRef = useRef<number | null>(null);
+  const DEATH_SAVE_SELF_ROLL_WINDOW_MS = 8_000;
 
   // The persisted event stream is the single announcement source for turn, HP,
   // condition, death, note, override, and correction updates. ID-based tracking
@@ -1519,6 +1627,14 @@ export default function RunSessionPage() {
     encounterId: number;
     cursor: CombatLogAnnouncementCursor;
   } | null>(null);
+  // Issue #1919 — "table side": a compact toast for anyone OTHER than the roller when a
+  // death-save roll appears in the same already role-projected event feed CombatLog reads
+  // (never a new SSE type or a raw dice-log read — see `deathSaveOutcome.ts`'s doc comment).
+  // `recentDeathSaveSelfRollRef` (set at the roll mutation's `onMutate`) suppresses the
+  // roller's OWN roll here, since that client already got the full dice-overlay treatment.
+  const deathSaveSpectatorToastSequence = useRef(0);
+  const [deathSaveSpectatorToast, setDeathSaveSpectatorToast] = useState<{ id: number; message: string } | null>(null);
+  const deathSaveSpectatorToastTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!eventsQuery.data) return;
 
@@ -1539,7 +1655,42 @@ export default function RunSessionPage() {
         dedupeKey: `combat-log:${eid}:${appended.length}:${firstId}:${lastId}`,
       });
     }
-  }, [eid, eventsQuery.data, announce]);
+
+    // A null cursor is the initial-history baseline (same rule as the SR announcement
+    // above) — a page freshly opened mid-encounter must not toast every past roll.
+    if (!cursor) return;
+    const now = Date.now();
+    for (const event of advanced.appendedEvents) {
+      // Issue #1919 secrecy boundary: `deathSaveSpectatorToastInfo` reads ONLY the
+      // already role-projected `event.target`/`detail` — the same fields CombatLog
+      // renders for every viewer via the server's `redactEncounterEventsForViewer`
+      // (issue #869). A hidden combatant's name arrives already masked to the
+      // "Unknown combatant" placeholder (never null); this never does its own lookup
+      // that could bypass that redaction. See `deathSaveOutcome.unit.spec.ts` for the
+      // pinned regression.
+      const info = deathSaveSpectatorToastInfo(event);
+      if (!info) continue;
+      const selfRolledAt = event.targetId != null ? recentDeathSaveSelfRollRef.current.get(event.targetId) : undefined;
+      if (selfRolledAt != null) {
+        if (event.targetId != null) recentDeathSaveSelfRollRef.current.delete(event.targetId);
+        if (now - selfRolledAt < DEATH_SAVE_SELF_ROLL_WINDOW_MS) continue;
+      }
+      const outcomeWord = info.outcomeKind === 'success'
+        ? t('encounters.deathSave.spectatorOutcomeSuccess', 'success')
+        : t('encounters.deathSave.spectatorOutcomeFailure', 'failure');
+      const toastMessage = t(
+        'encounters.deathSave.spectatorToast',
+        '{{name}} death save: {{outcome}} (rolled {{natural}})',
+        { name: info.name, outcome: outcomeWord, natural: info.natural },
+      );
+      if (deathSaveSpectatorToastTimerRef.current != null) window.clearTimeout(deathSaveSpectatorToastTimerRef.current);
+      const toastId = ++deathSaveSpectatorToastSequence.current;
+      setDeathSaveSpectatorToast({ id: toastId, message: toastMessage });
+      deathSaveSpectatorToastTimerRef.current = window.setTimeout(() => {
+        setDeathSaveSpectatorToast((current) => (current?.id === toastId ? null : current));
+      }, 4_000);
+    }
+  }, [eid, eventsQuery.data, announce, t]);
 
   // Ending an encounter does not currently append a combat-log row. Retain that
   // useful status announcement without restoring the old turn/HP diff path, which
@@ -1555,6 +1706,15 @@ export default function RunSessionPage() {
   }, [eid, encounter, announce]);
 
   const myUserId = me?.user.id;
+  const membersQuery = useQuery({
+    queryKey: queryKeys.campaignMembers(cid),
+    queryFn: () => api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`),
+    enabled: encounter?.mapAttachmentId != null,
+  });
+  const aoeDeclarerNames = useMemo(
+    () => new Map((membersQuery.data ?? []).map((member) => [String(member.userId), member.displayName || member.username || String(member.userId)])),
+    [membersQuery.data],
+  );
   const ownedCharacterIds = useMemo(
     () =>
       new Set(
@@ -1592,11 +1752,30 @@ export default function RunSessionPage() {
 
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
+      const id = ++pendingActionUseSequence.current;
+      pendingActionUseIdRef.current = id;
       setPendingApply(null);
-      setPendingActionUse({ combatantId, actorName, actionIndex, actionName, spec });
+      setActionTargetIds([]);
+      setActionTargetsDeclared(false);
+      setPendingActionUse({ id, combatantId, actorName, actionIndex, actionName, spec });
     },
     [],
   );
+
+  const toggleActionTarget = useCallback((id: number) => {
+    setActionTargetIds((previous) => {
+      if (!pendingActionUse || actionTargetsDeclared) return previous;
+      if (previous.includes(id)) return previous.filter((targetId) => targetId !== id);
+      const max = pendingActionUse.spec.targets.count > 0 ? pendingActionUse.spec.targets.count : 50;
+      return previous.length >= max ? previous : [...previous, id];
+    });
+  }, [pendingActionUse, actionTargetsDeclared]);
+  const actionLegalTargetIds = useMemo(() => pendingActionUse && pendingActionUse.spec.targets.count > 0
+    ? legalTargets(encounter?.combatants ?? [], pendingActionUse.combatantId, pendingActionUse.spec.targets.allow).map((combatant) => combatant.id)
+    : [], [encounter?.combatants, pendingActionUse]);
+  const actionTargetsAtCapacity = !!pendingActionUse
+    && pendingActionUse.spec.targets.count > 0
+    && actionTargetIds.length >= pendingActionUse.spec.targets.count;
 
   const onAoeHitLayoutChange = useCallback((layout: AoeHitLayout | null) => {
     setAoeHitLayout(layout);
@@ -1703,6 +1882,44 @@ export default function RunSessionPage() {
       invalidateEncounter(queryClient, eid);
     },
   });
+
+  const duplicateCombatant = useMutation({
+    mutationFn: ({ body }: { combatantId: number; body: Record<string, unknown> }) =>
+      api.post<Combatant>(`${API}/encounters/${eid}/combatants`, body),
+    onMutate: () => setActionError(null),
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: (_data, _err, { combatantId }) => {
+      pendingDuplicateCombatantIds.current.delete(combatantId);
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
+  const requestDuplicateCombatant = useCallback(
+    (combatant: Combatant, rosterNames: readonly string[]) => {
+      if (riskyBlocked || reconcileBlocks || pendingDuplicateCombatantIds.current.has(combatant.id)) return;
+      pendingDuplicateCombatantIds.current.add(combatant.id);
+      markCombatantPending(combatant.id, true);
+      duplicateCombatant.mutate({
+        combatantId: combatant.id,
+        body: {
+          kind: combatant.kind,
+          duplicateOfCombatantId: combatant.id,
+          name: duplicateCombatantName(combatant.name, rosterNames),
+          ruleEntryId: combatant.ruleEntryId ?? undefined,
+          statblock: combatant.statblock ?? undefined,
+          hpMax: typeof combatant.hpMax === 'number' && combatant.hpMax > 0 ? combatant.hpMax : undefined,
+          initMod: combatant.initMod,
+          initiativeGroup: combatant.initiativeGroup ?? undefined,
+          tokenSize: combatant.tokenSize,
+        },
+      });
+    },
+    [duplicateCombatant, markCombatantPending, reconcileBlocks, riskyBlocked],
+  );
 
   const combatantTurnState = useMutation({
     mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
@@ -2122,6 +2339,23 @@ export default function RunSessionPage() {
     [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm, seedHpFeedbackSnapshot, appendHpFeedbackEvents],
   );
 
+  // Issue #1909 scope note: earlier rounds of this PR added a CAS token + debounce/
+  // serialization queue to this whole-statblock PATCH (the in-app statblock editor's
+  // onChange path), trying to close a pre-existing lost-update on a caller this issue
+  // never named. That mechanism went through five review-caught regressions in a row (no
+  // token → lost updates; token added → 409 on every keystroke; token re-read at send time
+  // → guard defeated by a concurrent writer; token latched per-combatant → permanent
+  // lockout after any other encounter write; draft leaked across an encounter-id change
+  // mid-debounce) — a strong signal it was being built in the wrong place for this PR.
+  // Reverted back to this endpoint's actual, and already-solved, scope: `patchCombatant`
+  // sends every patch (including `statblock`) as a plain, immediate, token-less PATCH,
+  // exactly as it did before this PR touched this file. This restores the PRE-EXISTING
+  // whole-statblock-editor concurrency gap (a concurrent whole-statblock save can still
+  // revert another writer's unrelated edit) rather than introducing a new one — that gap
+  // predates this PR and is now tracked as its own follow-up issue rather than solved here.
+  // What #1909 actually asked for — flipping ONE resource pip no longer clobbers the WHOLE
+  // statblock — is unaffected: the pip path went through `adjustCombatantResource`'s
+  // delta-based endpoint from the very first round and never depended on this mechanism.
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => {
       const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
@@ -2135,17 +2369,36 @@ export default function RunSessionPage() {
 
   const deathSaveRoll = useKeyedMutation({
     mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
-      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
+      api.post<{ combatant: Combatant; roll: DiceRoll }>(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
+      const before = encounter?.combatants.find((candidate) => candidate.id === combatantId);
+      deathSaveBeforeStateRef.current.set(combatantId, before?.deathState ?? 'dying');
+      recentDeathSaveSelfRollRef.current.set(combatantId, Date.now());
+      // Issue #1919 — no client-supplied die face: this only starts the shared tumble
+      // animation. The face it settles on always comes from `showRoll(data.roll)` below.
+      beginRollAnimation('1d20');
+    },
+    onSuccess: (data) => {
+      showRoll(data.roll);
+      const before = deathSaveBeforeStateRef.current.get(data.combatant.id) ?? 'dying';
+      const outcome: DeathSaveOutcome = {
+        natural: data.roll.total,
+        kind: classifyDeathSaveOutcome(data.roll.total, before, data.combatant.deathState),
+      };
+      if (deathSaveOutcomeTimerRef.current != null) window.clearTimeout(deathSaveOutcomeTimerRef.current);
+      setDeathSaveOutcome({ combatantId: data.combatant.id, outcome });
+      deathSaveOutcomeTimerRef.current = window.setTimeout(() => setDeathSaveOutcome(null), 2_600);
     },
     onError: (err) => {
+      cancelRollAnimation();
       if (isAmbiguousOutcome(err)) enterReconciling();
       else reportError(err);
     },
     onSettled: (_data, _err, { combatantId }) => {
       markCombatantPending(combatantId, false);
+      deathSaveBeforeStateRef.current.delete(combatantId);
       invalidateEncounter(queryClient, eid);
     },
   });
@@ -2587,6 +2840,44 @@ export default function RunSessionPage() {
   }, [eid, queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
+  // Player declarations use scoped routes so the server, not the browser, owns
+  // declarer attribution and per-template authorization (#1913).
+  const declareAoeTemplate = useCallback(async (template: Omit<AoeTemplate, 'declaredByUserId'>) => {
+    setActionError(null);
+    await api.post(`${API}/encounters/${eid}/aoe-templates`, template);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const updateAoeTemplate = useCallback(async (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => {
+    setActionError(null);
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+      current
+        ? { ...current, aoe: current.aoe.map((template) => (template.id === templateId ? { ...template, ...patch } : template)) }
+        : current,
+    );
+    try {
+      await api.patch(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`, patch);
+    } catch (error) {
+      // A refetch is a rollback that does not clobber a later local nudge that
+      // may already have updated the same cache entry.
+      invalidateEncounter(queryClient, eid);
+      throw error;
+    }
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const removeAoeTemplate = useCallback(async (templateId: string) => {
+    setActionError(null);
+    await api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const clearPlayerAoeTemplates = useCallback(async () => {
+    const playerTemplates = (encounter?.aoe ?? []).filter((template) => template.declaredByUserId != null);
+    if (playerTemplates.length === 0) return;
+    setActionError(null);
+    const results = await Promise.allSettled(playerTemplates.map((template) => api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(template.id)}`)));
+    invalidateEncounter(queryClient, eid);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }, [eid, encounter?.aoe, queryClient]);
 
   // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
   // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
@@ -2685,7 +2976,11 @@ export default function RunSessionPage() {
     canDmWrite && encounter
       ? {
           canExecute: () => {
-            if (!encounter || headerBusy || riskyBlocked) return false;
+            // #599/#1933: the keyboard path must honor the same safety-hold mirror as the
+            // Next-turn button's GatedControl reason — otherwise the shortcut would still
+            // fire (and get server-rejected) while the button next to it visibly explains
+            // why it will not.
+            if (!encounter || headerBusy || riskyBlocked || safetyHoldActive) return false;
             if (confirmEnd || confirmReopen || confirmDelete) return false;
             return dmLifecycleActions(encounter.status).nextTurn;
           },
@@ -3016,6 +3311,16 @@ export default function RunSessionPage() {
             {encounter.turnPhase === 'lair' ? ` · Lair (init ${LAIR_INITIATIVE_COUNT})` : ''}
           </span>
         )}
+        {/* Turn timer (issue #1935): DM-cockpit elapsed chip next to the round tag. Players
+            get the same information (only once a limit is set) via PlayerVitalsHeader below,
+            not here — see TurnElapsedChip's audience doc. */}
+        {isDm && (
+          <TurnElapsedChip
+            turnStartedAt={encounter.turnStartedAt}
+            turnTimerSeconds={encounter.turnTimerSeconds}
+            audience="dm"
+          />
+        )}
         <DifficultyBadge difficulty={difficulty} />
         {isDm && <PrintControl resetKey={encounter.id} className="ml-auto" />}
         <span
@@ -3083,6 +3388,7 @@ export default function RunSessionPage() {
           lifecycle={lifecycle}
           headerBusy={headerBusy}
           riskyBlocked={riskyBlocked}
+          safetyHoldActive={safetyHoldActive}
           needsInitiativeCount={needsInitiativeCount}
           hasNoCombatants={hasNoCombatants}
           undoTurnDisabled={
@@ -3107,6 +3413,10 @@ export default function RunSessionPage() {
             setConfirmReopen(true);
           }}
           onRequestDelete={() => setConfirmDelete(true)}
+          turnTimerSeconds={encounter.turnTimerSeconds}
+          onSetTurnTimerSeconds={(seconds) => {
+            void queueEncounterPatch({ turnTimerSeconds: seconds });
+          }}
         />
       </div>
 
@@ -3400,8 +3710,12 @@ export default function RunSessionPage() {
           canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
+          currentTurnCombatantId={encounter.status === 'running' ? turnWorkspace?.current?.combatantId ?? null : null}
+          currentTurnMovementMaxFt={turnWorkspace?.movement?.maxFt ?? null}
+          onMoveFt={(combatantId, moveFt) => patchCombatantTurnState(combatantId, { moveFt })}
           onBatchTokens={batchMoveTokens}
           onUndoTokenBatch={undoTokenBatch}
           dismissTokenUndoNonce={dismissTokenUndoNonce}
@@ -3412,6 +3726,19 @@ export default function RunSessionPage() {
           onSetFog={setEncounterFog}
           pendingFog={pendingFogForEncounter(pendingFog, eid)}
           onSetAoe={setEncounterAoe}
+          aoeDeclarerNames={aoeDeclarerNames}
+          canDeclareAoe={!riskyBlocked && encounter.status !== 'ended' && (canDmWrite || canPlayerWrite)}
+          onDeclareAoe={(template) => { void declareAoeTemplate(template).catch(reportError); }}
+          onUpdateAoe={async (templateId, patch) => {
+            try {
+              await updateAoeTemplate(templateId, patch);
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
+          }}
+          onRemoveAoe={(templateId) => { void removeAoeTemplate(templateId).catch(reportError); }}
+          onClearPlayerAoe={canEditEncounter ? () => { void clearPlayerAoeTemplates().catch(reportError); } : undefined}
           hpFeedbackByCombatant={hpFeedbackByCombatant}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
@@ -3431,22 +3758,35 @@ export default function RunSessionPage() {
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
+          targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: toggleActionTarget } : null}
+          impactTargetIds={actionImpactTargetIds}
         />
       )}
 
       {/* Sticky Player Vitals Header */}
       {!isDm && myCombatants.length > 0 && (
-        <PlayerVitalsHeader 
-          combatants={myCombatants} 
+        <PlayerVitalsHeader
+          combatants={myCombatants}
           charactersById={charactersById}
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
+          movementDefault={movementDefault}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
+          turnStartedAt={encounter.turnStartedAt}
+          turnTimerSeconds={encounter.turnTimerSeconds}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
             hpDelta.mutate({ combatantId: id, delta, actorId });
           }}
-          onSetHpMax={(id, max) => patchCombatant(id, { hpMax: max })}
+          onSetHpMax={(id, max) => {
+            if (reconcileBlocks) return;
+            patchCombatant(id, { hpMax: max });
+          }}
+          onRollDeathSave={(id) => rollDeathSave({ id })}
+          isDeathSaveBusy={(id) => pendingCombatantIds.has(id) || reconcileBlocks}
+          syncBlocked={riskyBlocked}
+          deathSaveOutcome={deathSaveOutcome}
         />
       )}
 
@@ -3467,9 +3807,23 @@ export default function RunSessionPage() {
             <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
             <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
             {canDmWrite && (
-              <Btn className="ml-auto" disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
-                Done →
-              </Btn>
+              // Issue #1933 review: this is the THIRD entry point to `nextTurn`, alongside
+              // the keyboard shortcut and DmLifecycleHeader's button. Both of those got the
+              // safety-hold mirror; this one did not, so a DM resolving a lair action while
+              // the table is paused fired a write `assertNoSafetyHold` rejects and got a
+              // bare error — the exact "server rejects and the UI cannot say why" outcome
+              // this issue exists to remove. Same shared resolver as the header, so all
+              // three agree by construction rather than by three people remembering.
+              // `ml-auto` moves to the WRAPPER: it is the flex item of this row now, so the
+              // button's own auto margin would push nothing (issue #1933 review).
+              <GatedControl
+                className="ml-auto"
+                reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t, headerBusy)}
+              >
+                <Btn disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
+                  Done →
+                </Btn>
+              </GatedControl>
             )}
           </div>
         </Card>
@@ -3558,6 +3912,7 @@ export default function RunSessionPage() {
             endTurn.mutate({ expectedCurrentCombatantId })
           }
           endTurnBusy={endTurn.isPending}
+          safetyHoldActive={safetyHoldActive}
         />
       )}
       <TurnChangeBeat
@@ -3570,6 +3925,13 @@ export default function RunSessionPage() {
             : turnWorkspace?.current?.combatantId === currentCombatantId
               && turnWorkspace?.isYourTurn === true)}
       />
+      {/* Issue #1919 "table side": visible-only, same convention as TurnChangeBeat above —
+          the combat-log Announcer already covers this exact roll for every viewer via SR. */}
+      {deathSaveSpectatorToast && (
+        <div key={deathSaveSpectatorToast.id} className="cf-death-save-spectator-toast" data-testid="death-save-spectator-toast">
+          {deathSaveSpectatorToast.message}
+        </div>
+      )}
 
       {pendingApply && (
         <ApplyDamageBar
@@ -3669,21 +4031,51 @@ export default function RunSessionPage() {
 
       {pendingActionUse && (
         <ActionUsePanel
+          key={pendingActionUse.id}
           encounterId={eid}
           actorCombatantId={pendingActionUse.combatantId}
           actorName={pendingActionUse.actorName}
           actionIndex={pendingActionUse.actionIndex}
           actionName={pendingActionUse.actionName}
+          actionToken={pendingActionUse.id}
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
+          targetIds={actionTargetIds}
+          onToggleTarget={toggleActionTarget}
+          onPreview={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(true); }}
+          onPreviewStart={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(true); }}
+          onPreviewError={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(false); }}
+          onBackToTargets={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(false); }}
           isDm={isDm}
+          // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
+          // from `EncountersService.assertNoSafetyHold`. Threading the hold only into the
+          // lifecycle controls left this Apply enabled during a pause, so raising an X-Card
+          // after a preview produced a bare server conflict instead of the gate reason.
+          // Scoped to Apply: the server keeps `resolve` (the preview) open during a hold,
+          // so the roll/preview controls in this panel stay as they were.
+          // Deliberately NOT `|| safetyHoldActive`: this prop also feeds the panel's
+          // QuickRollButtons, and `/quick-roll` carries no hold guard server-side (only
+          // `apply` does). Folding the hold in here would disable a control the server
+          // would have allowed. The hold reaches Apply alone, via `applyGateReason`.
           applyDisabled={riskyBlocked}
-          onDismiss={() => setPendingActionUse(null)}
+          applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
+          onDismiss={() => { pendingActionUseIdRef.current = null; setPendingActionUse(null); setActionTargetIds([]); setActionTargetsDeclared(false); }}
           onError={surfaceActionError}
           onApplied={(token, _policy, sourceEncounterId) => {
             if (!isCurrentCombatantUndoEncounter(sourceEncounterId, activeEncounterIdRef.current)) return;
             void invalidateEncounter(queryClient, sourceEncounterId);
+            pendingActionUseIdRef.current = null;
             setPendingActionUse(null);
+            if (!prefersReducedMotion()) {
+              if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);
+              setActionImpactTargetIds(actionTargetIds);
+              actionImpactTimerRef.current = window.setTimeout(() => {
+                setActionImpactTargetIds([]);
+                actionImpactTimerRef.current = null;
+              }, 250);
+            }
+            setActionTargetIds([]);
+            setActionTargetsDeclared(false);
             if (trashedEncounterIdsRef.current.has(sourceEncounterId)) return;
             dismissCompetingRecoveryUndos();
             setActionUndo({ token, label: pendingActionUse.actionName });
@@ -3721,6 +4113,7 @@ export default function RunSessionPage() {
               charactersById={charactersById}
               turnPulse={turnPulse}
               hpFeedbackByCombatant={hpFeedbackByCombatant}
+              colorVisionAssist={me?.user.colorVisionAssist ?? false}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
@@ -3758,6 +4151,7 @@ export default function RunSessionPage() {
                   combatant={c}
                   hpFeedbackEvents={hpFeedbackByCombatant.get(c.id) ?? []}
                   isCurrentTurn={c.id === currentCombatantId}
+                  colorVisionAssist={me?.user.colorVisionAssist ?? false}
                   // Permission decides whether these controls MOUNT at all (issue #1746):
                   // a genuinely unauthorized viewer (wrong owner, ended encounter) never sees
                   // them. Whether the sync gate currently blocks writes is a separate, transient
@@ -3769,8 +4163,17 @@ export default function RunSessionPage() {
                   canEditPermission={canEditCombatantPermission(c)}
                   syncBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
-                  statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  // Issue #1926: a non-DM viewer mounts the same compendium statblock viewer
+                  // once the DM has revealed this combatant — the ruleEntryId link itself is
+                  // not campaign-secret (unchanged by this issue; see /rules/entries/:id), so
+                  // the server-enforced gate here is `statblockRevealed`, not `isDm`.
+                  statblock={(isDm || c.statblockRevealed) && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  showKillPrompt={isDm && shouldShowKillPrompt(c, dismissedKillPromptIds)}
+                  onDismissKillPrompt={() => setDismissedKillPromptIds((prev) => dismissKillPrompt(prev, c.id))}
                   canRemove={canDmWrite}
+                  onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
+                    ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))
+                    : undefined}
                   canSetInitiative={canDmWrite && encounter.status !== 'ended'}
                   running={encounter.status === 'running'}
                   character={
@@ -3838,6 +4241,7 @@ export default function RunSessionPage() {
                   onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
                   onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
                   onRollDeathSave={() => rollDeathSave(c)}
+                  deathSaveOutcome={deathSaveOutcome?.combatantId === c.id ? deathSaveOutcome.outcome : null}
                   onRollInitiative={() => rollCombatantInitiative(c)}
                   onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
                   onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
@@ -3864,6 +4268,7 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onRemove={() => setConfirmRemoveCombatantId(c.id)}
+                  targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: () => toggleActionTarget(c.id) } : null}
                 />
               ))
             )}
@@ -3888,12 +4293,14 @@ export default function RunSessionPage() {
           <CombatLog events={events} />
 
           <SharedDiceLog campaignId={cid} />
+
+          <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} />
         </aside>
       </div>
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} encounterUpdatedAt={encounter.updatedAt} />
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} />
 
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 

@@ -65,6 +65,7 @@
         "saveBudget": "Couldn't save the budget.",
         "saveInstructions": "Couldn't save the instructions.",
         "saveTableStyle": "Could not save table style.",
+        "saveComprehension": "Could not save the comprehension profile.",
         "invalidBudget": "Enter a non-negative number."
       },
       "narrationLanguage": {
@@ -175,6 +176,44 @@
             "default": "Default (no preference)",
             "light": "Light — a name and a trait",
             "deep": "Deep — voices and motives"
+          }
+        }
+      },
+      "comprehension": {
+        "sectionTitle": "Comprehension profile",
+        "feedbackSubject": "Comprehension profile",
+        "body": "Asks the AI to structure narration for readability — a different axis from table style, above. On every setting the AI already chunks narration into short beats, closes each turn with \"What changed\" then \"What can you do\", offers 2-4 suggested actions alongside free-form input (never instead of it), and answers a Simplify/Recap/Explain request from a player. These dropdowns fine-tune that baseline; leaving an axis on Default states no extra preference.",
+        "save": "Save comprehension profile",
+        "axes": {
+          "readingComplexity": "Reading complexity",
+          "paragraphLength": "Paragraph length",
+          "sensoryIntensity": "Sensory intensity",
+          "choiceCount": "Suggested choices"
+        },
+        "options": {
+          "readingComplexity": {
+            "default": "Default (no preference)",
+            "simple": "Simple — plain words, short sentences",
+            "standard": "Standard — everyday vocabulary",
+            "rich": "Rich — fuller vocabulary, longer sentences"
+          },
+          "paragraphLength": {
+            "default": "Default (no preference)",
+            "short": "Short — 1-2 sentences per beat",
+            "standard": "Standard — a few sentences per beat",
+            "long": "Long — fuller paragraphs, fewer breaks"
+          },
+          "sensoryIntensity": {
+            "default": "Default (no preference)",
+            "minimal": "Minimal — only what a player needs to act",
+            "standard": "Standard — a moderate amount of detail",
+            "vivid": "Vivid — rich sensory description"
+          },
+          "choiceCount": {
+            "default": "Default (2-4, at the AI's judgement)",
+            "two": "Two suggestions",
+            "three": "Three suggestions",
+            "four": "Four suggestions"
           }
         }
       }

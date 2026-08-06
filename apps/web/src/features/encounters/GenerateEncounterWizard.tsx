@@ -407,6 +407,7 @@ export function GenerateEncounterWizard({
 }
 
 function DifficultyExplanationPanel({ preview }: { preview: EncounterPreview }) {
+  const { t } = useTranslation();
   const e = preview.explanation;
   const tone = e.status === 'unsupported' || e.status === 'unknown' ? 'tag tag-outline' : 'tag tag-accent';
   return (
@@ -418,6 +419,19 @@ function DifficultyExplanationPanel({ preview }: { preview: EncounterPreview }) 
         {preview.matchedBand ? null : (
           <span className="tag tag-neutral" style={{ fontSize: 10 }}>
             achieved {preview.explanation.band ?? preview.difficulty.label} (requested {preview.targetBand})
+          </span>
+        )}
+        {/* Issue #1928: the target band still sizes the roster (5e-shaped count/CR heuristic) even
+            when this rule system has no budget math of its own — label it, don't hide it. */}
+        {preview.difficultySupport === 'heuristic' && (
+          <span
+            className="tag tag-outline"
+            style={{ fontSize: 10 }}
+            title={t('encounters.wizard.heuristicDifficultyHint', {
+              defaultValue: "Target band sized by D&D 5e's XP budget — this rule system has no difficulty math of its own.",
+            })}
+          >
+            {t('encounters.wizard.heuristicDifficultyBadge', { defaultValue: 'Target band: heuristic' })}
           </span>
         )}
       </div>
@@ -495,6 +509,9 @@ function RosterSlotRow({
               <GameIcon slug="pin" size={UI_ICON_SIZE.xs} /> Pinned
             </span>
           </Chip>
+        )}
+        {slot.source === 'homebrew' && (
+          <span className="tag tag-accent text-3xs">{t('encounters.wizard.homebrewBadge', 'Homebrew')}</span>
         )}
         <span className="tag tag-neutral" style={{ fontSize: 10 }}>
           {slot.cr !== null ? `CR ${slot.cr}` : 'CR ?'} · {slot.xp} XP

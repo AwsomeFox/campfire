@@ -1,4 +1,7 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { combatants } from '../src/db/schema';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 const TINY_PNG = Buffer.from(
@@ -124,6 +127,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       .send({ kind: 'npc', npcId, hpMax: 10 });
     expect(npcCombatant.status).toBe(201);
     expect(npcCombatant.body.npcDispositionSnapshot).toBe('hostile');
+    const npcDuplicate = await dmAgent
+      .post(`/api/v1/encounters/${encRes.body.id}/combatants`)
+      .send({ kind: 'npc', name: 'Bartender Echo', hpMax: 10, duplicateOfCombatantId: npcCombatant.body.id });
+    expect(npcDuplicate.status).toBe(201);
 
     await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/notes`)
@@ -320,7 +327,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(clonedRemote.portraitUrl).toBe('https://images.example.test/remote-voice.png');
 
       // Encounters copied with combatants (Hero + Remote Voice were auto-added on
-      // encounter create, so there are 4). The character combatant's characterId
+      // encounter create, so there are 5). The character combatant's characterId
       // must be remapped to the cloned character. Location/quest/session links
       // (issue #864) must also remap into the clone — never keep the source
       // campaign's ids.
@@ -333,7 +340,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(encDetail.body.locationId).not.toBe(locationId);
       expect(encDetail.body.questId).not.toBe(questId);
       expect(encDetail.body.sessionId).not.toBe(sessionId);
-      expect(encDetail.body.combatants.length).toBe(4);
+      expect(encDetail.body.combatants.length).toBe(5);
       // Issue #548: cloned encounters are fresh prep, not a snapshot of live combat.
       expect(encDetail.body.status).toBe('preparing');
       expect(encDetail.body.round).toBe(0);
@@ -350,6 +357,11 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       const bartender = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Bartender');
       expect(bartender).toBeDefined();
       expect(bartender.npcDispositionSnapshot).toBeNull();
+      const bartenderEcho = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Bartender Echo');
+      expect(bartenderEcho).toBeDefined();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const clonedDuplicate = await db.select().from(combatants).where(eq(combatants.id, bartenderEcho.id)).get();
+      expect(clonedDuplicate?.npcIdentitySourceId).toBe(clonedNpcs.body[0].id);
       const hero = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Hero');
       expect(hero.kind).toBe('character');
       expect(hero.characterId).toBe(clonedHero.id);
@@ -361,6 +373,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       const cloneStart = await dmAgent.post(`/api/v1/encounters/${encDetail.body.id}/start`);
       expect(cloneStart.status).toBe(201);
       expect(cloneStart.body.combatants.find((c: { name: string }) => c.name === 'Bartender').npcDispositionSnapshot).toBe('hostile');
+      expect(cloneStart.body.combatants.find((c: { name: string }) => c.name === 'Bartender Echo').npcDispositionSnapshot).toBe('hostile');
       const difficultyAtStart = await dmAgent.get(`/api/v1/encounters/${encDetail.body.id}/difficulty`);
       expect(difficultyAtStart.status).toBe(200);
       expect((await dmAgent.patch(`/api/v1/npcs/${clonedNpcs.body[0].id}`).send({ disposition: 'friendly' })).status).toBe(200);
@@ -521,6 +534,46 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(endedDetail.body.status).toBe('preparing');
     expect(endedDetail.body.endedAt).toBeNull();
     expect(endedDetail.body.round).toBe(0);
+  });
+
+  // Issue #1910 review (Codex, round 5): the combatant snapshot fields the clone insert
+  // DOES carry (initMod, ruleEntryId, sortOrder, characterId mapping) are baseline stats,
+  // not combat state — HP/initiative/conditions reset because THOSE are play progress, but
+  // a non-default speed snapshot must survive a clone the same way initMod already does.
+  // This matters more since e19d4f81 dropped the live-character fallback in getTurnWorkspace:
+  // a null combatant.speed now resolves straight to the adapter default with no second
+  // chance to recover the real value from the linked character, so a clone that dropped
+  // the snapshot would be a clean, permanent data loss rather than a masked one.
+  it('full clone carries a non-default combatant speed snapshot forward (issue #1910)', async () => {
+    const speedPatch = await dmAgent.patch(`/api/v1/characters/${heroId}`).send({ speed: 27 });
+    expect(speedPatch.status).toBe(200);
+    expect(speedPatch.body.speed).toBe(27);
+
+    try {
+      const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Speed Snapshot Fight' });
+      expect(encRes.status).toBe(201);
+      const sourceEncounterId = encRes.body.id;
+      const heroCombatant = (await dmAgent.get(`/api/v1/encounters/${sourceEncounterId}`)).body.combatants.find(
+        (c: { characterId: number | null }) => c.characterId === heroId,
+      );
+      expect(heroCombatant).toBeDefined();
+      expect(heroCombatant.speed).toBe(27); // add-time snapshot taken from the just-patched character
+
+      const cloneRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({ name: 'Speed Snapshot Sequel' });
+      expect(cloneRes.status).toBe(201);
+      const cloneId = cloneRes.body.id;
+
+      const clonedEncs = await dmAgent.get(`/api/v1/campaigns/${cloneId}/encounters`);
+      const clonedEncounter = clonedEncs.body.find((e: { name: string }) => e.name === 'Speed Snapshot Fight');
+      expect(clonedEncounter).toBeDefined();
+      const clonedDetail = await dmAgent.get(`/api/v1/encounters/${clonedEncounter.id}`);
+      const clonedHeroCombatant = clonedDetail.body.combatants.find((c: { name: string }) => c.name === heroCombatant.name);
+      expect(clonedHeroCombatant).toBeDefined();
+      expect(clonedHeroCombatant.speed).toBe(27); // must survive the clone, not reset to null
+    } finally {
+      // Restore source Hero so later tests (encounter auto-add) see the original null speed.
+      await dmAgent.patch(`/api/v1/characters/${heroId}`).send({ speed: null });
+    }
   });
 
   it('template clone copies prep only and resets play state', async () => {

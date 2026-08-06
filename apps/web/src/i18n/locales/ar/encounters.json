@@ -1,6 +1,35 @@
 {
   "encounters": {
     "title": "المواجهات",
+    "vitals": {
+      "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
+      "maxHp": "الحد الأقصى لنقاط الحياة",
+      "setMax": "تعيين الحد الأقصى",
+      "deathSaves": "رميات الموت",
+      "dyingStrip": "أنت تحتضر — {{successes}} نجاحات / {{failures}} إخفاقات",
+      "rollDeathSave": "ارمِ نرد الموت"
+    },
+    "deathSave": {
+      "outcome": {
+        "revive": "٢٠ طبيعي — عدت إلى قدميك!",
+        "dead": "توفي.",
+        "stabilized": "استقرت حالته.",
+        "success": "نجاح (بنتيجة {{natural}}).",
+        "failure": "إخفاق (بنتيجة {{natural}})."
+      },
+      "spectatorToast": "{{name}} - رمية موت: {{outcome}} (بنتيجة {{natural}})",
+      "spectatorOutcomeSuccess": "نجاح",
+      "spectatorOutcomeFailure": "إخفاق"
+    },
+    "turnTimer": {
+      "elapsed": "الوقت المنقضي للدور {{elapsed}}",
+      "elapsedOfLimit": "الوقت المنقضي للدور {{elapsed}} من {{limit}}",
+      "settingsLabel": "إعدادات مؤقت الدور",
+      "settingsTitle": "مؤقت الدور",
+      "settingsHint": "مجرد تذكير اجتماعي بالوتيرة — لا يقدّم الدور تلقائيًا أبدًا ولا يمنع أحدًا.",
+      "off": "إيقاف",
+      "presetSeconds": "{{seconds}} ثانية"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
@@ -144,6 +173,21 @@
         "failed": "Couldn't prepare optimised sizes for this map — it is still shown at full size.",
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
+      },
+      "aoe": {
+        "label": "منطقة التأثير",
+        "addCircle": "أضف دائرة تأثير",
+        "addCone": "أضف مخروط تأثير",
+        "addLine": "أضف خط تأثير",
+        "clearPlayers": "امسح قوالب اللاعبين",
+        "clearPlayersHint": "أزل كل قوالب التأثير التي أعلنها اللاعبون",
+        "declaredBy": "أعلنه {{name}}"
+      },
+      "dragDistance": {
+        "budget": "استُخدم {{used}} من {{max}} {{unit}}",
+        "overSpeed": "تجاوز السرعة",
+        "movedMessage": "تحرك {{feet}} {{unit}}.",
+        "undoneMessage": "تم التراجع عن الحركة."
       }
     },
     "workspace": {
@@ -208,7 +252,8 @@
       "consequence": "Consequence: "
     },
     "actionFlow": {
-      "noTargets": "No legal targets."
+      "noTargets": "No legal targets.",
+      "systemMathNotice": "تمت التسوية بحسابات لم تُدقَّق لنظام قواعدك — تحقّق من النتيجة."
     },
     "wizard": {
       "step1": "1. Parameters",
@@ -216,8 +261,13 @@
       "step3": "3. Save encounter",
       "noCreatures": "No creatures — adjust the filters and regenerate, or add one.",
       "none": "— none —",
-      "noStatblock": "No statblock detail — HP/CR may be incomplete."
+      "noStatblock": "No statblock detail — HP/CR may be incomplete.",
+      "heuristicDifficultyBadge": "الفئة المستهدفة: تقديرية",
+      "heuristicDifficultyHint": "تم تحديد حجم الفئة المستهدفة وفق ميزانية نقاط الخبرة الخاصة بـ D&D 5e — لا يمتلك نظام القواعد هذا حسابات صعوبة خاصة به.",
+      "homebrewBadge": "محتوى منزلي"
     },
+    "duplicate": "تكرار",
+    "duplicateCombatant": "تكرار {{name}}",
     "resourceTracker": {
       "title": "متتبع الموارد",
       "features": "القدرات",
@@ -230,6 +280,32 @@
       "updateSlotError": "تعذر تحديث خانة التعويذة.",
       "ambiguousResolved": "لم نتمكن من تأكيد اكتمال هذا الإجراء في حينه، لكن القيم المعروضة محدثة الآن — تحقق منها قبل إعادة المحاولة.",
       "setUsedTitle": "تعيين المستخدم إلى {{val}}"
+    },
+    "rulesLookup": {
+      "heading": "البحث السريع في القواعد",
+      "placeholder": "ابحث في القواعد والابتكارات…",
+      "searchLabel": "البحث في القواعد والابتكارات المنزلية",
+      "noResults": "لم يتم العثور على قواعد مطابقة.",
+      "noDetails": "لا تتوفر تفاصيل لهذه القائمة.",
+      "recentLookups": "عمليات البحث الأخيرة",
+      "homebrewBadge": "محتوى منزلي",
+      "toggleExpand": "توسيع البحث السريع في القواعد",
+      "toggleCollapse": "طوي البحث السريع في القواعد",
+      "show": "عرض",
+      "hide": "إخفاء",
+      "loading": "جارٍ البحث…",
+      "typeToSearch": "ابدأ الكتابة للبحث في القواعد والابتكارات…",
+      "searchError": "تعذر البحث في القواعد."
+    },
+    "statblock": {
+      "reveal": "كشف",
+      "revealed": "مكشوف",
+      "revealToPlayers": "كشف بطاقة الإحصائيات للاعبين",
+      "hideFromPlayers": "إخفاء بطاقة الإحصائيات عن اللاعبين",
+      "revealedSummary": "بطاقة الإحصائيات (مكشوفة للاعبين)",
+      "killPrompt": "وصل {{name}} إلى 0 نقطة حياة — هل تريد كشف بطاقة إحصائياته للاعبين؟",
+      "dismiss": "تجاهل",
+      "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات"
     }
   }
 }

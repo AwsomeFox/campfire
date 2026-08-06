@@ -158,6 +158,9 @@ export class RosterImportService {
               passwordHash: null,
               serverRole: 'user',
               disabled: false,
+              // Issue #851 — a roster-imported account is not an approved organizer
+              // by default (same reasoning as UsersService.create()).
+              canCreateCampaigns: false,
               oidcSub: row.oidcSub ?? null,
               createdAt: ts,
               updatedAt: ts,

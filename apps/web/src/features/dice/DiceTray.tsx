@@ -25,6 +25,7 @@ import { useTranslation } from 'react-i18next';
 import { isImeComposing } from '../../lib/compositionSafeSubmit';
 import { openLegendAttributeDicePool, type ActionRollRequest, type DiceRoll } from '@campfire/schema';
 import { Btn, TextInput } from '../../components/ui';
+import { GatedControl } from '../../components/GatedControl';
 import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { useAnnounce } from '../../components/Announcer';
@@ -509,40 +510,48 @@ export function DiceTray({
         ))}
       </div>
 
-      {/* Advantage / Disadvantage (d20) */}
+      {/* Advantage / Disadvantage (d20) — issue #1933: disabled with no reason once the
+          pool stops being a lone d20 (advantage/disadvantage only make sense against a
+          single d20 roll). GatedControl only gates the toggle NOT currently active, since
+          switching an already-active mode back off must stay reachable regardless of pool
+          shape (`advMode !== 'adv'`/`'dis'` guards preserve that, unchanged from before). */}
       {!supportsActionDice && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <Btn
-          type="button"
-          ghost
-          onClick={() => toggleAdv('adv')}
-          disabled={!advAvailable && advMode !== 'adv'}
-          aria-pressed={advMode === 'adv'}
-          style={{
-            minHeight: compact ? 32 : 38,
-            fontSize: 12,
-            ...(advMode === 'adv'
-              ? { color: 'var(--color-accent)', borderColor: 'var(--color-accent)' }
-              : {}),
-          }}
-        >
-          {t('dice.advantage')}
-        </Btn>
-        <Btn
-          type="button"
-          ghost
-          onClick={() => toggleAdv('dis')}
-          disabled={!advAvailable && advMode !== 'dis'}
-          aria-pressed={advMode === 'dis'}
-          style={{
-            minHeight: compact ? 32 : 38,
-            fontSize: 12,
-            ...(advMode === 'dis'
-              ? { color: 'var(--color-accent)', borderColor: 'var(--color-accent)' }
-              : {}),
-          }}
-        >
-          {t('dice.disadvantage')}
-        </Btn>
+        <GatedControl reason={!advAvailable && advMode !== 'adv' ? t('run.gate.advDisRequiresLoneD20') : undefined}>
+          <Btn
+            type="button"
+            ghost
+            onClick={() => toggleAdv('adv')}
+            disabled={!advAvailable && advMode !== 'adv'}
+            aria-pressed={advMode === 'adv'}
+            style={{
+              minHeight: compact ? 32 : 38,
+              fontSize: 12,
+              ...(advMode === 'adv'
+                ? { color: 'var(--color-accent)', borderColor: 'var(--color-accent)' }
+                : {}),
+            }}
+          >
+            {t('dice.advantage')}
+          </Btn>
+        </GatedControl>
+        <GatedControl reason={!advAvailable && advMode !== 'dis' ? t('run.gate.advDisRequiresLoneD20') : undefined}>
+          <Btn
+            type="button"
+            ghost
+            onClick={() => toggleAdv('dis')}
+            disabled={!advAvailable && advMode !== 'dis'}
+            aria-pressed={advMode === 'dis'}
+            style={{
+              minHeight: compact ? 32 : 38,
+              fontSize: 12,
+              ...(advMode === 'dis'
+                ? { color: 'var(--color-accent)', borderColor: 'var(--color-accent)' }
+                : {}),
+            }}
+          >
+            {t('dice.disadvantage')}
+          </Btn>
+        </GatedControl>
       </div>}
 
       {/* Modifier stepper */}

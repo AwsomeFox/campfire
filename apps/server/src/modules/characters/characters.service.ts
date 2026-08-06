@@ -64,6 +64,7 @@ import type {
   DdbCharacterImport,
   DdbImportResult,
   ResourcePatch,
+  HomebrewMechanicsProfile,
 } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
@@ -152,6 +153,7 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     ac: row.ac,
     eac: row.eac,
     kac: row.kac,
+    speed: row.speed ?? null,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
     spCurrent: row.spCurrent,
@@ -376,11 +378,14 @@ export class CharactersService {
    */
   private async adapterForCampaign(campaignId: number) {
     const [row] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1);
-    return ruleSystemAdapter(row?.ruleSystem);
+    return ruleSystemAdapter(
+      row?.ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null),
+    );
   }
 
   /**
@@ -1037,6 +1042,7 @@ export class CharactersService {
         ac: clampAc(input.ac ?? null),
         eac: clampAc(input.eac ?? null),
         kac: clampAc(input.kac ?? null),
+        speed: input.speed ?? null,
         hpCurrent,
         hpMax,
         hpTemp,
@@ -1142,6 +1148,10 @@ export class CharactersService {
     if (input.ac !== undefined) update.ac = clampAc(input.ac);
     if (input.eac !== undefined) update.eac = clampAc(input.eac);
     if (input.kac !== undefined) update.kac = clampAc(input.kac);
+    // Issue #1910: no clamp — schema's min(0) is the only bound (unlike AC's AC_MAX,
+    // no rule system caps a maximum speed). undefined = untouched; null clears it back
+    // to "unset" so the turn workspace falls through to the adapter default again.
+    if (input.speed !== undefined) update.speed = input.speed;
     if (input.hpMax !== undefined) update.hpMax = input.hpMax;
     if (input.spCurrent !== undefined) update.spCurrent = input.spCurrent;
     if (input.spMax !== undefined) update.spMax = input.spMax;
@@ -1200,12 +1210,15 @@ export class CharactersService {
     const failIncrease = input.deathSaveFailures !== undefined && clampDeathSaveCount(input.deathSaveFailures) > existing.deathSaveFailures;
     if (succIncrease || failIncrease) {
       const [deathCampaign] = this.db
-        .select({ ruleSystem: campaigns.ruleSystem })
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
         .from(campaigns)
         .where(eq(campaigns.id, existing.campaignId))
         .limit(1)
         .all();
-      const adapter = ruleSystemAdapter(deathCampaign?.ruleSystem);
+      const adapter = ruleSystemAdapter(
+        deathCampaign?.ruleSystem,
+        fromJsonText<HomebrewMechanicsProfile | null>(deathCampaign?.customMechanicsProfile, null),
+      );
       if (!hpModelForAdapter(adapter).deathSaves) {
         throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
       }
@@ -1420,12 +1433,17 @@ export class CharactersService {
       // death saves (Starfinder, PF2e, OSR, …) matches the combat engine: a character dropped
       // to 0 HP is simply "down", never auto-flagged 'dying' by a rule they don't use.
       const [deathCampaign] = tx
-        .select({ ruleSystem: campaigns.ruleSystem })
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
         .from(campaigns)
         .where(eq(campaigns.id, fresh.campaignId))
         .limit(1)
         .all();
-      const hpModel = hpModelForAdapter(ruleSystemAdapter(deathCampaign?.ruleSystem));
+      const hpModel = hpModelForAdapter(
+        ruleSystemAdapter(
+          deathCampaign?.ruleSystem,
+          fromJsonText<HomebrewMechanicsProfile | null>(deathCampaign?.customMechanicsProfile, null),
+        ),
+      );
       const deathSavesSupported = hpModel.deathSaves;
 
       const requested = 'delta' in patch ? fresh.hpCurrent + patch.delta : patch.set;

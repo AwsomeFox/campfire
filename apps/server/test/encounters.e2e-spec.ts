@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import {
   auditLog,
@@ -143,6 +143,39 @@ describe('encounters (e2e)', () => {
     expect(scout.characterId).toBe(hero.body.id);
     // DEX 20 must NOT win (that would be 5e); Perception is Wisdom-based.
     expect(scout.initMod).toBe(10);
+  });
+
+  it('13th Age create seeds character initMod with DEX mod + level (issue #1465)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    await db
+      .insert(rulePacks)
+      .values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+      .onConflictDoNothing();
+
+    const camp = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Archmage Init Campaign', ruleSystem: 'archmage-srd' });
+    expect(camp.status).toBe(201);
+
+    const hero = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Vanguard', stats: { DEX: 14 }, level: 5, hpCurrent: 40, hpMax: 40 });
+    expect(hero.status).toBe(201);
+
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Dragon Battle' });
+    expect(res.status).toBe(201);
+    expect(res.body.combatants).toHaveLength(1);
+    const vanguard = res.body.combatants[0];
+    expect(vanguard.characterId).toBe(hero.body.id);
+    // 13th Age initiative is DEX mod (+2) + level (5) = +7
+    expect(vanguard.initMod).toBe(7);
   });
 
   it('player without dm role cannot create an encounter', async () => {
@@ -2172,6 +2205,201 @@ describe('encounters (e2e)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Issue #1926 — reveal a monster/npc's statblock to players. Server-enforced:
+// `redactMonsterHp` withholds the inline `statblock` from a non-DM read unless
+// the DM-only `statblockRevealed` flag is set, matching the issue #43 monster-HP
+// band pattern (a client-side gate is rejectable — the payload itself must omit
+// the field pre-reveal, not merely the UI).
+// ---------------------------------------------------------------------------
+describe('encounters — issue #1926: statblock reveal to players (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Statblock Reveal Campaign' })).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  const SECRET_STATBLOCK = {
+    ac: 15,
+    abilityScores: { STR: 18, DEX: 10, CON: 16, INT: 6, WIS: 8, CHA: 5 },
+    actions: [],
+    resources: {},
+    spellSlots: {},
+    traits: [],
+    notes: 'secret DM notes never sent to a player pre-reveal',
+  };
+
+  async function addRevealBoss(server: unknown, hpMax = 20): Promise<{ encounterId: number; combatantId: number }> {
+    const encRes = await request(server as never)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Reveal Fight', hidden: false });
+    const encounterId = encRes.body.id;
+    const add = await request(server as never)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Troll', hpMax, statblock: SECRET_STATBLOCK });
+    expect(add.status).toBe(201);
+    return { encounterId, combatantId: add.body.id as number };
+  }
+
+  it('defaults to statblockRevealed=false; a non-DM read omits the inline statblock entirely, the DM always sees it', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId, combatantId } = await addRevealBoss(server);
+
+    const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const dmBoss = (dmRes.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: unknown }>).find(
+      (c) => c.id === combatantId,
+    )!;
+    expect(dmBoss.statblockRevealed).toBe(false);
+    expect(dmBoss.statblock).not.toBeNull();
+
+    for (const headers of [player, viewer]) {
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
+      const boss = (res.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: unknown }>).find(
+        (c) => c.id === combatantId,
+      )!;
+      expect(boss.statblockRevealed).toBe(false);
+      expect(boss.statblock).toBeNull();
+      // Assert on the raw payload, not just the parsed field — a leak nested
+      // anywhere else in the JSON must fail this too.
+      expect(JSON.stringify(boss)).not.toMatch(/secret DM notes/);
+    }
+  });
+
+  it('a non-DM PATCH carrying statblockRevealed is rejected 403 COMBATANT_FIELD_DM_ONLY and leaves the flag untouched', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId, combatantId } = await addRevealBoss(server);
+
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(player)
+      .send({ statblockRevealed: true });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('COMBATANT_FIELD_DM_ONLY');
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const boss = (after.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: unknown }>).find(
+      (c) => c.id === combatantId,
+    )!;
+    expect(boss.statblockRevealed).toBe(false);
+    expect(boss.statblock).toBeNull();
+  });
+
+  it('a DM toggle reveals the statblock to non-DM readers, logs a combat-log note event and an audit row with the real actor; hiding it again removes it from the next read', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const { encounterId, combatantId } = await addRevealBoss(server);
+
+    const auditBefore = (await db.select().from(auditLog).where(eq(auditLog.entityId, combatantId))).length;
+
+    const reveal = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ statblockRevealed: true });
+    expect(reveal.status).toBe(200);
+    expect(reveal.body.statblockRevealed).toBe(true);
+
+    // The core regression: a genuinely non-DM GET now carries the statblock.
+    const playerRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const playerBoss = (
+      playerRes.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number } | null }>
+    ).find((c) => c.id === combatantId)!;
+    expect(playerBoss.statblockRevealed).toBe(true);
+    expect(playerBoss.statblock).not.toBeNull();
+    expect(playerBoss.statblock!.ac).toBe(15);
+
+    const events = await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId));
+    const revealEvent = events.find((e) => e.type === 'note' && e.detail.includes('revealed to players'));
+    expect(revealEvent).toBeDefined();
+    expect(revealEvent!.target).toBe('Troll');
+    expect(revealEvent!.targetId).toBe(combatantId);
+
+    const auditRows = await db.select().from(auditLog).where(eq(auditLog.entityId, combatantId));
+    expect(auditRows.length).toBe(auditBefore + 1);
+    const lastAudit = auditRows[auditRows.length - 1];
+    expect(lastAudit.action).toBe('encounter.combatant.update');
+    expect(lastAudit.actor).toContain('dm-1');
+
+    const hide = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ statblockRevealed: false });
+    expect(hide.status).toBe(200);
+    expect(hide.body.statblockRevealed).toBe(false);
+
+    const playerAfterHide = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const bossAfterHide = (
+      playerAfterHide.body.combatants as Array<{ id: number; statblockRevealed: boolean; statblock: unknown }>
+    ).find((c) => c.id === combatantId)!;
+    expect(bossAfterHide.statblockRevealed).toBe(false);
+    expect(bossAfterHide.statblock).toBeNull();
+
+    const hideEvent = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId))
+    ).find((e) => e.type === 'note' && e.detail.includes('hidden again'));
+    expect(hideEvent).toBeDefined();
+
+    // A no-op re-send (already false) does not append a second hide event or audit row.
+    const auditAfterHide = (await db.select().from(auditLog).where(eq(auditLog.entityId, combatantId))).length;
+    const noop = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ statblockRevealed: false });
+    expect(noop.status).toBe(200);
+    expect((await db.select().from(auditLog).where(eq(auditLog.entityId, combatantId))).length).toBe(auditAfterHide + 1);
+    const noteEventsAfterNoop = (
+      await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encounterId))
+    ).filter((e) => e.type === 'note' && e.detail.includes('hidden again'));
+    expect(noteEventsAfterNoop.length).toBe(1);
+  });
+
+  it('reveal never affects HP banding — exact HP stays redacted for a non-DM regardless of statblockRevealed', async () => {
+    const server = ctx.app.getHttpServer();
+    const { encounterId, combatantId } = await addRevealBoss(server, 100);
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ hpSet: 40 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ statblockRevealed: true });
+
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const boss = (
+      res.body.combatants as Array<{ id: number; statblock: unknown; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>
+    ).find((c) => c.id === combatantId)!;
+    expect(boss.statblock).not.toBeNull();
+    expect(boss.hpCurrent).toBeNull();
+    expect(boss.hpMax).toBeNull();
+    expect(boss.hpBand).toBe('bloodied');
+  });
+
+  it('a hidden encounter still 404s a non-DM regardless of statblockRevealed', async () => {
+    const server = ctx.app.getHttpServer();
+    const encRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Hidden Reveal Fight', hidden: true });
+    const encounterId = encRes.body.id;
+    const add = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Shadow Troll', hpMax: 10, statblock: SECRET_STATBLOCK });
+    const combatantId = add.body.id;
+    const reveal = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`)
+      .set(dm)
+      .send({ statblockRevealed: true });
+    expect(reveal.status).toBe(200);
+
+    expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(player)).status).toBe(404);
+    expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(viewer)).status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Issue #532 — optimistic concurrency for encounters. Live combat is the
 // highest-contention entity (the same encounter open across multiple DM devices
 // — a laptop + a tablet at the table), so PATCH /encounters/:id enforces the
@@ -3431,6 +3659,12 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
         .set(dm)
         .send({ kind: 'npc', npcId, name: 'The Traitor', hpMax: 50 })
     ).body.id;
+    const duplicateId = (
+      await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'npc', name: 'The Traitor 2', hpMax: 50, duplicateOfCombatantId: combatantId })
+    ).body.id;
     // The DM still sees the real identity link + name.
     const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     const dmC = (
@@ -3439,6 +3673,8 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
     expect(dmC.npcId).toBe(npcId);
     expect(dmC.name).toBe('The Traitor');
     expect(dmC.npcDispositionSnapshot).toBe('hostile');
+    expect(JSON.stringify(dmRes.body.combatants)).not.toMatch(/npcIdentitySourceId/);
+    expect((dmRes.body.combatants as Array<{ id: number; name: string; npcId: number | null; npcDispositionSnapshot: string | null }>).find((c) => c.id === duplicateId)).toMatchObject({ name: 'The Traitor 2', npcId: null, npcDispositionSnapshot: 'hostile' });
     // A non-DM sees the token in initiative but NOT who it is: identity link severed, name masked.
     for (const headers of [player, viewer]) {
       const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
@@ -3450,7 +3686,378 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       expect(c.name).not.toBe('The Traitor');
       expect(c.npcDispositionSnapshot).toBeNull();
       expect(JSON.stringify(c)).not.toMatch(/Traitor/);
+      expect((res.body.combatants as Array<{ id: number; name: string; npcId: number | null }>).find((x) => x.id === duplicateId)).toMatchObject({ npcId: null, name: UNKNOWN_COMBATANT_LABEL });
     }
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${duplicateId}`).set(dm).send({ hpDelta: -1 })).status).toBe(200);
+    const hiddenEvents = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(player);
+    expect(JSON.stringify(hiddenEvents.body)).not.toMatch(/Traitor/);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm)).status).toBe(201);
+    const hiddenRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(JSON.stringify(hiddenRolls.body)).not.toMatch(/Traitor/);
+    const hiddenQuickRoll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/quick-roll`)
+      .set(dm)
+      .send({ combatantId: duplicateId, actionName: 'Hidden strike', kind: 'to-hit', expr: '+5', mode: 'flat' });
+    expect(hiddenQuickRoll.status).toBe(201);
+    expect(hiddenQuickRoll.body.roll).toMatchObject({ label: expect.stringContaining(UNKNOWN_COMBATANT_LABEL) });
+    const hiddenQuickRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(JSON.stringify(hiddenQuickRolls.body)).not.toMatch(/Traitor/);
+    expect(hiddenQuickRolls.body).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: UNKNOWN_COMBATANT_LABEL })]),
+    );
+    const exported = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json`).set(dm);
+    const exportedEncounter = exported.body.encounters.find((e: { combatants: Array<{ id: number }> }) => e.combatants.some((c) => c.id === duplicateId));
+    expect(exportedEncounter.combatants.find((c: { id: number }) => c.id === duplicateId)).toMatchObject({ npcIdentitySourceId: npcId });
+    const imported = await request(server).post('/api/v1/campaigns/import').set(dm).send(exported.body);
+    expect(imported.status).toBe(201);
+    const importedEncounter = (await request(server).get(`/api/v1/campaigns/${imported.body.id}/encounters`).set(dm)).body.find(
+      (e: { name: string }) => e.name === exportedEncounter.name,
+    );
+    const importedDetail = await request(server).get(`/api/v1/encounters/${importedEncounter.id}`).set(dm);
+    const importedDuplicate = importedDetail.body.combatants.find((c: { name: string }) => c.name === 'The Traitor 2');
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const importedDuplicateRow = await db.select().from(combatantsTable).where(eq(combatantsTable.id, importedDuplicate.id)).get();
+    expect(importedDuplicateRow?.npcIdentitySourceId).not.toBeNull();
+    expect(JSON.stringify(importedDetail.body.combatants)).not.toMatch(/npcIdentitySourceId/);
+    const playerImportedDetail = await request(server).get(`/api/v1/encounters/${importedEncounter.id}`).set(player);
+    expect(playerImportedDetail.body.combatants.find((c: { id: number }) => c.id === importedDuplicate.id)).toMatchObject({
+      npcId: null,
+      name: UNKNOWN_COMBATANT_LABEL,
+    });
+    const handoff = await request(server).get(`/api/v1/campaigns/${campaignId}/export?format=json&profile=handoff`).set(dm);
+    const handoffImported = await request(server).post('/api/v1/campaigns/import').set(dm).send(handoff.body);
+    expect(handoffImported.status).toBe(201);
+    const handoffEncounter = (await request(server).get(`/api/v1/campaigns/${handoffImported.body.id}/encounters`).set(dm)).body.find(
+      (e: { name: string }) => e.name === exportedEncounter.name,
+    );
+    const handoffPlayerDetail = await request(server).get(`/api/v1/encounters/${handoffEncounter.id}`).set(player);
+    expect(handoffPlayerDetail.body.combatants.find((c: { name: string }) => c.name === UNKNOWN_COMBATANT_LABEL)).toBeDefined();
+    const archive = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/export?format=mdzip`)
+      .set(dm)
+      .buffer(true)
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+    const archiveImported = await request(server)
+      .post('/api/v1/campaigns/import/archive')
+      .set(dm)
+      .attach('file', archive.body as Buffer, { filename: 'hidden-duplicate.mdzip', contentType: 'application/zip' });
+    expect(archiveImported.status).toBe(201);
+    const archiveEncounter = (await request(server).get(`/api/v1/campaigns/${archiveImported.body.id}/encounters`).set(dm)).body.find(
+      (e: { name: string }) => e.name === exportedEncounter.name,
+    );
+    const archivePlayerDetail = await request(server).get(`/api/v1/encounters/${archiveEncounter.id}`).set(player);
+    expect(archivePlayerDetail.body.combatants.find((c: { name: string }) => c.name === UNKNOWN_COMBATANT_LABEL)).toBeDefined();
+    const mixedIdentity = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', name: 'Bad identity duplicate', npcId, duplicateOfCombatantId: combatantId });
+    expect(mixedIdentity.status).toBe(400);
+    await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: false });
+    const revealed = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect((revealed.body.combatants as Array<{ id: number; name: string }>).find((x) => x.id === duplicateId)?.name).toBe('The Traitor 2');
+    const invalid = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', name: 'Bad', duplicateOfCombatantId: 999999 });
+    expect(invalid.status).toBe(400);
+    const otherEncounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Other fight' })).body.id;
+    const crossEncounter = await request(server)
+      .post(`/api/v1/encounters/${otherEncounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'npc', name: 'Bad cross-encounter duplicate', duplicateOfCombatantId: combatantId });
+    expect(crossEncounter.status).toBe(400);
+  });
+
+  it('masks a quick-roll actor as well as its action label when the NPC is hidden later', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Later Hidden NPC · the Betrayer', hidden: false })
+    ).body.id;
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Late identity reveal', hidden: false });
+    const combatantId = (
+      await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'npc', npcId, hpMax: 10 })
+    ).body.id;
+    const quickRoll = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/quick-roll`)
+      .set(dm)
+      .send({ combatantId, actionName: "Later Hidden NPC · the Betrayer's strike", kind: 'to-hit', expr: '+3', mode: 'flat' });
+    expect(quickRoll.status).toBe(201);
+    expect(quickRoll.body.roll.actor).toBe('Later Hidden NPC · the Betrayer');
+    expect((await request(server).patch(`/api/v1/npcs/${npcId}`).set(dm).send({ hidden: true })).status).toBe(200);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const [unstructuredRoll] = await db
+      .insert(diceRolls)
+      .values({
+        campaignId,
+        rollerUserId: 'dev:dm-1',
+        rollerName: 'dm-1',
+        expr: '1d20',
+        rolls: '[1]',
+        total: 1,
+        label: 'Unstructured roll label',
+        actor: 'Later Hidden NPC · the Betrayer',
+        npcId,
+        createdAt: new Date().toISOString(),
+      })
+      .returning();
+    const playerRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(playerRolls.body.find((roll: { id: number }) => roll.id === quickRoll.body.roll.id)).toMatchObject({
+      actor: UNKNOWN_COMBATANT_LABEL,
+      label: UNKNOWN_COMBATANT_LABEL,
+    });
+    expect(playerRolls.body.find((roll: { id: number }) => roll.id === unstructuredRoll.id)).toMatchObject({
+      actor: UNKNOWN_COMBATANT_LABEL,
+      label: UNKNOWN_COMBATANT_LABEL,
+    });
+    expect(JSON.stringify(playerRolls.body)).not.toMatch(/Later Hidden NPC|the Betrayer/);
+  });
+
+  it('keeps a hidden NPC quick roll masked when only its hidden encounter is revealed later', async () => {
+    const server = ctx.app.getHttpServer();
+    const npcId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Hidden encounter quick-roll NPC', hidden: true })
+    ).body.id as number;
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Reveal without NPC', hidden: true });
+    const combatantId = (
+      await request(server)
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .set(dm)
+        .send({ kind: 'npc', npcId, hpMax: 10 })
+    ).body.id as number;
+    const quickRoll = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/quick-roll`)
+      .set(dm)
+      .send({ combatantId, actionName: 'Hidden encounter quick-roll NPC attack', kind: 'to-hit', expr: '+3', mode: 'flat' });
+    expect(quickRoll.status).toBe(201);
+
+    expect((await request(server).patch(`/api/v1/encounters/${encounter.body.id}`).set(dm).send({ hidden: false })).status).toBe(200);
+    const playerRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    const masked = playerRolls.body.find((roll: { id: number }) => roll.id === quickRoll.body.roll.id);
+    expect(masked).toMatchObject({ label: UNKNOWN_COMBATANT_LABEL, actor: UNKNOWN_COMBATANT_LABEL });
+    expect(JSON.stringify(masked)).not.toContain('Hidden encounter quick-roll NPC');
+  });
+
+  it('duplicates manual Starfinder defenses and pool maxima with fresh pools', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Duplicate Starfinder defenses' });
+    expect(campaign.status).toBe(201);
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, campaign.body.id));
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaign.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Duplicate defense test' });
+    const source = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Armored Drone', hpMax: 20, initMod: 2 });
+    expect(source.status).toBe(201);
+    await db
+      .update(combatantsTable)
+      .set({ eac: 17, kac: 19, spCurrent: 3, spMax: 8, rpCurrent: 1, rpMax: 4 })
+      .where(eq(combatantsTable.id, source.body.id));
+
+    const duplicate = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Armored Drone 2', hpMax: 20, initMod: 2, duplicateOfCombatantId: source.body.id });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body).toMatchObject({ eac: 17, kac: 19, spCurrent: 8, spMax: 8, rpCurrent: 4, rpMax: 4 });
+
+    const now = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: `replacement-starfinder-${Date.now()}`, name: 'Replacement Starfinder', version: '1', license: '', sourceUrl: '', installedAt: now, entryCount: 1 })
+      .returning();
+    const [replacementEntry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'replacement-drone',
+        name: 'Replacement Drone',
+        type: 'monster',
+        summary: '',
+        body: '',
+        dataJson: JSON.stringify({ hitPoints: 13, stamina: 9, resolve: 5, eac: 21, kac: 23, abilityScores: { DEX: 18 } }),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const replacement = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id, ruleEntryId: replacementEntry.id });
+    expect(replacement.status).toBe(201);
+    expect(replacement.body).toMatchObject({ hpCurrent: 22, hpMax: 22, initMod: 4, eac: 21, kac: 23, spCurrent: 9, spMax: 9, rpCurrent: 5, rpMax: 5 });
+  });
+
+  it('keeps manual defenses when a duplicate resubmits its source rule entry', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const campaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Same-rule duplicate defenses' });
+    expect(campaign.status).toBe(201);
+    await db.update(campaigns).set({ ruleSystem: 'starfinder-1e' }).where(eq(campaigns.id, campaign.body.id));
+    const encounter = await request(server)
+      .post(`/api/v1/campaigns/${campaign.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Same-rule duplicate defense test' });
+    const now = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: `same-rule-starfinder-${Date.now()}`, name: 'Same-rule Starfinder', version: '1', license: '', sourceUrl: '', installedAt: now, entryCount: 1 })
+      .returning();
+    const [entry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'same-rule-drone',
+        name: 'Same-rule Drone',
+        type: 'monster',
+        summary: '',
+        body: '',
+        dataJson: JSON.stringify({ hitPoints: 13, stamina: 2, resolve: 1, eac: 11, kac: 12, abilityScores: { DEX: 14 } }),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const source = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: entry.id });
+    expect(source.status).toBe(201);
+    await db
+      .update(combatantsTable)
+      .set({ eac: 17, kac: 19, spCurrent: 3, spMax: 8, rpCurrent: 1, rpMax: 4 })
+      .where(eq(combatantsTable.id, source.body.id));
+
+    const duplicate = await request(server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id, ruleEntryId: entry.id });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body).toMatchObject({ eac: 17, kac: 19, spCurrent: 8, spMax: 8, rpCurrent: 4, rpMax: 4 });
+  });
+
+  it('derives manual combatant defaults from the duplicate source for REST and MCP callers', async () => {
+    const server = ctx.app.getHttpServer();
+    const source = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({
+        kind: 'monster',
+        name: 'API duplicate source',
+        hpMax: 27,
+        initMod: 4,
+        tokenSize: 'large',
+        statblock: {
+          ac: 16,
+          abilityScores: { STR: 18, DEX: 14 },
+          actions: [],
+          resources: { battery: 3 },
+          spellSlots: {},
+          traits: [],
+          notes: 'Authored source statblock',
+        },
+      });
+    expect(source.status).toBe(201);
+
+    const duplicate = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body).toMatchObject({
+      name: 'API duplicate source',
+      hpCurrent: 27,
+      hpMax: 27,
+      initMod: 4,
+      tokenSize: 'large',
+      statblock: { ac: 16, resources: { battery: 3 }, notes: 'Authored source statblock' },
+    });
+  });
+
+  it('preserves a duplicate source initiative breakdown', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const now = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: `duplicate-init-${Date.now()}`, name: 'Duplicate initiative', version: '1', license: '', sourceUrl: '', installedAt: now, entryCount: 1 })
+      .returning();
+    const [entry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'duplicate-initiative-source',
+        name: 'Initiative Source',
+        type: 'monster',
+        summary: '',
+        body: '',
+        dataJson: JSON.stringify({ hitPoints: 12 }),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    const source = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: entry.id });
+    expect(source.status).toBe(201);
+
+    const duplicate = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body.initiativeBreakdown).toEqual(source.body.initiativeBreakdown);
+  });
+
+  it('does not inherit an inline statblock when a duplicate selects another rule entry', async () => {
+    const server = ctx.app.getHttpServer();
+    const source = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({
+        kind: 'monster',
+        name: 'Inline source',
+        hpMax: 12,
+        statblock: { ac: 13, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'source-only' },
+      });
+    expect(source.status).toBe(201);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const now = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: `duplicate-statblock-${Date.now()}`, name: 'Replacement statblock', version: '1', license: '', sourceUrl: '', installedAt: now, entryCount: 1 })
+      .returning();
+    const [entry] = await db
+      .insert(ruleEntries)
+      .values({ packId: pack.id, slug: 'replacement', name: 'Replacement', type: 'monster', summary: '', body: '', dataJson: JSON.stringify({ hitPoints: 12 }), createdAt: now, updatedAt: now })
+      .returning();
+
+    const duplicate = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', duplicateOfCombatantId: source.body.id, ruleEntryId: entry.id });
+    expect(duplicate.status).toBe(201);
+    expect(duplicate.body).toMatchObject({ ruleEntryId: entry.id, statblock: null });
   });
 
   it('character combatant HP stays exact for a non-DM viewer (party HP is shared)', async () => {
@@ -5371,14 +5978,17 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     expect(afterHide.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(false);
     // ...but the row itself is not (the encounter is still visible — only the NPC's identity
     // is secret, same as the roster/combat-log masking rule this mirrors).
-    const masked = (afterHide.body as Array<{ label?: string; npcId?: number }>).find(
-      (r) => (r.label ?? '') === `${UNKNOWN_COMBATANT_LABEL} · Initiative`,
+    const masked = (afterHide.body as Array<{ label?: string; npcId?: number; actor?: string }>).find(
+      (r) => (r.label ?? '') === UNKNOWN_COMBATANT_LABEL,
     );
     expect(masked).toBeDefined();
     // Issue #1904 review finding (reported 3x): the label alone is not enough — npcId is a
     // stable handle that would let a player correlate this roll with a LATER reveal of the
     // same NPC. It must be nulled out, not just the display name.
     expect(masked?.npcId).toBeUndefined();
+    // Initiative rolls carry no in-fiction actor, so masking must preserve the absent
+    // actor and let the client use the real roller attribution rather than inventing one.
+    expect(masked?.actor).toBeUndefined();
 
     const dmView = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
     expect(dmView.body.some((r: { label?: string }) => (r.label ?? '').includes('Later-Hidden NPC'))).toBe(true);
@@ -5427,7 +6037,7 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     // The core regression: the replay's roll payload is re-redacted for the CURRENT
     // (demoted) role, not reused verbatim from the original DM-rendered response.
     expect(replay.body.roll.label).not.toContain('Replay Redact NPC');
-    expect(replay.body.roll.label).toBe(`${UNKNOWN_COMBATANT_LABEL} · Initiative`);
+    expect(replay.body.roll.label).toBe(UNKNOWN_COMBATANT_LABEL);
     expect(replay.body.roll.npcId).toBeUndefined();
   });
 
@@ -6030,6 +6640,16 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
     expect(res.body.tokenSize).toBe('huge');
   });
 
+  it('accepts tokenSize when adding a combatant and defaults omitted size to medium', async () => {
+    const server = ctx.app.getHttpServer();
+    const sized = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Large Ogre', hpMax: 59, tokenSize: 'large' });
+    const defaulted = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Medium Ogre', hpMax: 59 });
+    expect(sized.status).toBe(201);
+    expect(sized.body.tokenSize).toBe('large');
+    expect(defaulted.status).toBe(201);
+    expect(defaulted.body.tokenSize).toBe('medium');
+  });
+
   it('an invalid token size is rejected (400)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
@@ -6046,6 +6666,311 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
       .set(player)
       .send({ tokenSize: 'large' });
     expect(res.status).toBe(403);
+  });
+
+  describe('POST .../combatants/:cid/resources (issue #1909)', () => {
+    it("dm spends and restores a statblock combatant's feature resource and spell slot by delta, recording a resource_changed event", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Monster Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({
+          kind: 'monster',
+          name: 'REST Monk Boss',
+          hpMax: 20,
+          statblock: {
+            resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } },
+            spellSlots: { '2': { max: 2, used: 0 } },
+          },
+        });
+      expect(addRes.status).toBe(201);
+      const rCombatantId = addRes.body.id;
+
+      const spent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(spent.status).toBe(201);
+      expect(spent.body.statblock.resources.kiPoints.used).toBe(1);
+
+      const restored = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(restored.status).toBe(201);
+      expect(restored.body.statblock.resources.kiPoints.used).toBe(0);
+
+      const slotSpent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ spellLevel: 2, delta: 1 });
+      expect(slotSpent.status).toBe(201);
+      expect(slotSpent.body.statblock.spellSlots['2'].used).toBe(1);
+
+      const events = await request(server).get(`/api/v1/encounters/${rEncounterId}/events`).set(dm);
+      expect((events.body as Array<{ type: string }>).some((e) => e.type === 'resource_changed')).toBe(true);
+    });
+
+    it('a non-dm (player or viewer) is forbidden from adjusting a statblock combatant — it has no owning player', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Role Matrix', hidden: false });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST Role-Matrix Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const byPlayer = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(byPlayer.status).toBe(403);
+
+      const byViewer = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(byViewer.status).toBe(403);
+    });
+
+    it('a player adjusts their own character combatant; a different player is forbidden', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Owner Fight', hidden: false });
+      const rEncounterId = encRes.body.id;
+      const rCharCombatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === ownedCharacterId,
+      )?.id;
+      expect(rCharCombatantId).toBeDefined();
+      await request(server).patch(`/api/v1/characters/${ownedCharacterId}`).set(dm).send({ resources: { secondWind: { max: 1, used: 0, name: 'Second Wind', recharge: 'short-rest' } } });
+
+      const byOwner = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'secondWind', delta: 1 });
+      expect(byOwner.status).toBe(201);
+
+      const byOther = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(otherPlayer)
+        .send({ key: 'secondWind', delta: 1 });
+      expect(byOther.status).toBe(403);
+    });
+
+    it('overspend and below-zero restore return typed 400 with nothing written', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST Bounds Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST Bounds Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 1, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const overspend = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 5 });
+      expect(overspend.status).toBe(400);
+
+      const belowZero = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: -1 });
+      expect(belowZero.status).toBe(400);
+
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
+    });
+
+    // Review finding (Codex): a hidden/prep encounter auto-adds combatants for existing
+    // characters, so the OWNING PLAYER branch (character-linked, ownerUserId matches) can
+    // reach and mutate a combatant in an encounter that is otherwise wholesale invisible to
+    // them — GET /encounters/:id, /difficulty, /events all 404 a non-DM for a hidden
+    // encounter (issue #262/#869). A 403 here would itself leak the encounter's existence
+    // (distinguishable from "doesn't exist"), so the gate must match the sibling read/roll
+    // paths exactly: 404, not 403.
+    it("a player's own combatant in a HIDDEN encounter is invisible (404), not adjustable, matching GET's secrecy", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const rCharCombatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === ownedCharacterId,
+      )?.id;
+      expect(rCharCombatantId).toBeDefined();
+      await request(server)
+        .patch(`/api/v1/characters/${ownedCharacterId}`)
+        .set(dm)
+        .send({ resources: { hiddenFightResource: { max: 1, used: 0, name: 'Hidden Fight Resource', recharge: 'short-rest' } } });
+
+      // GET already 404s the owning player wholesale (issue #262) — the new endpoint must match.
+      expect((await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(player)).status).toBe(404);
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(player)
+        .send({ key: 'hiddenFightResource', delta: 1 });
+      expect(res.status).toBe(404);
+
+      // The DM (who can see the hidden encounter) is unaffected by the gate.
+      const dmRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCharCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'hiddenFightResource', delta: 1 });
+      expect(dmRes.status).toBe(201);
+    });
+
+    // Review finding (Devin, catching that the player-only test above did not close the
+    // gap): `requireRole(..., 'player')` 403s a viewer BEFORE the service's own
+    // `isVisibleTo` gate is ever reached, so a viewer hitting a HIDDEN encounter's REAL id
+    // got 403 — distinguishable from the 404 a NONEXISTENT id gets, which is the
+    // enumeration oracle hidden-entity secrecy exists to close. The controller now
+    // pre-checks visibility at the viewer floor before ever reaching the player-role gate,
+    // mirroring POST .../death-save and POST .../roll-initiative.
+    it("a viewer gets 404 for a HIDDEN encounter's real combatant id — indistinguishable from a nonexistent id (issue #1909 review)", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Viewer Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Viewer Secrecy Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      const viewerRealId = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(viewerRealId.status).toBe(404);
+
+      // Indistinguishable from a genuinely nonexistent encounter — not just "404 somewhere".
+      const viewerNonexistent = await request(server)
+        .post(`/api/v1/encounters/999999999/combatants/${rCombatantId}/resources`)
+        .set(viewer)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(viewerNonexistent.status).toBe(404);
+
+      // Nothing written.
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(0);
+    });
+
+    // Review finding (Codex): the controller's viewer-floor visibility precheck above
+    // called `requireRole(..., 'viewer')` with NO `allowArchived` option, so on a
+    // paused/completed campaign `assertWritable` throws 403 for EVERY member (any role,
+    // hidden or not) before the `isVisibleTo` gate is ever reached — reopening exactly the
+    // oracle that gate exists to close, but keyed on campaign archival instead of role: a
+    // hidden encounter that EXISTS gets 403 on an archived campaign, while a NONEXISTENT
+    // encounter id still gets 404 (`getRowOrThrow` throws before any role/archive check
+    // runs) — two different statuses for two cases a non-DM must not be able to tell
+    // apart. Fixed by mirroring `rollDeathSave`/`rollCombatantInitiative`'s existing
+    // pattern exactly: `allowArchived: true` on the viewer-visibility precheck and the
+    // player-role gate, deferring the actual archived-campaign write rejection to the
+    // service's own transactional `assertCampaignWritableInTx` (added in an earlier review
+    // round of this same PR).
+    it("a hidden encounter on an ARCHIVED campaign 404s a viewer identically to a nonexistent id, instead of leaking existence via 403 (Codex review)", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: '1909 REST Archived Hidden Secrecy', hidden: true });
+      expect(encRes.body.hidden).toBe(true);
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Archived Secrecy Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' })).status).toBe(200);
+      try {
+        const viewerRealId = await request(server)
+          .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+          .set(viewer)
+          .send({ key: 'kiPoints', delta: 1 });
+        const viewerNonexistent = await request(server)
+          .post(`/api/v1/encounters/999999999/combatants/${rCombatantId}/resources`)
+          .set(viewer)
+          .send({ key: 'kiPoints', delta: 1 });
+
+        // Indistinguishable — both cases must return the identical status, matching every
+        // other hidden-entity gate in this file.
+        expect(viewerRealId.status).toBe(404);
+        expect(viewerNonexistent.status).toBe(404);
+        expect(viewerRealId.status).toBe(viewerNonexistent.status);
+
+        // The DM (who CAN see this hidden encounter) reaches the service, whose own
+        // transactional archived-campaign check still correctly rejects a fresh write —
+        // loosening the controller gate must not reopen the archived-write hole itself.
+        const dmRes = await request(server)
+          .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+          .set(dm)
+          .send({ key: 'kiPoints', delta: 1 });
+        expect(dmRes.status).toBe(403);
+      } finally {
+        expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' })).status).toBe(200);
+      }
+    });
+
+    // Review finding (Devin + Copilot, same defect): there is no per-combatant revision
+    // column — `PATCH /encounters/:id/combatants/:cid`'s `expectedUpdatedAt` validates
+    // against the ENCOUNTER's own `updatedAt`. A whole-statblock PATCH (e.g. from
+    // CombatantStatblockEditor, or a stale client) must be rejected once a resource-adjust
+    // pip write has landed since the caller's token was read — otherwise a second writer
+    // holding a pre-spend token can silently revert the spend.
+    it("a pip spend advances the encounter's CAS token, so a stale whole-statblock PATCH is rejected instead of silently reverting it", async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1909 REST CAS Fight' });
+      const rEncounterId = encRes.body.id;
+      const staleToken = encRes.body.updatedAt as string;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'REST CAS Boss', hpMax: 10, statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} } });
+      const rCombatantId = addRes.body.id;
+
+      // Someone spends a pip through the new endpoint — the encounter's own `updatedAt`
+      // must move even though this write never touches an encounter-level field directly.
+      const spent = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}/resources`)
+        .set(dm)
+        .send({ key: 'kiPoints', delta: 1 });
+      expect(spent.status).toBe(201);
+
+      // A second writer — a stale CombatantStatblockEditor tab that read the encounter
+      // BEFORE the spend — PATCHes the whole statblock with that pre-spend token.
+      const staleWrite = await request(server)
+        .patch(`/api/v1/encounters/${rEncounterId}/combatants/${rCombatantId}`)
+        .set(dm)
+        .send({
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+          expectedUpdatedAt: staleToken,
+        });
+      expect(staleWrite.status).toBe(409);
+
+      // The spend survived: still 1, not reverted to 0 by the rejected stale PATCH.
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const rCombatant = (after.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === rCombatantId,
+      );
+      expect(rCombatant?.statblock.resources.kiPoints.used).toBe(1);
+    });
   });
 
   describe('fog of war + server-side token redaction', () => {
@@ -6253,6 +7178,10 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
 
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
+      const { declaredByUserId: _serverOwnedDeclarer, ...playerDeclaration } = ownedAoe;
+      expect(
+        (await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(playerDeclaration)).status,
+      ).toBe(201);
       await request(server)
         .patch(`/api/v1/encounters/${encounterId}`)
         .set(dm)
@@ -6548,6 +7477,254 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
     // role floor and not some unrelated breakage.
     const stillPlayer = await request(server).post(`/api/v1/encounters/${encounterId}/ping`).set(player).send({ x: 51, y: 51 });
     expect(stillPlayer.status).toBe(201);
+  });
+});
+
+describe('encounters — player-declared AoE templates (issue #1913)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  const declaration = { id: 'player-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45, color: '#663399' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Player AoE Campaign' })).body.id;
+    encounterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Visible Player AoE', hidden: false })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('stamps the caller, rejects spoofing, enforces ownership, and audits/SSEs writes', async () => {
+    const server = ctx.app.getHttpServer();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      const spoof = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/aoe-templates`)
+        .set(player)
+        .send({ ...declaration, declaredByUserId: 'dev:p-2' });
+      expect(spoof.status).toBe(400);
+
+      const created = await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration);
+      expect(created.status).toBe(201);
+      expect(created.body).toMatchObject({ ...declaration, declaredByUserId: 'dev:p-1' });
+
+      expect(
+        (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status,
+      ).toBe(403);
+      expect(
+        (await request(server).patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player).send({ declaredByUserId: 'dev:p-2' })).status,
+      ).toBe(400);
+
+      const playerMoved = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
+        .set(player)
+        .send({ x: 40 });
+      expect(playerMoved.status).toBe(200);
+      expect(playerMoved.body).toMatchObject({ x: 40, angleDeg: 45, color: '#663399' });
+
+      const dmUpdated = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`)
+        .set(dm)
+        .send({ x: 60, angleDeg: 90 });
+      expect(dmUpdated.status).toBe(200);
+      expect(dmUpdated.body).toMatchObject({ id: 'player-cone', x: 60, angleDeg: 90, declaredByUserId: 'dev:p-1' });
+
+      expect(
+        (await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(otherPlayer)).status,
+      ).toBe(403);
+      expect((await request(server).delete(`/api/v1/encounters/${encounterId}/aoe-templates/player-cone`).set(player)).status).toBe(200);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const actions = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId)).orderBy(asc(auditLog.id)))
+        .map((row) => row.action)
+        .filter((action) => action.startsWith('encounter.aoe.'));
+      expect(actions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update', 'encounter.aoe.update', 'encounter.aoe.remove']);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(4);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('keeps player attribution immutable through the legacy DM whole-list AoE patch', async () => {
+    const server = ctx.app.getHttpServer();
+    const playerTemplate = { ...declaration, id: 'legacy-player' };
+    expect(
+      (await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(playerTemplate)).status,
+    ).toBe(201);
+
+    const patched = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({
+        aoe: [
+          { ...playerTemplate, declaredByUserId: 'dev:p-2' },
+          { ...declaration, id: 'legacy-dm', declaredByUserId: 'dev:p-2' },
+        ],
+      });
+
+    expect(patched.status).toBe(200);
+    expect(patched.body.aoe).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'legacy-player', declaredByUserId: 'dev:p-1' }),
+      expect.objectContaining({ id: 'legacy-dm', declaredByUserId: null }),
+    ]));
+  });
+
+  it('rejects scoped AoE writes without rewriting malformed saved templates or emitting side effects', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const protectedId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Malformed saved AoE', hidden: false })
+    ).body.id;
+    const savedAoe = JSON.stringify([
+      { ...declaration, id: 'surviving-template', declaredByUserId: null },
+      { id: 'invalid-template', shape: 'not-a-shape' },
+    ]);
+    await db.update(encountersTable).set({ aoe: savedAoe }).where(eq(encountersTable.id, protectedId));
+    const before = await db.select().from(encountersTable).where(eq(encountersTable.id, protectedId)).get();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      expect((await request(server).post(`/api/v1/encounters/${protectedId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+      const after = await db.select().from(encountersTable).where(eq(encountersTable.id, protectedId)).get();
+      expect(after?.aoe).toBe(savedAoe);
+      expect(after?.updatedAt).toBe(before?.updatedAt);
+      expect(
+        (await db.select().from(auditLog).where(eq(auditLog.entityId, protectedId))).filter((row) => row.action.startsWith('encounter.aoe.')),
+      ).toEqual([]);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === protectedId)).toEqual([]);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('keeps hidden encounters non-enumerating, blocks viewers, ended fights, archives, and the 50-template overflow', async () => {
+    const server = ctx.app.getHttpServer();
+    const hiddenId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Hidden Player AoE', hidden: true })
+    ).body.id;
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/aoe-templates`).set(player).send(declaration)).status).toBe(404);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(viewer).send(declaration)).status).toBe(403);
+
+    const endedId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Ended Player AoE', hidden: false })
+    ).body.id;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(encountersTable).set({ status: 'ended', endedAt: new Date().toISOString() }).where(eq(encountersTable.id, endedId));
+    expect((await request(server).post(`/api/v1/encounters/${endedId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+
+    const capId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'AoE cap', hidden: false })
+    ).body.id;
+    const fifty = Array.from({ length: 50 }, (_, index) => ({ ...declaration, id: `cap-${index}` }));
+    await db.update(encountersTable).set({ aoe: JSON.stringify(fifty) }).where(eq(encountersTable.id, capId));
+    expect((await request(server).post(`/api/v1/encounters/${capId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+
+    const playerCapId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Player AoE cap', hidden: false })
+    ).body.id;
+    const tenPlayerTemplates = Array.from({ length: 10 }, (_, index) => ({ ...declaration, id: `player-cap-${index}`, declaredByUserId: 'dev:p-1' }));
+    await db.update(encountersTable).set({ aoe: JSON.stringify(tenPlayerTemplates) }).where(eq(encountersTable.id, playerCapId));
+    expect((await request(server).post(`/api/v1/encounters/${playerCapId}/aoe-templates`).set(player).send(declaration)).status).toBe(409);
+    expect((await request(server).post(`/api/v1/encounters/${playerCapId}/aoe-templates`).set(dm).send({ ...declaration, id: 'dm-after-player-cap' })).status).toBe(201);
+
+    const fogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Fogged player AoE', hidden: false })
+    ).body.id;
+    await request(server).patch(`/api/v1/encounters/${fogId}`).set(dm).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] } });
+    expect((await request(server).post(`/api/v1/encounters/${fogId}/aoe-templates`).set(player).send(declaration)).status).toBe(201);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(dm)).body.aoe).toHaveLength(1);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(player)).body.aoe).toHaveLength(1);
+    expect((await request(server).get(`/api/v1/encounters/${fogId}`).set(otherPlayer)).body.aoe).toEqual([]);
+    // A template hidden by fog cannot be distinguished from a missing id through
+    // any player mutation route, including REST's create-only declaration path.
+    expect((await request(server).patch(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${fogId}/aoe-templates/player-cone`).set(otherPlayer)).status).toBe(404);
+    expect((await request(server).post(`/api/v1/encounters/${fogId}/aoe-templates`).set(otherPlayer).send(declaration)).status).toBe(404);
+
+    const invalidFogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Invalid fog AoE visibility', hidden: false })
+    ).body.id;
+    await db.update(encountersTable).set({
+      aoe: JSON.stringify([{ ...declaration, id: 'invalid-fog-other', declaredByUserId: 'dev:p-2' }]),
+      fog: '{malformed',
+    }).where(eq(encountersTable.id, invalidFogId));
+    expect((await request(server).get(`/api/v1/encounters/${invalidFogId}`).set(player)).body.aoe).toEqual([]);
+    expect((await request(server).patch(`/api/v1/encounters/${invalidFogId}/aoe-templates/invalid-fog-other`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${invalidFogId}/aoe-templates/invalid-fog-other`).set(player)).status).toBe(404);
+
+    const siblingFogId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Sibling fog source', hidden: false })
+    ).body.id;
+    const siblingTargetId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Sibling fog AoE visibility', hidden: false })
+    ).body.id;
+    const sharedMap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(dm)
+      .field('kind', 'map')
+      .attach('file', MINIMAL_PNG_1X1, { filename: 'shared-fog-map.png', contentType: 'image/png' });
+    expect(sharedMap.status).toBe(201);
+    await db.update(encountersTable).set({ mapAttachmentId: sharedMap.body.id, fog: JSON.stringify({ enabled: true, revealed: [] }) }).where(eq(encountersTable.id, siblingFogId));
+    await db.update(encountersTable).set({
+      mapAttachmentId: sharedMap.body.id,
+      aoe: JSON.stringify([{ ...declaration, id: 'sibling-fog-other', declaredByUserId: 'dev:p-2' }]),
+    }).where(eq(encountersTable.id, siblingTargetId));
+    expect((await request(server).get(`/api/v1/encounters/${siblingTargetId}`).set(player)).body.aoe).toEqual([]);
+    expect((await request(server).patch(`/api/v1/encounters/${siblingTargetId}/aoe-templates/sibling-fog-other`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${siblingTargetId}/aoe-templates/sibling-fog-other`).set(player)).status).toBe(404);
+
+    await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, campaignId));
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/aoe-templates`).set(player).send(declaration)).status).toBe(403);
+    // Archive enforcement must not run before hidden visibility: a player probing
+    // this still-hidden encounter receives the same 404 as for a missing id.
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/aoe-templates`).set(player).send(declaration)).status).toBe(404);
+    expect((await request(server).patch(`/api/v1/encounters/${hiddenId}/aoe-templates/missing`).set(player).send({ x: 60 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${hiddenId}/aoe-templates/missing`).set(player)).status).toBe(404);
   });
 });
 
@@ -7071,6 +8248,15 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(res.body.targetBand).toBe('deadly');
       expect(res.body.matchedBand).toBe(true);
       expect(res.body.difficulty.band).toBe('deadly');
+      expect(res.body.difficulty.status).toBe('ok');
+      // Issue #1928: this campaign never set a ruleSystem — the same 5e fallback the combat
+      // math already uses — so the REPORTED difficulty is the system's own audited math.
+      expect(res.body.difficultySupport).toBe('supported');
+      // Codex review (#1981): totalXp stays the real adjusted-XP total (byte-identical to
+      // pre-#1928 output) and agrees with the reported difficulty's own adjustedXp for a
+      // supported system — never zeroed.
+      expect(res.body.totalXp).toBeGreaterThan(0);
+      expect(res.body.totalXp).toBe(res.body.difficulty.adjustedXp);
       expect(res.body.combatants.length).toBeGreaterThan(0);
       // Every suggested line references a real compendium statblock and carries CR/XP.
       for (const c of res.body.combatants) {
@@ -7177,6 +8363,12 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(Array.isArray(res.body.warnings)).toBe(true);
       // The plan round-trips.
       expect(res.body.plan[0].slotId).toBe(slot.slotId);
+      // Issue #1928: default (empty) ruleSystem falls back to 5e's own audited math.
+      expect(res.body.difficultySupport).toBe('supported');
+      // Codex review (#1981): totalXp agrees with the reported difficulty's own adjustedXp for
+      // a supported system, and is never zeroed.
+      expect(res.body.totalXp).toBeGreaterThan(0);
+      expect(res.body.totalXp).toBe(res.body.difficulty.adjustedXp);
     });
 
     it('tunes deterministically: reroll one slot is reproducible and pin survives reroll-all', async () => {
@@ -7262,6 +8454,174 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
         .set(dm)
         .send({ idempotencyKey: `bad-${Date.now()}`, roster: [{ slotId: 's1', ruleEntryId: 99999999, count: 1, pinned: false, seed: 1 }] });
       expect(commit.status).toBe(400);
+    });
+  });
+
+  // Issue #1927: the generator/preview candidate queries widen to include the campaign's own
+  // homebrew monsters (rule_entries rows with a non-null campaignId) alongside globally
+  // installed pack entries — while never crossing campaign boundaries, never surfacing
+  // archived homebrew, and leaving `packSlug` pack-only exactly as before.
+  describe('encounter generator + preview — campaign homebrew monsters (issue #1927)', () => {
+    let homebrewCrId: number;
+    let homebrewNoCrId: number;
+    let otherCampaignId: number;
+    const HOMEBREW_TAG = 'umbral-marsh-wyrm-1927';
+    const OTHER_CAMPAIGN_TAG = 'other-campaign-tag-1927';
+    const NO_CR_TAG = 'no-cr-homebrew-1927';
+
+    async function createHomebrew(cid: number, header: typeof dm, slug: string, name: string, data: Record<string, unknown>) {
+      const res = await request(ctx.app.getHttpServer())
+        .post(`/api/v1/campaigns/${cid}/homebrew`)
+        .set(header)
+        .send({ slug, name, type: 'monster', summary: '', body: '', data, rightsStatus: 'private_original' });
+      expect(res.status).toBe(201);
+      return res.body.id as number;
+    }
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+
+      // A CR-bearing homebrew monster owned by the main test campaign.
+      homebrewCrId = await createHomebrew(campaignId, dm, 'umbral-marsh-wyrm', 'Umbral Marsh Wyrm', {
+        challengeRating: 5,
+        hitPoints: 60,
+        type: HOMEBREW_TAG,
+      });
+      // A homebrew monster with no parseable CR/HP (issue #1505's data problem, not this one).
+      homebrewNoCrId = await createHomebrew(campaignId, dm, 'campfire-wisp', 'Campfire Wisp', {
+        type: NO_CR_TAG,
+      });
+
+      // A second campaign with its OWN homebrew, tagged distinctly, to prove isolation.
+      const otherCampRes = await request(server).post('/api/v1/campaigns').set(otherDm).send({ name: 'Other Homebrew Campaign' });
+      otherCampaignId = otherCampRes.body.id;
+      await createHomebrew(otherCampaignId, otherDm, 'rival-dm-horror', 'Rival DM Horror', {
+        challengeRating: 5,
+        hitPoints: 60,
+        type: OTHER_CAMPAIGN_TAG,
+      });
+    });
+
+    it('a CR-bearing homebrew monster appears in a generated roster, tagged source:homebrew', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 11, filters: { creatureType: HOMEBREW_TAG } });
+      expect(res.status).toBe(200);
+      expect(res.body.combatants.length).toBeGreaterThan(0);
+      for (const c of res.body.combatants) {
+        expect(c.ruleEntryId).toBe(homebrewCrId);
+        expect(c.source).toBe('homebrew');
+      }
+    });
+
+    it('a CR-bearing homebrew monster appears in preview/tune roster results, tagged source:homebrew', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 12, filters: { creatureType: HOMEBREW_TAG } });
+      expect(res.status).toBe(200);
+      expect(res.body.roster.length).toBeGreaterThan(0);
+      for (const slot of res.body.roster) {
+        expect(slot.ruleEntryId).toBe(homebrewCrId);
+        expect(slot.source).toBe('homebrew');
+        // The inspection card resolved a real statblock (not the "no candidates" fallback).
+        expect(slot.inspection.hasStatblock).toBe(true);
+      }
+
+      // A reroll-all tune op re-resolves the SAME (only) homebrew candidate again.
+      const reroll = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 12, filters: { creatureType: HOMEBREW_TAG }, roster: res.body.plan, tune: { op: 'reroll-all' } });
+      expect(reroll.status).toBe(200);
+      expect(reroll.body.roster.every((s: { source: string }) => s.source === 'homebrew')).toBe(true);
+    });
+
+    it("campaign A's generation never selects campaign B's homebrew", async () => {
+      const server = ctx.app.getHttpServer();
+      // Filter for the OTHER campaign's unique tag from INSIDE this campaign — no candidate in
+      // this campaign's scope carries that tag, so nothing should ever be selected.
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 13, filters: { creatureType: OTHER_CAMPAIGN_TAG } });
+      expect(res.status).toBe(200);
+      expect(res.body.combatants).toEqual([]);
+
+      // And the reverse: campaign A's homebrew tag is invisible from campaign B.
+      const reverse = await request(server)
+        .post(`/api/v1/campaigns/${otherCampaignId}/encounters/generate`)
+        .set(otherDm)
+        .send({ difficulty: 'medium', seed: 14, filters: { creatureType: HOMEBREW_TAG } });
+      expect(reverse.status).toBe(200);
+      expect(reverse.body.combatants).toEqual([]);
+    });
+
+    it('archived homebrew is never a generation candidate', async () => {
+      const server = ctx.app.getHttpServer();
+      const archivedId = await createHomebrew(campaignId, dm, 'archived-lantern-ghast', 'Archived Lantern Ghast', {
+        challengeRating: 5,
+        hitPoints: 40,
+        type: 'archived-tag-1927',
+      });
+      const archiveRes = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew/${archivedId}/archive`).set(dm);
+      expect(archiveRes.status).toBe(201);
+
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 15, filters: { creatureType: 'archived-tag-1927' } });
+      expect(res.status).toBe(200);
+      expect(res.body.combatants).toEqual([]);
+    });
+
+    it('filters.packSlug still yields pack-only candidates — homebrew is excluded even when it matches other filters', async () => {
+      const server = ctx.app.getHttpServer();
+      // 'gen-pack' was installed by the #304 describe above and lives in the SAME campaign.
+      // creatureType matches the homebrew tag, but packSlug narrows to the installed pack only,
+      // so the homebrew entry must never be returned regardless of the type filter.
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 16, filters: { packSlug: 'gen-pack', creatureType: HOMEBREW_TAG } });
+      expect(res.status).toBe(200);
+      expect(res.body.combatants).toEqual([]);
+    });
+
+    it('CR-less homebrew never enters an auto-budgeted pick, but is addable/pinnable and carries missing-statblock', async () => {
+      const server = ctx.app.getHttpServer();
+      // Auto-budgeted generation never picks it (xp=0 -> filtered out of `usable`).
+      const auto = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 17, filters: { creatureType: NO_CR_TAG } });
+      expect(auto.status).toBe(200);
+      expect(auto.body.combatants).toEqual([]);
+
+      // Explicitly pinned into a preview roster plan, it still resolves (source:homebrew) and
+      // is flagged missing-statblock rather than silently fabricated CR/XP.
+      const pinned = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 18, roster: [{ slotId: 's1', ruleEntryId: homebrewNoCrId, count: 1, pinned: true, seed: 1 }] });
+      expect(pinned.status).toBe(200);
+      expect(pinned.body.roster).toHaveLength(1);
+      expect(pinned.body.roster[0].ruleEntryId).toBe(homebrewNoCrId);
+      expect(pinned.body.roster[0].source).toBe('homebrew');
+      expect(pinned.body.roster[0].cr).toBeNull();
+      expect(pinned.body.warnings.some((w: { code: string }) => w.code === 'missing-statblock')).toBe(true);
+    });
+
+    it('same seed + same candidate set (mixed pack + homebrew) reproduces the same roster', async () => {
+      const server = ctx.app.getHttpServer();
+      const a = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/generate`).set(dm).send({ difficulty: 'medium', seed: 2027 });
+      const b = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/generate`).set(dm).send({ difficulty: 'medium', seed: 2027 });
+      expect(a.status).toBe(200);
+      expect(b.body.combatants).toEqual(a.body.combatants);
+      expect(b.body.seed).toBe(a.body.seed);
     });
   });
 
@@ -8027,6 +9387,141 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
   });
 });
 
+/**
+ * Issue #1928 — generator/preview difficulty honesty for a registered non-5e rule system.
+ * `generateEncounter`'s reported difficulty now routes through the SAME adapter-owned
+ * `estimateEncounterDifficultyForRuleSystem` call `previewEncounter`/`getDifficulty` already
+ * use, instead of the raw 5e math the internal count/CR heuristic still sizes the roster
+ * with — so a non-5e campaign gets an explicit `unsupported` band, never a confident 5e
+ * Deadly/Medium/etc. label presented as this system's own math. `difficultySupport` on
+ * generate + preview and the `GET :id/difficulty` `status` must all agree per rule system.
+ */
+describe('encounters — issue #1928: generator/preview difficulty honesty for a non-5e system (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let orcEntryId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'PF2e Generator Campaign' });
+    campaignId = camp.body.id;
+
+    // 'pf2e' is a registered adapter family id (not an installed-pack slug), set directly —
+    // same DB-write bypass of the installed-pack REST validation characters.e2e-spec.ts uses.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'pf2e' }).where(eq(campaigns.id, campaignId));
+
+    for (const name of ['Aria', 'Borin']) {
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name, level: 5, hpCurrent: 30, hpMax: 30 });
+      expect(res.status).toBe(201);
+    }
+
+    const ts = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({ slug: 'pf2e-gen-pack', name: 'PF2e Gen Pack', version: '1', license: 'ORC', sourceUrl: '', installedAt: ts, entryCount: 1 })
+      .returning();
+    const [orc] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'pf2e-orc',
+        name: 'Orc Warrior',
+        type: 'monster',
+        summary: 'Level 3',
+        body: '',
+        dataJson: JSON.stringify({ challengeRating: 3, hitPoints: 30, type: 'humanoid' }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+    orcEntryId = orc.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('generate reports an honest unsupported band with difficultySupport:\'heuristic\' — the roster is still valid', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+      .set(dm)
+      .send({ difficulty: 'medium', seed: 11, filters: { maxCr: 5 } });
+    expect(res.status).toBe(200);
+    // Label, don't block: the roster is still populated by the internal count/CR heuristic...
+    expect(res.body.combatants.length).toBeGreaterThan(0);
+    expect(res.body.combatants.every((c: { ruleEntryId: number }) => c.ruleEntryId === orcEntryId)).toBe(true);
+    expect(res.body.combatants.every((c: { xp: number }) => c.xp > 0)).toBe(true);
+    // ...but the REPORTED difficulty is explicit and unsupported, not a confident 5e band.
+    expect(res.body.difficulty.status).toBe('unsupported');
+    expect(res.body.difficulty.band).toBeNull();
+    expect(res.body.difficultySupport).toBe('heuristic');
+    // Codex review (#1981): `totalXp` must NOT be zeroed alongside the honest 'unsupported'
+    // status — `unsupportedEncounterDifficulty` always reports `adjustedXp:0` internally, but
+    // presenting that as `totalXp` here would be a FALSE zero sitting next to the positive
+    // per-combatant `xp` values above, not an honest absence. `totalXp` stays the real
+    // (heuristic) total that actually sized this roster; `difficulty`/`difficultySupport`
+    // alone carry the "not this system's own math" signal.
+    expect(res.body.totalXp).toBeGreaterThan(0);
+    // Devin review (#1981): `matchedBand` describes the 5e-shaped roster-SIZING pass, so it may
+    // legitimately be `true` beside `difficulty.band: null`. That pairing is only honest while
+    // the interpretive signal travels with it — a consumer seeing `matchedBand` MUST also see
+    // `difficultySupport` to know the match is about sizing, not about this system rating the
+    // fight. Pin that: whenever the reported band is absent, `difficultySupport` must be
+    // present and 'heuristic', so `matchedBand` can never be read as an achieved difficulty
+    // without the qualifier beside it.
+    expect(typeof res.body.matchedBand).toBe('boolean');
+    if (res.body.difficulty.band === null) {
+      expect(res.body.difficultySupport).toBe('heuristic');
+    }
+  });
+
+  it('preview reports the same unsupported band + difficultySupport for the identical roster, and a positive totalXp', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+      .set(dm)
+      .send({ difficulty: 'medium', seed: 11, filters: { maxCr: 5 } });
+    expect(res.status).toBe(200);
+    expect(res.body.difficulty.status).toBe('unsupported');
+    expect(res.body.difficultySupport).toBe('heuristic');
+    // Codex review (#1981): same invariant as generate — this also corrects a PRE-EXISTING
+    // zeroing in previewEncounter (predates #1928; `reported.adjustedXp` was already used
+    // here), not just the copy #1928 introduced in generateEncounter.
+    expect(res.body.totalXp).toBeGreaterThan(0);
+  });
+
+  it('GET :id/difficulty on a committed PF2e encounter agrees with generate/preview (all three unsupported)', async () => {
+    const server = ctx.app.getHttpServer();
+    const committed = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters/generate?commit=true`)
+      .set(dm)
+      .send({ difficulty: 'medium', seed: 12, name: 'PF2e Skirmish', filters: { maxCr: 5 } });
+    expect(committed.status).toBe(200);
+    expect(committed.body.suggestion.difficultySupport).toBe('heuristic');
+
+    const got = await request(server).get(`/api/v1/encounters/${committed.body.encounter.id}/difficulty`).set(dm);
+    expect(got.status).toBe(200);
+    expect(got.body.status).toBe('unsupported');
+    expect(got.body.band).toBeNull();
+  });
+
+  it('the target difficulty param is still accepted (never rejected) for this heuristic system', async () => {
+    const server = ctx.app.getHttpServer();
+    for (const difficulty of ['trivial', 'easy', 'medium', 'hard', 'deadly'] as const) {
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/generate`)
+        .set(dm)
+        .send({ difficulty, seed: 20, filters: { maxCr: 5 } });
+      expect(res.status).toBe(200);
+      expect(res.body.targetBand).toBe(difficulty);
+    }
+  });
+});
+
 describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
@@ -8103,6 +9598,17 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
     const { encounterId, ariaId, monsterId } = await seedRunningFight();
     const server = ctx.app.getHttpServer();
 
+    await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ fog: { enabled: true, revealed: [] } });
+    expect(
+      (await request(server)
+        .post(`/api/v1/encounters/${encounterId}/aoe-templates`)
+        .set(player)
+        .send({ id: 'end-turn-owner-aoe', shape: 'circle', x: 20, y: 20, sizeFt: 10 })).status,
+    ).toBe(201);
+
     const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     expect(before.body.currentCombatantId).toBe(ariaId);
 
@@ -8112,6 +9618,29 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       .send({ expectedCurrentCombatantId: ariaId });
     expect(res.status).toBe(201);
     expect(res.body.currentCombatantId).toBe(monsterId);
+    expect(res.body.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'end-turn-owner-aoe', declaredByUserId: 'dev:p-1' })]));
+  });
+
+  it('replays a player end-turn receipt after the active turn advances (#1971)', async () => {
+    const { encounterId, ariaId, monsterId } = await seedRunningFight();
+    const server = ctx.app.getHttpServer();
+    const body = { expectedCurrentCombatantId: ariaId, idempotencyKey: 'player-end-turn-replay-1971' };
+    const first = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(player).send(body);
+    expect(first.status).toBe(201);
+    expect(first.body.currentCombatantId).toBe(monsterId);
+
+    const replay = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(player).send(body);
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+
+    const otherActor = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(otherPlayer).send(body);
+    expect(otherActor.status).toBe(403);
+
+    const changed = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/end-turn`)
+      .set(player)
+      .send({ ...body, expectedCurrentCombatantId: monsterId });
+    expect(changed.status).toBe(403);
   });
 
   it('player POST /end-turn is forbidden when it is not their turn', async () => {
@@ -8183,5 +9712,219 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       expect(otherState.hpCurrent).toBe(0);
       expect(otherState.deathState).toBe('stable');
     });
+  });
+
+  describe('POST /api/v1/encounters/:id/escalation (issue #1465)', () => {
+    it('returns 403 when called by a player', async () => {
+      const server = ctx.app.getHttpServer();
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: '5e Escalation Gate' });
+      const enc = await request(server).post(`/api/v1/campaigns/${camp.body.id}/encounters`).set(dm).send({ name: '5e Fight' });
+      const res = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(player)
+        .send({ held: true });
+      expect(res.status).toBe(403);
+    });
+
+    it('returns 400 when called on a non-13th Age encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: '5e Escalation non-13A' });
+      const enc = await request(server).post(`/api/v1/campaigns/${camp.body.id}/encounters`).set(dm).send({ name: '5e Fight' });
+      const res = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ held: true });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('13th Age');
+    });
+
+    it('returns 400 for out-of-range override values on 13th Age encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db
+        .insert(rulePacks)
+        .values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+        .onConflictDoNothing();
+
+      const camp = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: '13A Escalation Range Test', ruleSystem: 'archmage-srd' });
+      expect(camp.status).toBe(201);
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+        .set(dm)
+        .send({ name: 'Escalation Fight' });
+      expect(enc.status).toBe(201);
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Orc', hpMax: 20 });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/roll-initiative`).set(dm);
+      const started = await request(server).post(`/api/v1/encounters/${enc.body.id}/start`).set(dm);
+      expect(started.status).toBe(201);
+
+      // `POST /encounters/:id/escalation` param-parses `:id` with ParseIntPipe before
+      // ever reaching the archmage-adapter override-range check. If campaign/encounter
+      // creation above silently failed, `enc.body.id` would be `undefined` and the
+      // route would 400 from ParseIntPipe alone — the exact same status this test
+      // expects from a genuinely out-of-range override — letting a broken setup pass
+      // silently. The asserts above pin the setup to 200/201 so a 400 below can only
+      // come from the override-range check itself.
+      const highRes = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ override: 7 });
+      expect(highRes.status).toBe(400);
+
+      const lowRes = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ override: -1 });
+      expect(lowRes.status).toBe(400);
+    });
+
+    it('returns 409 when called on an ended 13th Age encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db
+        .insert(rulePacks)
+        .values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+        .onConflictDoNothing();
+
+      const camp = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: '13A Escalation Ended Test', ruleSystem: 'archmage-srd' });
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+        .set(dm)
+        .send({ name: 'Ended Escalation Fight' });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Orc', hpMax: 20 });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/roll-initiative`).set(dm);
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/start`).set(dm);
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/end`).set(dm);
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ override: 3 });
+      // updateEscalationDie() calls assertMutable() first, which rejects an ended
+      // encounter with 409 before the 13th-Age-adapter check ever runs — pin to the
+      // real contract instead of accepting a permissive [400, 409] (issue #1465 review).
+      expect(res.status).toBe(409);
+    });
+
+    it('updates escalation die state on valid DM request', async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      await db
+        .insert(rulePacks)
+        .values({ slug: 'archmage-srd', name: 'Archmage SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+        .onConflictDoNothing();
+
+      const camp = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: '13A Escalation Valid Test', ruleSystem: 'archmage-srd' });
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+        .set(dm)
+        .send({ name: 'Running Escalation Fight' });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/combatants`).set(dm).send({ kind: 'monster', name: 'Orc', hpMax: 20 });
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/roll-initiative`).set(dm);
+      await request(server).post(`/api/v1/encounters/${enc.body.id}/start`).set(dm);
+
+      const res = await request(server)
+        .post(`/api/v1/encounters/${enc.body.id}/escalation`)
+        .set(dm)
+        .send({ held: true, override: 4 });
+      expect(res.status).toBe(201);
+      expect(res.body.escalationDie).toBe(4);
+      expect(res.body.escalationDieHeld).toBe(true);
+      expect(res.body.escalationDieOverride).toBe(4);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1935 — turn timer: turnTimerSeconds PATCH authorization + turnStartedAt's
+// PATCH-proofing and REST/MCP-shared exposure on every role's GET. The stamping
+// itself (start/next-turn/undo/end/reopen) is covered at the service layer in
+// test/unit/encounters-turn-timer.spec.ts — this block only exercises what needs
+// the real HTTP/DTO layer: role gating and the strict-schema PATCH rejection.
+// ---------------------------------------------------------------------------
+describe('encounters — turn timer (issue #1935, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Turn Timer Campaign' })).body.id;
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Timer Drill', hidden: false });
+    encounterId = created.body.id;
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Goblin', hpMax: 10 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('DM PATCH turnTimerSeconds succeeds and is reflected on GET', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ turnTimerSeconds: 90 });
+    expect(res.status).toBe(200);
+    expect(res.body.turnTimerSeconds).toBe(90);
+
+    const got = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(got.body.turnTimerSeconds).toBe(90);
+  });
+
+  it('non-DM PATCH of turnTimerSeconds is rejected 403', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ turnTimerSeconds: 60 });
+    expect(res.status).toBe(403);
+
+    // Unchanged — the rejected caller's value never landed.
+    const got = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(got.body.turnTimerSeconds).toBe(90);
+  });
+
+  it('a negative turnTimerSeconds is rejected 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ turnTimerSeconds: -30 });
+    expect(res.status).toBe(400);
+  });
+
+  it('turnStartedAt in a PATCH body is rejected 400 — it is not part of EncounterUpdate at all (strict DTO)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ turnStartedAt: '2020-01-01T00:00:00.000Z' });
+    expect(res.status).toBe(400);
+  });
+
+  it('turnStartedAt and turnTimerSeconds are exposed identically to a DM and a player GET (not a secret)', async () => {
+    const server = ctx.app.getHttpServer();
+    const start = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(start.status).toBe(201);
+    // Typed assertions, not just "not null" — an absent (undefined) field would
+    // otherwise pass a bare `.not.toBeNull()` check just as well as a real stamp.
+    expect(typeof start.body.turnStartedAt).toBe('string');
+    expect(Number.isNaN(Date.parse(start.body.turnStartedAt))).toBe(false);
+
+    const dmGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const playerGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(playerGet.status).toBe(200);
+    expect(typeof playerGet.body.turnTimerSeconds).toBe('number');
+    expect(playerGet.body.turnStartedAt).toBe(dmGet.body.turnStartedAt);
+    expect(playerGet.body.turnTimerSeconds).toBe(dmGet.body.turnTimerSeconds);
   });
 });

@@ -89,6 +89,8 @@ export interface SeedData {
   linkedEndedEncounterId: number;
   statblockEntryId: number;
   statblockEncounterId: number;
+  archmageCampaignId: number;
+  archmageEncounterId: number;
   npcId: number;
   xpRecipients: Record<'active' | 'retired' | 'dead' | 'inactive', { id: number; name: string; xp: number }>;
   semantic: {
@@ -224,6 +226,46 @@ export default async function globalSetup(config: FullConfig) {
   });
   await waitForInstall(admin, statblockUpload.id);
 
+  const archmagePackUpload = await okJson(admin, 'post', '/api/v1/rules/packs/upload', {
+    source: 'upload',
+    pack: {
+      slug: 'archmage',
+      name: '13th Age Archmage Fixtures',
+      version: '1',
+      license: 'CC0',
+    },
+    entries: [
+      {
+        slug: 'archmage-fixture',
+        name: 'Archmage Fixture Monster',
+        type: 'monster',
+        summary: '13th Age Monster',
+        dataJson: JSON.stringify({ name: 'Archmage Fixture Monster', hpMax: 50 }),
+      },
+    ],
+  });
+  await waitForInstall(admin, archmagePackUpload.id);
+
+  const openLegendPackUpload = await okJson(admin, 'post', '/api/v1/rules/packs/upload', {
+    source: 'upload',
+    pack: {
+      slug: 'open-legend',
+      name: 'Open Legend Fixtures',
+      version: '1',
+      license: 'CC0',
+    },
+    entries: [
+      {
+        slug: 'open-legend-fixture',
+        name: 'Open Legend Fixture Monster',
+        type: 'monster',
+        summary: 'Open Legend Monster',
+        dataJson: JSON.stringify({ name: 'Open Legend Fixture Monster', hpMax: 20 }),
+      },
+    ],
+  });
+  await waitForInstall(admin, openLegendPackUpload.id);
+
   // --- DM builds the campaign + memberships + fixtures -------------------------
   const dm = await loginContext(baseURL, 'dm');
   const campaign = await okJson(dm, 'post', '/api/v1/campaigns', {
@@ -242,6 +284,28 @@ export default async function globalSetup(config: FullConfig) {
 
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.player, role: 'player' });
   await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
+
+  // 13th Age (archmage) campaign + running encounter fixture for ruleset-specific specs (#1465).
+  const archmageCampaign = await okJson(dm, 'post', '/api/v1/campaigns', {
+    name: 'E2E — Archmage 13th Age',
+    ruleSystem: 'archmage',
+  });
+  const archmageCampaignId: number = archmageCampaign.id;
+  await okJson(dm, 'post', `/api/v1/campaigns/${archmageCampaignId}/members`, { userId: userIds.player, role: 'player' });
+  await okJson(dm, 'post', `/api/v1/campaigns/${archmageCampaignId}/members`, { userId: userIds.viewer, role: 'viewer' });
+
+  const archmageEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${archmageCampaignId}/encounters`, {
+    name: 'Archmage Escalation Battle',
+    hidden: false,
+  });
+  const archmageEncounterId: number = archmageEncounter.id;
+  await okJson(dm, 'post', `/api/v1/encounters/${archmageEncounterId}/combatants`, {
+    kind: 'monster',
+    name: 'Archmage Owlbear',
+    hpMax: 50,
+  });
+  await okJson(dm, 'post', `/api/v1/encounters/${archmageEncounterId}/roll-initiative`);
+  await okJson(dm, 'post', `/api/v1/encounters/${archmageEncounterId}/start`);
 
   // Issue #621 browser fixture: use the public upload/search/encounter APIs so both the
   // compendium reader and combat card consume exactly the same persisted dataJson string.
@@ -683,6 +747,8 @@ export default async function globalSetup(config: FullConfig) {
     linkedEndedEncounterId,
     statblockEntryId,
     statblockEncounterId,
+    archmageCampaignId,
+    archmageEncounterId,
     npcId,
     xpRecipients,
     semantic: {

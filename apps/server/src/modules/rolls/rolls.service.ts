@@ -1,4 +1,4 @@
-import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
+import { Inject, Injectable, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, desc, eq, inArray, lte, notExists, sql } from 'drizzle-orm';
 import type { DiceRoll, RollResult, RollResultTerm, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -7,6 +7,7 @@ import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import type { RequestUser } from '../../common/user.types';
 import { UNKNOWN_COMBATANT_LABEL } from '../encounters/encounters.logic';
+import { CampaignEventsService } from '../events/campaign-events.service';
 
 /**
  * #614: how many dice rolls each campaign keeps before the oldest are pruned.
@@ -107,7 +108,19 @@ type RollWriteDb = Pick<DrizzleDb, 'insert'>;
  */
 @Injectable()
 export class RollsService implements OnApplicationBootstrap {
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    @Optional() @Inject(CampaignEventsService) private readonly events?: CampaignEventsService,
+  ) {}
+
+  emitDiceRolled(roll: DiceRoll | { id: number; campaignId: number; encounterId?: number | null }): void {
+    this.events?.emit({
+      type: 'dice.rolled',
+      campaignId: roll.campaignId,
+      rollId: roll.id,
+      ...(roll.encounterId != null ? { encounterId: roll.encounterId } : {}),
+    });
+  }
 
   /**
    * Kick off retention. Prune once at boot (awaited so a test's immediate
@@ -128,7 +141,9 @@ export class RollsService implements OnApplicationBootstrap {
    * always fast and a roll is never lost to a synchronous delete race.
    */
   async record(campaignId: number, result: RollResult, user: RequestUser): Promise<DiceRoll> {
-    return this.recordInTransaction(this.db, campaignId, result, user);
+    const roll = this.recordInTransaction(this.db, campaignId, result, user);
+    this.emitDiceRolled(roll);
+    return roll;
   }
 
   /**
@@ -279,12 +294,11 @@ export class RollsService implements OnApplicationBootstrap {
    * redaction, only for the row-dropping encounter check (pushed into SQL instead, see
    * `listForCampaign`).
    *
-   * The reconstructed label assumes the exact "<name> · Initiative" suffix every current
-   * npcId-tagged producer writes (encounters.service.ts's bulk and per-combatant initiative
-   * rolls — the only callers that set npcId today), and matches the SAME string those write
-   * paths already use for an NPC hidden AT roll time, so a masked entry looks identical
-   * regardless of when the hide happened. Revisit this if a future roll type starts tagging
-   * npcId for a different action label.
+   * The rest of a label is not safe to preserve: quick-roll action names are DM-authored
+   * free text and can name the concealed NPC too. Replace the whole label, rather than
+   * trying to parse an identity-free suffix. Rolls that did not persist an in-fiction
+   * actor keep their real roller attribution, so initiative records still identify the
+   * player or DM account that made the roll.
    */
   private async maskHiddenNpcLabels(rolls: DiceRoll[]): Promise<DiceRoll[]> {
     const npcIds = [...new Set(rolls.map((r) => r.npcId).filter((id): id is number => id !== undefined))];
@@ -304,8 +318,12 @@ export class RollsService implements OnApplicationBootstrap {
       // mask was supposed to withhold. Null it out alongside the label, same as the
       // roster-read mask (getWithCombatantsOrThrow: `{ ...c, npcId: null, name:
       // UNKNOWN_COMBATANT_LABEL }`) severs the identity link, not just the display name.
-      const { npcId: _npcId, ...withoutNpcId } = r;
-      return { ...withoutNpcId, label: `${UNKNOWN_COMBATANT_LABEL} · Initiative` };
+      const { npcId: _npcId, actor: _actor, ...withoutIdentity } = r;
+      return {
+        ...withoutIdentity,
+        ...(r.actor !== undefined ? { actor: UNKNOWN_COMBATANT_LABEL } : {}),
+        label: UNKNOWN_COMBATANT_LABEL,
+      };
     });
   }
 

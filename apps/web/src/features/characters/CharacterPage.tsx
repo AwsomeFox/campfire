@@ -30,6 +30,7 @@ import { CharacterSheetNav } from './CharacterSheetNav';
 import { characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
 import type {
+  ActionSpec,
   Attachment,
   Character,
   CharacterAction,
@@ -49,6 +50,8 @@ import {
   sortCheckCatalog,
   formatCheckBreakdown,
   restOptionsForAdapter,
+  inferActionSpecFromText,
+  isResolvableSpec,
 } from '@campfire/schema';
 import { findLeveledConditionTrack, conditionLevel } from './leveledCondition';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
@@ -65,6 +68,7 @@ import {
   characterSheetDraftFrom,
   characterSheetDraftsEqual,
   isCharacterSheetDirty,
+  normalizeRestoredDraft,
   snapshotCharacterSheetDraft,
 } from './characterSheetFormState';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -96,6 +100,7 @@ import {
   CHARACTER_LEVEL_LABEL,
   CHARACTER_NAME_LABEL,
   CHARACTER_SPECIES_LABEL,
+  CHARACTER_SPEED_LABEL,
   CHARACTER_STATUS_HELP,
   CHARACTER_STATUS_LABEL,
   CHARACTER_STORY_HELP,
@@ -785,6 +790,7 @@ function SheetEditForm({
   const [background, setBackground] = useState(baseline.background);
   const [level, setLevel] = useState(baseline.level);
   const [ac, setAc] = useState(baseline.ac);
+  const [speed, setSpeed] = useState(baseline.speed);
   const [hpMax, setHpMax] = useState(baseline.hpMax);
   const [status, setStatus] = useState<CharacterStatus>(baseline.status);
   const [stats, setStats] = useState<Record<string, string>>(baseline.stats);
@@ -808,6 +814,7 @@ function SheetEditForm({
     background,
     level,
     ac,
+    speed,
     hpMax,
     status,
     stats,
@@ -825,6 +832,14 @@ function SheetEditForm({
       const acParsed = parseLocalizedInteger(ac, formatLocale);
       if (!acParsed.ok) errs.ac = acParsed.error;
       else acValue = acParsed.value;
+    }
+    // Issue #1910: optional, locale-parsed like AC. min:0 mirrors the schema's
+    // speed.min(0) — no upper bound, unlike AC's implicit sanity ceiling.
+    let speedValue: number | null = null;
+    if (speed.trim() !== '') {
+      const speedParsed = parseLocalizedInteger(speed, formatLocale, { min: 0 });
+      if (!speedParsed.ok) errs.speed = speedParsed.error;
+      else speedValue = speedParsed.value;
     }
     const hpMaxParsed = parseLocalizedInteger(hpMax, formatLocale, { min: 1 });
     if (!hpMaxParsed.ok) errs.hpMax = hpMaxParsed.error;
@@ -851,6 +866,7 @@ function SheetEditForm({
         background: background.trim(),
         level: levelNum,
         ac: acValue,
+        speed: speedValue,
         hpMax: hpMaxNum,
         status,
         stats: { ...character.stats, ...statNums },
@@ -881,6 +897,7 @@ function SheetEditForm({
     onError,
     onSaved,
     species,
+    speed,
     stats,
     status,
   ]);
@@ -895,16 +912,29 @@ function SheetEditForm({
     baseline,
     serverUpdatedAt: character.updatedAt,
     isDraftEqual: characterSheetDraftsEqual,
+    // Issue #1910 review (Devin, PR #1980): readFormDraft only validates the
+    // envelope (v: 1) + that `data` exists, not the field set — a draft
+    // persisted before `speed` joined CharacterSheetDraft restores with
+    // `data.speed === undefined`. Feeding that straight into setSpeed puts a
+    // non-string into state typed `string`, and save()'s later `speed.trim()`
+    // throws inside the async handler — an unhandled rejection (the handler
+    // is `void save()`), so the Save button silently does nothing.
+    // normalizeRestoredDraft fills every field defensively, not just the one
+    // reported line — see its own doc comment for why the rest of this shape
+    // has no CURRENT equivalent gap, but could gain one the next time a field
+    // is added here.
     onRestoreDraft: (restored) => {
-      setName(restored.name);
-      setSpecies(restored.species);
-      setClassName(restored.className);
-      setBackground(restored.background);
-      setLevel(restored.level);
-      setAc(restored.ac);
-      setHpMax(restored.hpMax);
-      setStatus(restored.status);
-      setStats({ ...restored.stats });
+      const safe = normalizeRestoredDraft(restored);
+      setName(safe.name);
+      setSpecies(safe.species);
+      setClassName(safe.className);
+      setBackground(safe.background);
+      setLevel(safe.level);
+      setAc(safe.ac);
+      setSpeed(safe.speed);
+      setHpMax(safe.hpMax);
+      setStatus(safe.status);
+      setStats(safe.stats);
     },
     onDiscard: onCancel,
     onSave: save,
@@ -996,6 +1026,23 @@ function SheetEditForm({
             setFieldErrors((fe) => ({ ...fe, ac: '' }));
           }}
           placeholder={defenseLabel}
+          optional
+        />
+        <Field
+          idPrefix={CHARACTER_EDIT_PREFIX}
+          name={CHARACTER_FIELD.speed}
+          label={CHARACTER_SPEED_LABEL}
+          labelClassName={cardLabel}
+          type="text"
+          inputMode="numeric"
+          min={0}
+          value={speed}
+          error={fieldErrors.speed || null}
+          onChange={(e) => {
+            setSpeed(e.target.value);
+            setFieldErrors((fe) => ({ ...fe, speed: '' }));
+          }}
+          placeholder={CHARACTER_SPEED_LABEL}
           optional
         />
       </div>
@@ -1562,6 +1609,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
 }
 
 function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCardProps & { roller: Roller }) {
+  const { t } = useTranslation();
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
@@ -1609,6 +1657,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
 
   async function add() {
     if (!name.trim()) return;
+    const inferredSpec = inferActionSpecFromText(toHit.trim(), damage.trim(), kind.trim());
     const action: CharacterAction = {
       name: name.trim(),
       kind: kind.trim(),
@@ -1616,6 +1665,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
       damage: damage.trim(),
       targetAc: targetAc.trim(),
       notes: notes.trim(),
+      ...(inferredSpec ? { spec: inferredSpec } : {}),
     };
     const ok = await saveActions([...character.actions, action], "Couldn't add the action.", `Added action ${action.name}`);
     if (ok) {
@@ -1626,13 +1676,35 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
 
   async function saveEdit() {
     if (editingIndex == null || !name.trim()) return;
+    const existingAction = character.actions[editingIndex];
+    const nextToHit = toHit.trim();
+    const nextDamage = damage.trim();
+    const nextKind = kind.trim();
+
+    let nextSpec: ActionSpec | undefined = existingAction?.spec;
+
+    if (!existingAction?.spec) {
+      nextSpec = inferActionSpecFromText(nextToHit, nextDamage, nextKind);
+    } else if (existingAction.spec.provenance?.source === 'sheet-inferred') {
+      const toHitChanged = nextToHit !== (existingAction.toHit ?? '');
+      const damageChanged = nextDamage !== (existingAction.damage ?? '');
+      const kindChanged = nextKind !== (existingAction.kind ?? '');
+      if (toHitChanged || damageChanged || kindChanged) {
+        nextSpec = inferActionSpecFromText(nextToHit, nextDamage, nextKind);
+      }
+    } else {
+      nextSpec = existingAction.spec;
+    }
+
     const action: CharacterAction = {
+      ...existingAction,
       name: name.trim(),
-      kind: kind.trim(),
-      toHit: toHit.trim(),
-      damage: damage.trim(),
+      kind: nextKind,
+      toHit: nextToHit,
+      damage: nextDamage,
       targetAc: targetAc.trim(),
       notes: notes.trim(),
+      spec: nextSpec,
     };
     const next = character.actions.map((a, i) => (i === editingIndex ? action : a));
     const ok = await saveActions(next, "Couldn't save the action.", `Updated action ${action.name}`);
@@ -1723,6 +1795,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
         }
         const attackExpr = action.toHit ? toHitExpr(action.toHit, 'flat') : null;
         const dmgExpr = action.damage ? damageExpr(action.damage) : null;
+        const isResolvable = action.spec != null && isResolvableSpec(action.spec);
         return (
           <div key={`${action.name}-${i}`} className="cf-inset px-3 py-2 flex items-start gap-2.5">
             <div className="flex-1 min-w-0">
@@ -1736,6 +1809,15 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                 {action.targetAc && (
                   <span className="tag tag-neutral text-[10px]" title="Target Armor Class">
                     vs {action.targetAc}
+                  </span>
+                )}
+                {isResolvable ? (
+                  <span className="tag tag-neutral text-[10px]" data-testid="action-one-tap-badge">
+                    {t('characters.actions.oneTapReady')}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-400" data-testid="action-text-only-hint">
+                    {t('characters.actions.textOnly')}
                   </span>
                 )}
               </p>

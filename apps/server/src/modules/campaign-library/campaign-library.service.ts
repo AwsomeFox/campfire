@@ -13,12 +13,13 @@ import {
   LibraryBulkRequest, LibraryBulkResult,
   QuestStatus, FactionStanding, LocationStatus,
   CampaignLibraryTemplate, CampaignLibraryTemplateSave, CampaignLibraryTemplateInstantiate,
+  EncounterTemplateRoster, defaultCombatantStatblock, TokenSize,
   LibraryEntityType,
   type LibraryEntitySummary,
   type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, campaignLibraryTemplates, campaigns, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
+import { attachments, auditLog, campaignLibraryBulkOperations, campaignLibraryCollections, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaignLibraryTags, campaignLibraryTemplates, campaigns, combatants, encounters, factions, inventoryItems, locations, npcs, quests, timelineEvents } from '../../db/schema';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { nowIso } from '../../common/time';
 import { getRequestId } from '../../common/request-context';
@@ -788,10 +789,80 @@ export class CampaignLibraryService {
     timeline_event: { table: 'timeline_events', fields: ['title', 'in_world_date', 'body', 'era', 'sort_index', 'dm_secret', 'hidden'], refs: {} },
     inventory_item: { table: 'inventory_items', fields: ['owner_type', 'character_id', 'name', 'qty', 'notes', 'icon_slug'], refs: { character_id: { key: 'characterId', table: 'characters' } } },
     campaign_library_monster: { table: 'campaign_library_monsters', fields: ['name', 'statblock_json', 'source_rule_entry_id'], refs: { source_rule_entry_id: { key: 'sourceRuleEntryId', table: 'rule_entries' } } },
-    // Encounters are prep templates only.  No combatants, turn pointer, rolls,
-    // completion state or idempotency state can be reintroduced by instantiation.
+    // Encounters snapshot map/grid geometry and roster composition (non-character/non-NPC combatant
+    // statblocks and counts). Play state — runtime initiative, damage, temp HP, conditions, death state,
+    // turn pointer, active effects, and token positions — is stripped on save, and PCs/NPCs join through existing runtime flows.
     encounter: { table: 'encounters', fields: ['name', 'location_id', 'quest_id', 'session_id', 'map_attachment_id', 'grid_size', 'grid_scale', 'grid_unit', 'grid_snap', 'fog', 'grid_type', 'hex_orientation', 'aoe', 'grid_offset_x', 'grid_offset_y', 'grid_cell_height', 'grid_rotation', 'grid_opacity', 'hidden'], refs: { location_id: { key: 'locationId', table: 'locations' }, quest_id: { key: 'questId', table: 'quests' }, session_id: { key: 'sessionId', table: 'sessions' }, map_attachment_id: { key: 'mapAttachmentId', table: 'attachments', attachmentCommitted: true } } },
   };
+
+  private buildEncounterTemplateRoster(rawCombatants: Array<Record<string, unknown>>): z.infer<typeof EncounterTemplateRoster> {
+    const valid = rawCombatants.filter((c) => c.character_id == null && c.npc_id == null && c.kind !== 'character');
+    const groups: Array<{
+      kind: 'character' | 'monster' | 'npc';
+      name: string;
+      baseName: string;
+      statblock: CombatantStatblock | null;
+      hpMax: number;
+      initMod: number;
+      tokenSize: TokenSize;
+      sortOrder: number;
+      count: number;
+    }> = [];
+
+    for (const c of valid) {
+      const rawName = String(c.name ?? '');
+      const baseName = rawName.replace(/\s+\d+$/, '').trim() || rawName;
+      const kind = (c.kind as 'monster' | 'npc') ?? 'monster';
+      const hpMax = Number(c.hp_max ?? c.hpMax ?? 0);
+      const initMod = Number(c.init_mod ?? c.initMod ?? 0);
+      const tokenSize = (String(c.token_size ?? c.tokenSize ?? 'medium')) as TokenSize;
+      const sortOrder = Number(c.sort_order ?? c.sortOrder ?? 0);
+      const statblockText = (c.statblock_json ?? c.statblockJson) as string | null;
+      let statblock: CombatantStatblock | null = null;
+      if (statblockText) {
+        const parsed = CombatantStatblock.safeParse(fromJsonText(statblockText, null));
+        if (parsed.success) statblock = parsed.data;
+      }
+
+      const match = groups.find((g) =>
+        g.kind === kind &&
+        g.baseName === baseName &&
+        g.hpMax === hpMax &&
+        g.initMod === initMod &&
+        g.tokenSize === tokenSize &&
+        JSON.stringify(g.statblock) === JSON.stringify(statblock)
+      );
+
+      if (match) {
+        match.count += 1;
+      } else {
+        groups.push({
+          kind,
+          name: rawName,
+          baseName,
+          statblock,
+          hpMax,
+          initMod,
+          tokenSize,
+          sortOrder,
+          count: 1,
+        });
+      }
+    }
+
+    const rosterEntries = groups.map((g) => ({
+      kind: g.kind,
+      name: g.count > 1 ? g.baseName : g.name,
+      statblock: g.statblock,
+      hpMax: g.hpMax,
+      initMod: g.initMod,
+      tokenSize: g.tokenSize,
+      sortOrder: g.sortOrder,
+      count: g.count,
+    }));
+
+    return EncounterTemplateRoster.parse(rosterEntries);
+  }
 
   private templateRow(row: typeof campaignLibraryTemplates.$inferSelect): z.infer<typeof CampaignLibraryTemplate> {
     return CampaignLibraryTemplate.parse({ id: row.id, campaignId: row.campaignId, entityType: row.entityType, name: row.name, description: row.description, snapshot: fromJsonText(row.snapshotJson, {}), sourceEntityId: row.sourceEntityId, archivedAt: row.archivedAt, createdAt: row.createdAt, updatedAt: row.updatedAt });
@@ -847,7 +918,48 @@ export class CampaignLibraryService {
     const args = [campaignId, ...adapter.fields.map((field) => values[field] ?? null), ts, ts];
     const row = tx.get(sql`insert into ${sql.raw(adapter.table)} (${sql.join(fields.map((field) => sql.raw(field)), sql`, `)}) values (${sql.join(args.map((value) => sql`${value}`), sql`, `)}) returning id`);
     if (!row) throw new BadRequestException('Template instantiation failed');
-    return (row as { id: number }).id;
+    const newId = (row as { id: number }).id;
+
+    if (type === 'encounter' && snapshot.roster !== undefined) {
+      const parsedRoster = EncounterTemplateRoster.safeParse(snapshot.roster);
+      if (!parsedRoster.success) {
+        throw new BadRequestException(`Invalid encounter template roster: ${parsedRoster.error.message}`);
+      }
+      let currentSortOrder = 0;
+      for (const entry of parsedRoster.data) {
+        const count = Math.max(1, entry.count ?? 1);
+        const names = count > 1 ? Array.from({ length: count }, (_, i) => `${entry.name} ${i + 1}`) : [entry.name];
+        const itemSortOrder = Math.max(currentSortOrder, entry.sortOrder ?? 0);
+        for (let i = 0; i < names.length; i++) {
+          const cName = names[i];
+            const statblockJson = entry.statblock
+              ? toJsonText(entry.statblock)
+              : entry.kind === 'monster'
+                ? toJsonText(defaultCombatantStatblock())
+                : null;
+            tx.insert(combatants).values({
+              encounterId: newId,
+              kind: entry.kind,
+              name: cName,
+              initMod: entry.initMod ?? 0,
+              hpCurrent: entry.hpMax,
+              hpMax: entry.hpMax,
+              tokenSize: entry.tokenSize ?? 'medium',
+              sortOrder: itemSortOrder + i,
+              statblockJson,
+              hpTemp: 0,
+              deathState: 'none',
+              deathSaveSuccesses: 0,
+              deathSaveFailures: 0,
+              conditions: '[]',
+              conditionInstances: null,
+            }).run();
+          }
+          currentSortOrder = itemSortOrder + names.length;
+        }
+      }
+
+    return newId;
   }
 
   private assertInventoryOwner(values: Record<string, unknown>) {
@@ -890,6 +1002,12 @@ export class CampaignLibraryService {
       if (!source) throw new NotFoundException(`${input.entityType} ${input.entityId} not found in this campaign`);
       const snapshot = Object.fromEntries(adapter.fields.map((field) => [field, source[field]]));
       if (input.entityType === 'location' && snapshot.status === 'current') snapshot.status = 'explored';
+      if (input.entityType === 'encounter') {
+        const rawCombatants = tx.all(
+          sql`select * from combatants where encounter_id=${input.entityId} order by sort_order asc, id asc`
+        ) as Array<Record<string, unknown>>;
+        snapshot.roster = this.buildEncounterTemplateRoster(rawCombatants);
+      }
       this.assertTemplateRefs(tx, campaignId, adapter, snapshot);
       const row = tx.insert(campaignLibraryTemplates).values({ campaignId, entityType: input.entityType, name: input.name.trim(), description: input.description, snapshotJson: toJsonText(snapshot), sourceEntityId: input.entityId, createdAt: ts, updatedAt: ts }).returning().get();
       tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.template.save', entityType: 'campaign_library_template', entityId: row.id, detail: input.entityType, requestId: getRequestId() ?? null, createdAt: ts }).run();
@@ -921,6 +1039,12 @@ export class CampaignLibraryService {
       const source = this.templateSource(tx, adapter.table, entityId, campaignId);
       if (!source) throw new NotFoundException(`${type} ${entityId} not found in this campaign`);
       const snapshot = Object.fromEntries(adapter.fields.map((field) => [field, source[field]]));
+      if (type === 'encounter') {
+        const rawCombatants = tx.all(
+          sql`select * from combatants where encounter_id=${entityId} order by sort_order asc, id asc`
+        ) as Array<Record<string, unknown>>;
+        snapshot.roster = this.buildEncounterTemplateRoster(rawCombatants);
+      }
       const id = this.createFromSnapshot(tx, campaignId, type as Exclude<LibraryEntityType, 'attachment'>, snapshot, input.name, input.refs);
       tx.insert(auditLog).values({ campaignId, actor: auditActor(user), actorRole: role, action: 'campaign_library.entity.duplicate', entityType: type, entityId: id, detail: String(entityId), requestId: getRequestId() ?? null, createdAt: ts }).run();
       return { entityType: type, entityId: id };

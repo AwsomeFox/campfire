@@ -29,6 +29,7 @@ const HASH_SECTION: Readonly<Record<string, SettingsSectionId>> = {
   'ai-dm-budget': 'ai',
   'ai-dm-instructions': 'ai',
   'ai-dm-style': 'ai',
+  'ai-dm-comprehension': 'ai',
   data: 'data',
   export: 'data',
   duplicate: 'data',

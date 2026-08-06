@@ -1,5 +1,9 @@
 {
   "characters": {
+    "actions": {
+      "oneTapReady": "One-tap ready",
+      "textOnly": "Text only"
+    },
     "conditionLevel": {
       "raise": "Raise",
       "lower": "Lower",

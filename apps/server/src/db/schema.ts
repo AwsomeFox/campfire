@@ -1,5 +1,5 @@
 import { sqliteTable, text, integer, real, index, uniqueIndex, primaryKey } from 'drizzle-orm/sqlite-core';
-import type { AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
+import type { AiDmComprehensionProfile, AiDmProactiveSettings, AiDmStylePresets } from '@campfire/schema';
 
 /**
  * Drizzle table definitions mirroring @campfire/schema entities.
@@ -14,6 +14,9 @@ export const campaigns = sqliteTable('campaigns', {
   description: text('description').notNull().default(''),
   status: text('status').notNull().default('active'),
   currentLocationId: integer('current_location_id'),
+  // Issue #871: campaign-wide narrative tone/challenge backdrop — see the full object/timeframe/
+  // audience/owner/consequence definition on `DangerLevel` in @campfire/schema. No column rename:
+  // the wire format is unchanged, only the user-facing label and contextual help were clarified.
   dangerLevel: text('danger_level').notNull().default('low'),
   // When true, only the DM may award XP / level up characters (issue #270). Added in
   // older DBs via migrateCampaignsTableForDmControlsProgression() — see db/db.module.ts.
@@ -41,6 +44,11 @@ export const campaigns = sqliteTable('campaigns', {
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   ruleSystem: text('rule_system').notNull().default(''),
+  // Issue #1502: a per-campaign homebrew mechanics profile (JSON-encoded HomebrewMechanicsProfile
+  // from @campfire/schema), or NULL when unset. Only meaningful alongside a `ruleSystem` slug
+  // that is NOT a built-in registered adapter — enforced in CampaignsService, not here. NULL in
+  // every campaign that predates this column; see db/db.module.ts ALTER TABLE note.
+  customMechanicsProfile: text('custom_mechanics_profile'),
   // Attachment (kind='map') rendered as the campaign map background on Dashboard/Location detail.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   mapAttachmentId: integer('map_attachment_id'),
@@ -101,6 +109,8 @@ export const characters = sqliteTable('characters', {
   ac: integer('ac'),
   eac: integer('eac'),
   kac: integer('kac'),
+  // Issue #1910: movement speed. Nullable — see @campfire/schema's Character.speed doc.
+  speed: integer('speed'),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
   spCurrent: integer('sp_current').notNull().default(0),
@@ -1007,6 +1017,14 @@ export const users = sqliteTable('users', {
   timeFormat: text('time_format').notNull().default('system'),
   // Per-player dice overlay skin (issue #1315).
   diceTheme: text('dice_theme').notNull().default('nocturne'),
+  // Whether to play spectator tumble/crit animations for other players' rolls (issue #1899).
+  animateOthersRolls: integer('animate_others_rolls', { mode: 'boolean' }).notNull().default(true),
+  // Issue #851 — "approved organizer" eligibility under the 'approved_organizers'
+  // campaign-creation policy (settings.campaignCreationPolicy). Ignored entirely under
+  // the 'everyone'/'admins_only' policies.
+  canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(false),
+  // Color-vision-assist mode: adds non-color channels to combat indicators (issue #1942).
+  colorVisionAssist: integer('color_vision_assist', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -1039,6 +1057,19 @@ export const passwordResetRequests = sqliteTable('password_reset_requests', {
 export const settings = sqliteTable('settings', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
+});
+
+// Issue #851 — the safe request/approval flow for a restricted campaign-creation
+// policy. Mirrors passwordResetRequests above: a user files a 'pending' row, an
+// admin approves or denies it (approving flips users.canCreateCampaigns to true).
+export const campaignCreationRequests = sqliteTable('campaign_creation_requests', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  status: text('status').notNull().default('pending'), // 'pending' | 'approved' | 'denied'
+  note: text('note').notNull().default(''),
+  requestedAt: text('requested_at').notNull(),
+  decidedAt: text('decided_at'),
+  decidedBy: text('decided_by'), // audit actor string (auditActor()), null until decided
 });
 
 /**
@@ -1370,8 +1401,11 @@ export const rulePacks = sqliteTable('rule_packs', {
 export const ruleEntries = sqliteTable('rule_entries', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   packId: integer('pack_id').notNull(),
-  // NULL for globally installed/open-pack entries. Non-null rows are private to
-  // this campaign and must only be read through campaign homebrew endpoints.
+  // NULL for globally installed/open-pack entries. Non-null rows are the owning campaign's
+  // own homebrew — readable through the campaign homebrew endpoints AND (issue #1927) through
+  // the encounter generator/preview candidate queries, scoped by campaign membership and
+  // `isNull(archivedAt)` there; every reader must still scope by this column (or archivedAt),
+  // never read cross-campaign.
   campaignId: integer('campaign_id'),
   slug: text('slug').notNull(),
   name: text('name').notNull(),
@@ -1538,6 +1572,13 @@ export const encounters = sqliteTable('encounters', {
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   endedAt: text('ended_at'),
+  // Turn timer (issue #1935): server-stamped instant the CURRENT turn began, so every
+  // connected client agrees on elapsed time — never client-computed. null when not actively
+  // mid-turn (preparing or ended). Added by migration on older DBs (see db/db.module.ts).
+  turnStartedAt: text('turn_started_at'),
+  // DM-set pacing limit in seconds; 0 = off (elapsed-only, DM-facing chip). Never enforced
+  // server-side. Added by migration on older DBs (see db/db.module.ts).
+  turnTimerSeconds: integer('turn_timer_seconds').notNull().default(0),
   // Issue #473: DM deferred the post-encounter aftermath panel (idempotent resume).
   aftermathDismissedAt: text('aftermath_dismissed_at'),
   // Issue #1448: Aftermath mutations tracking (XP award timestamp and stored loot list package).
@@ -1825,6 +1866,10 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
    *  One JSON column rather than five scalars, matching `proactive_settings` above — the whole
    *  block is read, written and (for #1070's cross-campaign reuse) copied as one value. */
   stylePresets: text('style_presets', { mode: 'json' }).$type<AiDmStylePresets>().default({} as any),
+  /** Comprehension profile (#874): reading complexity/paragraph length/sensory intensity/choice
+   *  count, JSON-encoded. Same one-JSON-column shape as `style_presets` above, for the same
+   *  reason — read, written and copied as one value. */
+  comprehensionProfile: text('comprehension_profile', { mode: 'json' }).$type<AiDmComprehensionProfile>().default({} as any),
   /** Depth cap for the FIFO action queue when turns are submitted while running (#1045). */
   actionQueueDepth: integer('action_queue_depth').default(8),
   createdAt: text('created_at').notNull(),
@@ -2050,6 +2095,7 @@ export const combatants = sqliteTable('combatants', {
   kind: text('kind').notNull(), // 'character' | 'monster' | 'npc'
   characterId: integer('character_id'), // set when kind='character' — links back to characters.id
   npcId: integer('npc_id'), // set when kind='npc' — links back to npcs.id (identity). Added by migration on older DBs.
+  npcIdentitySourceId: integer('npc_identity_source_id'), // internal redaction source for unlinked duplicate NPCs
   npcDispositionSnapshot: text('npc_disposition_snapshot'), // encounter-time NPC disposition; nullable for legacy rows
   name: text('name').notNull(),
   initiative: integer('initiative'), // null until rolled
@@ -2066,6 +2112,9 @@ export const combatants = sqliteTable('combatants', {
   rpMax: integer('rp_max').notNull().default(0),
   eac: integer('eac'),
   kac: integer('kac'),
+  // Issue #1910: add-time snapshot of the linked character's speed. Nullable — see
+  // @campfire/schema's Combatant.speed doc.
+  speed: integer('speed'),
   // Temp HP + death-save subsystem (issue #57). Added by migration on older DBs;
   // see db/db.module.ts migrateCombatantsTableForHpModel().
   hpTemp: integer('hp_temp').notNull().default(0),
@@ -2099,6 +2148,10 @@ export const combatants = sqliteTable('combatants', {
   conditionInstances: text('condition_instances'),
   // Issue #425: inline homebrew statblock JSON (CombatantStatblock) for manual monsters.
   statblockJson: text('statblock_json'),
+  // Issue #1926: DM-controlled reveal of this combatant's statblock to non-DM viewers.
+  // NOT NULL DEFAULT false — added by migration on older DBs (see
+  // db/db.module.ts migrateCombatantsTableForStatblockRevealed1926).
+  statblockRevealed: integer('statblock_revealed', { mode: 'boolean' }).notNull().default(false),
 });
 
 /** One-shot, short-lived exact-row snapshots for combatant removal undo (issue #1469). */

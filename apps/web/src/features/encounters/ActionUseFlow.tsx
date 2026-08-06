@@ -19,6 +19,7 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { invalidateEncounter } from '../../lib/query';
 import { RollContextMenu } from '../../components/RollContextMenu';
 import { Btn } from '../../components/ui';
+import { GatedControl } from '../../components/GatedControl';
 import { useAnnounce } from '../../components/Announcer';
 import { QuickRollButtons } from './QuickRollButtons';
 
@@ -36,7 +37,7 @@ function isAllyTarget(actor: Combatant, target: Combatant): boolean {
     : target.kind === 'monster' || target.kind === 'npc';
 }
 
-function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
+export function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
   const actor = combatants.find((c) => c.id === actorId);
   if (!actor) return [];
   if (allow === 'self') return combatants.filter((c) => c.id === actorId);
@@ -52,32 +53,54 @@ export function ActionUsePanel({
   actorName,
   actionIndex,
   actionName,
+  actionToken,
   spec,
   combatants,
+  targetIds,
+  onToggleTarget,
   isDm,
   applyDisabled = false,
+  applyGateReason,
   onDismiss,
   onApplied,
   onError,
+  onPreview,
+  onPreviewStart,
+  onPreviewError,
+  onBackToTargets,
 }: {
   encounterId: number;
   actorCombatantId: number;
   actorName: string;
   actionIndex: number;
   actionName: string;
+  /** Monotonic identity assigned by the session page to ignore stale resolve callbacks. */
+  actionToken: number;
   spec: ActionSpec;
   combatants: Combatant[];
+  targetIds: number[];
+  onToggleTarget: (id: number) => void;
   isDm: boolean;
   applyDisabled?: boolean;
+  /**
+   * Localized reason the Apply control is gated right now, or `undefined` when it is not
+   * (issue #1933 review). Scoped to Apply alone: `ActionResolverService.apply` calls
+   * `assertNotHeld`, but `resolve` (the preview) stays open during a safety hold on
+   * purpose, so the roll/preview controls beside it must NOT inherit this.
+   */
+  applyGateReason?: string;
   onDismiss: () => void;
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy, sourceEncounterId: number) => void;
   onError: (msg: string | null) => void;
+  onPreview: (actionToken: number) => void;
+  onPreviewStart: (actionToken: number) => void;
+  onPreviewError: (actionToken: number) => void;
+  onBackToTargets: (actionToken: number) => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
   const queryClient = useQueryClient();
   const [step, setStep] = useState<Step>('targets');
-  const [targetIds, setTargetIds] = useState<number[]>([]);
   const [preview, setPreview] = useState<ActionResolveResult | null>(null);
   const [commitSubmitted, setCommitSubmitted] = useState(false);
   const [isUnconfirmed, setIsUnconfirmed] = useState(false);
@@ -96,7 +119,7 @@ export function ActionUsePanel({
   const needsTarget = spec.targets.count > 0;
 
   const resolvePreview = useMutation({
-    mutationFn: (rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit') =>
+    mutationFn: ({ rollMode }: { rollMode?: 'normal' | 'advantage' | 'disadvantage' | 'crit'; actionToken: number }) =>
       api.post<ActionResolveResult>(`${API}/encounters/${encounterId}/actions/resolve`, {
         actorCombatantId,
         actionIndex,
@@ -118,13 +141,14 @@ export function ActionUsePanel({
         commit: false,
         rollMode,
       }),
-    onMutate: () => onError(null),
-    onSuccess: (res) => {
+    onMutate: ({ actionToken: resolveActionToken }) => { onPreviewStart(resolveActionToken); onError(null); },
+    onSuccess: (res, { actionToken: resolveActionToken }) => {
       setPreview(res);
       setStep('preview');
+      onPreview(resolveActionToken);
       announce(res.resolution.playerSummary);
     },
-    onError: (err) => onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })),
+    onError: (err, { actionToken: resolveActionToken }) => { onPreviewError(resolveActionToken); onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })); },
   });
 
   const commit = useMutation({
@@ -167,15 +191,6 @@ export function ActionUsePanel({
       }
     },
   });
-
-  function toggleTarget(id: number) {
-    setTargetIds((prev) => {
-      if (prev.includes(id)) return prev.filter((x) => x !== id);
-      const max = spec.targets.count > 0 ? spec.targets.count : 50;
-      if (prev.length >= max) return prev;
-      return [...prev, id];
-    });
-  }
 
   const canPreview = !needsTarget || targetIds.length > 0;
 
@@ -231,7 +246,7 @@ export function ActionUsePanel({
                     type="button"
                     className={targetIds.includes(c.id) ? 'tag tag-accent' : 'tag tag-neutral'}
                     aria-pressed={targetIds.includes(c.id)}
-                    onClick={() => toggleTarget(c.id)}
+                    onClick={() => onToggleTarget(c.id)}
                     style={{ minHeight: 44, minWidth: 44, cursor: 'pointer', border: 0 }}
                   >
                     {c.name}
@@ -245,7 +260,7 @@ export function ActionUsePanel({
             className="btn btn-primary"
             data-testid="action-use-preview"
             disabled={!canPreview || resolvePreview.isPending}
-            onRoll={(mode) => resolvePreview.mutate(mode)}
+            onRoll={(rollMode) => resolvePreview.mutate({ rollMode, actionToken })}
           >
             {resolvePreview.isPending ? 'Resolving…' : 'Preview'}
           </RollContextMenu>
@@ -264,6 +279,18 @@ export function ActionUsePanel({
               ))}
             </ul>
           </div>
+          {preview.systemMathSupported === false && (
+            <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }} data-testid="action-use-system-math-notice">
+              {/* Must not name 5e/d20: `systemMathSupported === false` also covers adapters
+                  that supply their own resolveAttack (OSR descending-AC, Open Legend
+                  exploding pools), where the system's OWN math ran. Keep this in step with
+                  the catalog string — action-use-system-math-notice.unit.spec.ts asserts
+                  both this default and the catalog value are free of that claim. */}
+              {t('encounters.actionFlow.systemMathNotice', {
+                defaultValue: "Resolved with math that hasn't been audited for your system — verify the result.",
+              })}
+            </p>
+          )}
           {preview.policy === 'dm-confirmed' && !isDm && (
             <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
               Your DM will apply the consequences — this is a declaration only.
@@ -302,21 +329,34 @@ export function ActionUsePanel({
                 setPreview(null);
                 setCommitSubmitted(false);
                 setIsUnconfirmed(false);
+                onBackToTargets(actionToken);
               }}
             >
               Back
             </button>
             {!isUnconfirmed && (preview.canApply || (isDm && !preview.applied)) && (
-              <Btn
-                data-testid="action-use-apply"
-                disabled={applyDisabled || commit.isPending || commitSubmitted || preview.applied}
-                onClick={() => {
-                  if (commitSubmitted || commit.isPending) return;
-                  commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
-                }}
+              <GatedControl
+                // Suppressed while the commit is in flight or already applied: `busy` is
+                // the operative blocker then, not the hold, and GatedControl strips the
+                // native `disabled` whenever a reason is present (issue #1933 review).
+                reason={commit.isPending || commitSubmitted || preview.applied ? undefined : applyGateReason}
               >
-                {commit.isPending ? 'Applying…' : 'Apply'}
-              </Btn>
+                <Btn
+                  data-testid="action-use-apply"
+                  // `applyGateReason != null` is the Apply-ONLY blocker (currently the
+                  // safety hold). It must not live in `applyDisabled`, which also feeds
+                  // QuickRollButtons above — `/quick-roll` is not hold-guarded server-side.
+                  disabled={
+                    applyDisabled || applyGateReason != null || commit.isPending || commitSubmitted || preview.applied
+                  }
+                  onClick={() => {
+                    if (commitSubmitted || commit.isPending) return;
+                    commit.mutate({ chainId: preview.chainId, sourceEncounterId: encounterId });
+                  }}
+                >
+                  {commit.isPending ? 'Applying…' : 'Apply'}
+                </Btn>
+              </GatedControl>
             )}
             {!preview.canApply && !isDm && !isUnconfirmed && (
               <Btn data-testid="action-use-done" onClick={onDismiss}>
@@ -329,4 +369,3 @@ export function ActionUsePanel({
     </div>
   );
 }
-

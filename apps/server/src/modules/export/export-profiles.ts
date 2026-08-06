@@ -229,7 +229,11 @@ export function resolveExportPolicy(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const PUBLISHABLE_FIELDS = {
-  campaign: ['id', 'name', 'description', 'status', 'dangerLevel', 'narrationLanguage', 'ruleSystem', 'mapAttachmentId', 'currentLocationId'],
+  // Issue #1502 review: `customMechanicsProfile` rides with `ruleSystem`, not apart from it.
+  // A homebrew system IS its profile — carrying the slug while stripping the profile exported
+  // a campaign whose rule system silently reverted to 5e on import, the same class of omission
+  // the `character` entry below documents for `speed`.
+  campaign: ['id', 'name', 'description', 'status', 'dangerLevel', 'narrationLanguage', 'ruleSystem', 'customMechanicsProfile', 'mapAttachmentId', 'currentLocationId'],
   quest: ['id', 'campaignId', 'parentId', 'title', 'body', 'giverNpcId', 'reward', 'sortOrder', 'objectives'],
   questObjective: ['id', 'questId', 'text', 'sortOrder'],
   npc: ['id', 'campaignId', 'name', 'role', 'disposition', 'locationId', 'factionId', 'body', 'portraitUrl', 'iconSlug'],
@@ -237,7 +241,12 @@ export const PUBLISHABLE_FIELDS = {
   faction: ['id', 'campaignId', 'name', 'kind', 'body', 'goals', 'reputation', 'standing', 'portraitUrl'],
   session: ['id', 'campaignId', 'number', 'title'],
   character: [
-    'id', 'campaignId', 'name', 'species', 'className', 'level', 'background', 'stats', 'ac', 'eac', 'kac',
+    // Issue #1910 review (Codex, PR #1980): `speed` is a baseline mechanical stat,
+    // the same category as `ac`/`eac`/`kac` — it doesn't change turn-by-turn like
+    // played state does, so it belongs here (always carried), not in
+    // PLAYED_STATE_FIELDS. Omitting it meant the `handoff`/`publish` profiles
+    // silently stripped a non-default speed before import.
+    'id', 'campaignId', 'name', 'species', 'className', 'level', 'background', 'stats', 'ac', 'eac', 'kac', 'speed',
     'hpMax', 'spMax', 'rpMax', 'saveProficiencies', 'skills', 'actions', 'resources', 'portraitUrl', 'notes',
   ],
   note: ['id', 'campaignId', 'visibility', 'entityType', 'entityId', 'entityName', 'body'],
@@ -248,8 +257,11 @@ export const PUBLISHABLE_FIELDS = {
     'gridOffsetX', 'gridOffsetY', 'gridCellHeight', 'gridRotation', 'gridOpacity', 'combatants',
   ],
   combatant: [
+    // Issue #1910 review: the add-time speed snapshot follows the same
+    // always-carried convention as eac/kac (Starfinder's combatant-side armor
+    // snapshot) just above it, not PLAYED_STATE_FIELDS — see the character list.
     'id', 'encounterId', 'kind', 'characterId', 'npcId', 'name', 'initMod', 'initiativeGroup',
-    'hpMax', 'spMax', 'rpMax', 'eac', 'kac', 'sortOrder', 'tokenX', 'tokenY', 'tokenSize',
+    'hpMax', 'spMax', 'rpMax', 'eac', 'kac', 'speed', 'sortOrder', 'tokenX', 'tokenY', 'tokenSize',
     'statblockJson', 'compendiumRef', 'compendiumSnapshot', 'ruleEntryId',
   ],
   storyArc: ['id', 'campaignId', 'title', 'summary', 'sortOrder', 'beats'],

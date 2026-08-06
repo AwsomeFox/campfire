@@ -66,4 +66,38 @@ test.describe('Generate-encounter wizard surface (issue #412)', () => {
     const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: Record<string, unknown> };
     expect(en.encounters?.generate).toBe('Generate encounter');
   });
+
+  // Issue #1928: a registered non-5e rule system has no encounter-difficulty math of its own
+  // (the existing `unsupported-system` warning already covers that), but the target band still
+  // sizes the roster via the internal 5e-shaped count/CR heuristic — that must be labelled
+  // 'heuristic', not silently presented as this system's own math.
+  test('labels the target band "heuristic" when difficultySupport is heuristic (issue #1928)', () => {
+    const src = readFileSync(WIZARD, 'utf8');
+    expect(src).toMatch(/preview\.difficultySupport === 'heuristic'/);
+    expect(src).toMatch(/t\(['"]encounters\.wizard\.heuristicDifficultyBadge['"]/);
+    const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: { wizard?: Record<string, unknown> } };
+    expect(en.encounters?.wizard?.heuristicDifficultyBadge).toBe('Target band: heuristic');
+    const ar = JSON.parse(readFileSync(resolve(__dirname, '../../src/i18n/locales/ar/encounters.json'), 'utf8')) as {
+      encounters?: { wizard?: Record<string, unknown> };
+    };
+    // Real Arabic copy, not an English passthrough (the ar catalog otherwise leaves some
+    // pre-existing strings untranslated, but new strings must not add to that debt).
+    expect(ar.encounters?.wizard?.heuristicDifficultyBadge).not.toBe(en.encounters?.wizard?.heuristicDifficultyBadge);
+  });
+
+  // Issue #1927: the generator/preview candidate set now includes the campaign's own homebrew
+  // monsters alongside the installed compendium. Each roster slot is labelled with a `source`
+  // ('pack' | 'homebrew') so the DM can tell which is which at a glance.
+  test('renders a Homebrew chip for a slot with source "homebrew" (issue #1927)', () => {
+    const src = readFileSync(WIZARD, 'utf8');
+    expect(src).toMatch(/slot\.source === 'homebrew'/);
+    expect(src).toMatch(/t\(['"]encounters\.wizard\.homebrewBadge['"]/);
+    const en = JSON.parse(readFileSync(EN_ENCOUNTERS, 'utf8')) as { encounters?: { wizard?: Record<string, unknown> } };
+    expect(en.encounters?.wizard?.homebrewBadge).toBe('Homebrew');
+    const ar = JSON.parse(readFileSync(resolve(__dirname, '../../src/i18n/locales/ar/encounters.json'), 'utf8')) as {
+      encounters?: { wizard?: Record<string, unknown> };
+    };
+    expect(ar.encounters?.wizard?.homebrewBadge).toBeTruthy();
+    expect(ar.encounters?.wizard?.homebrewBadge).not.toBe(en.encounters?.wizard?.homebrewBadge);
+  });
 });

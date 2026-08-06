@@ -6,6 +6,7 @@ import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
 import { CharacterStatCard } from '../../../components/CharacterStatCard';
 import { Btn, HpBar, TextInput } from '../../../components/ui';
+import { GatedControl } from '../../../components/GatedControl';
 import { isImeComposing } from '../../../lib/compositionSafeSubmit';
 import { UI_ICON_SIZE } from '../../../lib/uiIcons';
 import { CombatantActionsList } from '../CombatantActionsList';
@@ -16,6 +17,7 @@ import { TOKEN_SIZE_OPTIONS } from '../map/BattleMap';
 import { FloatingNumbers } from '../FloatingNumbers';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { DEATH_STATE_LABEL, DeathSaveTracker } from './DeathSaves';
+import type { DeathSaveOutcome } from './deathSaveOutcome';
 import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, conditionDraftFromInstance, conditionSourceLabel, emptyConditionDraft, type ConditionDraft, type ConditionSourceOption, type ConditionTiming } from './conditionDraft';
 
 const HP_BAND_LABEL: Record<string, string> = { healthy: 'Healthy', bloodied: 'Bloodied', critical: 'Critical', down: 'Down' };
@@ -97,6 +99,8 @@ export type CombatantRowProps = {
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   /** Roll a death save through the server-authoritative d20 + shared dice-log action. */
   onRollDeathSave: () => void;
+  /** Issue #1919: this combatant's just-settled death-save outcome, or null once faded. */
+  deathSaveOutcome?: DeathSaveOutcome | null;
   /**
    * Roll this combatant's own initiative through the server-authoritative die + shared
    * dice-log action (issue #1904). Rendered only for a null-initiative combatant the
@@ -117,9 +121,24 @@ export type CombatantRowProps = {
   legendaryActions?: Combatant['legendaryActions'];
   onUseLegendary?: () => void;
   onReleaseLegendary?: () => void;
+  onDuplicate?: () => void;
   onRemove: () => void;
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
+  targeting?: { legal: boolean; selected: boolean; declared: boolean; atCapacity: boolean; onToggle: () => void } | null;
+  /**
+   * Color-vision-assist mode (issue #1942): adds a current-turn chevron beside the
+   * accent border/tint, and an HP danger glyph beside the color-only bar tone.
+   */
+  colorVisionAssist?: boolean;
+  /**
+   * Issue #1926: a monster/npc just dropped to 0 HP with its statblock still hidden — show
+   * the one-tap "reveal to players?" prompt on this (DM) row. Never shown for a non-DM;
+   * the parent derives this from `shouldShowKillPrompt` + its own per-session dismissed set.
+   */
+  showKillPrompt?: boolean;
+  /** Dismiss the kill prompt for this combatant for the rest of the session (client-local only). */
+  onDismissKillPrompt?: () => void;
 };
 
 export function CombatantRow({
@@ -152,6 +171,7 @@ export function CombatantRow({
   onSetTempHp,
   onSetDeathSaves,
   onRollDeathSave,
+  deathSaveOutcome,
   onRollInitiative,
   onSetInitiative,
   onClearInitiative,
@@ -165,7 +185,12 @@ export function CombatantRow({
   legendaryActions,
   onUseLegendary,
   onReleaseLegendary,
+  onDuplicate,
   onRemove,
+  targeting = null,
+  colorVisionAssist = false,
+  showKillPrompt = false,
+  onDismissKillPrompt,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   // Issue #1746: one shared reason string for every write control this row disables while
@@ -173,7 +198,7 @@ export function CombatantRow({
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
   // tech via `aria-describedby` (below) rather than `title` alone, which screen readers
   // announce inconsistently and keyboard-only users cannot reach at all.
-  const syncBlockedReason = syncBlocked ? t('encounters.sync.controlsPaused') : undefined;
+  const syncBlockedReason = syncBlocked ? t('run.gate.syncBlocked') : undefined;
   const syncBlockedReasonId = `combatant-${combatant.id}-sync-blocked-reason`;
   const syncBlockedDescribedBy = syncBlocked ? syncBlockedReasonId : undefined;
   const [addingCondition, setAddingCondition] = useState(false);
@@ -280,12 +305,15 @@ export function CombatantRow({
       : hpFeedbackEvents.some((event) => event.crit)
         ? ' cf-hp-feedback-anchor--crit'
         : '';
+  const targetSelectionUnavailable = targeting?.legal && targeting.atCapacity && !targeting.selected;
 
   return (
     <div
       ref={rowRef}
       data-testid={`combatant-row-${combatant.id}`}
       data-current-turn={isCurrentTurn ? 'true' : undefined}
+      data-target-legal={targeting?.legal ? 'true' : undefined}
+      data-target-selected={targeting?.selected ? 'true' : undefined}
       className={`cf-hp-feedback-anchor${feedbackClass}`}
       style={{
         display: 'flex',
@@ -295,12 +323,33 @@ export function CombatantRow({
         padding: '9px 14px',
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
-        boxShadow: isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
-        opacity: down ? 0.55 : 1,
+        boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal && !targeting?.declared && !targetSelectionUnavailable ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+        opacity: down ? 0.55 : targetSelectionUnavailable ? 0.65 : 1,
         filter: down ? 'grayscale(0.75)' : 'none',
+      }}
+      onClick={(event) => {
+        if (!targeting?.legal || targeting.declared || targetSelectionUnavailable) return;
+        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock], [data-combatant-detail]');
+        if (interactive && interactive !== event.currentTarget) return;
+        targeting.onToggle();
       }}
     >
       <FloatingNumbers events={hpFeedbackEvents} />
+      {targeting?.legal && (
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-44"
+          data-testid={`combatant-target-toggle-${combatant.id}`}
+          aria-label={targetSelectionUnavailable ? `Target limit reached; ${combatant.name} cannot be selected` : `${targeting.selected ? 'Remove' : 'Select'} ${combatant.name} as an action target`}
+          aria-pressed={targeting.selected}
+          disabled={targeting.declared || targetSelectionUnavailable}
+          title={targetSelectionUnavailable ? 'Target limit reached' : undefined}
+          onClick={targeting.onToggle}
+          style={{ flex: 'none', padding: '0 8px', fontSize: 12 }}
+        >
+          {targeting.selected ? 'Targeted' : 'Target'}
+        </button>
+      )}
       {/* Issue #1746: single accessible reason shared by every write control this row
           disables while the sync gate blocks, referenced via aria-describedby below. */}
       {syncBlocked && (
@@ -485,6 +534,15 @@ export function CombatantRow({
           </div>
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+            {colorVisionAssist && isCurrentTurn && (
+              <span
+                data-testid={`combatant-row-turn-chevron-${combatant.id}`}
+                aria-hidden="true"
+                style={{ color: 'var(--color-accent)', fontSize: 12 }}
+              >
+                ▸
+              </span>
+            )}
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
               {down && <GameIcon slug="death-skull" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1.5" />}
               {combatant.name}
@@ -601,6 +659,52 @@ export function CombatantRow({
             )}
           </div>
         )}
+        {/* Issue #1926: one-tap kill prompt — a monster/npc just dropped to 0 HP with its
+            statblock still hidden. Never automatic: the DM must tap Reveal or Dismiss.
+            Dismissing sticks for this combatant for the rest of the session (see
+            `shouldShowKillPrompt`/`dismissKillPrompt`) and leaves the manual toggle below
+            available regardless. */}
+        {showKillPrompt && (
+          <div
+            role="status"
+            data-testid={`kill-prompt-${combatant.id}`}
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              marginTop: 4,
+              marginBottom: 4,
+              padding: '6px 8px',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-divider)',
+              fontSize: 12,
+            }}
+          >
+            <span>{t('encounters.statblock.killPrompt', { name: combatant.name })}</span>
+            <button
+              type="button"
+              className="btn btn-ghost !min-h-8 text-xs"
+              disabled={busy || syncBlocked}
+              aria-describedby={syncBlockedDescribedBy}
+              title={syncBlockedReason}
+              onClick={() => {
+                onPatchCombatant?.({ statblockRevealed: true });
+                onDismissKillPrompt?.();
+              }}
+            >
+              {t('encounters.statblock.reveal')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost !min-h-8 text-xs"
+              aria-label={t('encounters.statblock.dismissKillPrompt')}
+              onClick={onDismissKillPrompt}
+            >
+              {t('encounters.statblock.dismiss')}
+            </button>
+          </div>
+        )}
         {/* Death-save tracker (issue #57): shown for a character that is dying/stable/dead,
             or any character sitting at 0 HP. Monsters never roll death saves. */}
         {combatant.kind === 'character' &&
@@ -617,9 +721,9 @@ export function CombatantRow({
               busy={busy}
               syncBlocked={syncBlocked}
               syncBlockedReason={syncBlockedReason}
-              syncBlockedDescribedBy={syncBlockedDescribedBy}
               onSet={onSetDeathSaves}
               onRoll={onRollDeathSave}
+              outcome={deathSaveOutcome}
             />
           )}
         {(combatant.conditionInstances?.length ?? 0) > 0 ? (
@@ -1034,22 +1138,22 @@ export function CombatantRow({
               </form>
               )
             ) : (
-              <button
-                type="button"
-                className="btn btn-ghost"
-                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
-                disabled={syncBlocked}
-                title={syncBlockedReason}
-                aria-describedby={syncBlockedDescribedBy}
-                data-testid={`add-condition-toggle-${combatant.id}`}
-                onClick={() => {
-                  setEditingConditionId(null);
-                  setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
-                  setAddingCondition(true);
-                }}
-              >
-                + condition
-              </button>
+              <GatedControl reason={syncBlockedReason}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+                  disabled={syncBlocked}
+                  data-testid={`add-condition-toggle-${combatant.id}`}
+                  onClick={() => {
+                    setEditingConditionId(null);
+                    setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
+                    setAddingCondition(true);
+                  }}
+                >
+                  + condition
+                </button>
+              </GatedControl>
             )}
 
             {/* Starfinder Stamina Rest Button */}
@@ -1116,20 +1220,22 @@ export function CombatantRow({
             surface the linked entry's AC / attacks / ability scores inline so the DM can
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
-        {statblock}
+        {statblock && <div data-combatant-statblock>{statblock}</div>}
         {onUseMonsterAction && (
-          <CombatantActionsList
-            encounterId={encounterId}
-            combatantId={combatant.id}
-            combatantName={combatant.name}
-            campaignId={campaignId}
-            enabled
-            disabledReason={syncBlockedReason}
-            onUseAction={onUseMonsterAction}
-          />
+          <div data-combatant-detail>
+            <CombatantActionsList
+              encounterId={encounterId}
+              combatantId={combatant.id}
+              combatantName={combatant.name}
+              campaignId={campaignId}
+              enabled
+              disabledReason={syncBlockedReason}
+              onUseAction={onUseMonsterAction}
+            />
+          </div>
         )}
         {canEditIdentity && combatant.statblock && combatant.kind === 'monster' && (
-          <details className="mt-2">
+          <details className="mt-2" data-combatant-detail>
             <summary className="text-xs text-muted cursor-pointer">Edit statblock</summary>
             <CombatantStatblockEditor
               value={combatant.statblock}
@@ -1138,25 +1244,41 @@ export function CombatantRow({
             />
           </details>
         )}
+        {/* Issue #1926: a revealed inline statblock, read-only, for a viewer without edit
+            rights (a player, or the DM once the encounter has ended and identity edits are
+            gone). Mutually exclusive with the editable form above (that one requires
+            canEditIdentity); the compendium (ruleEntryId) case is handled by the parent's
+            `statblock` prop instead — see RunSessionPage's reveal-aware condition. */}
+        {!canEditIdentity &&
+          combatant.statblockRevealed &&
+          combatant.statblock &&
+          (combatant.kind === 'monster' || combatant.kind === 'npc') && (
+            <details className="mt-2" data-combatant-detail data-testid={`combatant-statblock-revealed-${combatant.id}`}>
+              <summary className="text-xs text-muted cursor-pointer">{t('encounters.statblock.revealedSummary')}</summary>
+              <CombatantStatblockEditor value={combatant.statblock} onChange={() => {}} disabled ruleSystem={ruleSystem} />
+            </details>
+          )}
         {/* Character card (in-encounter sheet): a player sees only their own combat stats,
             while the DM sees the whole party. */}
         {combatant.kind === 'character' && character && (
-          <CharacterStatCard
-            character={character}
-            ruleSystem={ruleSystem}
-            defaultOpen={openCardByDefault}
-            openOnActiveTurn={openCardOnActiveTurn}
-            /* Click-to-roll only from an active owned card, or any card for the DM. */
-            campaignId={campaignId}
-            /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
-               actions) — mounting this card already implies DM-or-owner (see the `character`
-               prop gate above), matching listUsableActions' own authorization. */
-            encounterId={encounterId}
-            combatantId={combatant.id}
-            onError={onRollError}
-            onApplyDamage={onApplyDamage}
-            onUseAction={onUseAction}
-          />
+          <div data-combatant-detail>
+            <CharacterStatCard
+              character={character}
+              ruleSystem={ruleSystem}
+              defaultOpen={openCardByDefault}
+              openOnActiveTurn={openCardOnActiveTurn}
+              /* Click-to-roll only from an active owned card, or any card for the DM. */
+              campaignId={campaignId}
+              /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
+                 actions) — mounting this card already implies DM-or-owner (see the `character`
+                 prop gate above), matching listUsableActions' own authorization. */
+              encounterId={encounterId}
+              combatantId={combatant.id}
+              onError={onRollError}
+              onApplyDamage={onApplyDamage}
+              onUseAction={onUseAction}
+            />
+          </div>
         )}
       </div>
       <div style={{ minWidth: 140, flex: 'none' }}>
@@ -1199,7 +1321,7 @@ export function CombatantRow({
                   {hpDisplay(combatant)}
                 </span>
               </div>
-              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
+              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} colorVisionAssist={colorVisionAssist} />
             </div>
             {/* RP (Resolve Points) indicator for Starfinder */}
             {combatant.rpMax != null && combatant.rpMax > 0 && (
@@ -1281,22 +1403,21 @@ export function CombatantRow({
       {canEditPermission && combatant.hpCurrent != null && (
         <div style={{ display: 'flex', gap: 8, flex: 'none', flexWrap: 'wrap', alignItems: 'center', maxWidth: '100%' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
-            <button
-              key={step}
-              className="btn btn-icon btn-secondary cf-target-44"
-              style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
-              /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
-                 lands instantly via setQueryData, so there's no round-trip to wait on.
-                 `busy` intentionally does NOT disable this button; only the sync gate
-                 (issue #1746) does, since a blocked write really cannot be trusted. */
-              disabled={syncBlocked}
-              title={syncBlockedReason}
-              aria-describedby={syncBlockedDescribedBy}
-              aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
-              onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
-            >
-              {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
-            </button>
+            <GatedControl key={step} reason={syncBlockedReason}>
+              <button
+                className="btn btn-icon btn-secondary cf-target-44"
+                style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
+                /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
+                   lands instantly via setQueryData, so there's no round-trip to wait on.
+                   `busy` intentionally does NOT disable this button; only the sync gate
+                   (issue #1746) does, since a blocked write really cannot be trusted. */
+                disabled={syncBlocked}
+                aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
+                onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
+              >
+                {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
+              </button>
+            </GatedControl>
           ))}
           <div style={{ display: 'flex', gap: 4, marginLeft: 4, alignItems: 'center', flexWrap: 'wrap' }}>
             <input
@@ -1344,6 +1465,46 @@ export function CombatantRow({
             </button>
           </div>
         </div>
+      )}
+      {canEditIdentity && (combatant.kind === 'monster' || combatant.kind === 'npc') && onPatchCombatant && (
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-44 text-xs"
+          style={{ minWidth: 44, height: 44, flex: 'none' }}
+          disabled={busy || syncBlocked}
+          aria-pressed={combatant.statblockRevealed}
+          aria-describedby={syncBlockedDescribedBy}
+          data-testid={`statblock-reveal-toggle-${combatant.id}`}
+          // The visible label is just "Reveal"/"Revealed" to fit the row, which on its own
+          // says nothing about WHAT is revealed — and the battle map already has a fog
+          // "Reveal" tool, so a bare accessible name of "Reveal" is ambiguous both to a
+          // screen-reader user and to any role+name query.
+          aria-label={
+            combatant.statblockRevealed
+              ? t('encounters.statblock.hideFromPlayers')
+              : t('encounters.statblock.revealToPlayers')
+          }
+          title={
+            syncBlockedReason ??
+            (combatant.statblockRevealed ? t('encounters.statblock.hideFromPlayers') : t('encounters.statblock.revealToPlayers'))
+          }
+          onClick={() => onPatchCombatant({ statblockRevealed: !combatant.statblockRevealed })}
+        >
+          {combatant.statblockRevealed ? t('encounters.statblock.revealed') : t('encounters.statblock.reveal')}
+        </button>
+      )}
+      {onDuplicate && (
+        <button
+          className="btn btn-icon btn-ghost cf-target-44"
+          style={{ width: 44, height: 44, flex: 'none' }}
+          disabled={busy || syncBlocked}
+          onClick={onDuplicate}
+          aria-label={t('encounters.duplicateCombatant', { name: combatant.name })}
+          aria-describedby={syncBlockedDescribedBy}
+          title={syncBlockedReason ?? t('encounters.duplicate')}
+        >
+          <UIIcon name="add" size="xs" />
+        </button>
       )}
       {canRemove && (
         <button

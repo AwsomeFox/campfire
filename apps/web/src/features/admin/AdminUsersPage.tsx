@@ -14,6 +14,7 @@ import { RequireServerAdmin } from './RequireServerAdmin';
 import { UsersCard } from './UsersCard';
 import { ResetRequestsCard } from './ResetRequestsCard';
 import { SettingsCard } from './SettingsCard';
+import { CampaignGovernanceCard } from './CampaignGovernanceCard';
 import { GameIcon } from '../../components/GameIcon';
 import { PageTitle } from '../../components/PageTitle';
 import { MembershipIntegrityCard } from './MembershipIntegrityCard';
@@ -80,6 +81,7 @@ function AdminUsers() {
       <MembershipIntegrityCard users={users ?? []} />
       <ResetRequestsCard />
       <SettingsCard settings={settings} onChange={load} />
+      <CampaignGovernanceCard settings={settings} onChange={load} />
     </div>
   );
 }

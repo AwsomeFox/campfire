@@ -42,6 +42,7 @@ describe('EncountersService unit coverage tests', () => {
       record: jest.fn().mockResolvedValue({ id: 1 }),
       recordRoll: jest.fn().mockResolvedValue({ id: 1 }),
       recordInTransaction: jest.fn().mockReturnValue({ id: 1 }),
+      emitDiceRolled: jest.fn(),
     } as unknown as RollsService;
     const moderation = {
       quarantineNoteIfWatched: jest.fn(),
@@ -353,6 +354,7 @@ describe('EncountersService unit coverage tests', () => {
         recordedActor = data.actor;
         return Promise.resolve({ id: 99 });
       }),
+      emitDiceRolled: jest.fn(),
     };
     (encountersService as any).rolls = mockRollsService;
 

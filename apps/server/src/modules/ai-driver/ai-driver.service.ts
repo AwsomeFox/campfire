@@ -27,6 +27,7 @@ import {
   buildNarrationLanguageContract,
   DriverSessionProfile,
   DriverToolPolicyClass,
+  type HomebrewMechanicsProfile,
   resolveNarrationLanguage,
   resolverImplementsSystemMath,
   ruleSystemAdapter,
@@ -68,6 +69,7 @@ import {
   renderRecentHistorySection,
 } from './driver-history';
 import { renderTableStyleSection } from './driver-style';
+import { renderComprehensionSection } from './driver-comprehension';
 import { AiDmTranscriptService } from './ai-driver-transcript.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import {
@@ -1209,12 +1211,24 @@ const RECOVERY_SUMMARY: Record<ControlStateRecovery, string> = {
  * Inverted, an unaudited system withholds guidance — the failure mode becomes "the AI was not
  * told resolve_action exists", not "the AI committed HP that never should have been lost".
  *
- * Today this is true for 5e alone, plus the unknown/empty/homebrew slugs `ruleSystemAdapter`
+ * Today this is true for 5e alone, plus the unknown/empty slugs `ruleSystemAdapter`
  * deliberately resolves to the 5e adapter (5e maths is genuinely what those campaigns get).
  * The adapter work that widens it is tracked in #1598 and #1599.
+ *
+ * **#1502 review:** `customMechanicsProfile` must be threaded through, not dropped. Once a
+ * campaign persists a homebrew profile, its slug no longer resolves to 5e — it resolves to
+ * that profile's own adapter, whose ability table, AC convention and initiative are the
+ * table's, not 5e's. Asking with the slug alone would keep answering "5e" for exactly the
+ * campaigns that just stopped being 5e, and this gate fails OPEN when it answers true: the
+ * model would be told to `resolve_action` with `commit:true` and write HP off arithmetic
+ * this table does not use. The profile-resolved adapter declares no `ResolverMathProfile`,
+ * so threading it makes the gate withhold guidance — the fail-safe direction.
  */
-export function resolverSpeaksCampaignSystem(ruleSystem?: string | null): boolean {
-  return resolverImplementsSystemMath(ruleSystemAdapter(ruleSystem));
+export function resolverSpeaksCampaignSystem(
+  ruleSystem?: string | null,
+  customMechanicsProfile?: HomebrewMechanicsProfile | null,
+): boolean {
+  return resolverImplementsSystemMath(ruleSystemAdapter(ruleSystem, customMechanicsProfile));
 }
 
 /**
@@ -1227,7 +1241,10 @@ export function resolverSpeaksCampaignSystem(ruleSystem?: string | null): boolea
  * model is told so plainly and told to defer to the human DM: less capable than the ungated
  * text, and strictly more correct.
  */
-export function buildGroundingPreamble(ruleSystem?: string | null): string {
+export function buildGroundingPreamble(
+  ruleSystem?: string | null,
+  customMechanicsProfile?: HomebrewMechanicsProfile | null,
+): string {
   return [
   'You are the AI Dungeon Master running a live tabletop scene. Narrate vividly but stay grounded:',
   '- Never invent rules — call lookup_rule / get_rule_entry and cite the rule you used.',
@@ -1271,7 +1288,7 @@ export function buildGroundingPreamble(ruleSystem?: string | null): string {
   // between a standalone save and an action-embedded one is only worth teaching to a table
   // whose rules that maths actually is.
   '- roll_dice is for rolls with no target and no consequence — a random table, a morale roll. It does NOT apply anything. Never use it to hand-roll an attack, a save, or damage.',
-  ...(resolverSpeaksCampaignSystem(ruleSystem)
+  ...(resolverSpeaksCampaignSystem(ruleSystem, customMechanicsProfile)
     ? [
         '- To resolve an ATTACK, call resolve_action — never hand-roll one. It rolls the d20 with the right modifier, compares the target’s AC, classifies hit/miss/crit under THIS campaign’s rule system, rolls damage and applies that system’s own critical rule, applies damage-type resistance/immunity, writes the result, and returns an undo token. Pass commit:true to resolve and apply in ONE call. Narrate the totals it returns — never recompute a crit yourself, and never assume one system’s crit maths applies at this table.',
         '- resolve_action needs no pre-authored action: for a monster swing or an improvised attack pass an inline `spec`. A minimal one looks like {"mode":"attack","attack":{"bonus":"+5"},"outcomes":{"hit":{"damage":[{"formula":"1d8","flat":3,"type":"slashing"}]}}}. Put ONLY dice in `formula` and the modifier in `flat` (negative for a penalty: `1d8-1` is {"formula":"1d8","flat":-1}) — that split is what lets the server apply this system’s critical rule to the right half, so "1d8+3" as a formula gives wrong crit damage.',
@@ -1520,6 +1537,15 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // rather than a silent clamp — a tool that fails open on "no slots left" would have made
   // unlimited casting look sanctioned instead of merely unmodelled.
   'adjust_spell_slots',
+  // #1909 review (Codex, ninth finding): the delta-based combatant resource/spell-slot
+  // spend this issue built specifically so a live-play pip click never clobbers a whole
+  // statblock. Omitting it here left AI live play with no way to reach it at all — the
+  // model would fall back to whole-statblock `update_combatant` for a resource spend,
+  // reintroducing exactly the clobber this PR exists to prevent, specifically for driver
+  // sessions. Same safety shape as `adjust_spell_slots` just above: overspend/over-restore
+  // is a hard typed error (never a silent clamp), so granting it does not sanction an
+  // unbounded spend the way a fails-open tool would.
+  'adjust_combatant_resource',
   'award_xp',
   'level_up_character',
   // #1041 — rest is core live play, and these REPLACE a long chain of raw HP/slot/condition
@@ -1545,6 +1571,10 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'generate_ai_map',
   'refine_ai_map',
   'update_encounter',
+  // Player-declared AoE templates (#1913) are narrow, server-authorized map state:
+  // the encounter service enforces visibility, lifecycle, creator ownership, and limits.
+  'declare_aoe_template',
+  'remove_aoe_template',
   // private information delivery (#1023)
   'whisper_to_player',
   // economy / loot (#1021) — explicit live-play exception with execution-time grant-only guards
@@ -1613,10 +1643,13 @@ export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  *    already governs, with no economy or disclosure blast radius of its own (commit_encounter,
  *    next_turn, set_escalation_die, add_combatant, update_combatant, resolve_action,
  *    apply_action, undo_action, undo_remove_combatant, update_character_hp, set_character_conditions,
- *    adjust_spell_slots, award_xp, level_up_character, long_rest, short_rest);
+ *    adjust_spell_slots, adjust_combatant_resource, award_xp, level_up_character, long_rest,
+ *    short_rest);
  *  - it is a scene/world-state nudge with no economy or disclosure blast radius
  *    (reveal_map_region, check_objective, set_npc_disposition, set_faction_reputation,
- *    set_location_discovery, whisper_to_player, add_note).
+ *    set_location_discovery, declare_aoe_template, remove_aoe_template, whisper_to_player,
+ *    add_note). AoE template ownership, secrecy, encounter lifecycle, and size limits are
+ *    enforced by EncountersService rather than needing driver-specific argument shaping.
  */
 export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_dice',
@@ -1646,6 +1679,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'update_character_hp',
   'set_character_conditions',
   'adjust_spell_slots',
+  'adjust_combatant_resource',
   'award_xp',
   'level_up_character',
   'long_rest',
@@ -1655,6 +1689,8 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_npc_disposition',
   'set_faction_reputation',
   'set_location_discovery',
+  'declare_aoe_template',
+  'remove_aoe_template',
   'whisper_to_player',
   'add_note',
   'add_session_recap',
@@ -1789,7 +1825,12 @@ export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLive
       ...DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS,
       ...DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS,
     ]),
-    forbidden: new Set(['hidden', 'mapAlignment']),
+    // `turnTimerSeconds` (issue #1935) is a pacing decision about the PHYSICAL TABLE — how
+    // long a human gets to think on their turn — not a world change, so it isn't even the
+    // kind of thing the propose-then-approve flow is for; it's a control over the humans at
+    // the table, which is a stronger reason to withhold it from the seat than an ordinary
+    // world edit. Nothing in #1935 asks for AI control of it. A human DM sets it, full stop.
+    forbidden: new Set(['hidden', 'mapAlignment', 'turnTimerSeconds']),
   },
   'adjust_treasury': {
     allowed: new Set(['campaignId', 'delta']),
@@ -1990,8 +2031,23 @@ export function guardDriverLivePlayArgs(
           'quest/session links on encounters it created this session. Rejected: mapAlignment.',
       };
     }
-    // `rule.forbidden` only lists `hidden` and `mapAlignment`, both handled above with explicit
-    // error codes; future forbidden fields should be checked before `unknownArgKeys`.
+    // Issue #1935: turnTimerSeconds is a pacing decision about the PHYSICAL TABLE — how long a
+    // human gets to think on their turn — not a world change, so the propose-then-approve flow
+    // isn't even the right frame for it; it's a control over the humans at the table, a
+    // stronger reason to withhold it than an ordinary edit. Refused (not silently dropped),
+    // same as hidden/mapAlignment above, so the model gets a clear signal rather than a
+    // quietly-ignored write.
+    if ('turnTimerSeconds' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          'The driver may not set turnTimerSeconds. The turn-timer pacing limit is a decision about the ' +
+          'physical table and must be set by the human DM.',
+      };
+    }
+    // `rule.forbidden` lists `hidden`, `mapAlignment`, and `turnTimerSeconds`, all handled above
+    // with explicit error codes; future forbidden fields should be checked before `unknownArgKeys`.
     const unknown = unknownArgKeys(args, rule);
     if (unknown.length > 0) {
       return {
@@ -7186,23 +7242,11 @@ export class AiDriverService {
       detail: auditDetail,
     });
 
-    // Homebrew / no rule system: say so plainly rather than searching every installed pack
-    // and answering from whichever happens to match first (#717).
-    if (!pack) {
-      return { query, result: renderNoRuleSystem(query) };
-    }
-
-    // Issue #1898 review: campaignId/user were already both in scope on this method's
-    // own signature — this is a fourth internal caller of the same read the issue's
-    // three other call sites (REST search, REST entry, MCP lookup_rule) now scope,
-    // not the MCP tokenContext case (which would have needed a novel ambient default).
-    // Without it, the AI-DM's rules lookup silently stayed pack-only and reported no
-    // match for a campaign's own homebrew rulings.
-    const page = await this.rules.search({ q: query, pack: pack.slug, campaignId }, 5, user);
+    const page = await this.rules.search({ q: query, pack: pack?.slug, campaignId }, 5, user);
     if (page.items.length === 0) {
-      return { query, result: renderNoMatch(query, pack) };
+      return { query, result: pack ? renderNoMatch(query, pack) : renderNoRuleSystem(query) };
     }
-    return { query, result: renderRulesAnswer(query, pack, page.items, campaignId) };
+    return { query, result: renderRulesAnswer(query, pack ?? null, page.items, campaignId) };
   }
 
   /**
@@ -7613,7 +7657,7 @@ export class AiDriverService {
     const campaign = await this.campaigns.getOrThrow(campaignId);
     const sessionForPrompt = session ?? this.ensureSession(campaignId);
     const parts: string[] = [
-      buildGroundingPreamble(campaign.ruleSystem),
+      buildGroundingPreamble(campaign.ruleSystem, campaign.customMechanicsProfile),
       GROUNDING_CITATION_CONTRACT,
       UNTRUSTED_INPUT_PREAMBLE,
     ];
@@ -7626,6 +7670,12 @@ export class AiDriverService {
     // subordination does not depend on where it happens to sit.
     const tableStyle = renderTableStyleSection(seat.stylePresets);
     if (tableStyle) parts.push(tableStyle);
+    // #874 — comprehension profile, immediately after table style: both are standing DM
+    // preferences about how the table is run, but this one carries the issue's stated DEFAULT
+    // (chunking, the "What changed" / "What can you do" ending, non-exclusive suggestions
+    // alongside free text, rules kept apart from prose, and Simplify/Recap/Explain support), so
+    // — unlike table style — it is never skipped even on an all-`default` seat.
+    parts.push(renderComprehensionSection(seat.comprehensionProfile));
 
     const { language, provenance } = resolveNarrationLanguage(campaign.narrationLanguage, narrationLanguageOverride);
     parts.push(buildNarrationLanguageContract(language, provenance));
@@ -8083,7 +8133,7 @@ function excerptRuleBody(body: string | undefined | null): string {
  * credits an entry under its OWN license/attribution, never blindly the pack's). Branch on
  * `top.campaignId != null` and use the entry's own rights fields instead.
  */
-function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[], campaignId: number): string {
+function renderRulesAnswer(query: string, pack: RulePack | null, results: RuleEntry[], campaignId: number): string {
   const [top, ...rest] = results;
   const lines: string[] = [];
   lines.push(`**${top.name}**${top.type ? ` *(${top.type})*` : ''}`);
@@ -8093,7 +8143,7 @@ function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[], 
     lines.push(body);
   }
   lines.push('');
-  if (top.campaignId != null) {
+  if (top.campaignId != null || !pack) {
     const credit = [top.author, top.attribution].filter((v) => v && v.trim()).join(' — ');
     // Only an explicitly open_licensed homebrew entry names a real license to credit;
     // private_original/permission_granted homebrew has none to show (and must never

@@ -47,6 +47,7 @@ function combatant(id: number, initiative: number, sortOrder = id): Combatant {
     rpMax: 0,
     eac: null,
     kac: null,
+    speed: null,
     hpTemp: 0,
     hpBand: null,
     deathState: 'none',
@@ -64,6 +65,7 @@ function combatant(id: number, initiative: number, sortOrder = id): Combatant {
     conditionInstances: [],
     legendaryActions: null,
     statblock: null,
+    statblockRevealed: false,
   };
 }
 

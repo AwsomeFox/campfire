@@ -468,4 +468,29 @@ describe('ai-dm rules-lookup — campaign rule-system scoping (#717)', () => {
 
     await request(h.server).delete(`/api/v1/rules/packs/${dnd.packId}`).set(dm);
   });
+
+  it('finds a campaign homebrew entry when the campaign has no rule system configured (#1967)', async () => {
+    const campaignId = await h.createCampaign('Pure Homebrew Campaign');
+    await h.configureSeat(campaignId, seat);
+
+    const homebrew = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+      .set(dm)
+      .send({
+        slug: 'homebrew-curse',
+        name: 'Homebrew Curse',
+        type: 'condition',
+        summary: '',
+        body: 'Target creature suffers disadvantage on all checks.',
+        rightsStatus: 'private_original',
+      });
+    expect(homebrew.status).toBe(201);
+
+    const res = await h.lever(campaignId, 'rules-lookup', { query: 'Homebrew Curse' }, player);
+    expect(res.status).toBe(201);
+    expect(res.body.result).not.toContain('no rule system configured');
+    expect(res.body.result).toContain('Homebrew Curse');
+    expect(res.body.result).toContain('disadvantage on all checks');
+    expect(res.body.result).toContain('*Source: Campaign homebrew*');
+  });
 });

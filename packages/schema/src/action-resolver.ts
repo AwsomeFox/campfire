@@ -267,7 +267,8 @@ export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'cri
  * narrow "make proficiency adapter-owned" scope this issue asked for. OSR/Open Legend remain
  * excluded for the original, unchanged reason above.
  */
-export type ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
+export const ResolverMathProfile = z.literal('d20-ascending-ac-5e-proficiency');
+export type ResolverMathProfile = z.infer<typeof ResolverMathProfile>;
 
 /** The only {@link ResolverMathProfile} that exists today. */
 export const RESOLVER_MATH_D20_5E: ResolverMathProfile = 'd20-ascending-ac-5e-proficiency';
@@ -778,7 +779,7 @@ export const UsableAction = z.object({
    * a hand-authored sheet action or a monster/NPC statblock action. Lets the UI tag which
    * combat action came from gear vs. the sheet without a second lookup.
    */
-  source: z.string().max(40).default(''),
+  source: z.string().max(220).default(''),
 });
 export type UsableAction = z.infer<typeof UsableAction>;
 
@@ -796,6 +797,32 @@ export const ActionResolveResult = z.object({
    * client-echoed resolution — so the applied numbers can only ever be the server's own roll.
    */
   chainId: z.string().min(1).max(64),
+  /**
+   * Issue #1928: whether the resolver's OWN attack/save maths (d20 vs ascending AC, 5e-shaped
+   * proficiency — see {@link resolverImplementsSystemMath}) is audited for the campaign's
+   * active rule system. `true` for 5e and for an empty/unrecognized slug (the same 5e fallback
+   * combat math already uses elsewhere); `false` for a registered adapter that has not declared
+   * {@link ResolverAdapter.resolverMath} (PF2e, OSR, Open Legend, …). Defaults to `true` so a
+   * payload shaped before this field existed keeps parsing — before it, no caller was told
+   * anything about audit status at all, so `true` is the least-surprising default rather than a
+   * claim about which maths that payload ran through.
+   *
+   * Label, don't block: `false` never refuses or alters resolution (see
+   * {@link resolverImplementsSystemMath}'s doc comment) — it marks the system UNAUDITED
+   * end-to-end, and does NOT say which maths ran. Some adapters supply their own
+   * {@link ResolverAdapter.resolveAttack} (OSR compares against descending AC, Open Legend
+   * rolls an exploding pool) and are still reported `false` because the combined attack/save
+   * profile is unaudited — so for those, the numbers really are the system's own and telling a
+   * caller they are 5e-shaped would push it to discount a result that was right for the table.
+   * Read `mathProfile` for what actually executed: it names the audited profile in force, and
+   * is null otherwise.
+   */
+  systemMathSupported: z.boolean().default(true),
+  /**
+   * Issue #1928: the audited math profile actually in force, or `null` when
+   * `systemMathSupported` is false (an unaudited system) — never guessed at.
+   */
+  mathProfile: ResolverMathProfile.nullable().default(null),
 });
 export type ActionResolveResult = z.infer<typeof ActionResolveResult>;
 
@@ -1049,6 +1076,126 @@ export function isResolvableSpec(spec: ActionSpec | null | undefined): boolean {
     return spec.save.dc.kind !== 'none';
   }
   return false;
+}
+
+/**
+ * Parse damage text (e.g. "1d8+3 slashing", "2d6 fire + 1d4 cold", "5 fire") into typed {@link DamagePart}s (issue #1930).
+ * Preserves the invariant that `formula` contains dice ONLY (e.g. "1d8") and `flat` contains the modifier (e.g. 3).
+ */
+export function parseDamagePartsFromText(damageText?: string | null): DamagePart[] {
+  const text = (damageText ?? '').trim();
+  if (!text) return [];
+  // Split on component boundaries: commas, semicolons, " and ", or " + ".
+  // Minus signs ('-') are part of flat modifiers (e.g. "1d4-1" or "1d4 - 1") and are NOT component separators.
+  const parts = text.split(/\s*[,;]\s*|\s+and\s+|\s+\+\s+/i).map((p) => p.trim()).filter(Boolean);
+  const out: DamagePart[] = [];
+  for (const part of parts) {
+    const diceMatch = /^((?:\d*d\d+(?:\s*[+-]\s*\d*d\d+)*))(?:\s*([+-]\s*\d+))?\s*(.*)$/i.exec(part);
+    if (diceMatch) {
+      const formula = diceMatch[1].replace(/\s+/g, '');
+      const signStr = diceMatch[2] ? diceMatch[2].replace(/\s+/g, '') : '';
+      const flat = signStr ? Number.parseInt(signStr, 10) : 0;
+      const type = (diceMatch[3] ?? '').trim().toLowerCase();
+      if (formula) {
+        out.push({ formula, flat: Number.isFinite(flat) ? flat : 0, type });
+        continue;
+      }
+    }
+    const flatMatch = /^([+-]?\d+)\s*(.*)$/i.exec(part);
+    if (flatMatch) {
+      const flat = Number.parseInt(flatMatch[1], 10);
+      const type = (flatMatch[2] ?? '').trim().toLowerCase();
+      if (Number.isFinite(flat)) {
+        out.push({ formula: '', flat, type });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Infer a structured {@link ActionSpec} from freeform sheet action text (`toHit`, `damage`, `kind`).
+ * Surfaced for web-authored attack editing and DDB/compendium imports (issue #1930).
+ *
+ * Parses text like "+5" and "1d8+3 slashing" into an ActionSpec with `provenance.source = 'sheet-inferred'`.
+ * Returns `undefined` when the text cannot be resolved into a valid, resolvable spec.
+ */
+export function inferActionSpecFromText(
+  toHit?: string | null,
+  damage?: string | null,
+  kind?: string | null,
+): ActionSpec | undefined {
+  const toHitText = (toHit ?? '').trim();
+  const damageText = (damage ?? '').trim();
+  const _kindText = (kind ?? '').trim().toLowerCase();
+
+  if (!toHitText && !damageText) return undefined;
+
+  const damageParts = parseDamagePartsFromText(damageText);
+
+  // Check for save DC in toHit (e.g. "DC 15", "DC 14 DEX", "DC15"). Requires explicit DC text.
+  const saveDcMatch = /\bDC\s*(\d{1,2})(?:\s*([A-Za-z]{3}))?/i.exec(toHitText);
+  if (saveDcMatch) {
+    const dcVal = Number.parseInt(saveDcMatch[1], 10);
+    const ability = (saveDcMatch[2] ?? '').toUpperCase();
+    const outcomes: Partial<Record<OutcomeKey, OutcomeBranch>> = damageParts.length > 0
+      ? {
+          failure: { damage: damageParts, halfDamage: false, healing: '', tempHp: '', effects: [], text: '' },
+          success: { damage: [], halfDamage: true, healing: '', tempHp: '', effects: [], text: '' },
+        }
+      : {};
+    const parsed = ActionSpec.safeParse({
+      mode: 'save',
+      save: { ability, dc: { kind: 'fixed', dc: dcVal } },
+      cost: { slot: 'action', count: 1 },
+      targets: { count: 1, allow: 'enemy' },
+      outcomes,
+      provenance: { ruleSystem: '', source: 'sheet-inferred', ref: '' },
+    });
+    return parsed.success && isResolvableSpec(parsed.data) ? parsed.data : undefined;
+  }
+
+  // Attack mode: extract attack bonus from toHit (e.g. "+5", "5", "-1", "+0", "1d20+5", "d20+5")
+  let attackBonus = '';
+  if (toHitText) {
+    if (/^[+-]?\d{1,3}$/.test(toHitText)) {
+      const n = Number.parseInt(toHitText, 10);
+      if (Number.isFinite(n)) {
+        attackBonus = n >= 0 ? `+${n}` : String(n);
+      }
+    } else {
+      const d20Match = /^(?:1\s*)?d20\s*([+-]\s*\d{1,3})?$/i.exec(toHitText);
+      if (d20Match) {
+        const modStr = d20Match[1] ? d20Match[1].replace(/\s+/g, '') : '';
+        const n = modStr ? Number.parseInt(modStr, 10) : 0;
+        if (Number.isFinite(n)) {
+          attackBonus = n >= 0 ? `+${n}` : String(n);
+        }
+      } else {
+        const leadSignedMatch = /^([+-]\d{1,3})\b/.exec(toHitText);
+        if (leadSignedMatch) {
+          attackBonus = leadSignedMatch[1];
+        }
+      }
+    }
+  }
+
+  if (attackBonus !== '') {
+    const outcomes: Partial<Record<OutcomeKey, OutcomeBranch>> = damageParts.length > 0
+      ? { hit: { damage: damageParts, halfDamage: false, healing: '', tempHp: '', effects: [], text: '' } }
+      : {};
+    const parsed = ActionSpec.safeParse({
+      mode: 'attack',
+      attack: { bonus: attackBonus, ability: '', proficient: true, vs: 'ac' },
+      cost: { slot: 'action', count: 1 },
+      targets: { count: 1, allow: 'enemy' },
+      outcomes,
+      provenance: { ruleSystem: '', source: 'sheet-inferred', ref: '' },
+    });
+    return parsed.success && isResolvableSpec(parsed.data) ? parsed.data : undefined;
+  }
+
+  return undefined;
 }
 
 /**
