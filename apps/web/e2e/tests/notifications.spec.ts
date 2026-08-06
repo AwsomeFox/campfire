@@ -571,6 +571,7 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   // Start a count load before read-all in the other tab, then release its stale
   // positive response after the read-all broadcast arrives.
   holdNextCount = true;
+  await second.bringToFront();
   void second.getByRole('link', { name: 'Quests', exact: true }).click();
   await expect.poll(() => staleCountStarted, { timeout: 25000 }).toBe(true);
   await first.getByRole('button', { name: /Notifications/ }).click();
