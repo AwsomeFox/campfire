@@ -4946,6 +4946,15 @@ export class EncountersService {
         // the request was awaiting preflight cannot be bypassed with the stale outer row.
         const [freshEncounter] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
         if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+        // The outer `isVisibleTo` gate ran against the STALE pre-transaction row. A DM who
+        // hides the encounter in the window between that check and this transaction would
+        // otherwise leave a non-DM's write landing — mirroring onto the character sheet and
+        // emitting a combat-log event — on an encounter that must now be wholesale
+        // nonexistent to them (issue #262). `adjustCombatantResource` (issue #1909 review)
+        // and `rollDeathSave` already re-check here; this path was the outlier.
+        if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
         this.assertMutable(freshEncounter);
         this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
         // Issue #1902 rework (round 14, codex P1): re-validate `expectedUpdatedAt` against
