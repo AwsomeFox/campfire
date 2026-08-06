@@ -4253,7 +4253,7 @@ export class McpToolsService {
         const rollMode = (advantage as 'normal' | 'advantage' | 'disadvantage' | undefined) ?? 'normal';
 
         const campaign = await this.campaigns.getOrThrow(character.campaignId);
-        const adapter = ruleSystemAdapter(campaign.ruleSystem);
+        const adapter = ruleSystemAdapter(campaign.ruleSystem, campaign.customMechanicsProfile);
         const resolved = resolveSavingThrow({
           stats: fromJsonText<Record<string, number>>(character.stats, {}),
           saveProficiencies: fromJsonText<string[]>(character.saveProficiencies, []),

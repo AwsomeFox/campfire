@@ -44,6 +44,11 @@ export const campaigns = sqliteTable('campaigns', {
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   ruleSystem: text('rule_system').notNull().default(''),
+  // Issue #1502: a per-campaign homebrew mechanics profile (JSON-encoded HomebrewMechanicsProfile
+  // from @campfire/schema), or NULL when unset. Only meaningful alongside a `ruleSystem` slug
+  // that is NOT a built-in registered adapter — enforced in CampaignsService, not here. NULL in
+  // every campaign that predates this column; see db/db.module.ts ALTER TABLE note.
+  customMechanicsProfile: text('custom_mechanics_profile'),
   // Attachment (kind='map') rendered as the campaign map background on Dashboard/Location detail.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   mapAttachmentId: integer('map_attachment_id'),

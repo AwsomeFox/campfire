@@ -67,6 +67,7 @@ import {
   type RuleSystemAdapter,
   type SpellSlotMap,
   type TargetDefenses,
+  type HomebrewMechanicsProfile,
 } from '@campfire/schema';
 
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -202,8 +203,12 @@ export class ActionResolverService {
   }
 
   private adapterForCampaign(campaignId: number): RuleSystemAdapter {
-    const c = this.db.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).get();
-    return ruleSystemAdapter(c?.ruleSystem ?? '');
+    const c = this.db
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .get();
+    return ruleSystemAdapter(c?.ruleSystem ?? '', fromJsonText<HomebrewMechanicsProfile | null>(c?.customMechanicsProfile, null));
   }
 
   /**
