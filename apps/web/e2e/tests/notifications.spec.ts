@@ -605,8 +605,23 @@ test('restores a new unread count after mark-all-read across tabs', async ({ bro
   // A second tab's new count request starts after read-all, so its positive
   // response is fresh server evidence rather than the released stale request.
   unreadCount = 1;
+  await second.bringToFront();
+  await second.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
   await second.getByRole('link', { name: 'Dashboard', exact: true }).click();
   await expect(second.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
+
+  await first.bringToFront();
+  await first.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
   await expect(first.getByRole('button', { name: 'Notifications (1 unread)' })).toBeVisible();
 
   await context.close();
