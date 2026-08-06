@@ -28,6 +28,12 @@ export interface GroupCheckSummary {
   totalCount: number;
   resolvedCount: number;
   passCount: number;
+  /**
+   * Resolved members whose outcome could not be recovered (their roll fell out of the fetched
+   * dice-roll window). `passCount` never counts these, but it also cannot be trusted as "the
+   * rest failed" — see {@link shouldShowPassedTally}.
+   */
+  unknownOutcomeCount: number;
 }
 
 /**
@@ -63,6 +69,7 @@ export function buildGroupCheckSummaries(
     });
     const resolvedCount = members.filter((m) => m.status === 'resolved').length;
     const passCount = members.filter((m) => m.success === true).length;
+    const unknownOutcomeCount = members.filter((m) => m.status === 'resolved' && m.success === null).length;
     summaries.push({
       summary: {
         groupId,
@@ -73,6 +80,7 @@ export function buildGroupCheckSummaries(
         totalCount: members.length,
         resolvedCount,
         passCount,
+        unknownOutcomeCount,
       },
       maxRowId: sorted[sorted.length - 1].id,
     });
@@ -83,13 +91,27 @@ export function buildGroupCheckSummaries(
 }
 
 /**
+ * Whether the "X of N passed" tally can be shown honestly (issue #1943 review). `passCount`
+ * only counts members with a KNOWN `success`, so if any resolved member's outcome is unknown
+ * (its roll aged out of the fetched dice-roll window), a "passed" count would silently read
+ * every unknown outcome as a failure — worse than showing nothing, because it looks confident.
+ * Requires a `dc` too: without one no member ever has a `success` to tally.
+ */
+export function shouldShowPassedTally(summary: Pick<GroupCheckSummary, 'dc' | 'unknownOutcomeCount'>): boolean {
+  return summary.dc != null && summary.unknownOutcomeCount === 0;
+}
+
+/**
  * Whether the "Group succeeds (half or more)" advisory should render for a group (issue #1943):
- * only once every member has resolved, at least half passed, AND the adapter's system endorses
- * the convention (see `groupCheckMajorityAdvisoryForAdapter` in @campfire/schema). A group with
- * any DC-less member never reaches this — `passCount` only counts members with a known `success`.
+ * only once every member has resolved with a KNOWN outcome (no `unknownOutcomeCount`), at least
+ * half passed, AND the adapter's system endorses the convention (see
+ * `groupCheckMajorityAdvisoryForAdapter` in @campfire/schema). A group with any DC-less or
+ * unknown-outcome member never reaches this — the aggregate must never claim more certainty
+ * than the per-member data supports.
  */
 export function groupCheckMajoritySucceeds(summary: GroupCheckSummary, adapterHasMajorityAdvisory: boolean): boolean {
   if (!adapterHasMajorityAdvisory) return false;
   if (summary.resolvedCount !== summary.totalCount) return false;
+  if (summary.unknownOutcomeCount > 0) return false;
   return summary.passCount * 2 >= summary.totalCount;
 }

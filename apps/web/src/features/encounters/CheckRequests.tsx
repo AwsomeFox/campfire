@@ -29,7 +29,17 @@ import { queryKeys, invalidateCampaignCheckRequests } from '../../lib/query';
 import { Card, Btn, Chip, TextInput } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { useCampaign } from '../../app/CampaignContext';
-import { buildGroupCheckSummaries, groupCheckMajoritySucceeds } from './groupCheckBoard';
+import { buildGroupCheckSummaries, groupCheckMajoritySucceeds, shouldShowPassedTally } from './groupCheckBoard';
+
+/**
+ * Bounds the group-check board's own check-requests fetch (issue #1943 review): `listCheckRequests`
+ * has no server-side default limit, and the board refetches on every `check.requested`/
+ * `check.resolved` SSE invalidation for the life of the campaign — an unbounded page would grow
+ * without end and get chattier the longer a campaign runs. 100 rows comfortably covers many
+ * recent group sends (up to 20 characters each) while staying well clear of the dice-roll feed's
+ * own 50-roll window, so a resolved group's roll is very unlikely to have aged out of both.
+ */
+const GROUP_CHECK_BOARD_REQUEST_LIMIT = 100;
 
 /** Human summary of a resolved outcome for the announcer + result line. */
 function outcomeText(res: CheckRequestResolution): string {
@@ -249,6 +259,11 @@ export function CheckRequestPanel({
  * shared dice-roll feed (`GET /campaigns/:id/rolls`, the same one `SharedDiceLog` renders) —
  * `CheckRequest` itself only carries the REQUESTED dc, not the roll's outcome. See
  * `groupCheckBoard.ts` for the pure grouping/tally logic.
+ *
+ * Reads a bounded, board-owned request page under `queryKeys.campaignCheckRequestsAll` — NOT
+ * the plain `campaignCheckRequests` key, which `CheckRequestPrompts` already owns app-wide with
+ * a `?status=pending`-only `queryFn` (issue #1943 review: two components sharing one React
+ * Query key with different `queryFn`s let either one silently serve the other's cached payload).
  */
 export function GroupCheckBoard({ campaignId }: { campaignId: number }) {
   const { t } = useTranslation();
@@ -256,8 +271,8 @@ export function GroupCheckBoard({ campaignId }: { campaignId: number }) {
   const adapterHasMajorityAdvisory = groupCheckMajorityAdvisoryForAdapter(ruleSystemAdapter(campaign?.ruleSystem));
 
   const requestsQuery = useQuery({
-    queryKey: queryKeys.campaignCheckRequests(campaignId),
-    queryFn: () => api.get<CheckRequest[]>(`${API}/campaigns/${campaignId}/check-requests`),
+    queryKey: queryKeys.campaignCheckRequestsAll(campaignId),
+    queryFn: () => api.get<CheckRequest[]>(`${API}/campaigns/${campaignId}/check-requests?limit=${GROUP_CHECK_BOARD_REQUEST_LIMIT}`),
     enabled: Number.isFinite(campaignId),
   });
   const rollsQuery = useQuery({
@@ -283,7 +298,7 @@ export function GroupCheckBoard({ campaignId }: { campaignId: number }) {
             <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
               <strong>{summary.checkLabel}</strong>
               <span className="text-muted" style={{ fontSize: 12 }}>
-                {summary.dc != null
+                {shouldShowPassedTally(summary)
                   ? t('encounters.checks.board.tallyPassed', { pass: summary.passCount, total: summary.totalCount })
                   : t('encounters.checks.board.tallyResolved', { resolved: summary.resolvedCount, total: summary.totalCount })}
               </span>

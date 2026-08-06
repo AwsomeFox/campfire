@@ -523,4 +523,30 @@ describe('Group check requests (issue #1943, e2e)', () => {
     const dmGroupRows = dmList.body.filter((r: { groupId: string | null }) => r.groupId === groupId);
     expect(dmGroupRows).toHaveLength(2);
   });
+
+  // Issue #1943 review: the group-check board refetches this list on every SSE invalidation for
+  // the life of the campaign — an unbounded page would grow without end. `?limit`/`?offset`
+  // bound it (shared pagination convention); omitted, behavior is exactly as before (unbounded).
+  it('optional ?limit bounds the page; omitted still returns every visible row (back-compat)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Three more sends on top of everything already created by earlier tests in this block —
+    // guarantees there are strictly more than 2 rows visible to the DM at this point.
+    for (let i = 0; i < 3; i++) {
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+        .set(dm)
+        .send({ characterIds: [charA], checkId: 'save:DEX' });
+    }
+
+    const unbounded = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+    expect(unbounded.status).toBe(200);
+    expect(unbounded.body.length).toBeGreaterThan(2);
+
+    const bounded = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests?limit=2`).set(dm);
+    expect(bounded.status).toBe(200);
+    expect(bounded.body).toHaveLength(2);
+    // Newest-first ordering is preserved under the limit — the bounded page is exactly the
+    // first 2 rows of the unbounded page, not an arbitrary 2.
+    expect(bounded.body.map((r: { id: number }) => r.id)).toEqual(unbounded.body.slice(0, 2).map((r: { id: number }) => r.id));
+  });
 });

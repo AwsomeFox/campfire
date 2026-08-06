@@ -39,6 +39,19 @@ export const queryKeys = {
   campaignCharacters: (campaignId: number) => ['campaign', campaignId, 'characters'] as const,
   /** DM-initiated check requests (issue #415) — the DM-request → player-prompt → roll loop. */
   campaignCheckRequests: (campaignId: number) => ['campaign', campaignId, 'check-requests'] as const,
+  /**
+   * The group-check board's own read (issue #1943 review): a SEPARATE key, nested under (and
+   * therefore still invalidated by) `campaignCheckRequests` above. `CheckRequestPrompts` already
+   * owns the base key with a `?status=pending`-only `queryFn`, and is mounted app-wide
+   * (`Layout.tsx`) for every campaign member including DMs — sharing that exact key with the
+   * board's own unfiltered `queryFn` let React Query's single cache-entry-per-key model silently
+   * hand either component the other's payload, non-deterministically hiding resolved members and
+   * the pass tally. Appending a segment keeps the two queries independent while
+   * `invalidateCampaignCheckRequests`'s prefix match (see `invalidateEncounter`'s doc comment for
+   * why a shorter key sweeps its children) still busts both on every `check.requested`/
+   * `check.resolved` frame.
+   */
+  campaignCheckRequestsAll: (campaignId: number) => ['campaign', campaignId, 'check-requests', 'all'] as const,
   /** The campaign member roster (resolves userId → display name for AI-DM lever surfaces, #340). */
   campaignMembers: (campaignId: number) => ['campaign', campaignId, 'members'] as const,
   /** The party roster (alias surface for character/HP/condition writes). */

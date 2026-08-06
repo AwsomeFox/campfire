@@ -65,6 +65,7 @@ import type {
   DdbImportResult,
   ResourcePatch,
   HomebrewMechanicsProfile,
+  PageParams,
 } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
@@ -73,6 +74,7 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters,
 import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
+import { applyPage } from '../../common/pagination';
 import { fromJsonText, toJsonText } from '../../common/json';
 import {
   conditionWriteSetFromNames,
@@ -93,6 +95,9 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, summarizeDdbImport, computeDdbActionEntryCount, type DdbFetch } from './ddb-importer';
+
+/** Issue #1943 review: caps an explicit `?limit=`/`limit` arg on the check-requests list — see `listCheckRequests`. */
+export const CHECK_REQUEST_LIST_MAX_LIMIT = 200;
 
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type SyncDb = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
@@ -572,12 +577,19 @@ export class CharactersService {
    * List check requests visible to the caller (issue #415). The DM sees every request in the
    * campaign; a non-DM sees only requests targeting a character they OWN (the targeted player).
    * Optional `status` filter ('pending' | 'resolved'). Newest first.
+   *
+   * Optional `page` (issue #1943 review): the web group-check board refetches this on every
+   * `check.requested`/`check.resolved` SSE invalidation for the life of the campaign, so an
+   * unbounded result set would grow without end and get chattier the longer a campaign runs —
+   * precisely the worst time for a bigger payload. Uses the shared `applyPage`/`PageParams`
+   * pagination convention (same as sessions/audit/notes): omitted, this is fully backward
+   * compatible with every existing caller — unbounded, exactly as before.
    */
   async listCheckRequests(
     campaignId: number,
     user: RequestUser,
     role: Role,
-    opts: { status?: CheckRequest['status'] } = {},
+    opts: { status?: CheckRequest['status']; page?: PageParams } = {},
   ): Promise<CheckRequest[]> {
     // Visibility is pushed into the WHERE clause rather than filtered in memory (issue #415):
     // the DM sees every request in the campaign; a non-DM sees only requests targeting a
@@ -585,12 +597,15 @@ export class CharactersService {
     const conditions = [eq(checkRequests.campaignId, campaignId)];
     if (opts.status) conditions.push(eq(checkRequests.status, opts.status));
     if (role !== 'dm') conditions.push(eq(characters.ownerUserId, user.id));
-    const rows = await this.db
+    let query = this.db
       .select({ req: checkRequests, characterName: characters.name })
       .from(checkRequests)
       .innerJoin(characters, eq(checkRequests.characterId, characters.id))
       .where(and(...conditions))
-      .orderBy(desc(checkRequests.id));
+      .orderBy(desc(checkRequests.id))
+      .$dynamic();
+    query = applyPage(query, opts.page);
+    const rows = await query;
     return rows.map((r) => this.toCheckRequestDomain(r.req, r.characterName));
   }
 

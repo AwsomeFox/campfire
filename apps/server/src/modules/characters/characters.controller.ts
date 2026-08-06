@@ -4,11 +4,12 @@ import type { Response } from 'express';
 import { CharacterCreate, CharacterUpdate, CheckRequestStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
+import { parsePageParams } from '../../common/pagination';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
-import { CharactersService } from './characters.service';
+import { CharactersService, CHECK_REQUEST_LIST_MAX_LIMIT } from './characters.service';
 import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, ConditionLevelPatchDto, SpellSlotPatchDto, ResourcePatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto, RestPatchDto, PartyRecoveryPreviewDto, PartyRecoveryApplyDto, PartyRecoveryUndoDto } from './characters.dto';
 
 @ApiTags('characters')
@@ -438,18 +439,23 @@ export class CampaignCheckRequestsController {
   @ApiOperation({
     summary: 'List check requests visible to the caller',
     description:
-      'Requires campaign membership (issue #415). The DM sees every request in the campaign; a player sees only requests targeting a character they own (the targeted player). Optional `?status=pending|resolved` filter. Newest first.',
+      'Requires campaign membership (issue #415). The DM sees every request in the campaign; a player sees only requests targeting a character they own (the targeted player). Optional `?status=pending|resolved` filter. Newest first. Optional `?limit`/`?offset` (issue #1943) bound the page — omitted, the full visible result is returned exactly as before.',
   })
   @ApiQuery({ name: 'status', required: false, enum: ['pending', 'resolved'], description: 'Filter by request status.' })
+  @ApiQuery({ name: 'limit', required: false, description: `Max rows to return (capped at ${CHECK_REQUEST_LIST_MAX_LIMIT}). Omitted returns every visible row.` })
+  @ApiQuery({ name: 'offset', required: false, description: 'Rows to skip before the page starts.' })
   @ApiResponse({ status: 200, description: 'Visible check requests, newest first.' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('status') status: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Query('offset') offset: string | undefined,
     @CurrentUser() user: RequestUser,
   ) {
     const role = await this.access.requireMember(user, campaignId);
     const parsed = status ? CheckRequestStatus.parse(status) : undefined;
-    return this.characters.listCheckRequests(campaignId, user, role, { status: parsed });
+    const page = parsePageParams({ limit, offset }, CHECK_REQUEST_LIST_MAX_LIMIT);
+    return this.characters.listCheckRequests(campaignId, user, role, { status: parsed, page });
   }
 }
 
