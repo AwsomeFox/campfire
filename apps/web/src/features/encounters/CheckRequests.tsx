@@ -20,7 +20,7 @@ import { useTranslation } from 'react-i18next';
  * Live-region announcements route through the app-wide Announcer (useAnnounce) — never a second
  * aria-live region. Visible copy is scoped with data-testid to keep strict Playwright locators happy.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, CheckRequest, CheckRequestResolution, DiceRoll, RollCheckDefinition } from '@campfire/schema';
 import { ruleSystemAdapter, groupCheckMajorityAdvisoryForAdapter } from '@campfire/schema';
@@ -168,21 +168,18 @@ export function CheckRequestPanel({
   // Neither half may touch `localError`/the shared parent `onError` channel unconditionally,
   // though (issue #1943 review, third instance on this PR of "correct about its own case, wrong
   // about what else shares the channel"): `onError` is `RunSessionPage`'s page-wide
-  // `surfaceActionError`, fed by many unrelated actions, and `localError` is ALSO written by
-  // this panel's own send mutation below. A naive `else { setLocalError(null); onError?.(null) }`
-  // runs on every render where `checksAnyError` is `false` — including the very first one
-  // (mount) — silently wiping whichever of those an unrelated write left there. This ref +
-  // `syncCatalogErrorDisplay` make the clearing conditional on OWNERSHIP: this effect may only
-  // clear a message it itself most recently set — never on mount, and never one the send
-  // mutation (or a future writer) has since taken over. See that function's doc comment.
-  const catalogErrorOwnsParentSlotRef = useRef(false);
+  // `surfaceActionError`, fed by many unrelated actions. Rounds 4-7 tried three increasingly
+  // careful ways to CLEAR it correctly and each was still wrong; the rule that holds is that
+  // this effect never clears the parent slot at all — only adds to it. Clearing there is left to
+  // the page's existing user-action convention (`send.onMutate` below, and every other mutation
+  // on this page). `localError` IS this panel's own, so it is both set and cleared here.
+  // See `syncCatalogErrorDisplay`'s doc comment for why the ownership-flag approach failed.
   useEffect(() => {
     const firstErrored = checksQueries.find((q) => q.isError);
     const msg = firstErrored
       ? translateApiError(firstErrored.error, t, { fallbackKey: 'encounters.errors.loadChecks' })
       : t('encounters.errors.loadChecks');
-    const result = syncCatalogErrorDisplay(checksAnyError, msg, catalogErrorOwnsParentSlotRef.current);
-    catalogErrorOwnsParentSlotRef.current = result.ownsParentSlot;
+    const result = syncCatalogErrorDisplay(checksAnyError, msg);
     if (result.localError !== undefined) setLocalError(result.localError);
     if (result.parentError !== undefined) onError?.(result.parentError);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once per loading/failed<->loaded transition, not per render
@@ -200,10 +197,6 @@ export function CheckRequestPanel({
     onMutate: () => {
       setLocalError(null);
       onError?.(null);
-      // This clear is the send mutation's own, user-initiated one (pre-dates issue #1943 — see
-      // the original single-target implementation) — not a catalog write, so the catalog effect
-      // above must not later believe it still owns (and may clear) whatever appears here next.
-      catalogErrorOwnsParentSlotRef.current = false;
     },
     onSuccess: (created) => {
       const [first] = created;
@@ -224,9 +217,6 @@ export function CheckRequestPanel({
       const msg = translateApiError(err, t, { fallbackKey: 'encounters.errors.sendCheck' });
       setLocalError(msg);
       onError?.(msg);
-      // The send mutation now owns the shared slot with ITS OWN message — a later catalog
-      // recovery (checksAnyError flipping back to false) must not clear this out from under it.
-      catalogErrorOwnsParentSlotRef.current = false;
     },
   });
 

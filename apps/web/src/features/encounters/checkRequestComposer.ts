@@ -105,8 +105,6 @@ export function exceedsCheckRequestCap(targetIds: readonly number[]): boolean {
 
 /** What {@link syncCatalogErrorDisplay} tells its caller to write. `undefined` means "leave alone". */
 export interface CatalogErrorSyncResult {
-  /** Whether the panel's shared parent `onError` slot now holds THIS effect's message. */
-  ownsParentSlot: boolean;
   /** `undefined`: do not call `setLocalError` at all. Otherwise the exact value to set. */
   localError: string | null | undefined;
   /** `undefined`: do not call `onError` at all. Otherwise the exact value to pass it. */
@@ -114,31 +112,32 @@ export interface CatalogErrorSyncResult {
 }
 
 /**
- * Governs whether a catalog-load error effect may write to `localError`/the shared parent
- * `onError` channel (issue #1943 review, third instance on this PR of "correct about its own
- * case, wrong about what else shares the channel"): entering the error state always claims the
- * slot and writes the message, but LEAVING it must clear ONLY what this effect itself put there
- * — never on mount (nothing was ever set), and never a message some other writer (the panel's
- * own send mutation, or anything upstream) has since put in the same slot.
+ * Decides what a catalog-load error effect may write (issue #1943 review, rounds 4-7).
  *
- * `prevOwnsParentSlot` starts `false` (a plain `useRef(false)`, nothing claimed yet) and MUST be
- * set back to `false` by any other writer that takes over the slot (this module doesn't own that
- * handoff — see `CheckRequests.tsx`'s send mutation, which resets the ref whenever it writes its
- * own message so a later catalog recovery can't reach in and clear what the send mutation owns).
+ * The rule that finally holds: **this effect never CLEARS the shared parent slot.** `onError` is
+ * `RunSessionPage`'s page-wide `surfaceActionError`, written by many unrelated encounter actions;
+ * this panel is one writer among many and cannot know what else has since put a message there.
  *
- * Naive alternative this replaces: `if (anyError) { ...set... } else { ...clear... }` — the
- * `else` branch runs unconditionally on every `anyError === false` render, INCLUDING the very
- * first one (mount), silently wiping whatever the parent was already displaying that this
- * effect never set and has no business touching.
+ * Four rounds were spent trying to clear it correctly — unconditionally, then only on a
+ * true->false transition, then only when an ownership ref said we still held it. Each was closer
+ * and each was still wrong, because an ownership flag is invisible to writers that never touch
+ * it: any other action that overwrote the banner left the flag still reading "ours", so the next
+ * catalog recovery erased a newer, unrelated failure the DM had not yet read.
+ *
+ * So the effect only ever ADDS to the parent slot (on failure) and leaves clearing to the
+ * convention every other mutation on that page already follows: `onMutate` clears the banner as
+ * the direct result of a user action. The cost is that a stale page-level catalog message can
+ * linger until the DM's next action — strictly smaller than erasing a real report of a failed
+ * damage apply or turn advance, and identical to how every sibling panel already behaves.
+ *
+ * `localError` is different: this panel owns it outright, so it is both set and cleared here, and
+ * the inline message plus the disabled Check `<select>` remain fully accurate either way.
  */
-export function syncCatalogErrorDisplay(anyError: boolean, message: string, prevOwnsParentSlot: boolean): CatalogErrorSyncResult {
+export function syncCatalogErrorDisplay(anyError: boolean, message: string): CatalogErrorSyncResult {
   if (anyError) {
-    return { ownsParentSlot: true, localError: message, parentError: message };
+    return { localError: message, parentError: message };
   }
-  if (prevOwnsParentSlot) {
-    return { ownsParentSlot: false, localError: null, parentError: null };
-  }
-  // Not in error, and this effect never held (or no longer holds) the slot — mount, or a
-  // recovery that happened after someone else took the slot over. Touch nothing.
-  return { ownsParentSlot: false, localError: undefined, parentError: undefined };
+  // Recovered: clear only what this panel owns. The parent slot is left exactly as-is —
+  // it may hold a newer message from an unrelated action, and this effect cannot tell.
+  return { localError: null, parentError: undefined };
 }
