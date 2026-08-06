@@ -123,6 +123,14 @@ export type CombatantRowProps = {
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
   targeting?: { legal: boolean; selected: boolean; declared: boolean; atCapacity: boolean; onToggle: () => void } | null;
+  /**
+   * Issue #1926: a monster/npc just dropped to 0 HP with its statblock still hidden — show
+   * the one-tap "reveal to players?" prompt on this (DM) row. Never shown for a non-DM;
+   * the parent derives this from `shouldShowKillPrompt` + its own per-session dismissed set.
+   */
+  showKillPrompt?: boolean;
+  /** Dismiss the kill prompt for this combatant for the rest of the session (client-local only). */
+  onDismissKillPrompt?: () => void;
 };
 
 export function CombatantRow({
@@ -171,6 +179,8 @@ export function CombatantRow({
   onDuplicate,
   onRemove,
   targeting = null,
+  showKillPrompt = false,
+  onDismissKillPrompt,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   // Issue #1746: one shared reason string for every write control this row disables while
@@ -628,6 +638,52 @@ export function CombatantRow({
                 ✎
               </button>
             )}
+          </div>
+        )}
+        {/* Issue #1926: one-tap kill prompt — a monster/npc just dropped to 0 HP with its
+            statblock still hidden. Never automatic: the DM must tap Reveal or Dismiss.
+            Dismissing sticks for this combatant for the rest of the session (see
+            `shouldShowKillPrompt`/`dismissKillPrompt`) and leaves the manual toggle below
+            available regardless. */}
+        {showKillPrompt && (
+          <div
+            role="status"
+            data-testid={`kill-prompt-${combatant.id}`}
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              marginTop: 4,
+              marginBottom: 4,
+              padding: '6px 8px',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-divider)',
+              fontSize: 12,
+            }}
+          >
+            <span>{t('encounters.statblock.killPrompt', { name: combatant.name })}</span>
+            <button
+              type="button"
+              className="btn btn-ghost !min-h-8 text-xs"
+              disabled={busy || syncBlocked}
+              aria-describedby={syncBlockedDescribedBy}
+              title={syncBlockedReason}
+              onClick={() => {
+                onPatchCombatant?.({ statblockRevealed: true });
+                onDismissKillPrompt?.();
+              }}
+            >
+              {t('encounters.statblock.reveal')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost !min-h-8 text-xs"
+              aria-label={t('encounters.statblock.dismissKillPrompt')}
+              onClick={onDismissKillPrompt}
+            >
+              {t('encounters.statblock.dismiss')}
+            </button>
           </div>
         )}
         {/* Death-save tracker (issue #57): shown for a character that is dying/stable/dead,
@@ -1168,6 +1224,20 @@ export function CombatantRow({
             />
           </details>
         )}
+        {/* Issue #1926: a revealed inline statblock, read-only, for a viewer without edit
+            rights (a player, or the DM once the encounter has ended and identity edits are
+            gone). Mutually exclusive with the editable form above (that one requires
+            canEditIdentity); the compendium (ruleEntryId) case is handled by the parent's
+            `statblock` prop instead — see RunSessionPage's reveal-aware condition. */}
+        {!canEditIdentity &&
+          combatant.statblockRevealed &&
+          combatant.statblock &&
+          (combatant.kind === 'monster' || combatant.kind === 'npc') && (
+            <details className="mt-2" data-combatant-detail data-testid={`combatant-statblock-revealed-${combatant.id}`}>
+              <summary className="text-xs text-muted cursor-pointer">{t('encounters.statblock.revealedSummary')}</summary>
+              <CombatantStatblockEditor value={combatant.statblock} onChange={() => {}} disabled ruleSystem={ruleSystem} />
+            </details>
+          )}
         {/* Character card (in-encounter sheet): a player sees only their own combat stats,
             while the DM sees the whole party. */}
         {combatant.kind === 'character' && character && (
@@ -1375,6 +1445,24 @@ export function CombatantRow({
             </button>
           </div>
         </div>
+      )}
+      {canEditIdentity && (combatant.kind === 'monster' || combatant.kind === 'npc') && onPatchCombatant && (
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-44 text-xs"
+          style={{ minWidth: 44, height: 44, flex: 'none' }}
+          disabled={busy || syncBlocked}
+          aria-pressed={combatant.statblockRevealed}
+          aria-describedby={syncBlockedDescribedBy}
+          data-testid={`statblock-reveal-toggle-${combatant.id}`}
+          title={
+            syncBlockedReason ??
+            (combatant.statblockRevealed ? t('encounters.statblock.hideFromPlayers') : t('encounters.statblock.revealToPlayers'))
+          }
+          onClick={() => onPatchCombatant({ statblockRevealed: !combatant.statblockRevealed })}
+        >
+          {combatant.statblockRevealed ? t('encounters.statblock.revealed') : t('encounters.statblock.reveal')}
+        </button>
       )}
       {onDuplicate && (
         <button
