@@ -1825,7 +1825,10 @@ export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLive
       ...DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS,
       ...DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS,
     ]),
-    forbidden: new Set(['hidden', 'mapAlignment']),
+    // monsterHpDisplay (issue #1925) is a table-secrecy dial, the same class as `hidden` —
+    // it decides how much monster HP the DM's table reveals to players and must be a human
+    // DM act, not an autonomous seat decision.
+    forbidden: new Set(['hidden', 'mapAlignment', 'monsterHpDisplay']),
   },
   'adjust_treasury': {
     allowed: new Set(['campaignId', 'delta']),
@@ -1934,8 +1937,8 @@ export function recordDriverUndoableCommit(
  *    {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
  *  - create_encounter: `hidden` is stripped (always DM-only prep on creation).
  *  - update_encounter: VTT fields only, or authoring fields on the seat's OWN creations;
- *    `hidden` is refused outright; mapAttachmentId must be null (detach/undo) or a
- *    session-generated map id.
+ *    `hidden` and `monsterHpDisplay` are refused outright; mapAttachmentId must be null
+ *    (detach/undo) or a session-generated map id.
  *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination
  *    ({@link DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION}).
  *  - add_inventory_item: grant-only — party/treasury owner only (no `ownerType: 'character'`,
@@ -2005,9 +2008,11 @@ export function guardDriverLivePlayArgs(
 
   if (toolName === 'update_encounter') {
     const rule = DRIVER_LIVE_PLAY_TOOL_ARG_RULES.update_encounter!;
-    // `hidden` and `mapAlignment` are refused rather than dropped. `hidden` controls encounter
-    // visibility (#262/#754) and must be a human act. `mapAlignment` is a map-replacement reset
-    // directive (#870) and may not be set by the autonomous seat through update_encounter (#1792).
+    // `hidden`, `mapAlignment`, and `monsterHpDisplay` are refused rather than dropped. `hidden`
+    // controls encounter visibility (#262/#754) and must be a human act. `mapAlignment` is a
+    // map-replacement reset directive (#870) and may not be set by the autonomous seat through
+    // update_encounter (#1792). `monsterHpDisplay` (#1925) is the same class of table-secrecy
+    // dial as `hidden` — it decides how much monster HP the table's players are told.
     if ('hidden' in args) {
       return {
         ok: false,
@@ -2026,8 +2031,18 @@ export function guardDriverLivePlayArgs(
           'quest/session links on encounters it created this session. Rejected: mapAlignment.',
       };
     }
-    // `rule.forbidden` only lists `hidden` and `mapAlignment`, both handled above with explicit
-    // error codes; future forbidden fields should be checked before `unknownArgKeys`.
+    if ('monsterHpDisplay' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          'The driver may not change how much monster HP an encounter reveals to players. Switching between ' +
+          'band/exact/hidden display must be done by the human DM.',
+      };
+    }
+    // `rule.forbidden` only lists `hidden`, `mapAlignment`, and `monsterHpDisplay`, all handled
+    // above with explicit error codes; future forbidden fields should be checked before
+    // `unknownArgKeys`.
     const unknown = unknownArgKeys(args, rule);
     if (unknown.length > 0) {
       return {
