@@ -4,6 +4,7 @@ import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
 import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
+import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
 import { GatedControl } from '../../components/GatedControl';
 import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
@@ -77,7 +78,7 @@ import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMo
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
-import { tokenIdentityBackground } from './tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export { BattleMap } from './map/BattleMap';
@@ -430,12 +431,15 @@ function InitiativeStrip({
   charactersById,
   turnPulse = false,
   hpFeedbackByCombatant,
+  colorVisionAssist = false,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
   turnPulse?: boolean;
   hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
+  /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
+  colorVisionAssist?: boolean;
 }) {
   return (
     <div
@@ -470,10 +474,20 @@ function InitiativeStrip({
               }
             }}
           >
+            {colorVisionAssist && isCurrent && (
+              <span
+                data-testid="strip-token-turn-chevron"
+                aria-hidden="true"
+                style={{ fontSize: 11, lineHeight: 1, color: 'var(--color-accent)' }}
+              >
+                ▾
+              </span>
+            )}
             <div
               aria-current={isCurrent ? 'true' : undefined}
               className={`flex items-center justify-center overflow-hidden bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
               style={{
+                position: 'relative',
                 width: isCurrent ? 48 : 40,
                 height: isCurrent ? 48 : 40,
                 transition: 'all 0.2s ease',
@@ -491,6 +505,23 @@ function InitiativeStrip({
                 <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
                   {tokenInitials(c.name)}
                 </span>
+              )}
+              {colorVisionAssist && (
+                <span
+                  data-testid="strip-token-identity-shape"
+                  data-token-shape={tokenIdentityShape(c.id)}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    right: 2,
+                    bottom: 2,
+                    width: 9,
+                    height: 9,
+                    background: '#fff',
+                    clipPath: TOKEN_IDENTITY_SHAPE_CLIP_PATH[tokenIdentityShape(c.id)],
+                    boxShadow: '0 0 0 1px rgba(15,23,42,.7)',
+                  }}
+                />
               )}
             </div>
             <FloatingNumbers events={feedback} />
@@ -696,6 +727,11 @@ export default function RunSessionPage() {
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
   // optimistic and stay live even while a request is in flight.
   const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  // Issue #1926: combatants for which the DM has resolved (revealed from, or dismissed)
+  // the one-tap kill prompt this session. Client-local only — a page reload resets it,
+  // same as every other transient run-session UI state; the server-persisted
+  // `statblockRevealed` flag itself is the only thing that's actually authoritative.
+  const [dismissedKillPromptIds, setDismissedKillPromptIds] = useState<ReadonlySet<number>>(() => new Set());
   // React state disables the source row after render; the ref closes the same-tick
   // double-click window before that render can happen.
   const pendingDuplicateCombatantIds = useRef(new Set<number>());
@@ -3648,8 +3684,12 @@ export default function RunSessionPage() {
           canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
+          currentTurnCombatantId={encounter.status === 'running' ? turnWorkspace?.current?.combatantId ?? null : null}
+          currentTurnMovementMaxFt={turnWorkspace?.movement?.maxFt ?? null}
+          onMoveFt={(combatantId, moveFt) => patchCombatantTurnState(combatantId, { moveFt })}
           onBatchTokens={batchMoveTokens}
           onUndoTokenBatch={undoTokenBatch}
           dismissTokenUndoNonce={dismissTokenUndoNonce}
@@ -3705,6 +3745,7 @@ export default function RunSessionPage() {
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
           movementDefault={movementDefault}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -4044,6 +4085,7 @@ export default function RunSessionPage() {
               charactersById={charactersById}
               turnPulse={turnPulse}
               hpFeedbackByCombatant={hpFeedbackByCombatant}
+              colorVisionAssist={me?.user.colorVisionAssist ?? false}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
@@ -4081,6 +4123,7 @@ export default function RunSessionPage() {
                   combatant={c}
                   hpFeedbackEvents={hpFeedbackByCombatant.get(c.id) ?? []}
                   isCurrentTurn={c.id === currentCombatantId}
+                  colorVisionAssist={me?.user.colorVisionAssist ?? false}
                   // Permission decides whether these controls MOUNT at all (issue #1746):
                   // a genuinely unauthorized viewer (wrong owner, ended encounter) never sees
                   // them. Whether the sync gate currently blocks writes is a separate, transient
@@ -4092,7 +4135,13 @@ export default function RunSessionPage() {
                   canEditPermission={canEditCombatantPermission(c)}
                   syncBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
-                  statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  // Issue #1926: a non-DM viewer mounts the same compendium statblock viewer
+                  // once the DM has revealed this combatant — the ruleEntryId link itself is
+                  // not campaign-secret (unchanged by this issue; see /rules/entries/:id), so
+                  // the server-enforced gate here is `statblockRevealed`, not `isDm`.
+                  statblock={(isDm || c.statblockRevealed) && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  showKillPrompt={isDm && shouldShowKillPrompt(c, dismissedKillPromptIds)}
+                  onDismissKillPrompt={() => setDismissedKillPromptIds((prev) => dismissKillPrompt(prev, c.id))}
                   canRemove={canDmWrite}
                   onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
                     ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))

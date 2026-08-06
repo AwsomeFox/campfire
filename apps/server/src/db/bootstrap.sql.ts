@@ -920,6 +920,9 @@ CREATE TABLE IF NOT EXISTS users (
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
   dice_theme TEXT NOT NULL DEFAULT 'nocturne',
+  animate_others_rolls INTEGER NOT NULL DEFAULT 1,
+  can_create_campaigns INTEGER NOT NULL DEFAULT 0,
+  color_vision_assist INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -948,6 +951,21 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Issue #851 — the safe request/approval flow for a restricted campaign-creation
+-- policy. Mirrors password_reset_requests above: a user files a 'pending' row, an
+-- admin approves or denies it (approving flips users.can_create_campaigns to 1).
+CREATE TABLE IF NOT EXISTS campaign_creation_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  note TEXT NOT NULL DEFAULT '',
+  requested_at TEXT NOT NULL,
+  decided_at TEXT,
+  decided_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_creation_requests_user
+  ON campaign_creation_requests(user_id, status);
 
 -- Single-row install-identity table (issue #723): the per-install UUID
 -- (stable across backup/restore — it lives INSIDE the restored DB) and a
@@ -1804,7 +1822,9 @@ CREATE TABLE IF NOT EXISTS combatants (
   active_effects TEXT,
   condition_instances TEXT,
   -- Issue #425: inline homebrew statblock JSON for manual monsters.
-  statblock_json TEXT
+  statblock_json TEXT,
+  -- Issue #1926: DM-controlled reveal of this combatant's statblock to non-DM viewers.
+  statblock_revealed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS combatant_removal_undos (
