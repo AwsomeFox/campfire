@@ -226,6 +226,71 @@ export class CampaignGovernanceService {
   }
 
   /**
+   * Reactivation-only variant of {@link enforceTx}, for the two lifecycle transitions that flip
+   * an EXISTING campaign back into 'active' outside the create/import/clone insert paths —
+   * un-pausing via CampaignsService.update() and CampaignsService.restore() (issue #2016, split
+   * out of the #851 review, which named the revival counters as an open design question). This
+   * is deliberately NOT `enforceTx` with a flag:
+   *
+   *  - The POLICY tiers (admins_only/approved_organizers) never apply — assertPolicyAllowed gates
+   *    who may bring a NEW campaign into existence; a dm role is already required at the
+   *    controller/MCP layer to operate an existing one, and that is the relevant gate here.
+   *  - Only the ACTIVE ceiling is checked, never TOTAL. Both `countOwnedCampaigns(..., 'total')`
+   *    and `countAllCampaigns(..., 'total')` count every non-trashed row regardless of status —
+   *    a paused/completed campaign already sits inside that count, and un-pausing it changes
+   *    nothing there. Checking TOTAL again here would refuse a transition that consumes no new
+   *    total slot; the slot was already spent at creation.
+   *
+   * Callers MUST call this as the first statement inside the SAME synchronous transaction that
+   * flips the row to 'active' (update) or clears deletedAt while the stored status is already
+   * 'active' (restore) — same race-free requirement as {@link enforceTx} and for the same reason:
+   * two concurrent reactivations of two different at-the-ceiling-owner's campaigns must not both
+   * slip past this check before either commits.
+   *
+   * `ownerUserId` is the CAMPAIGN's own primaryOwner (see {@link getOwnerUserId}), not necessarily
+   * the caller — a co-DM may un-pause or restore a campaign owned by someone else, and the
+   * per-user ceiling is keyed to the campaign's owner, exactly as it is on create.
+   */
+  enforceActiveLimitTx(tx: SyncDb, ctx: CampaignGovernanceContext, ownerUserId: number | null): void {
+    if (ctx.bypass) return;
+    if (ownerUserId != null && ctx.limits.activePerUser != null) {
+      const used = this.countOwnedCampaigns(tx, ownerUserId, 'active');
+      if (used >= ctx.limits.activePerUser) {
+        throw new CampaignGovernanceDeniedError(
+          'limit_active_per_user',
+          `This campaign's owner already has ${used} active campaign(s); this server allows at most ${ctx.limits.activePerUser} per user.`,
+        );
+      }
+    }
+    if (ctx.limits.activeServerWide != null) {
+      const used = this.countAllCampaigns(tx, 'active');
+      if (used >= ctx.limits.activeServerWide) {
+        throw new CampaignGovernanceDeniedError(
+          'limit_active_server_wide',
+          `This server already has ${used} active campaign(s), its configured limit.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * The campaign's primaryOwner userId, or null when it has none — a dev/header-auth
+   * principal's create() call skips `addCreatorAsDmTx` entirely (no account to meter), so a
+   * campaign it created never carries a primaryOwner row and is correctly exempt from the
+   * per-user ceiling here too, matching create()'s own bypass. Callable with either the
+   * top-level db handle or a live transaction's `tx`.
+   */
+  getOwnerUserId(db: SyncDb, campaignId: number): number | null {
+    const row = db
+      .select({ userId: campaignMembers.userId })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.primaryOwner, true)))
+      .limit(1)
+      .get();
+    return row?.userId ?? null;
+  }
+
+  /**
    * "active" = status='active' non-trashed campaigns owned (campaignMembers.primaryOwner)
    * by `userId`; "total" = every non-trashed campaign owned (active + paused + completed).
    * Callable with either the top-level db handle or a live transaction's `tx` — both

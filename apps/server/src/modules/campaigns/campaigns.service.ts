@@ -916,6 +916,75 @@ export class CampaignsService {
       }
     }
 
+    const reactivating = existing.status !== 'active' && input.status === 'active';
+
+    // Issue #2016 (split from the #851 review): un-pausing an existing campaign back to
+    // 'active' raises the counted ACTIVE total exactly like a fresh create does, but it never
+    // passed through any governance check — only create/importCampaign/clone did. This has to
+    // run BEFORE the metadata-write logic below rather than fold into it: the archived-campaign
+    // read-only rule above already guarantees `input` carries nothing but `status` whenever
+    // `existing.status !== 'active'` (extraKeys was rejected otherwise), so a reactivation
+    // payload never touches ruleSystem/mapAttachmentId/pins/invites, and this can be a
+    // self-contained atomic status flip.
+    if (reactivating) {
+      const govCtx = await this.governance.resolveContext(user);
+      const ts = nowIso();
+      let updatedRow: typeof campaigns.$inferSelect | undefined;
+      try {
+        updatedRow = this.db.transaction((tx) => {
+          // Re-read status inside the transaction rather than trusting `existing` (fetched
+          // outside it, before this transaction reserved the writer slot): under
+          // `{ behavior: 'immediate' }` a concurrent reactivation of the SAME campaign may
+          // already have committed by the time this callback runs. If so, the row is already
+          // active and this request changes nothing — skip the ceiling check rather than
+          // falsely deny a no-op racing against its own prior success.
+          const current = tx.select({ status: campaigns.status }).from(campaigns).where(eq(campaigns.id, id)).limit(1).get();
+          if (!current) throw new NotFoundException(`Campaign ${id} not found`);
+          if (current.status !== 'active') {
+            // Issue #2016: the authoritative, race-free ACTIVE-only ceiling check — first
+            // statement that can deny, atomic with the status write below. Keyed to the
+            // CAMPAIGN's own owner, not the acting DM (see enforceActiveLimitTx's doc) — a
+            // co-DM may un-pause a campaign owned by someone else.
+            const ownerUserId = this.governance.getOwnerUserId(tx, id);
+            this.governance.enforceActiveLimitTx(tx, govCtx, ownerUserId);
+          }
+          const row = tx.update(campaigns).set({ status: 'active', updatedAt: ts }).where(eq(campaigns.id, id)).returning().get();
+          if (!row) throw new NotFoundException(`Campaign ${id} not found`);
+          return row;
+        }, { behavior: 'immediate' });
+      } catch (err) {
+        if (err instanceof CampaignGovernanceDeniedError) {
+          // Best-effort, outside the rolled-back transaction — see create()'s identical catch
+          // for why a bare `await this.audit.log(...)` here would risk turning an expected
+          // 403-with-a-reason into a 500 with none.
+          await auditBestEffort(
+            this.audit,
+            this.logger,
+            {
+              actor: auditActor(user),
+              actorRole: auditActorRole(user),
+              action: 'campaign.update.denied',
+              entityType: 'campaign',
+              entityId: id,
+              campaignId: id,
+              detail: `reason=${err.code}`,
+            },
+            (e) => `audit campaign.update.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+        throw err;
+      }
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.update',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+      });
+      return toDomain(updatedRow);
+    }
+
     const archiving =
       existing.status === 'active' && input.status !== undefined && input.status !== 'active';
 
@@ -3964,14 +4033,66 @@ export class CampaignsService {
    *
    * Issue #867: the UPDATE is predicated on `deleted_at IS NOT NULL` so a concurrent
    * purge that commits first leaves restore as 404 (never resurrects a wiped row).
+   *
+   * Issue #2016 (split from the #851 review): a trashed row is excluded from BOTH the
+   * active and total counts (see CampaignGovernanceService's doc), so restoring one that
+   * was ACTIVE when it was trashed raises the active total exactly like un-pausing does,
+   * with no check at all. A trashed row that was paused/completed does not re-enter the
+   * active count on restore, so it needs no check here — only ACTIVE-at-trash-time matters.
    */
   async restore(id: number, user: RequestUser): Promise<Campaign> {
-    const [row] = await this.db
-      .update(campaigns)
-      .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(and(eq(campaigns.id, id), isNotNull(campaigns.deletedAt)))
-      .returning();
-    if (!row) throw new NotFoundException(`Campaign ${id} is not in the trash`);
+    const govCtx = await this.governance.resolveContext(user);
+    let row: typeof campaigns.$inferSelect | undefined;
+    try {
+      row = this.db.transaction((tx) => {
+        const existing = tx
+          .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1)
+          .get();
+        if (!existing || existing.deletedAt == null) {
+          throw new NotFoundException(`Campaign ${id} is not in the trash`);
+        }
+        if (existing.status === 'active') {
+          // Issue #2016: the authoritative, race-free ACTIVE-only ceiling check — first
+          // statement that can deny, atomic with clearing deletedAt below. Keyed to the
+          // CAMPAIGN's own owner, not the acting DM (a co-DM may restore a campaign owned
+          // by someone else) — see enforceActiveLimitTx's doc.
+          const ownerUserId = this.governance.getOwnerUserId(tx, id);
+          this.governance.enforceActiveLimitTx(tx, govCtx, ownerUserId);
+        }
+        const updated = tx
+          .update(campaigns)
+          .set({ deletedAt: null, updatedAt: nowIso() })
+          .where(and(eq(campaigns.id, id), isNotNull(campaigns.deletedAt)))
+          .returning()
+          .get();
+        if (!updated) throw new NotFoundException(`Campaign ${id} is not in the trash`);
+        return updated;
+      }, { behavior: 'immediate' });
+    } catch (err) {
+      if (err instanceof CampaignGovernanceDeniedError) {
+        // Best-effort, outside the rolled-back transaction — see create()'s identical catch
+        // for why a bare `await this.audit.log(...)` here would risk turning an expected
+        // 403-with-a-reason into a 500 with none.
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            actor: auditActor(user),
+            actorRole: auditActorRole(user),
+            action: 'campaign.restore.denied',
+            entityType: 'campaign',
+            entityId: id,
+            campaignId: id,
+            detail: `reason=${err.code}`,
+          },
+          (e) => `audit campaign.restore.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      throw err;
+    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',

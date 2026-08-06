@@ -261,6 +261,92 @@ describe('CampaignGovernanceService (issue #851)', () => {
     });
   });
 
+  describe('reactivation-only ceiling (issue #2016) — enforceActiveLimitTx / getOwnerUserId', () => {
+    it('blocks when the campaign owner is already at the active ceiling', async () => {
+      const uid = await makeUser('reactuser1');
+      await seedOwnedCampaign(uid, 'active');
+      await settings.update({ maxActiveCampaignsPerUser: 1 });
+      const ctx = await governance.resolveContext(userActor(uid));
+      expect(() => db.transaction((tx) => governance.enforceActiveLimitTx(tx, ctx, uid))).toThrow(
+        CampaignGovernanceDeniedError,
+      );
+      try {
+        db.transaction((tx) => governance.enforceActiveLimitTx(tx, ctx, uid));
+      } catch (err) {
+        expect((err as CampaignGovernanceDeniedError).code).toBe('limit_active_per_user');
+      }
+    });
+
+    it('never checks the TOTAL ceiling — an owner at the total cap is unaffected', async () => {
+      const uid = await makeUser('reactuser2');
+      await seedOwnedCampaign(uid, 'active');
+      await seedOwnedCampaign(uid, 'paused');
+      // Total is exactly 2, at the configured ceiling below — enforceTx (create) would deny
+      // this owner a new campaign; enforceActiveLimitTx must not, because reactivating one of
+      // these two never spends a new TOTAL slot (issue #2016 hard requirement).
+      await settings.update({ maxTotalCampaignsPerUser: 2 });
+      const ctx = await governance.resolveContext(userActor(uid));
+      expect(() => db.transaction((tx) => governance.enforceActiveLimitTx(tx, ctx, uid))).not.toThrow();
+    });
+
+    it("is keyed to the CAMPAIGN's owner, not the acting caller", async () => {
+      const owner = await makeUser('reactowner1');
+      const coDm = await makeUser('reactcodm1');
+      await seedOwnedCampaign(owner, 'active');
+      await settings.update({ maxActiveCampaignsPerUser: 1 });
+      // coDm is the ACTOR whose context is resolved, but the ceiling must be checked against
+      // the campaign's actual owner — a co-DM un-pausing/restoring someone else's campaign is
+      // gated by THAT owner's count, not their own (which is zero here).
+      const ctx = await governance.resolveContext(userActor(coDm));
+      expect(() => db.transaction((tx) => governance.enforceActiveLimitTx(tx, ctx, owner))).toThrow(
+        CampaignGovernanceDeniedError,
+      );
+      // The same co-DM actor does NOT get blocked reactivating a campaign owned by someone
+      // who is under their own ceiling.
+      const underCeilingOwner = await makeUser('reactowner2');
+      expect(() => db.transaction((tx) => governance.enforceActiveLimitTx(tx, ctx, underCeilingOwner))).not.toThrow();
+    });
+
+    it('dev-auth principals bypass the reactivation check entirely, same as create', async () => {
+      // Seed the server-wide ceiling already full (limit 1, one active campaign already
+      // exists) — without the bypass this would deny; a bare `not.toThrow()` at limit=1 with
+      // zero seeded campaigns would pass either way and prove nothing.
+      const someoneElse = await makeUser('reactdevother1');
+      await seedOwnedCampaign(someoneElse, 'active');
+      await settings.update({ maxActiveCampaignsPerUser: 1, maxActiveCampaignsServerWide: 1 });
+      const ctx = await governance.resolveContext({ id: 'dev:tester2016', name: 'Dev', serverRole: 'user', devRole: 'dm' });
+      expect(ctx.bypass).toBe(true);
+      expect(() => db.transaction((tx) => governance.enforceActiveLimitTx(tx, ctx, null))).not.toThrow();
+    });
+
+    it('a null ownerUserId (no primaryOwner row) skips the per-user check, but the server-wide ceiling still applies', async () => {
+      const owner = await makeUser('reactserverowner1');
+      await seedOwnedCampaign(owner, 'active');
+      await settings.update({ maxActiveCampaignsServerWide: 1 });
+      const ctx = await governance.resolveContext(userActor(owner));
+      // null is exactly what getOwnerUserId returns for a dev-created campaign with no
+      // primaryOwner row — the per-user branch must be skipped, but the server-wide count
+      // still includes every active campaign regardless of ownership.
+      expect(() => db.transaction((tx) => governance.enforceActiveLimitTx(tx, ctx, null))).toThrow(
+        CampaignGovernanceDeniedError,
+      );
+      try {
+        db.transaction((tx) => governance.enforceActiveLimitTx(tx, ctx, null));
+      } catch (err) {
+        expect((err as CampaignGovernanceDeniedError).code).toBe('limit_active_server_wide');
+      }
+    });
+
+    it("getOwnerUserId returns the primaryOwner's id, or null when the campaign has none", async () => {
+      const owner = await makeUser('getowner1');
+      const campaignId = await seedOwnedCampaign(owner, 'active');
+      expect(governance.getOwnerUserId(db, campaignId)).toBe(owner);
+
+      const orphanId = await seedCampaign('active');
+      expect(governance.getOwnerUserId(db, orphanId)).toBeNull();
+    });
+  });
+
   describe('effective allowance (GET /campaigns/allowance)', () => {
     it('reports canCreate=true and correct used/max counters when under every limit', async () => {
       const uid = await makeUser('allowanceok');

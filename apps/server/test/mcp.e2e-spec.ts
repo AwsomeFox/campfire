@@ -3373,6 +3373,50 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(after.isError).toBeFalsy();
   });
 
+  it('#2016: update_campaign_status un-pausing back to active is denied over MCP once the active-per-user ceiling is full, matching REST', async () => {
+    // dmAgent (mcp-dm) already owns one active campaign from beforeAll ("MCP Campaign") — a
+    // ceiling of 1 is already fully consumed by it, so reactivating a SECOND owned campaign
+    // must be refused without ever creating a third.
+    const paused = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Reactivation Ceiling' });
+    const pausedId = paused.body.id as number;
+    expect((await dmAgent.patch(`/api/v1/campaigns/${pausedId}`).send({ status: 'paused' })).status).toBe(200);
+
+    await dmAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: 1 });
+    try {
+      const client = await mcpClient(dmToken);
+      const denied = await client.callTool({
+        name: 'update_campaign_status',
+        arguments: { campaignId: pausedId, status: 'active' },
+      });
+      expect(denied.isError).toBe(true);
+      const parsed = parseResult(denied) as { error: { status: number; code: string } };
+      expect(parsed.error.status).toBe(403);
+      expect(parsed.error.code).toBe('limit_active_per_user');
+
+      // Same underlying service method reached through REST — proves this is not an
+      // MCP-only gap (AGENTS.md: REST/MCP parity for a shared capability).
+      const restDenied = await dmAgent.patch(`/api/v1/campaigns/${pausedId}`).send({ status: 'active' });
+      expect(restDenied.status).toBe(403);
+      expect(restDenied.body.code).toBe('limit_active_per_user');
+    } finally {
+      await dmAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: null });
+    }
+  });
+
+  // NOTE (issue #2016): there is no MCP-level `restore_campaign` reactivation-ceiling test
+  // here, deliberately. `restore_campaign`'s own access check
+  // (`this.access.requireRole(user, campaignId, 'dm', { allowArchived: true })`) omits
+  // `allowTrashed: true`, so `requireMember` 404s a genuinely trashed campaign before the
+  // tool ever reaches `CampaignsService.restore()` — a pre-existing gap unrelated to this
+  // issue's governance change (confirmed unaffected by this branch: `git diff origin/main --
+  // mcp-tools.ts` is empty). The ceiling fix itself lives entirely in
+  // `CampaignsService.restore()`, which `restore_campaign` and `POST /campaigns/:id/restore`
+  // both call with no divergent logic (see mcp-tools.ts), so REST e2e coverage of `restore()`
+  // in campaign-governance.e2e-spec.ts plus the governance unit tests already prove the fix;
+  // wiring a trashed-campaign MCP call through would only exercise the unrelated access bug.
+  // Filed for separate follow-up rather than expanded here (AGENTS.md: one coherent issue
+  // per PR).
+
   it('request without Authorization gets 401; GET gets 405', async () => {
     const noAuth = await request(ctx.app.getHttpServer())
       .post('/mcp')
