@@ -6582,6 +6582,13 @@ export const User = z.object({
    * the permission on. Ignored under the 'everyone'/'admins_only' policies.
    */
   canCreateCampaigns: z.boolean().default(false),
+  /**
+   * Color-vision-assist mode (issue #1942): adds non-color channels (shape/pattern,
+   * glyphs, chevrons) alongside the existing color-only combat indicators — token
+   * identity, HP danger escalation, current-turn marker, crit/fumble overlay. Off by
+   * default so default-path rendering is unchanged.
+   */
+  colorVisionAssist: z.boolean().default(false),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -6606,6 +6613,7 @@ export const PreferencesUpdate = z.object({
   textSize: TextSize.optional(),
   diceTheme: DiceTheme.optional(),
   timeFormat: TimeFormat.optional(),
+  colorVisionAssist: z.boolean().optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 
@@ -10121,6 +10129,10 @@ export const EncounterSuggestionCombatant = z.object({
   xp: z.number().int().nonnegative(), // per-entry XP (monster or hazard; 5e CR→XP table)
   hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it (null when unknown)
   count: z.number().int().min(1), // how many of this entry (monster or hazard) to add
+  // Issue #1927: 'homebrew' when the entry is the campaign's own homebrew (rule_entries row
+  // with a non-null campaignId), 'pack' for a globally installed compendium entry. Defaults
+  // to 'pack' so payloads persisted before this change still parse.
+  source: z.enum(['pack', 'homebrew']).default('pack'),
 });
 export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
 
@@ -10245,6 +10257,10 @@ export const EncounterRosterSlot = z.object({
   pinned: z.boolean(),
   seed: z.number().int().nonnegative(),
   inspection: EncounterCreatureInspection,
+  // Issue #1927: 'homebrew' for the campaign's own rule_entries row (non-null campaignId),
+  // 'pack' for a globally installed compendium entry. Defaults to 'pack' so payloads
+  // persisted before this change still parse.
+  source: z.enum(['pack', 'homebrew']).default('pack'),
 });
 export type EncounterRosterSlot = z.infer<typeof EncounterRosterSlot>;
 

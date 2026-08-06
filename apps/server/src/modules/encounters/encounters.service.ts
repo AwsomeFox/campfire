@@ -3234,6 +3234,7 @@ export class EncountersService {
   private async loadMonsterCandidates(
     adapter: RuleSystemAdapter,
     filters: EncounterGenerateInput['filters'],
+    campaignId: number,
   ): Promise<GeneratorCandidate[]> {
     // Optional single-pack scoping: resolve the slug to a pack id, or short-circuit to no
     // candidates if the slug isn't installed (mirrors RulesService.search's pack filter).
@@ -3246,8 +3247,22 @@ export class EncountersService {
 
     const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
     const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
-    const where = packId !== undefined ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)) : and(typeWhere, isNull(ruleEntries.campaignId));
-    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
+    // Issue #1927: campaign homebrew (a rule_entries row with a non-null campaignId) is now a
+    // candidate alongside globally installed pack entries, using the same
+    // or(isNull(campaignId), eq(campaignId, ...)) idiom already used at commit/defenses/
+    // difficulty/add-combatant/aftermath — plus isNull(archivedAt) so soft-archived homebrew
+    // never generates. `packSlug` (below) narrows ONLY the global half: homebrew rows always
+    // live under a dedicated internal pack id (RulesService.homebrewPackId()), never under a
+    // real installed pack's id, so an explicit pack filter naturally excludes homebrew without
+    // extra logic — packSlug stays pack-only, unchanged from before this issue.
+    const where =
+      packId !== undefined
+        ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId))
+        : and(typeWhere, or(isNull(ruleEntries.campaignId), and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt))));
+    const rows = await this.db
+      .select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson, campaignId: ruleEntries.campaignId })
+      .from(ruleEntries)
+      .where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
     const envNeedle = filters?.environment?.trim().toLowerCase();
@@ -3284,6 +3299,7 @@ export class EncountersService {
         cr,
         xp: typeof data.xp === 'number' && data.xp > 0 ? data.xp : typeof data.experience === 'number' && data.experience > 0 ? data.experience : crToXp(cr),
         hpMax: adapter.monsterHitPoints(data),
+        source: row.campaignId != null ? 'homebrew' : 'pack',
       });
     }
     return candidates;
@@ -3308,7 +3324,7 @@ export class EncountersService {
     const { ruleSystem, customMechanicsProfile } = await this.ruleSystemForCampaign(campaignId);
     const adapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
-    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters, campaignId);
 
     // Mint a seed when the caller didn't supply one, so the result is reproducible: the
     // returned seed round-trips back through `seed` to rebuild the identical group.
@@ -3336,7 +3352,16 @@ export class EncountersService {
     });
 
     return {
-      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, entryType: p.entryType ?? 'monster', cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
+      combatants: result.picks.map((p) => ({
+        ruleEntryId: p.ruleEntryId,
+        name: p.name,
+        entryType: p.entryType ?? 'monster',
+        cr: p.cr,
+        xp: p.xp,
+        hpMax: p.hpMax,
+        count: p.count,
+        source: p.source ?? 'pack',
+      })),
       targetBand: input.difficulty,
       difficulty: reported,
       // Codex review (#1981): `reported.adjustedXp` is 0 for an `unsupported` status
@@ -3535,7 +3560,7 @@ export class EncountersService {
     const adapter = await this.adapterForCampaign(campaignId);
     const { ruleSystem } = await this.ruleSystemForCampaign(campaignId);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
-    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters, campaignId);
     const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
     const maxCount = input.count ?? 12;
 
@@ -3571,7 +3596,13 @@ export class EncountersService {
     const pickedIds = [...new Set(result.picks.map((p) => p.ruleEntryId))];
     const dataById = new Map<number, Record<string, unknown>>();
     if (pickedIds.length > 0) {
-      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(inArray(ruleEntries.id, pickedIds), isNull(ruleEntries.campaignId)));
+      // Issue #1927: picks may now include the campaign's own homebrew, so this must resolve
+      // statblocks for BOTH scopes (same widen as loadMonsterCandidates above), not just global
+      // pack entries — otherwise a homebrew pick's inspection card would silently come back empty.
+      const rows = await this.db
+        .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+        .from(ruleEntries)
+        .where(and(inArray(ruleEntries.id, pickedIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))));
       for (const r of rows) dataById.set(r.id, fromJsonText<Record<string, unknown>>(r.dataJson, {}));
     }
 
@@ -3594,6 +3625,7 @@ export class EncountersService {
         pinned: slotPlan.pinned,
         seed: slotPlan.seed,
         inspection: this.buildCreatureInspection(adapter, data, cr, xp, hpMax),
+        source: pick?.source ?? 'pack',
       };
     });
 

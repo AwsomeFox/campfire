@@ -19,6 +19,8 @@ interface PlayerVitalsHeaderProps {
    * for, so there is no per-combatant server value to thread through here.
    */
   movementDefault?: number;
+  /** Issue #1942: adds a non-color HP danger glyph alongside the color-only bar tone. */
+  colorVisionAssist?: boolean;
 }
 
 /**
@@ -35,7 +37,7 @@ export function vitalsSpeedFor(combatant: Combatant, movementDefault: number | u
   return movementDefault ?? null;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault }: PlayerVitalsHeaderProps) {
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false }: PlayerVitalsHeaderProps) {
   const { t } = useTranslation('encounters');
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
@@ -116,7 +118,7 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
               )}
               
               <div className="w-32 hidden sm:block">
-                <HpBar current={c.hpCurrent ?? 0} max={c.hpMax ?? 1} />
+                <HpBar current={c.hpCurrent ?? 0} max={c.hpMax ?? 1} colorVisionAssist={colorVisionAssist} />
               </div>
               
               {c.hpTemp != null && c.hpTemp > 0 && (

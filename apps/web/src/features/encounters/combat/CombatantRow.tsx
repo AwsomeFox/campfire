@@ -124,6 +124,11 @@ export type CombatantRowProps = {
   statblock?: ReactNode;
   targeting?: { legal: boolean; selected: boolean; declared: boolean; atCapacity: boolean; onToggle: () => void } | null;
   /**
+   * Color-vision-assist mode (issue #1942): adds a current-turn chevron beside the
+   * accent border/tint, and an HP danger glyph beside the color-only bar tone.
+   */
+  colorVisionAssist?: boolean;
+  /**
    * Issue #1926: a monster/npc just dropped to 0 HP with its statblock still hidden — show
    * the one-tap "reveal to players?" prompt on this (DM) row. Never shown for a non-DM;
    * the parent derives this from `shouldShowKillPrompt` + its own per-session dismissed set.
@@ -179,6 +184,7 @@ export function CombatantRow({
   onDuplicate,
   onRemove,
   targeting = null,
+  colorVisionAssist = false,
   showKillPrompt = false,
   onDismissKillPrompt,
 }: CombatantRowProps) {
@@ -524,6 +530,15 @@ export function CombatantRow({
           </div>
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+            {colorVisionAssist && isCurrentTurn && (
+              <span
+                data-testid={`combatant-row-turn-chevron-${combatant.id}`}
+                aria-hidden="true"
+                style={{ color: 'var(--color-accent)', fontSize: 12 }}
+              >
+                ▸
+              </span>
+            )}
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
               {down && <GameIcon slug="death-skull" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1.5" />}
               {combatant.name}
@@ -1301,7 +1316,7 @@ export function CombatantRow({
                   {hpDisplay(combatant)}
                 </span>
               </div>
-              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
+              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} colorVisionAssist={colorVisionAssist} />
             </div>
             {/* RP (Resolve Points) indicator for Starfinder */}
             {combatant.rpMax != null && combatant.rpMax > 0 && (

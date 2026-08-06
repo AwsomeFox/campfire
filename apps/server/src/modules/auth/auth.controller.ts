@@ -244,6 +244,7 @@ export class MeController {
           // can create — not because true is a safe default anywhere else. The column and
           // the shared contract both default FALSE.
           canCreateCampaigns: true,
+          colorVisionAssist: false,
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },

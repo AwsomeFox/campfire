@@ -233,7 +233,8 @@
       "none": "— none —",
       "noStatblock": "No statblock detail — HP/CR may be incomplete.",
       "heuristicDifficultyBadge": "Target band: heuristic",
-      "heuristicDifficultyHint": "Target band sized by D&D 5e's XP budget — this rule system has no difficulty math of its own."
+      "heuristicDifficultyHint": "Target band sized by D&D 5e's XP budget — this rule system has no difficulty math of its own.",
+      "homebrewBadge": "Homebrew"
     },
     "duplicate": "Duplicate",
     "duplicateCombatant": "Duplicate {{name}}",
