@@ -496,4 +496,25 @@ describe('EncountersService unit coverage tests', () => {
       ),
     ).rejects.toThrow(/not found/i);
   });
+
+  // Devin review of #1990: `eac`/`kac` are the only writable combatant fields that never
+  // enter `staticUpdate` — they go straight onto `writeSet` inside the transaction. The
+  // no-op early return did not consider them, so an armour-class-only PATCH matched the
+  // "nothing to do" condition and answered 200 having written nothing. Pre-existing, but
+  // it lives in the exact block this PR touches.
+  it('persists a DM patch that carries only eac/kac instead of silently no-opping', async () => {
+    const enc = await encountersService.create(campaignId, { name: 'AC Only Patch', hidden: false }, dmActor, 'dm');
+    const goblin = await encountersService.addCombatant(enc.id, { name: 'Goblin', kind: 'monster', hpMax: 10 }, dmActor, 'dm');
+
+    const patched = await encountersService.updateCombatant(enc.id, goblin.id, { eac: 12, kac: 14 }, dmActor, 'dm');
+    expect(patched.eac).toBe(12);
+    expect(patched.kac).toBe(14);
+
+    // Assert what was STORED, not just the returned projection — the defect was that the
+    // response looked correct while nothing had been written.
+    const reread = await encountersService.getWithCombatantsOrThrow(enc.id, 'dm');
+    const stored = reread.combatants.find((c) => c.id === goblin.id)!;
+    expect(stored.eac).toBe(12);
+    expect(stored.kac).toBe(14);
+  });
 });
