@@ -255,6 +255,11 @@ export const PUBLISHABLE_FIELDS = {
     'id', 'campaignId', 'name', 'locationId', 'questId', 'sessionId', 'mapAttachmentId',
     'gridSize', 'gridScale', 'gridUnit', 'gridSnap', 'gridType', 'hexOrientation', 'aoe',
     'gridOffsetX', 'gridOffsetY', 'gridCellHeight', 'gridRotation', 'gridOpacity', 'combatants',
+    // Monster-HP display dial (issue #1925): a presentation preference for the fight, the
+    // same always-carried category as gridType/gridOpacity above — it reveals nothing about
+    // encounter content by itself (unlike `hidden`, gated below in DM_SECRET_FIELDS), so it
+    // travels with every profile rather than requiring includeDmSecrets.
+    'monsterHpDisplay',
   ],
   combatant: [
     // Issue #1910 review: the add-time speed snapshot follows the same
