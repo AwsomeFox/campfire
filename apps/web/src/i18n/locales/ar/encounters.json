@@ -4,7 +4,22 @@
     "vitals": {
       "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
       "maxHp": "الحد الأقصى لنقاط الحياة",
-      "setMax": "تعيين الحد الأقصى"
+      "setMax": "تعيين الحد الأقصى",
+      "deathSaves": "رميات الموت",
+      "dyingStrip": "أنت تحتضر — {{successes}} نجاحات / {{failures}} إخفاقات",
+      "rollDeathSave": "ارمِ نرد الموت"
+    },
+    "deathSave": {
+      "outcome": {
+        "revive": "٢٠ طبيعي — عدت إلى قدميك!",
+        "dead": "توفي.",
+        "stabilized": "استقرت حالته.",
+        "success": "نجاح (بنتيجة {{natural}}).",
+        "failure": "إخفاق (بنتيجة {{natural}})."
+      },
+      "spectatorToast": "{{name}} - رمية موت: {{outcome}} (بنتيجة {{natural}})",
+      "spectatorOutcomeSuccess": "نجاح",
+      "spectatorOutcomeFailure": "إخفاق"
     },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",

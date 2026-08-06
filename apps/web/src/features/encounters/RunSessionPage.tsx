@@ -9,6 +9,7 @@ import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
 import { GatedControl } from '../../components/GatedControl';
 import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
+import { classifyDeathSaveOutcome, deathSaveSpectatorToastInfo, type DeathSaveOutcome } from './combat/deathSaveOutcome';
 import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -1553,6 +1554,13 @@ export default function RunSessionPage() {
         // `sheetMirrored`, so this only piggybacks the invalidation when it's actually
         // needed.
         if (event.sheetMirrored) invalidateCampaignCharactersForOwnership();
+        // Issue #1919 — a death-save roll (like any other combatant write) emits only
+        // `encounter.updated`; the persisted combat-log/dice-log event it also wrote would
+        // otherwise wait for the events feed's own 5s backstop poll before another viewer's
+        // spectator toast (and CombatLog highlight) could appear. Piggybacking this cheap
+        // refetch on the SAME frame that already invalidates the encounter itself is enough
+        // to satisfy "after the encounter.updated-driven refetch (or within one poll cycle)".
+        void queryClient.invalidateQueries({ queryKey: queryKeys.encounterEvents(eid) });
       },
       [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
     ),
@@ -1585,6 +1593,20 @@ export default function RunSessionPage() {
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
+  // Issue #1919 — the roller's own settled death-save outcome (nat 20 revive / fresh
+  // death / fresh stabilization / plain success-or-failure), fed to the ONE combatant's
+  // tracker whose roll it belongs to. `deathSaveBeforeStateRef` captures the pre-roll
+  // deathState at the roll mutation's `onMutate` time (the classifier needs a before/after
+  // pair; the server response only carries "after"). `recentDeathSaveSelfRollRef` marks
+  // this client as the one that just rolled for a combatant, briefly, so the spectator-
+  // toast diff below (which reads the same persisted event this roll produces) does not
+  // also toast the roller their own roll a second time.
+  const deathSaveBeforeStateRef = useRef(new Map<number, string>());
+  const recentDeathSaveSelfRollRef = useRef(new Map<number, number>());
+  const [deathSaveOutcome, setDeathSaveOutcome] = useState<{ combatantId: number; outcome: DeathSaveOutcome } | null>(null);
+  const deathSaveOutcomeTimerRef = useRef<number | null>(null);
+  const DEATH_SAVE_SELF_ROLL_WINDOW_MS = 8_000;
+
   // The persisted event stream is the single announcement source for turn, HP,
   // condition, death, note, override, and correction updates. ID-based tracking
   // suppresses duplicate SSE/mutation/poll refetches; initial history is a silent
@@ -1593,6 +1615,14 @@ export default function RunSessionPage() {
     encounterId: number;
     cursor: CombatLogAnnouncementCursor;
   } | null>(null);
+  // Issue #1919 — "table side": a compact toast for anyone OTHER than the roller when a
+  // death-save roll appears in the same already role-projected event feed CombatLog reads
+  // (never a new SSE type or a raw dice-log read — see `deathSaveOutcome.ts`'s doc comment).
+  // `recentDeathSaveSelfRollRef` (set at the roll mutation's `onMutate`) suppresses the
+  // roller's OWN roll here, since that client already got the full dice-overlay treatment.
+  const deathSaveSpectatorToastSequence = useRef(0);
+  const [deathSaveSpectatorToast, setDeathSaveSpectatorToast] = useState<{ id: number; message: string } | null>(null);
+  const deathSaveSpectatorToastTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!eventsQuery.data) return;
 
@@ -1613,7 +1643,42 @@ export default function RunSessionPage() {
         dedupeKey: `combat-log:${eid}:${appended.length}:${firstId}:${lastId}`,
       });
     }
-  }, [eid, eventsQuery.data, announce]);
+
+    // A null cursor is the initial-history baseline (same rule as the SR announcement
+    // above) — a page freshly opened mid-encounter must not toast every past roll.
+    if (!cursor) return;
+    const now = Date.now();
+    for (const event of advanced.appendedEvents) {
+      // Issue #1919 secrecy boundary: `deathSaveSpectatorToastInfo` reads ONLY the
+      // already role-projected `event.target`/`detail` — the same fields CombatLog
+      // renders for every viewer via the server's `redactEncounterEventsForViewer`
+      // (issue #869). A hidden combatant's name arrives already masked to the
+      // "Unknown combatant" placeholder (never null); this never does its own lookup
+      // that could bypass that redaction. See `deathSaveOutcome.unit.spec.ts` for the
+      // pinned regression.
+      const info = deathSaveSpectatorToastInfo(event);
+      if (!info) continue;
+      const selfRolledAt = event.targetId != null ? recentDeathSaveSelfRollRef.current.get(event.targetId) : undefined;
+      if (selfRolledAt != null) {
+        if (event.targetId != null) recentDeathSaveSelfRollRef.current.delete(event.targetId);
+        if (now - selfRolledAt < DEATH_SAVE_SELF_ROLL_WINDOW_MS) continue;
+      }
+      const outcomeWord = info.outcomeKind === 'success'
+        ? t('encounters.deathSave.spectatorOutcomeSuccess', 'success')
+        : t('encounters.deathSave.spectatorOutcomeFailure', 'failure');
+      const toastMessage = t(
+        'encounters.deathSave.spectatorToast',
+        '{{name}} death save: {{outcome}} (rolled {{natural}})',
+        { name: info.name, outcome: outcomeWord, natural: info.natural },
+      );
+      if (deathSaveSpectatorToastTimerRef.current != null) window.clearTimeout(deathSaveSpectatorToastTimerRef.current);
+      const toastId = ++deathSaveSpectatorToastSequence.current;
+      setDeathSaveSpectatorToast({ id: toastId, message: toastMessage });
+      deathSaveSpectatorToastTimerRef.current = window.setTimeout(() => {
+        setDeathSaveSpectatorToast((current) => (current?.id === toastId ? null : current));
+      }, 4_000);
+    }
+  }, [eid, eventsQuery.data, announce, t]);
 
   // Ending an encounter does not currently append a combat-log row. Retain that
   // useful status announcement without restoring the old turn/HP diff path, which
@@ -2292,17 +2357,36 @@ export default function RunSessionPage() {
 
   const deathSaveRoll = useKeyedMutation({
     mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
-      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
+      api.post<{ combatant: Combatant; roll: DiceRoll }>(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
+      const before = encounter?.combatants.find((candidate) => candidate.id === combatantId);
+      deathSaveBeforeStateRef.current.set(combatantId, before?.deathState ?? 'dying');
+      recentDeathSaveSelfRollRef.current.set(combatantId, Date.now());
+      // Issue #1919 — no client-supplied die face: this only starts the shared tumble
+      // animation. The face it settles on always comes from `showRoll(data.roll)` below.
+      beginRollAnimation('1d20');
+    },
+    onSuccess: (data) => {
+      showRoll(data.roll);
+      const before = deathSaveBeforeStateRef.current.get(data.combatant.id) ?? 'dying';
+      const outcome: DeathSaveOutcome = {
+        natural: data.roll.total,
+        kind: classifyDeathSaveOutcome(data.roll.total, before, data.combatant.deathState),
+      };
+      if (deathSaveOutcomeTimerRef.current != null) window.clearTimeout(deathSaveOutcomeTimerRef.current);
+      setDeathSaveOutcome({ combatantId: data.combatant.id, outcome });
+      deathSaveOutcomeTimerRef.current = window.setTimeout(() => setDeathSaveOutcome(null), 2_600);
     },
     onError: (err) => {
+      cancelRollAnimation();
       if (isAmbiguousOutcome(err)) enterReconciling();
       else reportError(err);
     },
     onSettled: (_data, _err, { combatantId }) => {
       markCombatantPending(combatantId, false);
+      deathSaveBeforeStateRef.current.delete(combatantId);
       invalidateEncounter(queryClient, eid);
     },
   });
@@ -3671,6 +3755,10 @@ export default function RunSessionPage() {
             if (reconcileBlocks) return;
             patchCombatant(id, { hpMax: max });
           }}
+          onRollDeathSave={(id) => rollDeathSave({ id })}
+          isDeathSaveBusy={(id) => pendingCombatantIds.has(id) || reconcileBlocks}
+          syncBlocked={riskyBlocked}
+          deathSaveOutcome={deathSaveOutcome}
         />
       )}
 
@@ -3809,6 +3897,13 @@ export default function RunSessionPage() {
             : turnWorkspace?.current?.combatantId === currentCombatantId
               && turnWorkspace?.isYourTurn === true)}
       />
+      {/* Issue #1919 "table side": visible-only, same convention as TurnChangeBeat above —
+          the combat-log Announcer already covers this exact roll for every viewer via SR. */}
+      {deathSaveSpectatorToast && (
+        <div key={deathSaveSpectatorToast.id} className="cf-death-save-spectator-toast" data-testid="death-save-spectator-toast">
+          {deathSaveSpectatorToast.message}
+        </div>
+      )}
 
       {pendingApply && (
         <ApplyDamageBar
@@ -4118,6 +4213,7 @@ export default function RunSessionPage() {
                   onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
                   onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
                   onRollDeathSave={() => rollDeathSave(c)}
+                  deathSaveOutcome={deathSaveOutcome?.combatantId === c.id ? deathSaveOutcome.outcome : null}
                   onRollInitiative={() => rollCombatantInitiative(c)}
                   onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
                   onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
