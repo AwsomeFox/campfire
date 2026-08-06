@@ -275,4 +275,186 @@ describe('shared-instance governance (issue #851, e2e)', () => {
       .attach('file', buffer, { filename: 'export.zip', contentType: 'application/zip' });
     expect(allowed.status).toBe(201);
   });
+
+  /**
+   * Issue #2016 (split from the #851 review): the ceilings above are enforced only on
+   * create/import/clone. Two further lifecycle transitions raise the counted ACTIVE total
+   * without passing through any check at all — un-pausing an existing campaign (PATCH
+   * {status:'active'}) and restoring one from the trash. Both are exercised here through
+   * the real HTTP routes; see test/unit/campaign-governance.spec.ts for the underlying
+   * enforceActiveLimitTx/getOwnerUserId unit coverage.
+   */
+  describe('reactivation ceilings (issue #2016)', () => {
+    it('PATCH un-pause (status back to active) is denied once the active-per-user ceiling is full', async () => {
+      await adminAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: 1 });
+      const user = await createUser('reactivateuser1');
+
+      const a = await user.post('/api/v1/campaigns').send({ name: 'A' });
+      expect(a.status).toBe(201);
+      // Pause A to free the one active slot for B — un-pausing never needs a check.
+      expect((await user.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'paused' })).status).toBe(200);
+
+      const b = await user.post('/api/v1/campaigns').send({ name: 'B' });
+      expect(b.status).toBe(201);
+
+      // A is paused, B is active — the ceiling (1) is already full. Un-pausing A would make 2.
+      const denied = await user.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'active' });
+      expect(denied.status).toBe(403);
+      expect(denied.body.code).toBe('limit_active_per_user');
+
+      // Free the slot by pausing B instead, then A's un-pause succeeds.
+      expect((await user.patch(`/api/v1/campaigns/${b.body.id}`).send({ status: 'paused' })).status).toBe(200);
+      const allowed = await user.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'active' });
+      expect(allowed.status).toBe(200);
+      expect(allowed.body.status).toBe('active');
+    });
+
+    it('PATCH un-pause does NOT double-count against the TOTAL ceiling — only ACTIVE applies to reactivation', async () => {
+      await adminAgent.patch('/api/v1/settings').send({ maxTotalCampaignsPerUser: 2 });
+      const user = await createUser('reactivatetotal1');
+
+      const a = await user.post('/api/v1/campaigns').send({ name: 'Total A' });
+      const b = await user.post('/api/v1/campaigns').send({ name: 'Total B' });
+      expect(a.status).toBe(201);
+      expect(b.status).toBe(201);
+      // Total (non-trashed, any status) is now exactly 2 — the configured ceiling.
+      expect((await user.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'paused' })).status).toBe(200);
+
+      // Un-pausing A does not create a new campaign and does not touch the total count (A
+      // was already inside it, paused or not) — if TOTAL were wrongly re-checked here, this
+      // would 403 even though nothing new is being consumed.
+      const reactivated = await user.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'active' });
+      expect(reactivated.status).toBe(200);
+      expect(reactivated.body.status).toBe('active');
+    });
+
+    it('restore is denied when the trashed campaign was ACTIVE and the active-per-user ceiling is full', async () => {
+      await adminAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: 1 });
+      const user = await createUser('restoreactive1');
+
+      const a = await user.post('/api/v1/campaigns').send({ name: 'Restore A' });
+      expect(a.status).toBe(201);
+      // Trash A while it is still active — active/total counts both exclude a trashed row,
+      // so this frees the slot (matching the issue's "excluded entirely" observation).
+      expect((await user.delete(`/api/v1/campaigns/${a.body.id}`)).status).toBe(200);
+
+      const b = await user.post('/api/v1/campaigns').send({ name: 'Restore B' });
+      expect(b.status).toBe(201);
+
+      // A's stored status is still 'active' from before it was trashed — restoring it would
+      // make 2 active campaigns against a ceiling of 1.
+      const denied = await user.post(`/api/v1/campaigns/${a.body.id}/restore`);
+      expect(denied.status).toBe(403);
+      expect(denied.body.code).toBe('limit_active_per_user');
+
+      expect((await user.patch(`/api/v1/campaigns/${b.body.id}`).send({ status: 'paused' })).status).toBe(200);
+      const allowed = await user.post(`/api/v1/campaigns/${a.body.id}/restore`);
+      expect(allowed.status).toBe(201);
+    });
+
+    it('restore is NOT blocked by the active ceiling when the trashed campaign was already paused/completed', async () => {
+      await adminAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: 1 });
+      const user = await createUser('restorepaused1');
+
+      const a = await user.post('/api/v1/campaigns').send({ name: 'Paused Restore A' });
+      expect(a.status).toBe(201);
+      expect((await user.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'paused' })).status).toBe(200);
+      expect((await user.delete(`/api/v1/campaigns/${a.body.id}`)).status).toBe(200);
+
+      const b = await user.post('/api/v1/campaigns').send({ name: 'Paused Restore B' });
+      expect(b.status).toBe(201);
+      // The ceiling (1) is now full via B alone. A was PAUSED when trashed, so restoring it
+      // brings back a paused row — the active count does not change, and this must succeed.
+      const allowed = await user.post(`/api/v1/campaigns/${a.body.id}/restore`);
+      expect(allowed.status).toBe(201);
+      expect(allowed.body.status).toBe('paused');
+    });
+
+    it('server-wide ACTIVE ceiling blocks un-pausing even when the caller\'s OWN per-user count is zero', async () => {
+      // Other tests in this suite share one app/db and may leave their own active campaigns
+      // behind, so anchor the ceiling to whatever is ALREADY active rather than a bare 1.
+      const baseline = ((await adminAgent.get('/api/v1/campaigns/allowance')).body as {
+        activeServerWide: { used: number };
+      }).activeServerWide.used;
+      await adminAgent.patch('/api/v1/settings').send({ maxActiveCampaignsServerWide: baseline + 1 });
+      const owner1 = await createUser('serverreactivate1');
+      const owner2 = await createUser('serverreactivate2');
+
+      const a = await owner1.post('/api/v1/campaigns').send({ name: 'Owner1 Campaign' });
+      expect(a.status).toBe(201); // baseline+1 — exactly at the ceiling
+      expect((await owner1.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'paused' })).status).toBe(200);
+
+      const b = await owner2.post('/api/v1/campaigns').send({ name: 'Owner2 Campaign' });
+      expect(b.status).toBe(201); // back to baseline+1 — A's pause freed the slot B just took
+
+      // owner1 owns zero ACTIVE campaigns right now, but the server-wide ceiling is already
+      // spent again by owner2's B.
+      const denied = await owner1.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'active' });
+      expect(denied.status).toBe(403);
+      expect(denied.body.code).toBe('limit_active_server_wide');
+    });
+
+    it('server-wide ACTIVE ceiling blocks restoring an active-when-trashed campaign for the same reason', async () => {
+      const baseline = ((await adminAgent.get('/api/v1/campaigns/allowance')).body as {
+        activeServerWide: { used: number };
+      }).activeServerWide.used;
+      await adminAgent.patch('/api/v1/settings').send({ maxActiveCampaignsServerWide: baseline + 1 });
+      const owner1 = await createUser('serverrestore1');
+      const owner2 = await createUser('serverrestore2');
+
+      const a = await owner1.post('/api/v1/campaigns').send({ name: 'Owner1 Restore Campaign' });
+      expect(a.status).toBe(201);
+      expect((await owner1.delete(`/api/v1/campaigns/${a.body.id}`)).status).toBe(200);
+
+      const b = await owner2.post('/api/v1/campaigns').send({ name: 'Owner2 Restore Campaign' });
+      expect(b.status).toBe(201); // baseline+1 again — A's trash freed the slot B just took
+
+      const denied = await owner1.post(`/api/v1/campaigns/${a.body.id}/restore`);
+      expect(denied.status).toBe(403);
+      expect(denied.body.code).toBe('limit_active_server_wide');
+    });
+
+    it('audits a reactivation denial with the real actor identity, for both update and restore', async () => {
+      await adminAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: 1 });
+
+      // update() denial
+      const updateUser = await createUser('reactivateauditupdate1');
+      const a = await updateUser.post('/api/v1/campaigns').send({ name: 'Audit A' });
+      expect((await updateUser.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'paused' })).status).toBe(200);
+      const b = await updateUser.post('/api/v1/campaigns').send({ name: 'Audit B' });
+      expect(b.status).toBe(201);
+      expect((await updateUser.patch(`/api/v1/campaigns/${a.body.id}`).send({ status: 'active' })).status).toBe(403);
+
+      // restore() denial — a separate user so its own create/trash/create sequence doesn't
+      // contend with updateUser's already-full per-user ceiling above.
+      const restoreUser = await createUser('reactivateauditrestore1');
+      const c = await restoreUser.post('/api/v1/campaigns').send({ name: 'Audit C' });
+      expect(c.status).toBe(201);
+      expect((await restoreUser.delete(`/api/v1/campaigns/${c.body.id}`)).status).toBe(200);
+      const d = await restoreUser.post('/api/v1/campaigns').send({ name: 'Audit D' });
+      expect(d.status).toBe(201);
+      expect((await restoreUser.post(`/api/v1/campaigns/${c.body.id}/restore`)).status).toBe(403);
+
+      const db = new Database(path.join(ctx.dataDir, 'campfire.db'), { readonly: true });
+      try {
+        const updateRow = db
+          .prepare(
+            "SELECT actor, actor_role, campaign_id FROM audit_log WHERE action = 'campaign.update.denied' AND campaign_id = ?",
+          )
+          .get(a.body.id) as { actor: string; actor_role: string; campaign_id: number } | undefined;
+        expect(updateRow).toBeDefined();
+        expect(updateRow?.actor_role).toBe('dm');
+
+        const restoreRow = db
+          .prepare(
+            "SELECT actor, actor_role, campaign_id FROM audit_log WHERE action = 'campaign.restore.denied' AND campaign_id = ?",
+          )
+          .get(c.body.id) as { actor: string; actor_role: string; campaign_id: number } | undefined;
+        expect(restoreRow).toBeDefined();
+        expect(restoreRow?.actor_role).toBe('dm');
+      } finally {
+        db.close();
+      }
+    });
+  });
 });

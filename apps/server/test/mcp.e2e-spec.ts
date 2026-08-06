@@ -2882,6 +2882,69 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     );
   });
 
+  // Issue #1926: update_combatant sets the DM-only statblockRevealed flag, and a
+  // player/viewer-scoped get_encounter reflects the same server-enforced redaction
+  // REST uses (both routes share EncountersService.getWithCombatantsOrThrow).
+  it('update_combatant sets statblockRevealed (DM-only); a viewer-scoped get_encounter withholds the statblock until then', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+    const playerTokenRes = await dmAgent
+      .post('/api/v1/tokens')
+      .send({ name: 'mcp-1926-player', scope: 'player', campaignId, writeScope: 'direct' });
+    expect(playerTokenRes.status).toBe(201);
+    const playerClient = await mcpClient(playerTokenRes.body.token);
+
+    const encounter = parseResult(
+      await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Reveal Fight', hidden: false } }),
+    ) as { id: number };
+
+    const added = parseResult(
+      await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId: encounter.id,
+          kind: 'monster',
+          name: 'MCP Troll',
+          hpMax: 20,
+          statblock: { ac: 14, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
+        },
+      }),
+    ) as { id: number };
+
+    const beforeReveal = parseResult(
+      await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: unknown }> };
+    const beforeBoss = beforeReveal.combatants.find((c) => c.id === added.id)!;
+    expect(beforeBoss.statblockRevealed).toBe(false);
+    expect(beforeBoss.statblock).toBeNull();
+    expect(JSON.stringify(beforeBoss)).not.toMatch(/mcp secret notes/);
+
+    const rejected = await playerClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: added.id, statblockRevealed: true },
+    });
+    expect(rejected.isError).toBe(true);
+    const rejectedBody = parseResult(rejected) as { error?: { status?: number; code?: string } };
+    expect(rejectedBody.error?.status).toBe(403);
+    expect(rejectedBody.error?.code).toBe('COMBATANT_FIELD_DM_ONLY');
+
+    const revealed = parseResult(
+      await dmClient.callTool({
+        name: 'update_combatant',
+        arguments: { encounterId: encounter.id, combatantId: added.id, statblockRevealed: true },
+      }),
+    ) as { statblockRevealed: boolean };
+    expect(revealed.statblockRevealed).toBe(true);
+
+    const afterReveal = parseResult(
+      await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number } | null }> };
+    const afterBoss = afterReveal.combatants.find((c) => c.id === added.id)!;
+    expect(afterBoss.statblockRevealed).toBe(true);
+    expect(afterBoss.statblock).not.toBeNull();
+    expect(afterBoss.statblock!.ac).toBe(14);
+  });
+
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {
     const client = await mcpClient(dmToken);
 
@@ -3372,6 +3435,50 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const after = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId: trashedCampaignId } });
     expect(after.isError).toBeFalsy();
   });
+
+  it('#2016: update_campaign_status un-pausing back to active is denied over MCP once the active-per-user ceiling is full, matching REST', async () => {
+    // dmAgent (mcp-dm) already owns one active campaign from beforeAll ("MCP Campaign") — a
+    // ceiling of 1 is already fully consumed by it, so reactivating a SECOND owned campaign
+    // must be refused without ever creating a third.
+    const paused = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Reactivation Ceiling' });
+    const pausedId = paused.body.id as number;
+    expect((await dmAgent.patch(`/api/v1/campaigns/${pausedId}`).send({ status: 'paused' })).status).toBe(200);
+
+    await dmAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: 1 });
+    try {
+      const client = await mcpClient(dmToken);
+      const denied = await client.callTool({
+        name: 'update_campaign_status',
+        arguments: { campaignId: pausedId, status: 'active' },
+      });
+      expect(denied.isError).toBe(true);
+      const parsed = parseResult(denied) as { error: { status: number; code: string } };
+      expect(parsed.error.status).toBe(403);
+      expect(parsed.error.code).toBe('limit_active_per_user');
+
+      // Same underlying service method reached through REST — proves this is not an
+      // MCP-only gap (AGENTS.md: REST/MCP parity for a shared capability).
+      const restDenied = await dmAgent.patch(`/api/v1/campaigns/${pausedId}`).send({ status: 'active' });
+      expect(restDenied.status).toBe(403);
+      expect(restDenied.body.code).toBe('limit_active_per_user');
+    } finally {
+      await dmAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: null });
+    }
+  });
+
+  // NOTE (issue #2016): there is no MCP-level `restore_campaign` reactivation-ceiling test
+  // here, deliberately. `restore_campaign`'s own access check
+  // (`this.access.requireRole(user, campaignId, 'dm', { allowArchived: true })`) omits
+  // `allowTrashed: true`, so `requireMember` 404s a genuinely trashed campaign before the
+  // tool ever reaches `CampaignsService.restore()` — a pre-existing gap unrelated to this
+  // issue's governance change (confirmed unaffected by this branch: `git diff origin/main --
+  // mcp-tools.ts` is empty). The ceiling fix itself lives entirely in
+  // `CampaignsService.restore()`, which `restore_campaign` and `POST /campaigns/:id/restore`
+  // both call with no divergent logic (see mcp-tools.ts), so REST e2e coverage of `restore()`
+  // in campaign-governance.e2e-spec.ts plus the governance unit tests already prove the fix;
+  // wiring a trashed-campaign MCP call through would only exercise the unrelated access bug.
+  // Filed for separate follow-up rather than expanded here (AGENTS.md: one coherent issue
+  // per PR).
 
   it('request without Authorization gets 401; GET gets 405', async () => {
     const noAuth = await request(ctx.app.getHttpServer())

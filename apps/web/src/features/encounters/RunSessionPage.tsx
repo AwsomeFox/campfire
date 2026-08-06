@@ -4,6 +4,7 @@ import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
 import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
+import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
 import { GatedControl } from '../../components/GatedControl';
 import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
@@ -726,6 +727,11 @@ export default function RunSessionPage() {
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
   // optimistic and stay live even while a request is in flight.
   const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  // Issue #1926: combatants for which the DM has resolved (revealed from, or dismissed)
+  // the one-tap kill prompt this session. Client-local only — a page reload resets it,
+  // same as every other transient run-session UI state; the server-persisted
+  // `statblockRevealed` flag itself is the only thing that's actually authoritative.
+  const [dismissedKillPromptIds, setDismissedKillPromptIds] = useState<ReadonlySet<number>>(() => new Set());
   // React state disables the source row after render; the ref closes the same-tick
   // double-click window before that render can happen.
   const pendingDuplicateCombatantIds = useRef(new Set<number>());
@@ -4051,7 +4057,13 @@ export default function RunSessionPage() {
                   canEditPermission={canEditCombatantPermission(c)}
                   syncBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
-                  statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  // Issue #1926: a non-DM viewer mounts the same compendium statblock viewer
+                  // once the DM has revealed this combatant — the ruleEntryId link itself is
+                  // not campaign-secret (unchanged by this issue; see /rules/entries/:id), so
+                  // the server-enforced gate here is `statblockRevealed`, not `isDm`.
+                  statblock={(isDm || c.statblockRevealed) && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  showKillPrompt={isDm && shouldShowKillPrompt(c, dismissedKillPromptIds)}
+                  onDismissKillPrompt={() => setDismissedKillPromptIds((prev) => dismissKillPrompt(prev, c.id))}
                   canRemove={canDmWrite}
                   onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
                     ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))

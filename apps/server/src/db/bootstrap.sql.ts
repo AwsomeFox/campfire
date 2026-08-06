@@ -1824,7 +1824,9 @@ CREATE TABLE IF NOT EXISTS combatants (
   active_effects TEXT,
   condition_instances TEXT,
   -- Issue #425: inline homebrew statblock JSON for manual monsters.
-  statblock_json TEXT
+  statblock_json TEXT,
+  -- Issue #1926: DM-controlled reveal of this combatant's statblock to non-DM viewers.
+  statblock_revealed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS combatant_removal_undos (

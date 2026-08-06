@@ -4690,7 +4690,9 @@ export class McpToolsService {
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
-        'fields: initiative, and the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat). ' +
+        'fields: initiative, the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat), and ' +
+        'statblockRevealed (reveals/hides this monster or npc\'s statblock to players; a non-DM read genuinely omits ' +
+        'the statblock until this is true — logs a combat-log note event and an audit row). ' +
         'Battle-map token position tokenX/tokenY (0–100 percent overlay, clamped) moves the combatant\'s token on the ' +
         'encounter map. DM may modify any combatant; a player may only touch hp/temp-hp/death-saves/conditions/token ' +
         'on a combatant linked to a character they own.',

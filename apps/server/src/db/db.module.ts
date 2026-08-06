@@ -2875,6 +2875,24 @@ function migrateCombatantsTableForStatblockJson(sqlite: Database.Database): void
   }
 }
 
+/**
+ * Issue #1926 — DM-controlled reveal of a monster/npc's statblock to non-DM viewers.
+ * Single ADD COLUMN (no follow-up UPDATE): DEFAULT 0 (not revealed) is already the
+ * correct/safe backfill for every pre-existing combatant, not merely a permissive
+ * placeholder — an upgrade must never retroactively reveal a monster's statblock
+ * that was withheld before this column existed.
+ */
+function migrateCombatantsTableForStatblockRevealed1926(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'statblock_revealed')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN statblock_revealed INTEGER NOT NULL DEFAULT 0');
+  }
+}
+
 function migrateCombatantsTableForNpcDispositionSnapshot(sqlite: Database.Database): void {
   const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
   if (!hasTable) return;
@@ -5222,7 +5240,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // compatibility is unaffected.
   { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
   { name: '0167_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
-  // 0168/0169 are claimed by other in-flight changes; this takes the next free ordinal.
+  // Renumbered twice while that branch was open: #1942 took 0166, then #1899 took 0167
+  // on main. This migration has never run against a real database under either earlier
+  // name, so no installation can have recorded them and upgrade compatibility holds.
+  { name: '0168_combatants_statblock_revealed_1926', run: migrateCombatantsTableForStatblockRevealed1926 },
+  // 0169 is claimed by the in-flight #1943 (group checks); this takes the next free one.
   { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
 ];
 
