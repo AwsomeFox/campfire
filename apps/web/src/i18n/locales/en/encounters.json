@@ -267,6 +267,7 @@
       "targets": "Targets",
       "wholeParty": "Whole party ({{count}})",
       "wholePartyTooLarge": "Too many active characters for one tap ({{count}}/{{max}}) — select targets individually.",
+      "manualSelectionTooLarge": "Too many targets selected ({{count}}/{{max}}) — deselect some to send this request.",
       "noCharacters": "No characters to target.",
       "check": "Check",
       "chooseCheck": "Choose a check…",

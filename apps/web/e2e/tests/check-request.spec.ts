@@ -254,4 +254,122 @@ test.describe('DM check request loop (#415)', () => {
       await dmApi.dispose();
     }
   });
+
+  test('hand-picking more than 20 targets disables Send with a clear reason, instead of a raw server 400 (#1943 review)', async ({ page }) => {
+    const { baseURL } = seed();
+
+    const dmApi: APIRequestContext = await request.newContext({ baseURL: baseURL || undefined, storageState: stateFor('dm') });
+
+    try {
+      const campaign = await (await dmApi.post('/api/v1/campaigns', { data: { name: 'E2E — Manual Selection Cap' } })).json();
+      const campaignId = campaign.id;
+
+      // 21 IDENTICAL characters — one over CheckRequestCreate.characterIds' server-side cap of
+      // 20 — sharing a save proficiency so a real checkId CAN be picked. Without a shared stat
+      // block the catalogs' intersection would be empty and the check <select> would have no
+      // option to choose, which would make `canSend` false for an unrelated reason (empty
+      // checkId) and never actually exercise the cap guard this test targets.
+      for (let i = 1; i <= 21; i++) {
+        const created = await dmApi.post(`/api/v1/campaigns/${campaignId}/characters`, {
+          data: {
+            name: `Extra ${i}`,
+            stats: { STR: 10, DEX: 14, CON: 10, INT: 10, WIS: 10, CHA: 10 },
+            saveProficiencies: ['DEX'],
+          },
+        });
+        expect(created.ok()).toBe(true);
+      }
+
+      await page.goto(`/c/${campaignId}`);
+      const panel = page.getByTestId('request-check-panel');
+      await expect(panel).toBeVisible();
+
+      // Hand-check all 21 — deliberately NOT using the "Whole party" preset, so this exercises
+      // the manual-checkbox path the preset's own cap guard does not cover.
+      const checkboxes = panel.locator('input[type="checkbox"][data-testid^="check-request-target-"]');
+      const count = await checkboxes.count();
+      expect(count).toBeGreaterThanOrEqual(21);
+      for (let i = 0; i < 21; i++) {
+        await checkboxes.nth(i).check();
+      }
+
+      // The cap hint is visible...
+      await expect(panel.getByTestId('check-request-manual-selection-too-large')).toBeVisible();
+      await expect(panel.getByTestId('check-request-manual-selection-too-large')).toContainText('21');
+      await expect(panel.getByTestId('check-request-manual-selection-too-large')).toContainText('20');
+
+      // ...and picking a real, available check (proving canSend's OTHER conditions are all
+      // satisfied) still leaves Send disabled — the cap itself must be the thing blocking it.
+      await expect(panel.getByLabel('Check').locator('option[value="save:DEX"]')).toHaveCount(1, { timeout: 10_000 });
+      await panel.getByLabel('Check').selectOption('save:DEX');
+      await expect(panel.getByRole('button', { name: 'Send request' })).toBeDisabled();
+
+      // Unchecking back down to the cap re-enables sending. Toggling a checkbox resets the
+      // chosen check (the shared-catalog intersection can change with the selection), so a
+      // check must be re-picked before Send reflects the cap alone again.
+      await checkboxes.nth(20).uncheck();
+      await expect(panel.getByTestId('check-request-manual-selection-too-large')).toHaveCount(0);
+      await expect(panel.getByLabel('Check').locator('option[value="save:DEX"]')).toHaveCount(1, { timeout: 10_000 });
+      await panel.getByLabel('Check').selectOption('save:DEX');
+      await expect(panel.getByRole('button', { name: 'Send request' })).toBeEnabled();
+    } finally {
+      await dmApi.dispose();
+    }
+  });
+
+  test('a failed check-catalog fetch that later recovers clears its own error message — not just stays disabled forever (#1943 review)', async ({
+    page,
+  }) => {
+    const { baseURL } = seed();
+
+    const dmApi: APIRequestContext = await request.newContext({ baseURL: baseURL || undefined, storageState: stateFor('dm') });
+
+    try {
+      const campaign = await (await dmApi.post('/api/v1/campaigns', { data: { name: 'E2E — Check Load Recovery' } })).json();
+      const campaignId = campaign.id;
+
+      const character = await (
+        await dmApi.post(`/api/v1/campaigns/${campaignId}/characters`, { data: { name: 'Recovery Hero' } })
+      ).json();
+      const characterId = character.id;
+
+      // Force exactly the first catalog fetch for this character to fail with a 4xx (no
+      // automatic react-query retry — see apps/web/src/lib/query.ts's `retry` rule — so the
+      // query settles into `isError` deterministically on the very first attempt), then let
+      // every subsequent request through to the real server untouched.
+      let failedOnce = false;
+      await page.route(`**/api/v1/characters/${characterId}/checks`, async (route) => {
+        if (!failedOnce) {
+          failedOnce = true;
+          await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ message: 'Simulated transient failure' }) });
+          return;
+        }
+        await route.continue();
+      });
+
+      await page.goto(`/c/${campaignId}`);
+      const panel = page.getByTestId('request-check-panel');
+      await expect(panel).toBeVisible();
+
+      await panel.getByTestId(`check-request-target-${characterId}`).check();
+
+      // --- FAILED: the catalog fetch errors — the panel surfaces a retryable message and the
+      //     check <select> is disabled, exactly as the earlier tri-state fix intends -----------
+      // translateApiError prefers the server-supplied `message` verbatim over the fallback key
+      // (apps/web/src/lib/api.ts) — the simulated 400 body's `message` is what actually renders.
+      const errorMessage = panel.getByText('Simulated transient failure');
+      await expect(errorMessage).toBeVisible({ timeout: 10_000 });
+      const retryButton = panel.getByTestId('check-request-retry-catalog');
+      await expect(retryButton).toBeVisible();
+      await expect(panel.getByLabel('Check')).toBeDisabled();
+
+      // --- RECOVERED: clicking Retry refetches (now hitting the real server) and succeeds —
+      //     the exact regression: the error message must disappear, not linger forever ---------
+      await retryButton.click();
+      await expect(errorMessage).toHaveCount(0, { timeout: 10_000 });
+      await expect(panel.getByLabel('Check')).toBeEnabled();
+    } finally {
+      await dmApi.dispose();
+    }
+  });
 });

@@ -155,18 +155,26 @@ export function CheckRequestPanel({
     for (const q of checksQueries) if (q.isError) void q.refetch();
   };
   // Surfaces a failed catalog fetch through the panel's existing error display (issue #1943
-  // review) rather than silently blocking send with a false "no check in common" claim. Only
-  // fires on the loading -> error TRANSITION (checksAnyError is stable across renders that stay
-  // in the same state), so it never fights the send mutation's own error handling below.
+  // review) rather than silently blocking send with a false "no check in common" claim. Handles
+  // BOTH transitions this effect owns, not just one: entering the error state sets the message,
+  // and RECOVERING from it (via Retry or by deselecting the failing character) clears the same
+  // message again — otherwise a DM who successfully retries still sees a stale "couldn't load"
+  // banner forever, which is worse than not having a Retry button at all. Fires once per
+  // loading/failed-<->-loaded TRANSITION (checksAnyError is stable across renders that stay in
+  // the same state), so it never fights the send mutation's own error handling below.
   useEffect(() => {
-    if (!checksAnyError) return;
-    const firstErrored = checksQueries.find((q) => q.isError);
-    const msg = firstErrored
-      ? translateApiError(firstErrored.error, t, { fallbackKey: 'encounters.errors.loadChecks' })
-      : t('encounters.errors.loadChecks');
-    setLocalError(msg);
-    onError?.(msg);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once per loading->error transition, not per render
+    if (checksAnyError) {
+      const firstErrored = checksQueries.find((q) => q.isError);
+      const msg = firstErrored
+        ? translateApiError(firstErrored.error, t, { fallbackKey: 'encounters.errors.loadChecks' })
+        : t('encounters.errors.loadChecks');
+      setLocalError(msg);
+      onError?.(msg);
+    } else {
+      setLocalError(null);
+      onError?.(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once per loading/failed<->loaded transition, not per render
   }, [checksAnyError]);
 
   const send = useMutation({
@@ -204,7 +212,12 @@ export function CheckRequestPanel({
     },
   });
 
-  const canSend = selectedIds.size > 0 && checkId.trim().length > 0 && !send.isPending;
+  // Manual checkbox selection has no upper bound of its own — guard it against the server's
+  // 20-target cap too (issue #1943 review), not just the "whole party" preset. Without this, a
+  // DM hand-picking 21+ characters got a raw, unexplained 400 from the server instead of a clear
+  // reason the send button itself is disabled.
+  const manualSelectionTooLarge = exceedsCheckRequestCap(selectedCharacterIds);
+  const canSend = selectedIds.size > 0 && !manualSelectionTooLarge && checkId.trim().length > 0 && !send.isPending;
 
   return (
     <Card className="space-y-2.5" data-testid="request-check-panel">
@@ -245,6 +258,11 @@ export function CheckRequestPanel({
           {wholePartyTooLarge && (
             <p className="text-muted" style={{ fontSize: 12 }} data-testid="check-request-whole-party-too-large">
               {t('encounters.checks.wholePartyTooLarge', { count: wholePartyIds.length, max: CHECK_REQUEST_MAX_TARGETS })}
+            </p>
+          )}
+          {manualSelectionTooLarge && (
+            <p className="text-muted" style={{ fontSize: 12 }} data-testid="check-request-manual-selection-too-large">
+              {t('encounters.checks.manualSelectionTooLarge', { count: selectedCharacterIds.length, max: CHECK_REQUEST_MAX_TARGETS })}
             </p>
           )}
           {availableCharacters.length === 0 ? (

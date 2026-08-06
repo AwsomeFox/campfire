@@ -20,7 +20,7 @@
  *  - {@link commonChecksFromQueries} (follow-up to #7): a failed per-character catalog fetch
  *    must never be read as "this character rolls nothing" — see its own doc comment.
  */
-import type { Character, RollCheckDefinition } from '@campfire/schema';
+import { CHECK_REQUEST_MAX_TARGETS, type Character, type RollCheckDefinition } from '@campfire/schema';
 
 /**
  * The checks every one of `checksLists` (one fetched catalog per selected character, in
@@ -75,8 +75,13 @@ export function commonChecksFromQueries(queries: readonly CheckCatalogQueryState
   return { checks, noCommonCheck: checks.length === 0, anyError };
 }
 
-/** `CheckRequestCreate.characterIds` is capped server-side at 20 (`packages/schema/src/index.ts`). */
-export const CHECK_REQUEST_MAX_TARGETS = 20;
+/**
+ * Re-exported for callers that only need this module's import (`CheckRequests.tsx` imports it
+ * from here rather than adding a second `@campfire/schema` import line). The single declaration
+ * lives in `@campfire/schema` — see its doc comment — so the UI's cap cannot drift from the
+ * server's `CheckRequestCreate.characterIds.max()`.
+ */
+export { CHECK_REQUEST_MAX_TARGETS };
 
 /**
  * The character ids the "whole party" preset should select: `status === 'active'` only. The

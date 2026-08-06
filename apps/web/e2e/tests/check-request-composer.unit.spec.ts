@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { CHECK_REQUEST_MAX_TARGETS as SCHEMA_CHECK_REQUEST_MAX_TARGETS } from '@campfire/schema';
 import type { Character, CharacterStatus, RollCheckDefinition } from '@campfire/schema';
 import {
   CHECK_REQUEST_MAX_TARGETS,
@@ -8,6 +9,19 @@ import {
   wholePartyTargetIds,
   type CheckCatalogQueryState,
 } from '../../src/features/encounters/checkRequestComposer';
+
+test.describe('CHECK_REQUEST_MAX_TARGETS — single declaration, not a duplicated constant (issue #1943 review)', () => {
+  test('the web composer re-exports the SAME constant CheckRequestCreate.characterIds is capped at — not a second copy of it', () => {
+    // The guarantee this asserts is structural, not behavioral: `checkRequestComposer.ts`
+    // imports `CHECK_REQUEST_MAX_TARGETS` from `@campfire/schema` and re-exports it rather than
+    // declaring its own `= 20`. This test can only observe that both names resolve to the same
+    // value at import time — it cannot prove there is only one declaration (a second hardcoded
+    // `20` that happened to match would pass this too). The actual guarantee is the single
+    // `export const CHECK_REQUEST_MAX_TARGETS` in packages/schema/src/index.ts and the absence
+    // of any other declaration — verified by reading the source, not by this assertion alone.
+    expect(CHECK_REQUEST_MAX_TARGETS).toBe(SCHEMA_CHECK_REQUEST_MAX_TARGETS);
+  });
+});
 
 /** Minimal RollCheckDefinition fixture — only `id`/`label` vary per call in these tests. */
 function mkCheckDef(id: string, overrides: Partial<RollCheckDefinition> = {}): RollCheckDefinition {

@@ -263,6 +263,7 @@
       "targets": "الأهداف",
       "wholeParty": "الفريق بأكمله ({{count}})",
       "wholePartyTooLarge": "عدد كبير جدًا من الشخصيات النشطة لتحديدها بلمسة واحدة ({{count}}/{{max}}) — اختر الأهداف يدويًا.",
+      "manualSelectionTooLarge": "تم تحديد أهداف كثيرة جدًا ({{count}}/{{max}}) — ألغِ تحديد البعض لإرسال هذا الطلب.",
       "noCharacters": "لا توجد شخصيات لاستهدافها.",
       "check": "Check",
       "chooseCheck": "Choose a check…",

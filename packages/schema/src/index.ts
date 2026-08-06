@@ -12058,9 +12058,18 @@ export type CheckRequestMode = z.infer<typeof CheckRequestMode>;
 export const CheckRequestStatus = z.enum(['pending', 'resolved']);
 export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
 
+/**
+ * The single source of truth for how many characters one group check-request send may target.
+ * Used both by `CheckRequestCreate.characterIds`'s `.max()` below (server-enforced) and by the
+ * web composer's "whole party" preset / manual-selection guard (`apps/web/src/features/
+ * encounters/checkRequestComposer.ts`) — importing this constant keeps the UI's cap from ever
+ * drifting out of sync with what the server actually accepts (issue #1943 review).
+ */
+export const CHECK_REQUEST_MAX_TARGETS = 20;
+
 /** DM input: request `checkId` from one or more target characters, with an optional DC + consequence. */
 export const CheckRequestCreate = z.object({
-  characterIds: z.array(Id).min(1).max(20).describe('Target character ids — one persisted request is created per character'),
+  characterIds: z.array(Id).min(1).max(CHECK_REQUEST_MAX_TARGETS).describe('Target character ids — one persisted request is created per character'),
   checkId: z.string().min(1).max(60).describe('Stable catalog id (e.g. "save:DEX", "skill:Perception") — must exist in each target\'s catalog'),
   mode: CheckRequestMode.default('normal').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
   dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side when the player rolls'),
