@@ -211,14 +211,43 @@ test.describe('combat tracker — non-DM views', () => {
   }
 });
 
+/**
+ * Matches ONLY the map-bytes endpoint (`GET .../map` or `.../map?revision=...`),
+ * never `.../map/derivatives` (issue #1996). The battle map fires both requests
+ * on mount — `useDerivativeManifest` polls the responsive-ladder manifest at
+ * `.../map/derivatives` alongside the `<img>` request for `.../map` itself — and
+ * a substring match like `url().includes('.../map')` matches both, since
+ * `.../map/derivatives` also contains `.../map` as a prefix. Whichever of the two
+ * responses lands first then wins `waitForResponse`, so the assertion can silently
+ * read headers off the JSON manifest (no explicit `Cache-Control`, so `undefined`)
+ * instead of the image response (always `private, no-store, max-age=0`) — a
+ * harness-side race, not a missing server header. Anchoring on `map` followed by
+ * `?` or end-of-string excludes the `/derivatives` child route.
+ */
+function isMapBytesUrl(url: string, encounterId: number): boolean {
+  return new RegExp(`/api/v1/encounters/${encounterId}/map(?:\\?|$)`).test(url);
+}
+
 test.describe('combat tracker — fog-safe map delivery (#463)', () => {
   test.use({ storageState: stateFor('player') });
 
   test('player canvas uses the encounter map endpoint and the raw attachment stays inaccessible', async ({ page }) => {
     const { encounterId, mapAttachmentId } = seed();
-    const mapResponse = page.waitForResponse((response) =>
-      response.url().includes(`/api/v1/encounters/${encounterId}/map`),
-    );
+
+    // Regression for issue #1996: `useDerivativeManifest` polls `.../map/derivatives`
+    // concurrently with the `<img>` request for `.../map`, and the small JSON manifest
+    // normally resolves first. Delaying the map-bytes response makes that ordering
+    // deterministic (rather than a timing-dependent flake), so this test reliably
+    // proves the predicate below reads the map-bytes response even when the manifest
+    // wins the race.
+    // A RegExp route matcher (not a glob) so `?` is a literal query-string anchor
+    // rather than a single-character wildcard that would also swallow `/derivatives`.
+    await page.route(new RegExp(`/api/v1/encounters/${encounterId}/map\\?`), async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await route.continue();
+    });
+
+    const mapResponse = page.waitForResponse((response) => isMapBytesUrl(response.url(), encounterId));
     await openEncounter(page);
 
     const map = page.getByRole('img', { name: 'Battle map' });
@@ -244,9 +273,7 @@ test.describe('combat tracker — fog-safe map delivery (#463)', () => {
     await page.evaluate(async () => {
       if ('serviceWorker' in navigator) await navigator.serviceWorker.ready;
     });
-    const reloadedMap = page.waitForResponse((res) =>
-      res.url().includes(`/api/v1/encounters/${encounterId}/map`),
-    );
+    const reloadedMap = page.waitForResponse((res) => isMapBytesUrl(res.url(), encounterId));
     await page.reload();
     expect((await reloadedMap).status()).toBe(200);
     const cachedUrls = await page.evaluate(async () => {
