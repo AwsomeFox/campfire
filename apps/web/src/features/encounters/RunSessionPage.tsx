@@ -40,6 +40,7 @@ import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
+import { TurnElapsedChip } from './TurnElapsedChip';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
 import { detectSseTurnBeat, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
@@ -441,6 +442,18 @@ function InitiativeStrip({
   /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
   colorVisionAssist?: boolean;
 }) {
+  const combatantRefs = useRef(new Map<number, HTMLDivElement>());
+
+  // A callback ref runs again for unrelated renders, which repeatedly stole the
+  // DM's horizontal scroll position. Restrict the scroll to an actual turn
+  // transition while retaining the user's reduced-motion preference (#1956).
+  useLayoutEffect(() => {
+    if (currentCombatantId == null) return;
+    combatantRefs.current
+      .get(currentCombatantId)
+      ?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
+  }, [currentCombatantId]);
+
   return (
     <div
       className="flex gap-2 overflow-x-auto pb-4 pt-2 px-2"
@@ -469,9 +482,8 @@ function InitiativeStrip({
             className={`cf-hp-feedback-anchor flex flex-col items-center gap-1 flex-none${feedbackClass}`}
             style={{ scrollSnapAlign: 'center' }}
             ref={(el) => {
-              if (isCurrent && el) {
-                el.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
-              }
+              if (el) combatantRefs.current.set(c.id, el);
+              else combatantRefs.current.delete(c.id);
             }}
           >
             {colorVisionAssist && isCurrent && (
@@ -3299,6 +3311,16 @@ export default function RunSessionPage() {
             {encounter.turnPhase === 'lair' ? ` · Lair (init ${LAIR_INITIATIVE_COUNT})` : ''}
           </span>
         )}
+        {/* Turn timer (issue #1935): DM-cockpit elapsed chip next to the round tag. Players
+            get the same information (only once a limit is set) via PlayerVitalsHeader below,
+            not here — see TurnElapsedChip's audience doc. */}
+        {isDm && (
+          <TurnElapsedChip
+            turnStartedAt={encounter.turnStartedAt}
+            turnTimerSeconds={encounter.turnTimerSeconds}
+            audience="dm"
+          />
+        )}
         <DifficultyBadge difficulty={difficulty} />
         {isDm && <PrintControl resetKey={encounter.id} className="ml-auto" />}
         <span
@@ -3391,6 +3413,10 @@ export default function RunSessionPage() {
             setConfirmReopen(true);
           }}
           onRequestDelete={() => setConfirmDelete(true)}
+          turnTimerSeconds={encounter.turnTimerSeconds}
+          onSetTurnTimerSeconds={(seconds) => {
+            void queueEncounterPatch({ turnTimerSeconds: seconds });
+          }}
         />
       </div>
 
@@ -3746,6 +3772,8 @@ export default function RunSessionPage() {
           currentCombatantId={currentCombatantId}
           movementDefault={movementDefault}
           colorVisionAssist={me?.user.colorVisionAssist ?? false}
+          turnStartedAt={encounter.turnStartedAt}
+          turnTimerSeconds={encounter.turnTimerSeconds}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);

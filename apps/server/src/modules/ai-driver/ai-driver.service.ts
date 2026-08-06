@@ -1825,7 +1825,12 @@ export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLive
       ...DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS,
       ...DRIVER_UPDATE_ENCOUNTER_AUTHORING_FIELDS,
     ]),
-    forbidden: new Set(['hidden', 'mapAlignment']),
+    // `turnTimerSeconds` (issue #1935) is a pacing decision about the PHYSICAL TABLE — how
+    // long a human gets to think on their turn — not a world change, so it isn't even the
+    // kind of thing the propose-then-approve flow is for; it's a control over the humans at
+    // the table, which is a stronger reason to withhold it from the seat than an ordinary
+    // world edit. Nothing in #1935 asks for AI control of it. A human DM sets it, full stop.
+    forbidden: new Set(['hidden', 'mapAlignment', 'turnTimerSeconds']),
   },
   'adjust_treasury': {
     allowed: new Set(['campaignId', 'delta']),
@@ -2026,8 +2031,23 @@ export function guardDriverLivePlayArgs(
           'quest/session links on encounters it created this session. Rejected: mapAlignment.',
       };
     }
-    // `rule.forbidden` only lists `hidden` and `mapAlignment`, both handled above with explicit
-    // error codes; future forbidden fields should be checked before `unknownArgKeys`.
+    // Issue #1935: turnTimerSeconds is a pacing decision about the PHYSICAL TABLE — how long a
+    // human gets to think on their turn — not a world change, so the propose-then-approve flow
+    // isn't even the right frame for it; it's a control over the humans at the table, a
+    // stronger reason to withhold it than an ordinary edit. Refused (not silently dropped),
+    // same as hidden/mapAlignment above, so the model gets a clear signal rather than a
+    // quietly-ignored write.
+    if ('turnTimerSeconds' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          'The driver may not set turnTimerSeconds. The turn-timer pacing limit is a decision about the ' +
+          'physical table and must be set by the human DM.',
+      };
+    }
+    // `rule.forbidden` lists `hidden`, `mapAlignment`, and `turnTimerSeconds`, all handled above
+    // with explicit error codes; future forbidden fields should be checked before `unknownArgKeys`.
     const unknown = unknownArgKeys(args, rule);
     if (unknown.length > 0) {
       return {

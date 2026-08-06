@@ -4486,7 +4486,10 @@ export class McpToolsService {
         '(issue #39: mapAttachmentId = an uploaded image attachment id, kind map|image, rendered as the run-session ' +
         'background; combatant token positions are set with update_combatant tokenX/tokenY, 0–100). Toggle hidden to ' +
         'hide/reveal the encounter as DM-only prep (issue #262: hidden=true withholds its roster + difficulty from ' +
-        'players; hidden=false reveals it). Pass null to clear a link or the map; omit a field to leave it unchanged. ' +
+        'players; hidden=false reveals it). Set turnTimerSeconds to a DM-chosen pacing limit in seconds (issue #1935; ' +
+        '0 = off) — purely a social/visual cue for the elapsed-time chip, never enforced server-side. turnStartedAt is ' +
+        'NOT settable here: it is a server-stamped timestamp, refreshed automatically whenever the turn advances. ' +
+        'Pass null to clear a link or the map; omit a field to leave it unchanged. ' +
         'Pass expectedUpdatedAt (the updatedAt you last read for this encounter) to opt into optimistic concurrency ' +
         '(issue #532): a stale value 409s rather than silently clobbering a co-DM\'s fresher edit.',
       { encounterId: Id.describe('Encounter id — from list_encounters'), expectedUpdatedAt: ExpectedUpdatedAt, ...EncounterUpdate.shape },

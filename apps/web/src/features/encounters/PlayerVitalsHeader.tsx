@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { Combatant, Character } from '@campfire/schema';
 import { HpBar, Card, Btn, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { TurnElapsedChip } from './TurnElapsedChip';
 import type { DeathSaveOutcome } from './combat/deathSaveOutcome';
 
 interface PlayerVitalsHeaderProps {
@@ -12,6 +13,9 @@ interface PlayerVitalsHeaderProps {
   onSetHpMax?: (combatantId: number, max: number) => void;
   turnPulse?: boolean;
   currentCombatantId?: number;
+  /** Turn timer (issue #1935) — server-stamped; renders only once a limit is set (see TurnElapsedChip). */
+  turnStartedAt?: string | null;
+  turnTimerSeconds?: number;
   /**
    * The active campaign's adapter movement-slot max (e.g. 30 for 5e), or `undefined`
    * when the adapter declares no movement slot at all (e.g. PF2e). Computed by the
@@ -71,7 +75,7 @@ export function vitalsSpeedFor(combatant: Combatant, movementDefault: number | u
   return movementDefault ?? null;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, onRollDeathSave, isDeathSaveBusy, syncBlocked = false, deathSaveOutcome }: PlayerVitalsHeaderProps) {
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, turnStartedAt = null, turnTimerSeconds = 0, onRollDeathSave, isDeathSaveBusy, syncBlocked = false, deathSaveOutcome }: PlayerVitalsHeaderProps) {
   const { t } = useTranslation('encounters');
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
@@ -102,6 +106,12 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
 
   return (
     <div className="sticky top-0 z-10 w-full mb-4">
+      <TurnElapsedChip
+        turnStartedAt={turnStartedAt}
+        turnTimerSeconds={turnTimerSeconds}
+        audience="player"
+        className="mb-2"
+      />
       {combatants.map(c => {
         const char = c.characterId ? charactersById.get(c.characterId) : undefined;
         const ac = char?.ac ?? c.eac ?? c.statblock?.ac ?? '—';
