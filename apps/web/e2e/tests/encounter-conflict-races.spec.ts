@@ -19,16 +19,28 @@ import { CREDS } from '../global-setup';
  * so this file never mutates state another shard's spec could observe.
  */
 
-/** Creates a fresh campaign with a real player member and a player-owned, active PC. */
+/**
+ * Creates a fresh campaign with a real player member and a player-owned, active PC.
+ *
+ * `onCampaignCreated` fires the instant the campaign id exists — BEFORE any of the later
+ * setup steps (player login, member add, character create) that could still throw. Every
+ * call site uses it to record the id for `finally`-block cleanup immediately, rather than
+ * waiting for this whole helper to return; a throw partway through would otherwise leave
+ * the caller's `campaignId` at its initial `null` and skip deletion entirely, leaking the
+ * campaign into the shared e2e database — exactly what this file's own header comment says
+ * never happens.
+ */
 async function setupConflictCampaign(
   dmContext: { request: APIRequestContext },
   name: string,
   campaignOpts: Record<string, unknown> = {},
+  onCampaignCreated?: (campaignId: number) => void,
 ): Promise<{ campaignId: number; characterId: number; playerUserId: string }> {
   const campaign = await (
     await dmContext.request.post('/api/v1/campaigns', { data: { name, ...campaignOpts } })
   ).json();
   const campaignId: number = campaign.id;
+  onCampaignCreated?.(campaignId);
 
   const playerCtx = await request.newContext({ baseURL: seed().baseURL });
   await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
@@ -75,8 +87,9 @@ test('a stale player end-turn 409s TURN_ALREADY_ADVANCED after the DM advances f
   try {
     // dmControlsTurns explicitly false (also the schema default) — this campaign setting
     // is exactly what scenario 1 requires: a player may end their OWN active combatant's turn.
-    const setup = await setupConflictCampaign(dmContext, 'E2E1916 Turn Race', { dmControlsTurns: false });
-    campaignId = setup.campaignId;
+    const setup = await setupConflictCampaign(dmContext, 'E2E1916 Turn Race', { dmControlsTurns: false }, (id) => {
+      campaignId = id;
+    });
 
     // A SECOND character owned by the SAME player. This is deliberate, not incidental: the
     // server's end-turn authorization (encounters.service.ts's endTurn) re-reads the CURRENT
@@ -322,8 +335,9 @@ test('a player-only SSE outage gates the player while the DM keeps acting, and t
   let eventAttempts = 0;
 
   try {
-    const setup = await setupConflictCampaign(dmContext, 'E2E1916 SSE Outage');
-    campaignId = setup.campaignId;
+    const setup = await setupConflictCampaign(dmContext, 'E2E1916 SSE Outage', {}, (id) => {
+      campaignId = id;
+    });
 
     const enc = await (
       await dmContext.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
