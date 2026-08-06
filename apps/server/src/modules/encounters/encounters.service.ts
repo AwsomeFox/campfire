@@ -4809,6 +4809,13 @@ export class EncountersService {
       patch.rpSet !== undefined ||
       patch.rpDelta !== undefined;
     const deathStateTouched = patch.deathState !== undefined;
+    // `eac`/`kac` are the one pair of writable fields that never enter `staticUpdate` —
+    // they are applied straight onto `writeSet` inside the transaction below, DM-only.
+    // Without them here, a patch carrying ONLY armour class matched the no-op condition
+    // and returned 200 with the unchanged combatant, having persisted nothing (issue
+    // #1990 review). Gated on `isDm` to mirror the write exactly: a non-DM's eac/kac is
+    // dropped there, so admitting it here would buy a pointless transaction, not a fix.
+    const defenseFieldsTouched = isDm && (patch.eac !== undefined || patch.kac !== undefined);
 
     if (
       Object.keys(staticUpdate).length === 0 &&
@@ -4816,6 +4823,7 @@ export class EncountersService {
       !conditionFieldsTouched &&
       !spFieldsTouched &&
       !deathStateTouched &&
+      !defenseFieldsTouched &&
       patch.statblock === undefined
     ) {
       this.assertMutable(encounterRow);
