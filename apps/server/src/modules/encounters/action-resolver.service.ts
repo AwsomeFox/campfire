@@ -582,7 +582,8 @@ export class ActionResolverService {
     return { stats: {}, level: 1 };
   }
 
-  private isCombatantControlledBy(row: typeof combatants.$inferSelect, user: RequestUser): boolean {
+  private isCombatantControlledBy(row: typeof combatants.$inferSelect, user: RequestUser, role?: Role): boolean {
+    if (role !== undefined && !roleAtLeast(role, 'player')) return false;
     if (row.controllerUserId !== null && String(row.controllerUserId) === String(user.id)) {
       return true;
     }
