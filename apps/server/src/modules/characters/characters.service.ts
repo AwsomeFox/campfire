@@ -521,13 +521,28 @@ export class CharactersService {
    * web/MCP group-check board — distinct submits (even targeting the same characters again)
    * always get distinct ids. A single-target submit takes this same path and still gets a
    * (size-1) groupId; nothing about the per-row behavior below changes.
+   *
+   * Issue #1943 review #7 (atomicity): this used to validate-then-insert INSIDE one loop, so a
+   * later target's 404/400 threw AFTER earlier targets' rows were already committed, audited,
+   * and emitted as `check.requested` — a DM whose group send failed would see an error and
+   * reasonably believe nothing happened, while part of the party already had a live prompt, all
+   * under the SAME `groupId` the board would then render as smaller than what was actually
+   * selected. Fixed in two phases: (1) validate EVERY target — existence, campaign membership,
+   * catalog membership — before writing anything, so a validation failure alone already leaves
+   * zero rows; (2) the inserts + their audit rows run inside ONE `db.transaction`, atomic with
+   * each other too, so a write-time failure (not just a validation failure) still can't leave a
+   * partial group — matching the existing `applyPartyRecovery`/`homebrew` transaction pattern in
+   * this codebase. SSE emission happens only AFTER the transaction commits, so a rolled-back
+   * group never ticks a client into refetching rows that don't exist.
    */
   async requestChecks(campaignId: number, input: CheckRequestCreate, user: RequestUser, role: Role): Promise<CheckRequest[]> {
     const adapter = await this.adapterForCampaign(campaignId);
     const mode = input.mode ?? 'flat';
     const ts = nowIso();
     const groupId = randomUUID();
-    const created: CheckRequest[] = [];
+
+    // Phase 1: validate every target before any row is written.
+    const validated: Array<{ characterId: number; charRow: typeof characters.$inferSelect; label: string }> = [];
     for (const characterId of input.characterIds) {
       const charRow = await this.getRowOrThrow(characterId);
       if (charRow.campaignId !== campaignId) {
@@ -535,39 +550,56 @@ export class CharactersService {
       }
       const def = findCheckInCatalog(adapter, toDomain(charRow), input.checkId);
       if (!def) throw new NotFoundException(`No rollable check "${input.checkId}" for character ${characterId}`);
-      const [row] = await this.db
-        .insert(checkRequests)
-        .values({
+      validated.push({ characterId, charRow, label: def.label });
+    }
+
+    // Phase 2: every target is known-valid — insert all rows (+ their audit rows) in one
+    // transaction, so a write-time failure partway through still cannot leave a partial group.
+    const inserted = this.db.transaction((tx) => {
+      const rows: Array<{ row: typeof checkRequests.$inferSelect; charRow: typeof characters.$inferSelect }> = [];
+      for (const { characterId, charRow, label } of validated) {
+        const row = tx
+          .insert(checkRequests)
+          .values({
+            campaignId,
+            characterId,
+            encounterId: input.encounterId ?? null,
+            checkId: input.checkId,
+            checkLabel: label,
+            mode,
+            dc: input.dc ?? null,
+            consequence: input.consequence ?? '',
+            status: 'pending',
+            requestedByUserId: user.id,
+            requestedByName: user.name ?? '',
+            rollId: null,
+            createdAt: ts,
+            resolvedAt: null,
+            groupId,
+          })
+          .returning()
+          .get();
+        this.audit.logInTx(tx, {
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'check.request',
+          entityType: 'character',
+          entityId: characterId,
           campaignId,
-          characterId,
-          encounterId: input.encounterId ?? null,
-          checkId: input.checkId,
-          checkLabel: def.label,
-          mode,
-          dc: input.dc ?? null,
-          consequence: input.consequence ?? '',
-          status: 'pending',
-          requestedByUserId: user.id,
-          requestedByName: user.name ?? '',
-          rollId: null,
-          createdAt: ts,
-          resolvedAt: null,
-          groupId,
-        })
-        .returning();
-      await this.audit.log({
-        actor: auditActor(user),
-        actorRole: role,
-        action: 'check.request',
-        entityType: 'character',
-        entityId: characterId,
-        campaignId,
-        detail:
-          `Requested ${def.label}` +
-          (input.dc != null ? ` vs DC ${input.dc}` : '') +
-          (input.consequence ? ` — consequence: ${input.consequence}` : ''),
-      });
-      this.events.emit({ type: 'check.requested', campaignId, requestId: row.id, characterId, userId: user.id });
+          detail:
+            `Requested ${label}` +
+            (input.dc != null ? ` vs DC ${input.dc}` : '') +
+            (input.consequence ? ` — consequence: ${input.consequence}` : ''),
+        });
+        rows.push({ row, charRow });
+      }
+      return rows;
+    });
+
+    // Phase 3: the group committed — safe to notify clients and build the domain response.
+    const created: CheckRequest[] = [];
+    for (const { row, charRow } of inserted) {
+      this.events.emit({ type: 'check.requested', campaignId, requestId: row.id, characterId: row.characterId, userId: user.id });
       created.push(this.toCheckRequestDomain(row, charRow.name));
     }
     return created;

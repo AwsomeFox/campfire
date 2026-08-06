@@ -549,4 +549,33 @@ describe('Group check requests (issue #1943, e2e)', () => {
     // first 2 rows of the unbounded page, not an arbitrary 2.
     expect(bounded.body.map((r: { id: number }) => r.id)).toEqual(unbounded.body.slice(0, 2).map((r: { id: number }) => r.id));
   });
+
+  // Issue #1943 review finding #7: requestChecks used to validate-then-insert inside one loop,
+  // so a LATER target's 404 threw after EARLIER targets' rows were already committed — a DM
+  // whose group send failed would see an error and reasonably believe nothing happened, while
+  // part of the party already had a live prompt under the same groupId. A rejected group must
+  // leave zero rows behind, for ANY of its targets, not just the one that failed validation.
+  it('a group send with a later invalid target leaves ZERO rows for the whole group — atomicity (#1943 review)', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+    expect(before.status).toBe(200);
+    const idsBefore = new Set(before.body.map((r: { id: number }) => r.id));
+
+    // charA and charB are valid, EARLIER targets that a validate-then-insert loop would already
+    // have committed by the time it reaches the third, nonexistent target id.
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB, 9_999_999], checkId: 'save:DEX' });
+    expect(res.status).toBe(404);
+
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+    expect(after.status).toBe(200);
+    const newRows = after.body.filter((r: { id: number }) => !idsBefore.has(r.id));
+    // The dramatic assertion: NO new rows at all from this rejected send — not even for charA
+    // or charB, which a validate-then-insert loop would have already committed.
+    expect(newRows).toHaveLength(0);
+    expect(newRows.some((r: { characterId: number }) => r.characterId === charA)).toBe(false);
+    expect(newRows.some((r: { characterId: number }) => r.characterId === charB)).toBe(false);
+  });
 });

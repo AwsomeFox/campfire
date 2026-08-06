@@ -21,7 +21,7 @@ import { useTranslation } from 'react-i18next';
  * aria-live region. Visible copy is scoped with data-testid to keep strict Playwright locators happy.
  */
 import { useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, CheckRequest, CheckRequestResolution, DiceRoll, RollCheckDefinition } from '@campfire/schema';
 import { ruleSystemAdapter, groupCheckMajorityAdvisoryForAdapter } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
@@ -30,6 +30,7 @@ import { Card, Btn, Chip, TextInput } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { useCampaign } from '../../app/CampaignContext';
 import { buildGroupCheckSummaries, groupCheckMajoritySucceeds, shouldShowPassedTally } from './groupCheckBoard';
+import { CHECK_REQUEST_MAX_TARGETS, commonChecks, exceedsCheckRequestCap, wholePartyTargetIds } from './checkRequestComposer';
 
 /**
  * Bounds the group-check board's own check-requests fetch (issue #1943 review): `listCheckRequests`
@@ -52,11 +53,26 @@ function outcomeText(res: CheckRequestResolution): string {
 
 /**
  * DM control: request a check/save from one or more characters at once (issue #1943). A
- * checkbox per character plus a one-tap "whole party" preset, a check picker (populated from
- * the first selected character's catalog — every character shares the same catalog IDs under
- * one rule system, only the modifiers differ), a DC and a consequence field. One box checked
- * behaves exactly like the original single-target flow. DM-only; the parent gates rendering on
- * role.
+ * checkbox per character (every character, any `status` — a DM can still hand-pick a retired or
+ * dead sheet for an edge case like a flashback scene) plus a one-tap "whole party" preset, a
+ * check picker, a DC and a consequence field. One box checked behaves exactly like the original
+ * single-target flow. DM-only; the parent gates rendering on role.
+ *
+ * The check picker is the INTERSECTION of every selected character's own catalog (issue #1943
+ * review #7), not just the first selected character's — that shortcut only happens to be safe
+ * for 5e/PF2e, whose adapters implement `buildCheckCatalog` identically for every character.
+ * Every other registered system (OSR, Open Legend, 13th Age, Starforged, homebrew) falls back to
+ * `neutralCheckCatalog`, which derives `skill:*`/`ability:*`/`save:*` ids from THAT character's
+ * own `stats`/`skills` keys — two party members can genuinely have different catalogs there, and
+ * offering a check the DM's pick has but another target lacks would 404 that target after
+ * already committing the others (see `requestChecks`'s own atomicity fix for the write-time
+ * half of that). An empty intersection (no check every selected character can roll) shows an
+ * explicit message rather than silently offering nothing.
+ *
+ * The "whole party" PRESET, unlike the checkboxes, is scoped to `status === 'active'` characters
+ * only (issue #1943 review) — its entire purpose is "everyone currently playing," and it is
+ * disabled with a visible reason once the active roster exceeds the server's 20-target cap
+ * (`CheckRequestCreate.characterIds.max(20)`) rather than minting a request the server would 400.
  */
 export function CheckRequestPanel({
   campaignId,
@@ -84,7 +100,15 @@ export function CheckRequestPanel({
     enabled: Number.isFinite(campaignId) && !characters,
   });
 
-  const availableCharacters = characters ?? campaignCharactersQuery.data ?? [];
+  // Memoized so the `characters ?? [] ?? []` fallback doesn't mint a new array identity every
+  // render — that would otherwise make `wholePartyIds` below recompute on every render too.
+  const availableCharacters = useMemo(() => characters ?? campaignCharactersQuery.data ?? [], [characters, campaignCharactersQuery.data]);
+  // "Whole party" means the characters currently playing, not every sheet the campaign has ever
+  // created (issue #1943 review) — see checkRequestComposer.ts's doc comment. The individual
+  // checkboxes below still list every character regardless of status; only this one-tap PRESET
+  // is scoped to active ones.
+  const wholePartyIds = useMemo(() => wholePartyTargetIds(availableCharacters), [availableCharacters]);
+  const wholePartyTooLarge = exceedsCheckRequestCap(wholePartyIds);
 
   const toggleCharacter = (id: number) => {
     setSelectedIds((prev) => {
@@ -97,20 +121,32 @@ export function CheckRequestPanel({
   };
 
   const selectWholeParty = () => {
-    setSelectedIds(new Set(availableCharacters.map((c) => c.id)));
+    // Defense in depth: the button is already disabled past the cap below, but never mint a
+    // characterIds array the server would 400 on regardless.
+    if (wholePartyTooLarge) return;
+    setSelectedIds(new Set(wholePartyIds));
     setCheckId('');
   };
 
-  // The catalog is the same set of ids for every character under one rule system (only the
-  // modifiers differ) — the first selected character's catalog drives the check dropdown.
-  const representativeId = availableCharacters.find((c) => selectedIds.has(c.id))?.id;
+  // Stable-ordered list of selected ids so useQueries' query array doesn't reshuffle every
+  // render (Sets have no ordering guarantee across renders).
+  const selectedCharacterIds = useMemo(() => Array.from(selectedIds).sort((a, b) => a - b), [selectedIds]);
 
-  const checksQuery = useQuery({
-    queryKey: ['characters', representativeId, 'checks'],
-    queryFn: () => api.get<RollCheckDefinition[]>(`${API}/characters/${representativeId}/checks`),
-    enabled: typeof representativeId === 'number',
+  // One checks-catalog fetch PER selected character — see the doc comment above for why a
+  // single representative's catalog is not safe to assume for every target.
+  const checksQueries = useQueries({
+    queries: selectedCharacterIds.map((id) => ({
+      queryKey: ['characters', id, 'checks'],
+      queryFn: () => api.get<RollCheckDefinition[]>(`${API}/characters/${id}/checks`),
+    })),
   });
-  const checks = useMemo(() => checksQuery.data ?? [], [checksQuery.data]);
+  const checksLoading = checksQueries.some((q) => q.isLoading);
+  const checks = useMemo(() => {
+    if (selectedCharacterIds.length === 0 || checksLoading) return [];
+    return commonChecks(checksQueries.map((q) => q.data ?? []));
+  }, [checksQueries, checksLoading, selectedCharacterIds.length]);
+  // True once every selected character's catalog has loaded but they share no rollable check.
+  const noCommonCheck = selectedCharacterIds.length > 0 && !checksLoading && checks.length === 0;
 
   const send = useMutation({
     mutationFn: () =>
@@ -165,13 +201,19 @@ export function CheckRequestPanel({
               type="button"
               ghost
               density="compact"
-              disabled={availableCharacters.length === 0}
+              disabled={wholePartyIds.length === 0 || wholePartyTooLarge}
               onClick={selectWholeParty}
               data-testid="check-request-whole-party"
+              title={wholePartyTooLarge ? t('encounters.checks.wholePartyTooLarge', { count: wholePartyIds.length, max: CHECK_REQUEST_MAX_TARGETS }) : undefined}
             >
-              {t('encounters.checks.wholeParty', { count: availableCharacters.length })}
+              {t('encounters.checks.wholeParty', { count: wholePartyIds.length })}
             </Btn>
           </div>
+          {wholePartyTooLarge && (
+            <p className="text-muted" style={{ fontSize: 12 }} data-testid="check-request-whole-party-too-large">
+              {t('encounters.checks.wholePartyTooLarge', { count: wholePartyIds.length, max: CHECK_REQUEST_MAX_TARGETS })}
+            </p>
+          )}
           {availableCharacters.length === 0 ? (
             <p className="text-muted" style={{ fontSize: 12 }}>{t('encounters.checks.noCharacters')}</p>
           ) : (
@@ -200,11 +242,15 @@ export function CheckRequestPanel({
             id="check-request-check"
             className="cf-select"
             value={checkId}
-            disabled={typeof representativeId !== 'number' || checksQuery.isLoading}
+            disabled={selectedCharacterIds.length === 0 || checksLoading || noCommonCheck}
             onChange={(e) => setCheckId(e.target.value)}
           >
             <option value="">
-              {typeof representativeId === 'number' ? t('encounters.checks.chooseCheck') : t('encounters.checks.pickCharacterFirst')}
+              {selectedCharacterIds.length === 0
+                ? t('encounters.checks.pickCharacterFirst')
+                : noCommonCheck
+                  ? t('encounters.checks.noCommonCheck')
+                  : t('encounters.checks.chooseCheck')}
             </option>
             {checks.map((def) => (
               <option key={def.id} value={def.id}>
@@ -212,6 +258,11 @@ export function CheckRequestPanel({
               </option>
             ))}
           </select>
+          {noCommonCheck && (
+            <p className="text-muted" style={{ fontSize: 12 }} data-testid="check-request-no-common-check">
+              {t('encounters.checks.noCommonCheckHint')}
+            </p>
+          )}
         </div>
         <div className="field" style={{ width: 80 }}>
           <label htmlFor="check-request-dc">{t('encounters.checks.dc')}</label>
@@ -281,9 +332,13 @@ export function GroupCheckBoard({ campaignId }: { campaignId: number }) {
     enabled: Number.isFinite(campaignId),
   });
 
+  // A page exactly at the requested limit means older rows may exist beyond it — see
+  // buildGroupCheckSummaries's doc comment on `hasMoreOlderRows` for why this is the one signal
+  // that flags a possibly-split group (issue #1943 review).
+  const hasMoreOlderRows = (requestsQuery.data?.length ?? 0) === GROUP_CHECK_BOARD_REQUEST_LIMIT;
   const summaries = useMemo(
-    () => buildGroupCheckSummaries(requestsQuery.data ?? [], rollsQuery.data ?? []),
-    [requestsQuery.data, rollsQuery.data],
+    () => buildGroupCheckSummaries(requestsQuery.data ?? [], rollsQuery.data ?? [], hasMoreOlderRows),
+    [requestsQuery.data, rollsQuery.data, hasMoreOlderRows],
   );
 
   if (summaries.length === 0) return null;
@@ -297,10 +352,12 @@ export function GroupCheckBoard({ campaignId }: { campaignId: number }) {
           <div key={summary.groupId} className="cf-inset" data-testid={`group-check-${summary.groupId}`} style={{ padding: '10px 12px' }}>
             <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
               <strong>{summary.checkLabel}</strong>
-              <span className="text-muted" style={{ fontSize: 12 }}>
-                {shouldShowPassedTally(summary)
-                  ? t('encounters.checks.board.tallyPassed', { pass: summary.passCount, total: summary.totalCount })
-                  : t('encounters.checks.board.tallyResolved', { resolved: summary.resolvedCount, total: summary.totalCount })}
+              <span className="text-muted" style={{ fontSize: 12 }} data-testid={`group-check-tally-${summary.groupId}`}>
+                {summary.possiblyIncomplete
+                  ? t('encounters.checks.board.possiblyIncomplete')
+                  : shouldShowPassedTally(summary)
+                    ? t('encounters.checks.board.tallyPassed', { pass: summary.passCount, total: summary.totalCount })
+                    : t('encounters.checks.board.tallyResolved', { resolved: summary.resolvedCount, total: summary.totalCount })}
               </span>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 6 }}>

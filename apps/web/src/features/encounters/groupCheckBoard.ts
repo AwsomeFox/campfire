@@ -8,6 +8,19 @@
  * server-computed `success`. A roll that has aged out of the fetched window — or a request sent
  * with no `dc` — reports `success: null`; the board shows it as resolved with no pass/fail chip
  * rather than guessing.
+ *
+ * The check-requests page itself is ALSO bounded (`GROUP_CHECK_BOARD_REQUEST_LIMIT` in
+ * `CheckRequests.tsx`) — the same staleness failure mode as the roll window, one level up (issue
+ * #1943 review): a group can hold up to 20 rows, and every single-target send consumes a row
+ * too, so in an active campaign a group's rows can straddle the page boundary — some fetched,
+ * some not. Unlike the roll-window case, a split group's ROWS are simply absent from `requests`
+ * entirely, so nothing about its fetched member count looks wrong on its own; `totalCount` itself
+ * would silently undercount. `hasMoreOlderRows` (true exactly when the page was truncated — the
+ * caller fetched the full page limit) lets {@link buildGroupCheckSummaries} flag the one group
+ * that can be affected: rows are inserted sequentially within a single `requestChecks()` call, so
+ * under normal (non-adversarial, single-DM-at-a-time) play a group's row ids are contiguous, and
+ * only the group holding the OLDEST row in a truncated page could have older, unfetched siblings
+ * beyond the boundary.
  */
 import type { CheckRequest, DiceRoll } from '@campfire/schema';
 
@@ -34,6 +47,15 @@ export interface GroupCheckSummary {
    * rest failed" — see {@link shouldShowPassedTally}.
    */
   unknownOutcomeCount: number;
+  /**
+   * True when this group holds the oldest row of a truncated check-requests page — meaning it
+   * may have additional, older members that were never fetched at all (issue #1943 review).
+   * Unlike `unknownOutcomeCount`, this isn't about a resolved member's outcome being unknown;
+   * `totalCount`/`resolvedCount`/`passCount` themselves are all suspect for this group, so no
+   * numeric tally is trustworthy — see {@link shouldShowPassedTally} and
+   * {@link groupCheckMajoritySucceeds}, both of which refuse to render anything confident here.
+   */
+  possiblyIncomplete: boolean;
 }
 
 /**
@@ -41,13 +63,23 @@ export interface GroupCheckSummary {
  * first (by the highest row id in the group — rows within one `requestChecks` call are inserted
  * together, so this is stable creation order). Rows with a null `groupId` (pre-#1943 history)
  * are excluded — there is no group to show them under.
+ *
+ * `hasMoreOlderRows` (issue #1943 review): pass `true` when the caller's fetch of `requests` was
+ * truncated (its length equals the page limit requested) — i.e. older rows may exist beyond what
+ * was fetched. Only the group holding the single oldest row in `requests` is flagged
+ * `possiblyIncomplete`; every other group's rows are all newer than the truncation boundary, so
+ * under normal sequential (single-DM-at-a-time) play they cannot have additional unfetched
+ * siblings. Defaults to `false` — omit it when the caller already fetched everything.
  */
 export function buildGroupCheckSummaries(
   requests: readonly CheckRequest[],
   rolls: readonly DiceRoll[],
+  hasMoreOlderRows = false,
 ): GroupCheckSummary[] {
   const rollById = new Map<number, DiceRoll>();
   for (const roll of rolls) rollById.set(roll.id, roll);
+
+  const oldestFetchedId = requests.length > 0 ? Math.min(...requests.map((r) => r.id)) : null;
 
   const rowsByGroup = new Map<string, CheckRequest[]>();
   for (const req of requests) {
@@ -70,6 +102,7 @@ export function buildGroupCheckSummaries(
     const resolvedCount = members.filter((m) => m.status === 'resolved').length;
     const passCount = members.filter((m) => m.success === true).length;
     const unknownOutcomeCount = members.filter((m) => m.status === 'resolved' && m.success === null).length;
+    const possiblyIncomplete = hasMoreOlderRows && oldestFetchedId != null && sorted.some((r) => r.id === oldestFetchedId);
     summaries.push({
       summary: {
         groupId,
@@ -81,6 +114,7 @@ export function buildGroupCheckSummaries(
         resolvedCount,
         passCount,
         unknownOutcomeCount,
+        possiblyIncomplete,
       },
       maxRowId: sorted[sorted.length - 1].id,
     });
@@ -95,22 +129,27 @@ export function buildGroupCheckSummaries(
  * only counts members with a KNOWN `success`, so if any resolved member's outcome is unknown
  * (its roll aged out of the fetched dice-roll window), a "passed" count would silently read
  * every unknown outcome as a failure — worse than showing nothing, because it looks confident.
- * Requires a `dc` too: without one no member ever has a `success` to tally.
+ * Requires a `dc` too: without one no member ever has a `success` to tally. Also refuses once
+ * the group is `possiblyIncomplete` — there, even `totalCount` itself is suspect (unfetched
+ * members are missing from `members` entirely, not merely unresolved), so no number here would
+ * be honest; the caller shows a distinct "may be incomplete" notice instead.
  */
-export function shouldShowPassedTally(summary: Pick<GroupCheckSummary, 'dc' | 'unknownOutcomeCount'>): boolean {
-  return summary.dc != null && summary.unknownOutcomeCount === 0;
+export function shouldShowPassedTally(summary: Pick<GroupCheckSummary, 'dc' | 'unknownOutcomeCount' | 'possiblyIncomplete'>): boolean {
+  return summary.dc != null && summary.unknownOutcomeCount === 0 && !summary.possiblyIncomplete;
 }
 
 /**
  * Whether the "Group succeeds (half or more)" advisory should render for a group (issue #1943):
- * only once every member has resolved with a KNOWN outcome (no `unknownOutcomeCount`), at least
- * half passed, AND the adapter's system endorses the convention (see
- * `groupCheckMajorityAdvisoryForAdapter` in @campfire/schema). A group with any DC-less or
- * unknown-outcome member never reaches this — the aggregate must never claim more certainty
- * than the per-member data supports.
+ * only once every member has resolved with a KNOWN outcome (no `unknownOutcomeCount`), the group
+ * is not `possiblyIncomplete` (its member list itself could be missing rows — see that field's
+ * doc comment), at least half passed, AND the adapter's system endorses the convention (see
+ * `groupCheckMajorityAdvisoryForAdapter` in @campfire/schema). A group with any DC-less,
+ * unknown-outcome, or possibly-incomplete member never reaches this — the aggregate must never
+ * claim more certainty than the per-member data supports.
  */
 export function groupCheckMajoritySucceeds(summary: GroupCheckSummary, adapterHasMajorityAdvisory: boolean): boolean {
   if (!adapterHasMajorityAdvisory) return false;
+  if (summary.possiblyIncomplete) return false;
   if (summary.resolvedCount !== summary.totalCount) return false;
   if (summary.unknownOutcomeCount > 0) return false;
   return summary.passCount * 2 >= summary.totalCount;

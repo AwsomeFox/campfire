@@ -265,9 +265,12 @@
       "requestCheck": "Request a check",
       "targets": "Targets",
       "wholeParty": "Whole party ({{count}})",
+      "wholePartyTooLarge": "Too many active characters for one tap ({{count}}/{{max}}) — select targets individually.",
       "noCharacters": "No characters to target.",
       "check": "Check",
       "chooseCheck": "Choose a check…",
+      "noCommonCheck": "No check every selected target can roll",
+      "noCommonCheckHint": "The selected targets have no check in common — pick fewer targets, or send separate requests.",
       "pickCharacterFirst": "Pick a target first",
       "dc": "DC",
       "consequenceOptional": "Consequence (optional)",
@@ -281,7 +284,8 @@
         "passed": "Passed",
         "failed": "Failed",
         "resolved": "Resolved",
-        "majoritySucceeds": "Group succeeds (half or more)"
+        "majoritySucceeds": "Group succeeds (half or more)",
+        "possiblyIncomplete": "Some members may not be shown (too old to load in full)"
       }
     },
     "wizard": {

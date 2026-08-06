@@ -261,9 +261,12 @@
       "requestCheck": "Request a check",
       "targets": "الأهداف",
       "wholeParty": "الفريق بأكمله ({{count}})",
+      "wholePartyTooLarge": "عدد كبير جدًا من الشخصيات النشطة لتحديدها بلمسة واحدة ({{count}}/{{max}}) — اختر الأهداف يدويًا.",
       "noCharacters": "لا توجد شخصيات لاستهدافها.",
       "check": "Check",
       "chooseCheck": "Choose a check…",
+      "noCommonCheck": "لا يوجد فحص مشترك بين كل الأهداف المحددة",
+      "noCommonCheckHint": "لا يوجد فحص مشترك بين الأهداف المحددة — اختر أهدافًا أقل، أو أرسل طلبات منفصلة.",
       "pickCharacterFirst": "اختر هدفًا أولاً",
       "dc": "DC",
       "consequenceOptional": "Consequence (optional)",
@@ -277,7 +280,8 @@
         "passed": "نجاح",
         "failed": "فشل",
         "resolved": "محسوم",
-        "majoritySucceeds": "تنجح المجموعة (نصفها أو أكثر)"
+        "majoritySucceeds": "تنجح المجموعة (نصفها أو أكثر)",
+        "possiblyIncomplete": "قد لا يظهر بعض الأعضاء (الطلب قديم جدًا ليُحمَّل بالكامل)"
       }
     },
     "actionFlow": {

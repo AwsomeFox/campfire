@@ -228,3 +228,76 @@ test.describe('check-request query key isolation (#1943 review)', () => {
     expect(all.length).toBeGreaterThan(base.length);
   });
 });
+
+// --- Review finding #5 (Devin): the board's own bounded request page (GROUP_CHECK_BOARD_
+// REQUEST_LIMIT rows) can split a single group across the fetch boundary exactly the way the
+// 50-roll dice window could split a group's outcomes — fixed the same way: the aggregate must
+// never claim more certainty than the data supports.
+test.describe('possiblyIncomplete — a truncated request page can split a group (#1943 review finding #5)', () => {
+  test('constructs the actual split-group case: a 3-member group where the truncated page only fetched 2 of its 3 rows', () => {
+    // Realistic scenario: 'party-save' is really a 3-character group (ids 1,2,3 all share it),
+    // but the DM's group send happened long enough ago that id=1 has aged out of the board's
+    // fetched page — 5 unrelated single-target sends landed after it. The page below (ids
+    // 2..6, length 5) is exactly what a `?limit=5` fetch would return: it never saw row id=1 at
+    // all, so from buildGroupCheckSummaries's point of view 'party-save' looks like a complete
+    // 2-member group unless it's told the page was truncated.
+    const requests = [
+      mkReq({ id: 2, characterId: 20, groupId: 'party-save', status: 'resolved', rollId: 100 }),
+      mkReq({ id: 3, characterId: 30, groupId: 'party-save', status: 'resolved', rollId: 101 }),
+      mkReq({ id: 4, characterId: 40, groupId: 'solo-1', status: 'resolved', rollId: 102 }),
+      mkReq({ id: 5, characterId: 50, groupId: 'solo-2', status: 'resolved', rollId: 103 }),
+      mkReq({ id: 6, characterId: 60, groupId: 'solo-3', status: 'resolved', rollId: 104 }),
+    ];
+    const rolls = [
+      mkRoll({ id: 100, success: true }),
+      mkRoll({ id: 101, success: true }),
+      mkRoll({ id: 102, success: true }),
+      mkRoll({ id: 103, success: true }),
+      mkRoll({ id: 104, success: true }),
+    ];
+
+    // hasMoreOlderRows = true: the caller fetched exactly its page limit (5), so row id=1 (and
+    // anything older) may exist beyond what was fetched.
+    const summaries = buildGroupCheckSummaries(requests, rolls, true);
+    const partySave = summaries.find((s) => s.groupId === 'party-save')!;
+    const solo1 = summaries.find((s) => s.groupId === 'solo-1')!;
+
+    // The split group IS flagged — it holds the page's oldest fetched row (id=2).
+    expect(partySave.possiblyIncomplete).toBe(true);
+    // A group entirely clear of the truncation boundary is NOT flagged, even on the same
+    // truncated page — only the group actually at risk is suppressed.
+    expect(solo1.possiblyIncomplete).toBe(false);
+
+    // The dramatic failure this pins: without the fix, 'party-save' would render "2 of 2
+    // passed — Group succeeds" for what is REALLY an (at least) 3-member group missing a
+    // member entirely — full confidence in a number that is flatly wrong.
+    expect(partySave.totalCount).toBe(2); // the undercount itself — a symptom, not what we assert on
+    expect(shouldShowPassedTally(partySave)).toBe(false);
+    expect(groupCheckMajoritySucceeds(partySave, true)).toBe(false);
+    // The unaffected group's tally is untouched by its neighbor's truncation.
+    expect(shouldShowPassedTally(solo1)).toBe(true);
+  });
+
+  test('the same page, NOT truncated (hasMoreOlderRows omitted/false), flags nothing — a fully-fetched page is trustworthy', () => {
+    const requests = [
+      mkReq({ id: 2, characterId: 20, groupId: 'party-save', status: 'resolved', rollId: 100 }),
+      mkReq({ id: 3, characterId: 30, groupId: 'party-save', status: 'resolved', rollId: 101 }),
+    ];
+    const rolls = [mkRoll({ id: 100, success: true }), mkRoll({ id: 101, success: true })];
+
+    const summaries = buildGroupCheckSummaries(requests, rolls); // hasMoreOlderRows defaults false
+    const partySave = summaries.find((s) => s.groupId === 'party-save')!;
+    expect(partySave.possiblyIncomplete).toBe(false);
+    expect(shouldShowPassedTally(partySave)).toBe(true);
+    expect(groupCheckMajoritySucceeds(partySave, true)).toBe(true);
+  });
+
+  test('a truncated page with only ONE group present: that group holds the oldest row and is flagged', () => {
+    const requests = [
+      mkReq({ id: 5, characterId: 1, groupId: 'solo-group', status: 'resolved', rollId: 100 }),
+    ];
+    const rolls = [mkRoll({ id: 100, success: true })];
+    const summaries = buildGroupCheckSummaries(requests, rolls, true);
+    expect(summaries[0].possiblyIncomplete).toBe(true);
+  });
+});
