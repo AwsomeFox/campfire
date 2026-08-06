@@ -102,6 +102,12 @@ export function CheckRequestPanel({
   const [dc, setDc] = useState('');
   const [consequence, setConsequence] = useState('');
   const [localError, setLocalError] = useState<string | null>(null);
+  // Issue #1943 review, round 8. `localError` is NOT exclusively the catalog effect's: the send
+  // mutation writes it too. Sharing one slot meant a catalog recovery cleared a send-failure
+  // message the DM had not read. Rounds 4-7 spent four attempts guarding a shared PARENT slot
+  // before concluding the effect must never clear what it doesn't exclusively own — the same
+  // reasoning applies here, one level down, and the fix is to stop sharing rather than to guard.
+  const [catalogError, setCatalogError] = useState<string | null>(null);
 
   const campaignCharactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(campaignId),
@@ -180,7 +186,7 @@ export function CheckRequestPanel({
       ? translateApiError(firstErrored.error, t, { fallbackKey: 'encounters.errors.loadChecks' })
       : t('encounters.errors.loadChecks');
     const result = syncCatalogErrorDisplay(checksAnyError, msg);
-    if (result.localError !== undefined) setLocalError(result.localError);
+    if (result.localError !== undefined) setCatalogError(result.localError);
     if (result.parentError !== undefined) onError?.(result.parentError);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once per loading/failed<->loaded transition, not per render
   }, [checksAnyError]);
@@ -234,9 +240,9 @@ export function CheckRequestPanel({
         Ask one or more players to roll a check or save. They get an in-page prompt and roll
         once; each result lands in the shared dice log with your consequence text.
       </p>
-      {localError && (
+      {catalogError && (
         <p className="text-sm text-rose-400">
-          {localError}
+          {catalogError}
           {checksAnyError && (
             <>
               {' '}
@@ -247,6 +253,7 @@ export function CheckRequestPanel({
           )}
         </p>
       )}
+      {localError && <p className="text-sm text-rose-400">{localError}</p>}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ flex: 2, minWidth: 220 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
