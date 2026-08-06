@@ -4,6 +4,7 @@ import type { Combatant, Character } from '@campfire/schema';
 import { HpBar, Card, Btn, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { TurnElapsedChip } from './TurnElapsedChip';
+import type { DeathSaveOutcome } from './combat/deathSaveOutcome';
 
 interface PlayerVitalsHeaderProps {
   combatants: Combatant[];
@@ -25,6 +26,39 @@ interface PlayerVitalsHeaderProps {
   movementDefault?: number;
   /** Issue #1942: adds a non-color HP danger glyph alongside the color-only bar tone. */
   colorVisionAssist?: boolean;
+  /**
+   * Issue #1919 — roll a death save for the viewer's own dying character through the
+   * SAME server-authoritative d20 + shared dice-log action `DeathSaveTracker` uses.
+   * Omitted entirely disables the strip's Roll button (matches `DeathSaveTracker`'s
+   * `canEditPermission && canRoll` gate: this header only ever renders the viewer's own
+   * owned combatants, so permission is implicit — `canRoll` is still `deathState === 'dying'`).
+   */
+  onRollDeathSave?: (combatantId: number) => void;
+  /** Per-combatant in-flight state for the Roll button, same signal as `busy` elsewhere. */
+  isDeathSaveBusy?: (combatantId: number) => boolean;
+  /** Issue #1746 sync gate — disables the Roll button without unmounting it. */
+  syncBlocked?: boolean;
+  /** This combatant's just-settled death-save outcome, or null once faded (issue #1919). */
+  deathSaveOutcome?: { combatantId: number; outcome: DeathSaveOutcome } | null;
+}
+
+function deathSaveOutcomeText(
+  t: (key: string, fallback: string, opts?: Record<string, unknown>) => string,
+  outcome: DeathSaveOutcome,
+): string {
+  switch (outcome.kind) {
+    case 'revive':
+      return t('encounters.deathSave.outcome.revive', 'Natural 20 — back on your feet!');
+    case 'dead':
+      return t('encounters.deathSave.outcome.dead', 'Died.');
+    case 'stabilized':
+      return t('encounters.deathSave.outcome.stabilized', 'Stabilized.');
+    case 'success':
+      return t('encounters.deathSave.outcome.success', 'Success (rolled {{natural}}).', { natural: outcome.natural });
+    case 'failure':
+    default:
+      return t('encounters.deathSave.outcome.failure', 'Failure (rolled {{natural}}).', { natural: outcome.natural });
+  }
 }
 
 /**
@@ -41,7 +75,7 @@ export function vitalsSpeedFor(combatant: Combatant, movementDefault: number | u
   return movementDefault ?? null;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, turnStartedAt = null, turnTimerSeconds = 0 }: PlayerVitalsHeaderProps) {
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, turnStartedAt = null, turnTimerSeconds = 0, onRollDeathSave, isDeathSaveBusy, syncBlocked = false, deathSaveOutcome }: PlayerVitalsHeaderProps) {
   const { t } = useTranslation('encounters');
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
@@ -183,14 +217,50 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
               )}
             </div>
 
-            {(c.hpCurrent === 0 || c.deathState === 'dying') && (
-              <div className="flex items-center gap-2 ml-auto border border-red-500/50 bg-red-950/30 px-3 py-1.5 rounded-lg">
-                <span className="text-xs text-red-200 font-semibold uppercase tracking-wider">Death Saves</span>
-                <span className="text-sm font-bold text-white tracking-widest">
-                  {c.deathSaveSuccesses} ✓ <span className="text-red-400">{c.deathSaveFailures} ✗</span>
-                </span>
-              </div>
-            )}
+            {(c.hpCurrent === 0 || c.deathState === 'dying') && (() => {
+              const dying = c.deathState === 'dying';
+              const canRoll = dying && onRollDeathSave != null;
+              const busy = isDeathSaveBusy?.(c.id) ?? false;
+              const outcome = deathSaveOutcome?.combatantId === c.id ? deathSaveOutcome.outcome : null;
+              return (
+                <div
+                  className={`flex items-center gap-2 ml-auto flex-wrap border px-3 py-1.5 rounded-lg ${dying ? 'border-red-500 bg-red-950/50' : 'border-red-500/50 bg-red-950/30'}`}
+                  data-testid={dying ? 'player-vitals-dying-strip' : 'player-vitals-death-saves'}
+                >
+                  <span className="text-xs text-red-200 font-semibold uppercase tracking-wider">
+                    {dying
+                      ? t(
+                          'encounters.vitals.dyingStrip',
+                          'You are dying — {{successes}} successes / {{failures}} failures',
+                          { successes: c.deathSaveSuccesses, failures: c.deathSaveFailures },
+                        )
+                      : t('encounters.vitals.deathSaves', 'Death Saves')}
+                  </span>
+                  {!dying && (
+                    <span className="text-sm font-bold text-white tracking-widest">
+                      {c.deathSaveSuccesses} ✓ <span className="text-red-400">{c.deathSaveFailures} ✗</span>
+                    </span>
+                  )}
+                  {canRoll && (
+                    <Btn
+                      className="cf-target-44"
+                      density="xs"
+                      disabled={busy || syncBlocked}
+                      title={syncBlocked ? t('encounters.sync.controlsPaused', 'Paused — reconnecting to live updates.') : undefined}
+                      aria-label={t('encounters.vitals.rollDeathSave', 'Roll a death save')}
+                      onClick={() => onRollDeathSave?.(c.id)}
+                    >
+                      {t('dice.roll', 'Roll')}
+                    </Btn>
+                  )}
+                  {outcome != null && (
+                    <span className={`cf-death-save-outcome cf-death-save-outcome--${outcome.kind}`} data-testid="death-save-outcome">
+                      {deathSaveOutcomeText(t, outcome)}
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="flex items-center gap-1.5 flex-wrap flex-1 justify-end min-w-[100px]">
               {c.conditions.map(cond => (

@@ -17,6 +17,7 @@ import { TOKEN_SIZE_OPTIONS } from '../map/BattleMap';
 import { FloatingNumbers } from '../FloatingNumbers';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { DEATH_STATE_LABEL, DeathSaveTracker } from './DeathSaves';
+import type { DeathSaveOutcome } from './deathSaveOutcome';
 import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, conditionDraftFromInstance, conditionSourceLabel, emptyConditionDraft, type ConditionDraft, type ConditionSourceOption, type ConditionTiming } from './conditionDraft';
 
 const HP_BAND_LABEL: Record<string, string> = { healthy: 'Healthy', bloodied: 'Bloodied', critical: 'Critical', down: 'Down' };
@@ -98,6 +99,8 @@ export type CombatantRowProps = {
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   /** Roll a death save through the server-authoritative d20 + shared dice-log action. */
   onRollDeathSave: () => void;
+  /** Issue #1919: this combatant's just-settled death-save outcome, or null once faded. */
+  deathSaveOutcome?: DeathSaveOutcome | null;
   /**
    * Roll this combatant's own initiative through the server-authoritative die + shared
    * dice-log action (issue #1904). Rendered only for a null-initiative combatant the
@@ -168,6 +171,7 @@ export function CombatantRow({
   onSetTempHp,
   onSetDeathSaves,
   onRollDeathSave,
+  deathSaveOutcome,
   onRollInitiative,
   onSetInitiative,
   onClearInitiative,
@@ -719,6 +723,7 @@ export function CombatantRow({
               syncBlockedReason={syncBlockedReason}
               onSet={onSetDeathSaves}
               onRoll={onRollDeathSave}
+              outcome={deathSaveOutcome}
             />
           )}
         {(combatant.conditionInstances?.length ?? 0) > 0 ? (

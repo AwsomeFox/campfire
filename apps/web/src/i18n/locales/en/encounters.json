@@ -4,7 +4,22 @@
     "vitals": {
       "editMaxHp": "Edit max HP",
       "maxHp": "Max HP",
-      "setMax": "Set Max"
+      "setMax": "Set Max",
+      "deathSaves": "Death Saves",
+      "dyingStrip": "You are dying — {{successes}} successes / {{failures}} failures",
+      "rollDeathSave": "Roll a death save"
+    },
+    "deathSave": {
+      "outcome": {
+        "revive": "Natural 20 — back on your feet!",
+        "dead": "Died.",
+        "stabilized": "Stabilized.",
+        "success": "Success (rolled {{natural}}).",
+        "failure": "Failure (rolled {{natural}})."
+      },
+      "spectatorToast": "{{name}} death save: {{outcome}} (rolled {{natural}})",
+      "spectatorOutcomeSuccess": "success",
+      "spectatorOutcomeFailure": "failure"
     },
     "turnTimer": {
       "elapsed": "Turn elapsed {{elapsed}}",
