@@ -1,5 +1,7 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { AuditService } from '../src/modules/audit/audit.service';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 
 /**
  * Roll catalog (issue #415) — server-resolved checks. The adapter owns the roll catalog, the
@@ -577,5 +579,79 @@ describe('Group check requests (issue #1943, e2e)', () => {
     expect(newRows).toHaveLength(0);
     expect(newRows.some((r: { characterId: number }) => r.characterId === charA)).toBe(false);
     expect(newRows.some((r: { characterId: number }) => r.characterId === charB)).toBe(false);
+  });
+
+  // Issue #1943 review, round 6: the atomicity fix above wrapped the check-request inserts in
+  // a transaction, and the per-row audit write went inside it as a consequence — folding it
+  // onto AuditService#logInTx's ALL-OR-NOTHING guarantee. That bought nothing for the atomicity
+  // this transaction actually needs (which is only between the check-request rows themselves),
+  // and added a new failure mode: an audit-subsystem hiccup would now roll back a DM's entire
+  // valid send. requestChecks moved the audit write to a post-commit, best-effort
+  // `auditBestEffort` call (matching `AuditService#log`'s documented "an audit-subsystem outage
+  // must not undo a user's work" guarantee) — this is the honest behavioural test for that: a
+  // forced audit failure must NOT cost the DM their check requests, or the SSE ticks that tell
+  // players to look.
+  it('a failed audit write does not cost the DM their check requests or the SSE events that notify players (#1943 review, round 6)', async () => {
+    const server = ctx.app.getHttpServer();
+    const audit = ctx.app.get(AuditService);
+    const events = ctx.app.get(CampaignEventsService);
+
+    // In-process subscription to the SAME Subject the real SSE endpoint streams from (the
+    // pattern already used elsewhere in this test family, e.g. encounters.e2e-spec.ts) — a
+    // direct, non-contrived observation of whether the notification actually fired.
+    const broadcasts: Array<{ type: string; requestId?: number; characterId?: number }> = [];
+    const subscription = events.streamFor(campaignId).subscribe((event) => broadcasts.push(event));
+
+    // Mocks BOTH audit write paths, not just the one this fix actually uses — a mutation back
+    // to the pre-fix `logInTx` call would never touch `.log()` at all (they're two independent
+    // methods; see AuditService's doc comments), so a test that only fails `.log()` would pass
+    // against the old code for the wrong reason (the old code's audit write would simply
+    // "succeed" against an unmocked `logInTx`). Failing both makes this test discriminate on
+    // the actual guarantee — "does an audit failure survive" — regardless of which method the
+    // implementation happens to call.
+    const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+    const spyInTx = jest.spyOn(audit, 'logInTx').mockImplementation(() => {
+      throw new Error('audit table is unavailable');
+    });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+        .set(dm)
+        .send({ characterIds: [charA, charB], checkId: 'save:DEX' });
+
+      // Not a 500, and not a partial result either — the requests genuinely committed even
+      // though every one of their audit rows failed to write.
+      expect(res.status).toBe(201);
+      expect(res.body).toHaveLength(2);
+      const createdIds = new Set(res.body.map((r: { id: number }) => r.id));
+
+      // The rows are really persisted (not silently rolled back by the audit failure) —
+      // read them back from a completely separate request.
+      const list = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+      expect(list.status).toBe(200);
+      const persisted = list.body.filter((r: { id: number }) => createdIds.has(r.id));
+      expect(persisted).toHaveLength(2);
+      expect(persisted.some((r: { characterId: number }) => r.characterId === charA)).toBe(true);
+      expect(persisted.some((r: { characterId: number }) => r.characterId === charB)).toBe(true);
+
+      // Both SSE ticks landed too — the audit failure suppressed neither this row's own
+      // notification nor a LATER row's (which a naive shared try/catch around the whole loop
+      // could have done).
+      const ticks = broadcasts.filter((e) => e.type === 'check.requested' && createdIds.has(e.requestId as number));
+      expect(ticks).toHaveLength(2);
+
+      // The audit call really was attempted (and really did fail) for both rows, via the
+      // post-commit `log()` path this fix uses — not `logInTx`, which would prove this test is
+      // exercising the OLD (transactional, all-or-nothing) shape instead.
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(spyInTx).not.toHaveBeenCalled();
+      for (const call of spy.mock.calls) {
+        expect(call[0]).toMatchObject({ action: 'check.request' });
+      }
+    } finally {
+      spy.mockRestore();
+      spyInTx.mockRestore();
+      subscription.unsubscribe();
+    }
   });
 });
