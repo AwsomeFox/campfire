@@ -64,6 +64,7 @@ import type {
   DdbCharacterImport,
   DdbImportResult,
   ResourcePatch,
+  HomebrewMechanicsProfile,
 } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
@@ -377,11 +378,14 @@ export class CharactersService {
    */
   private async adapterForCampaign(campaignId: number) {
     const [row] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1);
-    return ruleSystemAdapter(row?.ruleSystem);
+    return ruleSystemAdapter(
+      row?.ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null),
+    );
   }
 
   /**
@@ -1206,12 +1210,15 @@ export class CharactersService {
     const failIncrease = input.deathSaveFailures !== undefined && clampDeathSaveCount(input.deathSaveFailures) > existing.deathSaveFailures;
     if (succIncrease || failIncrease) {
       const [deathCampaign] = this.db
-        .select({ ruleSystem: campaigns.ruleSystem })
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
         .from(campaigns)
         .where(eq(campaigns.id, existing.campaignId))
         .limit(1)
         .all();
-      const adapter = ruleSystemAdapter(deathCampaign?.ruleSystem);
+      const adapter = ruleSystemAdapter(
+        deathCampaign?.ruleSystem,
+        fromJsonText<HomebrewMechanicsProfile | null>(deathCampaign?.customMechanicsProfile, null),
+      );
       if (!hpModelForAdapter(adapter).deathSaves) {
         throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
       }
@@ -1426,12 +1433,17 @@ export class CharactersService {
       // death saves (Starfinder, PF2e, OSR, …) matches the combat engine: a character dropped
       // to 0 HP is simply "down", never auto-flagged 'dying' by a rule they don't use.
       const [deathCampaign] = tx
-        .select({ ruleSystem: campaigns.ruleSystem })
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
         .from(campaigns)
         .where(eq(campaigns.id, fresh.campaignId))
         .limit(1)
         .all();
-      const hpModel = hpModelForAdapter(ruleSystemAdapter(deathCampaign?.ruleSystem));
+      const hpModel = hpModelForAdapter(
+        ruleSystemAdapter(
+          deathCampaign?.ruleSystem,
+          fromJsonText<HomebrewMechanicsProfile | null>(deathCampaign?.customMechanicsProfile, null),
+        ),
+      );
       const deathSavesSupported = hpModel.deathSaves;
 
       const requested = 'delta' in patch ? fresh.hpCurrent + patch.delta : patch.set;

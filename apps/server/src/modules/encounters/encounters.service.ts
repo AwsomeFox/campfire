@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -433,6 +433,10 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     aoe: parseAoe(row.aoe),
     hidden: row.hidden,
     endedAt: row.endedAt,
+    // Turn timer (issue #1935) — server-stamped only; exposed for every role (never a secret)
+    // so the DM header, PlayerVitalsHeader, and PlayerDisplayPage compute the same elapsed time.
+    turnStartedAt: row.turnStartedAt ?? null,
+    turnTimerSeconds: row.turnTimerSeconds ?? 0,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -478,6 +482,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditionInstances: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
     legendaryActions: null,
     statblock: parseCombatantStatblock(row.statblockJson),
+    statblockRevealed: row.statblockRevealed,
   };
 }
 
@@ -722,12 +727,16 @@ function deathSaveRollEventDetail(
 function redactMonsterHp(c: Combatant): Combatant {
   if (c.kind !== 'monster' && c.kind !== 'npc') return c;
   // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
-  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43).
+  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43),
+  // UNLESS the DM has explicitly revealed this combatant's statblock (issue #1926) —
+  // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
+  // never carries the field until the DM turns it on. HP banding itself is entirely
+  // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
   // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
   // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
   const redacted: Combatant = {
     ...c,
-    statblock: null,
+    statblock: c.statblockRevealed ? c.statblock : null,
     turnState: {
       ...c.turnState,
       pendingConcentrationChecks: [],
@@ -1034,8 +1043,12 @@ export class EncountersService {
    * as before. Adding a second rule system is a new adapter in the registry, not edits here.
    */
   private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
-    const [row] = await this.db.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
-    return ruleSystemAdapter(row?.ruleSystem);
+    const [row] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return ruleSystemAdapter(row?.ruleSystem, fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null));
   }
 
   /** Statblock-derived damage defences for direct tracker damage (issue #605). */
@@ -2066,6 +2079,14 @@ export class EncountersService {
       set.hidden = input.hidden;
       changedPredicates.push(sql`${encounters.hidden} IS NOT ${input.hidden ? 1 : 0}`);
     }
+    // Turn timer pacing limit (issue #1935) — dm only, like the rest of this endpoint.
+    // `turnStartedAt` is deliberately absent from EncounterUpdate/EncounterUpdateDto (strict
+    // schema), so it can never reach here at all — it is stamped only by the turn-transition
+    // methods themselves (start/advanceCurrentTurn/undoTurn/reopen), never via PATCH.
+    if (input.turnTimerSeconds !== undefined && input.turnTimerSeconds !== (encounterRow.turnTimerSeconds ?? 0)) {
+      set.turnTimerSeconds = input.turnTimerSeconds;
+      changedPredicates.push(sql`${encounters.turnTimerSeconds} IS NOT ${input.turnTimerSeconds}`);
+    }
 
     if (changedPredicates.length === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
@@ -2616,12 +2637,15 @@ export class EncountersService {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
     const [campaignRow] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, encounterRow.campaignId))
       .limit(1);
     const ruleSystem = campaignRow?.ruleSystem ?? null;
-    const adapter = ruleSystemAdapter(ruleSystem);
+    const adapter = ruleSystemAdapter(
+      ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(campaignRow?.customMechanicsProfile, null),
+    );
     const combatantRows = await this.listCombatantRows(encounterId);
 
     // Party levels: from each character-combatant's linked character sheet.
@@ -3222,6 +3246,7 @@ export class EncountersService {
   private async loadMonsterCandidates(
     adapter: RuleSystemAdapter,
     filters: EncounterGenerateInput['filters'],
+    campaignId: number,
   ): Promise<GeneratorCandidate[]> {
     // Optional single-pack scoping: resolve the slug to a pack id, or short-circuit to no
     // candidates if the slug isn't installed (mirrors RulesService.search's pack filter).
@@ -3234,8 +3259,22 @@ export class EncountersService {
 
     const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
     const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
-    const where = packId !== undefined ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)) : and(typeWhere, isNull(ruleEntries.campaignId));
-    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
+    // Issue #1927: campaign homebrew (a rule_entries row with a non-null campaignId) is now a
+    // candidate alongside globally installed pack entries, using the same
+    // or(isNull(campaignId), eq(campaignId, ...)) idiom already used at commit/defenses/
+    // difficulty/add-combatant/aftermath — plus isNull(archivedAt) so soft-archived homebrew
+    // never generates. `packSlug` (below) narrows ONLY the global half: homebrew rows always
+    // live under a dedicated internal pack id (RulesService.homebrewPackId()), never under a
+    // real installed pack's id, so an explicit pack filter naturally excludes homebrew without
+    // extra logic — packSlug stays pack-only, unchanged from before this issue.
+    const where =
+      packId !== undefined
+        ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId))
+        : and(typeWhere, or(isNull(ruleEntries.campaignId), and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt))));
+    const rows = await this.db
+      .select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson, campaignId: ruleEntries.campaignId })
+      .from(ruleEntries)
+      .where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
     const envNeedle = filters?.environment?.trim().toLowerCase();
@@ -3272,6 +3311,7 @@ export class EncountersService {
         cr,
         xp: typeof data.xp === 'number' && data.xp > 0 ? data.xp : typeof data.experience === 'number' && data.experience > 0 ? data.experience : crToXp(cr),
         hpMax: adapter.monsterHitPoints(data),
+        source: row.campaignId != null ? 'homebrew' : 'pack',
       });
     }
     return candidates;
@@ -3293,10 +3333,10 @@ export class EncountersService {
     // the adapter from it locally — `ruleSystemAdapter` is pure — rather than calling both
     // `adapterForCampaign` (which re-reads `campaigns.ruleSystem` itself) and
     // `ruleSystemForCampaign`, which would run the same SELECT twice on this hot path.
-    const ruleSystem = await this.ruleSystemForCampaign(campaignId);
-    const adapter = ruleSystemAdapter(ruleSystem);
+    const { ruleSystem, customMechanicsProfile } = await this.ruleSystemForCampaign(campaignId);
+    const adapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
-    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters, campaignId);
 
     // Mint a seed when the caller didn't supply one, so the result is reproducible: the
     // returned seed round-trips back through `seed` to rebuild the identical group.
@@ -3324,7 +3364,16 @@ export class EncountersService {
     });
 
     return {
-      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, entryType: p.entryType ?? 'monster', cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
+      combatants: result.picks.map((p) => ({
+        ruleEntryId: p.ruleEntryId,
+        name: p.name,
+        entryType: p.entryType ?? 'monster',
+        cr: p.cr,
+        xp: p.xp,
+        hpMax: p.hpMax,
+        count: p.count,
+        source: p.source ?? 'pack',
+      })),
       targetBand: input.difficulty,
       difficulty: reported,
       // Codex review (#1981): `reported.adjustedXp` is 0 for an `unsupported` status
@@ -3393,14 +3442,22 @@ export class EncountersService {
   // supplies candidates from the compendium, resolves statblocks, and owns persistence.
   // ---------------------------------------------------------------------------
 
-  /** Look up a campaign's rule system slug (for adapter-owned difficulty + support status). */
-  private async ruleSystemForCampaign(campaignId: number): Promise<string | null> {
+  /**
+   * Look up a campaign's rule system slug (for adapter-owned difficulty + support status)
+   * alongside its persisted homebrew mechanics profile (issue #1502), in the one SELECT.
+   */
+  private async ruleSystemForCampaign(
+    campaignId: number,
+  ): Promise<{ ruleSystem: string | null; customMechanicsProfile: HomebrewMechanicsProfile | null }> {
     const [row] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1);
-    return row?.ruleSystem ?? null;
+    return {
+      ruleSystem: row?.ruleSystem ?? null,
+      customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null),
+    };
   }
 
   /**
@@ -3508,10 +3565,14 @@ export class EncountersService {
    * NOTHING — any member (or AI) may preview; committing is the separate write path.
    */
   async previewEncounter(campaignId: number, input: EncounterPreviewInput, _viewerRole?: Role): Promise<EncounterPreview> {
+    // #1502: resolve through the campaign's persisted homebrew profile, not the slug alone.
+    // main added this call site while this branch was converting every adapter lookup to the
+    // profile-aware path; a slug-only `ruleSystemAdapter` here would silently give a homebrew
+    // campaign 5e's monster/difficulty maths for generated encounters.
     const adapter = await this.adapterForCampaign(campaignId);
-    const ruleSystem = await this.ruleSystemForCampaign(campaignId);
+    const { ruleSystem } = await this.ruleSystemForCampaign(campaignId);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
-    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters, campaignId);
     const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
     const maxCount = input.count ?? 12;
 
@@ -3547,7 +3608,13 @@ export class EncountersService {
     const pickedIds = [...new Set(result.picks.map((p) => p.ruleEntryId))];
     const dataById = new Map<number, Record<string, unknown>>();
     if (pickedIds.length > 0) {
-      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(inArray(ruleEntries.id, pickedIds), isNull(ruleEntries.campaignId)));
+      // Issue #1927: picks may now include the campaign's own homebrew, so this must resolve
+      // statblocks for BOTH scopes (same widen as loadMonsterCandidates above), not just global
+      // pack entries — otherwise a homebrew pick's inspection card would silently come back empty.
+      const rows = await this.db
+        .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+        .from(ruleEntries)
+        .where(and(inArray(ruleEntries.id, pickedIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))));
       for (const r of rows) dataById.set(r.id, fromJsonText<Record<string, unknown>>(r.dataJson, {}));
     }
 
@@ -3570,6 +3637,7 @@ export class EncountersService {
         pinned: slotPlan.pinned,
         seed: slotPlan.seed,
         inspection: this.buildCreatureInspection(adapter, data, cr, xp, hpMax),
+        source: pick?.source ?? 'pack',
       };
     });
 
@@ -4519,6 +4587,7 @@ export class EncountersService {
       if (replayed) return replayed;
       if (roll === null) throw new Error('Death-save dice roll was not persisted');
       const persistedRoll = roll as DiceRoll;
+      this.rolls.emitDiceRolled?.(persistedRoll);
 
       return { combatant: updated, roll: persistedRoll };
     } catch (err) {
@@ -4569,8 +4638,16 @@ export class EncountersService {
   }
 
   private assertDeathSavesSupportedForCampaign(campaignId: number, tx: SyncDb): void {
-    const [campaign] = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1).all();
-    const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+    const [campaign] = tx
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1)
+      .all();
+    const adapter = ruleSystemAdapter(
+      campaign?.ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+    );
     if (!hasDeathSavesForAdapter(adapter)) {
       throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
     }
@@ -4636,12 +4713,13 @@ export class EncountersService {
         patch.hpMax !== undefined ||
         patch.initMod !== undefined ||
         patch.tokenSize !== undefined ||
-        patch.initiative !== undefined
+        patch.initiative !== undefined ||
+        patch.statblockRevealed !== undefined
       ) {
         throw new ForbiddenException({
           code: 'COMBATANT_FIELD_DM_ONLY',
           message:
-            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, or initiative — roll your own initiative via the dedicated roll-initiative action.',
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, or statblockRevealed — roll your own initiative via the dedicated roll-initiative action.',
         });
       }
       if (!existing.characterId) {
@@ -4732,6 +4810,8 @@ export class EncountersService {
     if (patch.statblock !== undefined && isDm) {
       staticUpdate.statblockJson = toJsonText(CombatantStatblock.parse(patch.statblock));
     }
+    // Statblock reveal toggle (issue #1926) — DM-only (see the ForbiddenException above).
+    if (patch.statblockRevealed !== undefined && isDm) staticUpdate.statblockRevealed = patch.statblockRevealed;
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
@@ -5253,6 +5333,7 @@ export class EncountersService {
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
+      staticUpdate.statblockRevealed !== undefined ||
       hpMaxChanged;
     if (changedNonHp) {
       await this.audit.log({
@@ -5272,6 +5353,18 @@ export class EncountersService {
     // endpoint stays member-visible without leaking issue #43's redaction.
     const round = encounterRow.round;
     const targetName = row.name;
+
+    // Issue #1926: log the statblock reveal toggle. `detail` deliberately omits the
+    // combatant's name (issue #869 convention — never interpolate names into `detail`,
+    // only `target`/`targetId`) so a non-DM's redacted listing composes the same
+    // "<name> ...detail" phrasing as every other combat-log line.
+    if (staticUpdate.statblockRevealed !== undefined && staticUpdate.statblockRevealed !== existing.statblockRevealed) {
+      await this.appendEvent(encounterId, round, 'note', {
+        target: targetName,
+        targetId: combatantId,
+        detail: staticUpdate.statblockRevealed ? "'s statblock is revealed to players" : "'s statblock is hidden again",
+      });
+    }
 
     // Issue #620: attribute HP/death events to the attacker so the log reads "Ember hit
     // Goblin 3 for 8" rather than just "Goblin 3 took 8 damage". Resolution order:
@@ -5553,8 +5646,15 @@ export class EncountersService {
       }
       this.assertMutable(freshEncounter);
       this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
-      const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, freshEncounter.campaignId)).get();
-      const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+      const campaign = tx
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+        .from(campaigns)
+        .where(eq(campaigns.id, freshEncounter.campaignId))
+        .get();
+      const adapter = ruleSystemAdapter(
+        campaign?.ruleSystem,
+        fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+      );
       const roster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const snapshot = roster.find((row) => row.id === combatantId);
       if (!snapshot) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
@@ -5646,6 +5746,12 @@ export class EncountersService {
       const afterTurnVersion = freshEncounter.turnVersion + (runningAdapter && freshEncounter.currentCombatantId === combatantId ? 1 : 0);
       const afterCombatantStateVersion = freshEncounter.combatantStateVersion + (runningAdapter ? 1 : 0);
       let turnVersionUpdate: { turnVersion?: SQL } = {};
+      // Turn timer (issue #1935 review — Devin): removing the CURRENT combatant is a genuine
+      // turn transition (advanceEncounterTurn runs, turnVersion bumps, encounter.turn_changed
+      // fires) even though this method isn't named like a turn-advance one. Restamp alongside
+      // turnVersionUpdate below — same gate, same reasoning — so the new turn's chip doesn't
+      // keep accumulating the removed combatant's elapsed time.
+      let turnRestampUpdate: { turnStartedAt?: string } = {};
       let escalation: ReturnType<EncountersService['nextEscalationState']> | null = null;
       if (runningAdapter) {
         const sortedAfter = this.sortCombatantsWithAdapter(
@@ -5669,6 +5775,7 @@ export class EncountersService {
         // Keep this SQL expression out of the persisted undo snapshot.
         if (freshEncounter.currentCombatantId === combatantId) {
           turnVersionUpdate = { turnVersion: sql`${encounters.turnVersion} + 1` };
+          turnRestampUpdate = { turnStartedAt: now };
           // A removal can advance the active actor just like endTurn. Preserve that
           // turn edge for connected clients, including a lair transition with no
           // current combatant, while ordinary roster edits remain updated-only.
@@ -5757,6 +5864,7 @@ export class EncountersService {
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
+        ...turnRestampUpdate,
         turnPhase,
         ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
         updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
@@ -5779,6 +5887,10 @@ export class EncountersService {
           escalationDieHistory: freshEncounter.escalationDieHistory,
           lairResumeCombatantId: freshEncounter.lairResumeCombatantId,
           turnPhase: (freshEncounter.turnPhase as EncounterTurnPhase) ?? 'combatant',
+          // Turn timer (issue #1935 review): captured so undo can restore the ORIGINAL
+          // stamp, not a fresh one — see the restore side in undoRemoveCombatant for why
+          // this differs from undoTurn's deliberate "always fresh" restart.
+          turnStartedAt: freshEncounter.turnStartedAt,
         }),
         afterEncounterJson: toJsonText({ ...afterEncounter, turnVersion: afterTurnVersion, combatantStateVersion: afterCombatantStateVersion, escalationEventId }),
         expiresAt,
@@ -5849,8 +5961,15 @@ export class EncountersService {
         }
         this.assertMutable(current);
         this.assertCampaignWritableInTx(tx, current.campaignId);
-        const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, current.campaignId)).get();
-        const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+        const campaign = tx
+          .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+          .from(campaigns)
+          .where(eq(campaigns.id, current.campaignId))
+          .get();
+        const adapter = ruleSystemAdapter(
+          campaign?.ruleSystem,
+          fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+        );
         // A rule-pack uninstall nulls live combatants before deleting its entries, but
         // a removed combatant only exists in this snapshot during the undo window.
         // Restore the same ON DELETE SET NULL state rather than inserting a dangling FK.
@@ -5918,7 +6037,7 @@ export class EncountersService {
           snapshot.turnState = toJsonText(restoredTurnState);
         }
         tx.insert(combatants).values(snapshot).run();
-        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
+        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase; turnStartedAt?: string | null }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
         const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase; turnVersion?: number; combatantStateVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
         const runningAdapter = current.status === 'running' ? adapter : null;
         if (current.currentCombatantId === after.currentCombatantId && current.turnIndex === after.turnIndex && current.round === after.round && current.escalationDie === after.escalationDie && current.escalationDieHistory === after.escalationDieHistory && current.lairResumeCombatantId === after.lairResumeCombatantId && current.turnPhase === after.turnPhase && after.turnVersion === current.turnVersion && after.combatantStateVersion === current.combatantStateVersion) {
@@ -5947,7 +6066,33 @@ export class EncountersService {
             escalationDieHistory: before.escalationDieHistory,
             lairResumeCombatantId: before.lairResumeCombatantId,
             turnPhase: before.turnPhase,
-            ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
+            ...(before.currentCombatantId !== current.currentCombatantId
+              ? {
+                  turnVersion: sql`${encounters.turnVersion} + 1`,
+                  // Turn timer (issue #1935 review): restore the ORIGINAL pre-removal stamp,
+                  // not a fresh one. This undo is a short-lived (~30s) "erase my mistake"
+                  // capability — every other piece of state here (HP, conditions, escalation
+                  // die, turn pointer, lair resume, legendary usage) is restored to exactly
+                  // what it was, so a removal-then-undo is a true no-op. Giving the reverted
+                  // turn a fresh 0:00 instead would be a visible side effect of an action the
+                  // DM is actively erasing. That is why this differs from `undoTurn`, which
+                  // is a deliberate DM gameplay-rewind tool with its own documented "always
+                  // restamp fresh" semantics — there is no accidental click to fully undo.
+                  //
+                  // Issue #1935 review round 4 (Devin) — upgrade-window bug: `before` is
+                  // parsed from a JSON blob a PRE-upgrade binary may have written, before
+                  // `turnStartedAt` existed in that snapshot shape at all. `?? null` cannot
+                  // tell "the snapshot recorded null" (a real prior state — restoring null is
+                  // correct) apart from "the snapshot has no such key" (nothing to restore —
+                  // the live column must be left alone), collapsing both to null and
+                  // clobbering a perfectly valid running stamp for up to 24h after upgrade
+                  // (undo rows persist that long for idempotency replay, though the undo
+                  // CAPABILITY itself only lives ~30s). Only include the key when the
+                  // snapshot genuinely recorded one; omitting it from this partial `.set`
+                  // leaves the live column exactly as it was.
+                  ...(before.turnStartedAt !== undefined ? { turnStartedAt: before.turnStartedAt } : {}),
+                }
+              : {}),
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
             updatedAt: nextUpdatedAt(currentEnc1?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
@@ -6017,6 +6162,7 @@ export class EncountersService {
     const initModel = initiativeModelForAdapter(adapter);
     let rolled: Array<{ id: number; initiative: number; breakdown: CombatantInitiativeBreakdown; name: string }> = [];
     let freshEncounter = encounterRow;
+    const recordedRolls: DiceRoll[] = [];
 
     // The roster read, initiative assignment, log rows, and any turn-index repair must be
     // one SQLite transaction. Otherwise two devices can both see the same unrolled roster,
@@ -6129,7 +6275,7 @@ export class EncountersService {
       // roll must never leak into it (matches the per-combatant roll's same rule below).
       if (!fresh.hidden) {
         for (const entry of diceLogEntries) {
-          this.rolls.recordInTransaction(
+          const rec = this.rolls.recordInTransaction(
             tx,
             fresh.campaignId,
             {
@@ -6143,6 +6289,7 @@ export class EncountersService {
             },
             user,
           );
+          recordedRolls.push(rec);
         }
       }
       const cases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`), sql` `);
@@ -6212,6 +6359,11 @@ export class EncountersService {
     });
 
     this.emitEncounterEvent('encounter.updated', freshEncounter.campaignId, encounterId, freshEncounter.hidden);
+    if (!freshEncounter.hidden) {
+      for (const rec of recordedRolls) {
+        this.rolls.emitDiceRolled?.(rec);
+      }
+    }
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     return { ...snapshot, rolledCount: rolled.length };
@@ -6484,6 +6636,9 @@ export class EncountersService {
         throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       }
       this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
+      if (roll && !freshEncounterRow.hidden) {
+        this.rolls.emitDiceRolled?.(roll);
+      }
       return { combatant: committed, roll };
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but before
@@ -6595,6 +6750,9 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
+          // Turn timer (issue #1935): stamp the fresh server "now" the very first turn
+          // begins, in the same transaction that flips status to running.
+          turnStartedAt: ts,
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
@@ -7075,6 +7233,11 @@ export class EncountersService {
             lairResumeCombatantId,
             escalationDie: escalation.escalationDie,
             escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
+            // Turn timer (issue #1935): a fresh stamp for the NEW current turn, inside the
+            // same serialized transaction as the pointer move. Guarded by the idempotency
+            // dedup above (an early `return` there skips this whole tx.update), so a replayed
+            // retry of the same intent never restamps a turn that already started.
+            turnStartedAt: nowIso(),
             updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
           })
           .where(eq(encounters.id, encounterId))
@@ -7443,6 +7606,10 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
+          // Turn timer (issue #1935): undo restores a FRESH stamp, not the pre-advance one —
+          // a documented restart. The prior elapsed time is intentionally gone; undo produces
+          // a new "now" for whichever turn it retreats to, inside this same transaction.
+          turnStartedAt: nowIso(),
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
@@ -7813,7 +7980,7 @@ export class EncountersService {
     if (c.ruleEntryId !== null) {
       const encounterRow = await this.getRowOrThrow(c.encounterId);
       const adapter = await this.adapterForCampaign(encounterRow.campaignId);
-      const ruleSystem = await this.ruleSystemForCampaign(encounterRow.campaignId);
+      const { ruleSystem } = await this.ruleSystemForCampaign(encounterRow.campaignId);
       const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, c.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       const data = fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {});
       const expanded = expandStatblockActions(data, adapter, ruleSystem ?? '');
@@ -8328,7 +8495,9 @@ export class EncountersService {
       }
       const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
-        .set({ status: 'ended', endedAt: ts, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
+        // Turn timer (issue #1935): null the stamp when the encounter ends — there is no
+        // "current turn" running any more, so no client should keep ticking a chip.
+        .set({ status: 'ended', endedAt: ts, turnStartedAt: null, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
         .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
         .run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
@@ -8519,6 +8688,10 @@ export class EncountersService {
           turnIndex,
           turnPhase: 'combatant',
           lairResumeCombatantId: null,
+          // Turn timer (issue #1935): a reopened encounter begins a fresh turn (see the
+          // turnVersion bump above), so the timer restarts too rather than resuming a stamp
+          // from before the encounter ended.
+          turnStartedAt: ts,
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))

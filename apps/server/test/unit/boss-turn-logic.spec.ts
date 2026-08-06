@@ -48,6 +48,7 @@ function combatant(id: number, initiative: number | null): Combatant {
     conditionInstances: [],
     legendaryActions: null,
     statblock: null,
+    statblockRevealed: false,
   };
 }
 

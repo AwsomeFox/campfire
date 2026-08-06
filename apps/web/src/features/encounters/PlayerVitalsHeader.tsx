@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import type { Combatant, Character } from '@campfire/schema';
 import { HpBar, Card, Btn, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { TurnElapsedChip } from './TurnElapsedChip';
+import type { DeathSaveOutcome } from './combat/deathSaveOutcome';
 
 interface PlayerVitalsHeaderProps {
   combatants: Combatant[];
@@ -11,6 +13,9 @@ interface PlayerVitalsHeaderProps {
   onSetHpMax?: (combatantId: number, max: number) => void;
   turnPulse?: boolean;
   currentCombatantId?: number;
+  /** Turn timer (issue #1935) — server-stamped; renders only once a limit is set (see TurnElapsedChip). */
+  turnStartedAt?: string | null;
+  turnTimerSeconds?: number;
   /**
    * The active campaign's adapter movement-slot max (e.g. 30 for 5e), or `undefined`
    * when the adapter declares no movement slot at all (e.g. PF2e). Computed by the
@@ -19,6 +24,41 @@ interface PlayerVitalsHeaderProps {
    * for, so there is no per-combatant server value to thread through here.
    */
   movementDefault?: number;
+  /** Issue #1942: adds a non-color HP danger glyph alongside the color-only bar tone. */
+  colorVisionAssist?: boolean;
+  /**
+   * Issue #1919 — roll a death save for the viewer's own dying character through the
+   * SAME server-authoritative d20 + shared dice-log action `DeathSaveTracker` uses.
+   * Omitted entirely disables the strip's Roll button (matches `DeathSaveTracker`'s
+   * `canEditPermission && canRoll` gate: this header only ever renders the viewer's own
+   * owned combatants, so permission is implicit — `canRoll` is still `deathState === 'dying'`).
+   */
+  onRollDeathSave?: (combatantId: number) => void;
+  /** Per-combatant in-flight state for the Roll button, same signal as `busy` elsewhere. */
+  isDeathSaveBusy?: (combatantId: number) => boolean;
+  /** Issue #1746 sync gate — disables the Roll button without unmounting it. */
+  syncBlocked?: boolean;
+  /** This combatant's just-settled death-save outcome, or null once faded (issue #1919). */
+  deathSaveOutcome?: { combatantId: number; outcome: DeathSaveOutcome } | null;
+}
+
+function deathSaveOutcomeText(
+  t: (key: string, fallback: string, opts?: Record<string, unknown>) => string,
+  outcome: DeathSaveOutcome,
+): string {
+  switch (outcome.kind) {
+    case 'revive':
+      return t('encounters.deathSave.outcome.revive', 'Natural 20 — back on your feet!');
+    case 'dead':
+      return t('encounters.deathSave.outcome.dead', 'Died.');
+    case 'stabilized':
+      return t('encounters.deathSave.outcome.stabilized', 'Stabilized.');
+    case 'success':
+      return t('encounters.deathSave.outcome.success', 'Success (rolled {{natural}}).', { natural: outcome.natural });
+    case 'failure':
+    default:
+      return t('encounters.deathSave.outcome.failure', 'Failure (rolled {{natural}}).', { natural: outcome.natural });
+  }
 }
 
 /**
@@ -26,25 +66,21 @@ interface PlayerVitalsHeaderProps {
  * resolution the server uses in getTurnWorkspace (encounters.service.ts) EXACTLY:
  * the combatant's add-time snapshot, or — full stop — the caller-supplied adapter
  * default. Deliberately does NOT fall through to the character sheet's live speed
- * when the snapshot is null (round 4 review finding on PR #1980, applied here too):
- * `combatant.speed === null` is ambiguous between "predates the column" and "the
- * character had no speed set at add time" (the common case — Character.speed
- * defaults to null), and a live-character fallback would show a DIFFERENT number
- * here than getTurnWorkspace enforces for that same ambiguous case, reintroducing
- * the exact client/server disagreement this component's precedence fix (combatant-
- * before-character) was written to close. Returns `null` — not a fabricated 0 —
- * when the campaign's adapter has no movement slot at all; the caller must not
- * render a fabricated speed for a system that doesn't have one.
+ * when the snapshot is null: `combatant.speed === null` is ambiguous between "predates the column"
+ * and "the character had no speed set at add time", and a live-character fallback would show a DIFFERENT number.
  */
 export function vitalsSpeedFor(combatant: Combatant, movementDefault: number | undefined): number | null {
-  if (combatant.speed != null) return combatant.speed;
+  const speed = (combatant as { speed?: number | null }).speed;
+  if (speed != null) return speed;
   return movementDefault ?? null;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax: _onSetHpMax, turnPulse = false, currentCombatantId, movementDefault }: PlayerVitalsHeaderProps) {
-  useTranslation();
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, turnStartedAt = null, turnTimerSeconds = 0, onRollDeathSave, isDeathSaveBusy, syncBlocked = false, deathSaveOutcome }: PlayerVitalsHeaderProps) {
+  const { t } = useTranslation('encounters');
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
+  const [editingMaxFor, setEditingMaxFor] = useState<number | null>(null);
+  const [maxHpDraft, setMaxHpDraft] = useState('');
 
   if (combatants.length === 0) return null;
 
@@ -58,15 +94,29 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
     setAdjustHpFor(null);
   }
 
+  function commitMaxHp(combatantId: number) {
+    if (!maxHpDraft || maxHpDraft.includes('.') || !onSetHpMax) return;
+    const max = parseInt(maxHpDraft, 10);
+    if (!isNaN(max) && Number.isInteger(max) && max >= 1) {
+      onSetHpMax(combatantId, max);
+    }
+    setMaxHpDraft('');
+    setEditingMaxFor(null);
+  }
+
   return (
     <div className="sticky top-0 z-10 w-full mb-4">
+      <TurnElapsedChip
+        turnStartedAt={turnStartedAt}
+        turnTimerSeconds={turnTimerSeconds}
+        audience="player"
+        className="mb-2"
+      />
       {combatants.map(c => {
         const char = c.characterId ? charactersById.get(c.characterId) : undefined;
         const ac = char?.ac ?? c.eac ?? c.statblock?.ac ?? '—';
         const speed = vitalsSpeedFor(c, movementDefault);
-        const spellSaveDc = (char?.stats as any)?.spellSaveDc ?? (char?.stats as any)?.spell_save_dc ?? '—';
-        const spellAttack = (char?.stats as any)?.spellAttack ?? (char?.stats as any)?.spell_attack ?? '—';
-        
+
         return (
           <Card key={c.id} className={`flex flex-col md:flex-row flex-wrap gap-4 items-center bg-neutral-900 border-b-4 border-accent p-3 shadow-md mb-2 ${turnPulse && c.id === currentCombatantId ? 'cf-turn-beat-pulse' : ''}`}>
             <div className="flex flex-col flex-1 min-w-[120px]">
@@ -81,15 +131,38 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
               <button 
                 type="button"
                 className="flex flex-col items-center cf-target-44 min-w-[44px] cursor-pointer bg-transparent border-none text-white hover:bg-neutral-800 rounded p-1"
-                onClick={() => setAdjustHpFor(adjustHpFor === c.id ? null : c.id)}
+                onClick={() => {
+                  setEditingMaxFor(null);
+                  setAdjustHpFor(adjustHpFor === c.id ? null : c.id);
+                }}
                 title="Quick HP adjust"
               >
                 <span className="text-xs text-muted">HP</span>
                 <span className="font-bold text-lg leading-none">{c.hpCurrent} / {c.hpMax}</span>
               </button>
+
+              {onSetHpMax && (
+                <button
+                  type="button"
+                  aria-label={t('encounters.vitals.editMaxHp', 'Edit max HP')}
+                  className="cf-target-44 min-w-[44px] text-xs text-muted hover:text-white p-1 rounded hover:bg-neutral-800"
+                  onClick={() => {
+                    setAdjustHpFor(null);
+                    if (editingMaxFor === c.id) {
+                      setEditingMaxFor(null);
+                    } else {
+                      setEditingMaxFor(c.id);
+                      setMaxHpDraft(String(c.hpMax));
+                    }
+                  }}
+                  title={t('encounters.vitals.editMaxHp', 'Edit max HP')}
+                >
+                  ✏️
+                </button>
+              )}
               
               <div className="w-32 hidden sm:block">
-                <HpBar current={c.hpCurrent ?? 0} max={c.hpMax ?? 1} />
+                <HpBar current={c.hpCurrent ?? 0} max={c.hpMax ?? 1} colorVisionAssist={colorVisionAssist} />
               </div>
               
               {c.hpTemp != null && c.hpTemp > 0 && (
@@ -114,7 +187,24 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
               </div>
             )}
 
-            <div className="flex items-center gap-4 min-w-[100px]">
+            {editingMaxFor === c.id && (
+              <div className="flex items-center gap-2 bg-neutral-800 p-2 rounded-md shadow-inner">
+                <TextInput
+                  autoFocus
+                  placeholder={t('encounters.vitals.maxHp', 'Max HP')}
+                  className="w-24 text-sm cf-target-44"
+                  value={maxHpDraft}
+                  onChange={(e) => setMaxHpDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') commitMaxHp(c.id);
+                    if (e.key === 'Escape') setEditingMaxFor(null);
+                  }}
+                />
+                <Btn className="cf-target-44" density="xs" onClick={() => commitMaxHp(c.id)}>{t('encounters.vitals.setMax', 'Set Max')}</Btn>
+              </div>
+            )}
+
+            <div className="flex items-center gap-4 min-w-[80px]">
               <div className="flex flex-col items-center cf-target-44 justify-center">
                 <GameIcon slug="shield" size={14} className="text-muted" />
                 <span className="font-bold">{ac}</span>
@@ -125,28 +215,52 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
                   <span className="font-bold">{speed}</span>
                 </div>
               )}
-              {spellSaveDc !== '—' && (
-                <div className="flex flex-col items-center cf-target-44 justify-center hidden sm:flex">
-                  <span className="text-xs text-muted leading-none">Spell DC</span>
-                  <span className="font-bold">{spellSaveDc}</span>
-                </div>
-              )}
-              {spellAttack !== '—' && (
-                <div className="flex flex-col items-center cf-target-44 justify-center hidden sm:flex">
-                  <span className="text-xs text-muted leading-none">Spell Atk</span>
-                  <span className="font-bold">{spellAttack}</span>
-                </div>
-              )}
             </div>
 
-            {(c.hpCurrent === 0 || c.deathState === 'dying') && (
-              <div className="flex items-center gap-2 ml-auto border border-red-500/50 bg-red-950/30 px-3 py-1.5 rounded-lg">
-                <span className="text-xs text-red-200 font-semibold uppercase tracking-wider">Death Saves</span>
-                <span className="text-sm font-bold text-white tracking-widest">
-                  {c.deathSaveSuccesses} ✓ <span className="text-red-400">{c.deathSaveFailures} ✗</span>
-                </span>
-              </div>
-            )}
+            {(c.hpCurrent === 0 || c.deathState === 'dying') && (() => {
+              const dying = c.deathState === 'dying';
+              const canRoll = dying && onRollDeathSave != null;
+              const busy = isDeathSaveBusy?.(c.id) ?? false;
+              const outcome = deathSaveOutcome?.combatantId === c.id ? deathSaveOutcome.outcome : null;
+              return (
+                <div
+                  className={`flex items-center gap-2 ml-auto flex-wrap border px-3 py-1.5 rounded-lg ${dying ? 'border-red-500 bg-red-950/50' : 'border-red-500/50 bg-red-950/30'}`}
+                  data-testid={dying ? 'player-vitals-dying-strip' : 'player-vitals-death-saves'}
+                >
+                  <span className="text-xs text-red-200 font-semibold uppercase tracking-wider">
+                    {dying
+                      ? t(
+                          'encounters.vitals.dyingStrip',
+                          'You are dying — {{successes}} successes / {{failures}} failures',
+                          { successes: c.deathSaveSuccesses, failures: c.deathSaveFailures },
+                        )
+                      : t('encounters.vitals.deathSaves', 'Death Saves')}
+                  </span>
+                  {!dying && (
+                    <span className="text-sm font-bold text-white tracking-widest">
+                      {c.deathSaveSuccesses} ✓ <span className="text-red-400">{c.deathSaveFailures} ✗</span>
+                    </span>
+                  )}
+                  {canRoll && (
+                    <Btn
+                      className="cf-target-44"
+                      density="xs"
+                      disabled={busy || syncBlocked}
+                      title={syncBlocked ? t('encounters.sync.controlsPaused', 'Paused — reconnecting to live updates.') : undefined}
+                      aria-label={t('encounters.vitals.rollDeathSave', 'Roll a death save')}
+                      onClick={() => onRollDeathSave?.(c.id)}
+                    >
+                      {t('dice.roll', 'Roll')}
+                    </Btn>
+                  )}
+                  {outcome != null && (
+                    <span className={`cf-death-save-outcome cf-death-save-outcome--${outcome.kind}`} data-testid="death-save-outcome">
+                      {deathSaveOutcomeText(t, outcome)}
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="flex items-center gap-1.5 flex-wrap flex-1 justify-end min-w-[100px]">
               {c.conditions.map(cond => (

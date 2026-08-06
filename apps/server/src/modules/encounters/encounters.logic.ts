@@ -242,6 +242,10 @@ export interface GeneratorCandidate {
   cr: number | null;
   xp: number;
   hpMax: number | null;
+  // Issue #1927: 'homebrew' for the campaign's own rule_entries row, 'pack' for a globally
+  // installed compendium entry. Optional here (pure selection math doesn't need it) — the
+  // service always sets it when building candidates and defaults to 'pack' when mapping out.
+  source?: 'pack' | 'homebrew';
 }
 
 /** One selected monster line — a candidate plus the quantity to field. */

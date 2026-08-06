@@ -145,3 +145,21 @@ export function gateReasonText(
   if (busy) return undefined;
   return key ? t(`run.gate.${key}`) : undefined;
 }
+
+/**
+ * Turn timer preset control (issue #1935 review): a PATCH of `turnTimerSeconds` on an
+ * 'ended' encounter 409s via `assertMutable`, same as every other write in this header —
+ * so this control must be gated exactly like its siblings, not left permanently visible
+ * and enabled. `reopen` is true only in the 'ended' status (see the status→action matrix
+ * in `encounterLifecycleActions.ts`), so it doubles as "is this encounter ended" without
+ * a second lifecycle field.
+ */
+export function turnTimerControlVisible(reopenAllowed: boolean): boolean {
+  return !reopenAllowed;
+}
+
+/** Disabled alongside the other conflict-prone writes in this header: a request already
+ *  in flight, or a stale sync state the DM hasn't reconciled yet. */
+export function turnTimerControlDisabled(input: { headerBusy: boolean; riskyBlocked: boolean }): boolean {
+  return input.headerBusy || input.riskyBlocked;
+}
