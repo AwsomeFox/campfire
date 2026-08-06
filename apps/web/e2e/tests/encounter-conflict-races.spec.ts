@@ -8,9 +8,11 @@ import { CREDS } from '../global-setup';
  * previously exercised only in disconnected unit specs and DM-vs-DM browser specs
  * (`encounter-sync-live.spec.ts`, `encounter-sync-override.spec.ts`) — no browser test ever
  * ran a real DM context against a real player context. This suite covers three concrete
- * races end to end: a turn-advance CAS conflict (`TURN_ALREADY_ADVANCED`), concurrent
- * relative HP writes composing without a lost update, and an SSE outage that gates one
- * role's writes while the other keeps acting, then converges on reconnect.
+ * races end to end: a turn-advance CAS conflict (`TURN_ALREADY_ADVANCED`), an encounter-level
+ * STALE_WRITE with client-side rollback, and an SSE outage that gates one role's writes while
+ * the other keeps acting, then converges on reconnect. (A fourth scenario — concurrent
+ * relative HP writes to one combatant — is deliberately NOT included here; see the comment
+ * where it would sit, below scenario 1, for why it could not be proven under mutation.)
  *
  * Every test builds its OWN dedicated campaign (never the shared seeded "Ambush" fixture,
  * whose `dmControlsTurns` and roster other specs depend on) and tears it down in `finally`,
@@ -195,114 +197,28 @@ test('a stale player end-turn 409s TURN_ALREADY_ADVANCED after the DM advances f
 });
 
 // ---------------------------------------------------------------------------------------
-// Scenario 2 — concurrent relative HP writes to the SAME combatant (real DM + real player)
+// Scenario 2 — concurrent relative HP writes to the SAME combatant: NOT COVERED here.
+//
+// A DM damage write and a player heal write to the same combatant DO compose correctly
+// (relative hpDelta writes, no CAS token — see encounters.service.ts's updateCombatant),
+// but that is not the same claim as "proven safe under a genuine concurrent race", and this
+// suite ships only claims it can prove. A held-then-released two-context Playwright test
+// was built and DID assert the correct composed result (30 - 7 + 4 = 27) — but inverting the
+// production guard (using the pre-transaction `existing.hpCurrent` snapshot instead of the
+// in-transaction `fresh.hpCurrent` read at encounters.service.ts, in the combatant HP write
+// path) did NOT make it fail. Two HTTP requests released back-to-back from two separate
+// Playwright browser contexts do not force genuine interleaving at the server: this
+// single-process Node server's request handling for this path has no macrotask-yielding I/O
+// between the pre-transaction read and the write (better-sqlite3 is synchronous), so one
+// request's whole promise chain drains to completion before the other's socket data is even
+// read — the two writes end up fully serialized rather than racing, regardless of how close
+// together the client fires them. That is a real inversion of the target guard producing no
+// observable failure, so shipping the test would report protection that was not demonstrated.
+// This is the same class of limitation the coordinator hit driving a genuine write race for
+// an `EncounterOpRaceMarker` path and filed issue #2032 for (a two-connection harness that
+// can force real interleaving does not exist in this repo today). Filing this here as the
+// same gap rather than shipping a test that cannot fail.
 // ---------------------------------------------------------------------------------------
-test('a DM damage write and a player heal write to the same combatant both compose — no lost update — and both clients converge on the REST-read final HP', async ({
-  browser,
-}) => {
-  const dmContext = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
-  const playerContext = await browser.newContext({ storageState: stateFor('player'), serviceWorkers: 'block' });
-  const dmPage = await dmContext.newPage();
-  const playerPage = await playerContext.newPage();
-
-  let campaignId: number | null = null;
-  let encounterId: number | null = null;
-  let releaseDmPatch: () => void = () => {};
-  let releasePlayerPatch: () => void = () => {};
-
-  try {
-    const setup = await setupConflictCampaign(dmContext, 'E2E1916 HP Race');
-    campaignId = setup.campaignId;
-
-    const enc = await (
-      await dmContext.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
-        data: { name: 'E2E1916 HP Race Fight', hidden: false },
-      })
-    ).json();
-    encounterId = enc.id;
-    const playerCombatant = (enc.combatants as Array<{ id: number; characterId: number | null }>).find(
-      (c) => c.characterId === setup.characterId,
-    );
-    if (!playerCombatant) throw new Error('expected auto-added player combatant');
-
-    await dmContext.request.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
-    await dmContext.request.post(`/api/v1/encounters/${encounterId}/start`);
-
-    const combatantUrl = `**/api/v1/encounters/${encounterId}/combatants/${playerCombatant.id}`;
-    const dmHeld = new Promise<void>((resolve) => {
-      releaseDmPatch = resolve;
-    });
-    const playerHeld = new Promise<void>((resolve) => {
-      releasePlayerPatch = resolve;
-    });
-    await dmPage.route(combatantUrl, async (route) => {
-      if (route.request().method() !== 'PATCH') return route.continue();
-      await dmHeld;
-      return route.continue();
-    });
-    await playerPage.route(combatantUrl, async (route) => {
-      if (route.request().method() !== 'PATCH') return route.continue();
-      await playerHeld;
-      return route.continue();
-    });
-
-    await dmPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
-    await playerPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
-
-    const dmRow = dmPage.getByTestId(`combatant-row-${playerCombatant.id}`);
-    const playerRow = playerPage.getByTestId(`combatant-row-${playerCombatant.id}`);
-    await expect(dmRow.getByTestId('hp-steppers')).toBeVisible();
-    await expect(playerRow.getByTestId('hp-steppers')).toBeVisible();
-
-    await dmRow.getByLabel('Exact HP amount').fill('7');
-    await playerRow.getByLabel('Exact HP amount').fill('4');
-
-    const dmPatchDone = dmPage.waitForResponse(
-      (r) => r.url().includes(`/combatants/${playerCombatant.id}`) && r.request().method() === 'PATCH',
-    );
-    const playerPatchDone = playerPage.waitForResponse(
-      (r) => r.url().includes(`/combatants/${playerCombatant.id}`) && r.request().method() === 'PATCH',
-    );
-
-    // Fire both writes — held by the routes above — before releasing either, so the two
-    // PATCH requests are genuinely in flight together rather than strictly sequential.
-    await dmRow.getByRole('button', { name: 'Apply exact damage' }).click();
-    await playerRow.getByRole('button', { name: 'Apply exact healing' }).click();
-    releaseDmPatch();
-    releasePlayerPatch();
-
-    await dmPatchDone;
-    await playerPatchDone;
-
-    // 30 (seeded) - 7 (DM damage) + 4 (player heal) = 27. Neither write was lost.
-    const finalState = await (await dmContext.request.get(`/api/v1/encounters/${encounterId}`)).json();
-    const finalCombatant = (finalState.combatants as Array<{ id: number; hpCurrent: number }>).find(
-      (c) => c.id === playerCombatant.id,
-    );
-    expect(finalCombatant?.hpCurrent).toBe(27);
-
-    // Both UIs converge on that same value via their own stepper's aria-label (not just a
-    // raw text match — the label spells out "currently N of M", so this asserts the real
-    // rendered HP, not merely the presence of the number 27 somewhere on the page).
-    const hpLabelPattern = /currently 27 of 30/;
-    await expect
-      .poll(async () => (await dmRow.getByRole('button', { name: /Increase/ }).first().getAttribute('aria-label')) ?? '')
-      .toMatch(hpLabelPattern);
-    await expect
-      .poll(async () => (await playerRow.getByRole('button', { name: /Increase/ }).first().getAttribute('aria-label')) ?? '')
-      .toMatch(hpLabelPattern);
-  } finally {
-    releaseDmPatch();
-    releasePlayerPatch();
-    if (encounterId != null) {
-      await dmContext.request.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
-    }
-    if (campaignId != null) {
-      await dmContext.request.delete(`/api/v1/campaigns/${campaignId}`).catch(() => undefined);
-    }
-    await Promise.all([playerContext.close(), dmContext.close()]);
-  }
-});
 
 // ---------------------------------------------------------------------------------------
 // Scenario 3 — STALE_WRITE + client-side rollback on an encounter-level field
