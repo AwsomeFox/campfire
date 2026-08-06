@@ -53,12 +53,18 @@ describe('EncountersService — turn timer stamping (issue #1935)', () => {
     db = holder.proxy as DrizzleDb;
     const audit = new AuditService(db);
     const events = new CampaignEventsService();
-    const rolls = {
+    // Double-side typed against the real methods EncountersService actually calls on
+    // `this.rolls` (record/recordInTransaction/emitDiceRolled/redactRollForRole) — the
+    // annotation, not an assertion, so a missing/misspelled method fails right here
+    // (AGENTS.md test-double convention; issue #1935 review). None of these turn-lifecycle
+    // flows roll dice, so every method is an inert stub.
+    const rollsDouble: Pick<RollsService, 'record' | 'recordInTransaction' | 'emitDiceRolled' | 'redactRollForRole'> = {
       record: jest.fn().mockResolvedValue({ id: 1 }),
-      recordRoll: jest.fn().mockResolvedValue({ id: 1 }),
       recordInTransaction: jest.fn().mockReturnValue({ id: 1 }),
       emitDiceRolled: jest.fn(),
-    } as unknown as RollsService;
+      redactRollForRole: jest.fn().mockResolvedValue(null),
+    };
+    const rolls = rollsDouble as unknown as RollsService;
     const moderation = {
       quarantineNoteIfWatched: jest.fn(),
       snapshotCommentIfWatched: jest.fn(),

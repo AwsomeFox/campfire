@@ -9617,8 +9617,9 @@ export const Encounter = z.object({
   // Turn timer (issue #1935): a server-stamped instant so every connected client agrees on
   // when the CURRENT turn began, without any client computing or guessing it. Stamped fresh
   // inside the same serialized transaction as start/nextTurn/endTurn/undoTurn; null when the
-  // encounter isn't actively mid-turn (preparing, paused, or ended). Undo restamps fresh too —
-  // the prior elapsed time is intentionally not restored, it's a new "now" for the same turn.
+  // encounter isn't actively mid-turn — EncounterStatus has no separate paused state, so this
+  // covers 'preparing' (not yet started) and 'ended' alike. Undo restamps fresh too — the
+  // prior elapsed time is intentionally not restored, it's a new "now" for the same turn.
   // Purely informational: no server-side enforcement, auto-advance, or blocking ever reads it.
   turnStartedAt: IsoDate.nullable().default(null),
   // Optional DM-set pacing limit in seconds; 0 = off (elapsed-only, DM-facing only). DM-editable
