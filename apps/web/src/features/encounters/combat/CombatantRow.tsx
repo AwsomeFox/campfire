@@ -1470,6 +1470,15 @@ export function CombatantRow({
           aria-pressed={combatant.statblockRevealed}
           aria-describedby={syncBlockedDescribedBy}
           data-testid={`statblock-reveal-toggle-${combatant.id}`}
+          // The visible label is just "Reveal"/"Revealed" to fit the row, which on its own
+          // says nothing about WHAT is revealed — and the battle map already has a fog
+          // "Reveal" tool, so a bare accessible name of "Reveal" is ambiguous both to a
+          // screen-reader user and to any role+name query.
+          aria-label={
+            combatant.statblockRevealed
+              ? t('encounters.statblock.hideFromPlayers')
+              : t('encounters.statblock.revealToPlayers')
+          }
           title={
             syncBlockedReason ??
             (combatant.statblockRevealed ? t('encounters.statblock.hideFromPlayers') : t('encounters.statblock.revealToPlayers'))
