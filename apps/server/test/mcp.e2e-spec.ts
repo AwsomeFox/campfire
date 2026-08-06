@@ -4183,6 +4183,33 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(provenance.consent!.excludedInboxPrivate).toBe(0);
     });
 
+    /**
+     * Review finding (post-#2041): co-DM's first fix set `externalSend = true` whenever a
+     * provider config resolved, ignoring `AI_PROVIDER_ENDPOINT_IS_LOCAL` — the operator's
+     * explicit declaration that the configured endpoint is on-box (e.g. an Ollama install),
+     * documented in `website/docs/getting-started/installation.md`. That misreported a
+     * purely local generation as external. Scribe/inbox-sweep already honored this flag;
+     * co-DM now shares the same `resolveAiProvenanceEgress` helper, so this must hold on the
+     * MCP surface too, not only REST.
+     */
+    it('records consent.externalSend=false when the operator has declared the endpoint local (AI_PROVIDER_ENDPOINT_IS_LOCAL)', async () => {
+      const priorLocalFlag = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+      process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'true';
+      try {
+        const res = await draftNpc('MCP On-Box Warden');
+        expect(res.isError).toBeFalsy();
+        const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+        const consent = (proposal.generationProvenance as { consent?: { externalSend: boolean } }).consent;
+        expect(consent).toBeTruthy();
+        // A provider IS configured (genuinely serving the draft) but the operator declared
+        // the endpoint local, so nothing left the deployment.
+        expect(consent!.externalSend).toBe(false);
+      } finally {
+        if (priorLocalFlag === undefined) delete process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+        else process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = priorLocalFlag;
+      }
+    });
+
     it('reports campaignPolicy="disabled" truthfully — never fabricated as member_consent, never omitted', async () => {
       const policyRes = await dmAgent
         .patch(`/api/v1/campaigns/${consentCampaignId}`)

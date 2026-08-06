@@ -38,7 +38,7 @@ import { createAiProvider, type AiProvider } from './providers';
 import { resolveProviderStepUsage } from './providers/step-usage';
 import { isWithheldFinishReason, describeWithheldTurn } from '../ai-driver/driver-safety';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
-import { provenanceEndpointBaseUrl } from '../../common/ai-provenance-endpoint';
+import { provenanceEndpointBaseUrl, resolveAiProvenanceEgress } from '../../common/ai-provenance-endpoint';
 
 type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
 
@@ -193,6 +193,12 @@ export class CoDmService {
     // SERVER endpoint (#501).
     const { config, endpointScope: resolvedEndpointScope } =
       await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
+    // Issue #1993: whether this draft actually leaves the server. Shared with
+    // `ScribeService`/`InboxSweepService` via `resolveAiProvenanceEgress` (common/
+    // ai-provenance-endpoint.ts) so the three cannot drift on what "external" means — a
+    // configured provider is external UNLESS the operator has declared the endpoint local
+    // via `AI_PROVIDER_ENDPOINT_IS_LOCAL` (an on-box Ollama, for example).
+    const externalSend = resolveAiProvenanceEgress(config !== null) === 'external';
     const reservation = await this.aiDm.reserveTokenBudget(campaignId, DRAFT_MAX_TOKENS);
 
     let narration = '';
@@ -212,11 +218,6 @@ export class CoDmService {
     let providerType: string | null = null;
     let endpointScope: AiGenerationProvenance['endpoint']['scope'] = 'injected';
     let endpointBaseUrl: string | null = null;
-    // Issue #1993: whether this draft actually left the server. True exactly on the
-    // `config` branch below (a real OpenAI/Anthropic/Gemini/mock provider resolved via
-    // `createAiProvider`, which always reports `endpointScope` 'campaign' or 'server');
-    // false on the injected/no-op legacy seam, which never leaves the deployment.
-    let externalSend = false;
 
     try {
       if (config) {
@@ -244,7 +245,6 @@ export class CoDmService {
         resolvedModel = result.model || config.model;
         providerName = aiProvider.name;
         providerType = config.providerType;
-        externalSend = true;
         // The scope that OWNS the endpoint, so a keyless campaign override running against
         // the server endpoint is recorded as 'server' — both truthful and the condition
         // the baseUrl gate below keys off (#501 review).
@@ -402,6 +402,14 @@ export class CoDmService {
    * recorded truthfully (reusing the exact campaign-level policy scribe reads — no new
    * settings surface), with the note-consent counters fixed at zero because they are
    * structurally always zero on this path, not merely observed to be so this run.
+   *
+   * `externalSend` itself is computed by the shared `resolveAiProvenanceEgress` helper
+   * (`common/ai-provenance-endpoint.ts`), NOT re-implemented here — a first draft of this
+   * fix set `externalSend = true` whenever a provider config resolved, which ignored the
+   * operator's `AI_PROVIDER_ENDPOINT_IS_LOCAL` declaration and misreported an on-box Ollama
+   * deployment as external (review finding). `ScribeService` and `InboxSweepService` already
+   * had that rule; the bug was co-DM implementing half of it instead of calling the same
+   * function.
    */
   private buildGenerationProvenance(input: {
     target: CoDmDraftTarget;
