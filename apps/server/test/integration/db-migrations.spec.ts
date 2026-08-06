@@ -517,7 +517,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_purge_tombstones'").get(),
       ).toBeTruthy();
-      // 0162/0163 (#851): shared-instance governance — organizer flag + the
+      // 0164/0165 (#851): shared-instance governance — organizer flag + the
       // campaign-creation request/approval flow's table, created new on an old-shaped DB.
       expect(MIGRATION_NAMES).toContain('0164_users_can_create_campaigns_851');
       expect(MIGRATION_NAMES).toContain('0165_campaign_creation_requests_851');
