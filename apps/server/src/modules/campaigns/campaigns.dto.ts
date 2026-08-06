@@ -1,11 +1,22 @@
 import { createZodDto } from 'nestjs-zod';
-import { CampaignClone, CampaignCreate, CampaignImport, CampaignPurge, CampaignUpdate } from '@campfire/schema';
+import {
+  CampaignClone,
+  CampaignCreate,
+  CampaignCreationRequestCreate,
+  CampaignCreationRequestDecision,
+  CampaignImport,
+  CampaignPurge,
+  CampaignUpdate,
+} from '@campfire/schema';
 
 // .strict() at the DTO layer only — see encounters.dto.ts header comment.
 export class CampaignCreateDto extends createZodDto(CampaignCreate.strict()) {}
 export class CampaignUpdateDto extends createZodDto(CampaignUpdate.strict()) {}
 export class CampaignCloneDto extends createZodDto(CampaignClone.strict()) {}
 export class CampaignPurgeDto extends createZodDto(CampaignPurge.strict()) {}
+// Issue #851 — the campaign-creation request/approval flow.
+export class CampaignCreationRequestCreateDto extends createZodDto(CampaignCreationRequestCreate.strict()) {}
+export class CampaignCreationRequestDecisionDto extends createZodDto(CampaignCreationRequestDecision.strict()) {}
 // NOT .strict(): an import body is a whole export document with many top-level and
 // nested keys. Some the importer intentionally ignores (attachmentsNote, members,
 // audit, proposals, attachment metadata, …); others it now consumes (factions,

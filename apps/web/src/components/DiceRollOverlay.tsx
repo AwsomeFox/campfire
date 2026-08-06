@@ -52,11 +52,18 @@ export function DiceRollOverlay({
   dice,
   phase,
   theme = 'nocturne',
+  colorVisionAssist = false,
   onSettled,
 }: {
   dice: DiceRollOverlayDie[];
   phase: DiceRollOverlayPhase;
   theme?: DiceTheme | null;
+  /**
+   * Issue #1942: adds a star/skull glyph badge to the crit/fumble flourish so the
+   * distinction survives with animations disabled (prefers-reduced-motion) and hue
+   * ignored — this overlay is otherwise gold-glow vs red-glow only.
+   */
+  colorVisionAssist?: boolean;
   onSettled: () => void;
 }) {
   const [faces, setFaces] = useState<number[]>(() => dice.map((d) => randomFace(d.sides)));
@@ -126,6 +133,15 @@ export function DiceRollOverlay({
                 </span>
                 {isCrit && <div className="cf-dice-roll-overlay__crit-ring" />}
                 {isFumble && <div className="cf-dice-roll-overlay__fumble-void" />}
+                {colorVisionAssist && (isCrit || isFumble) && (
+                  <span
+                    className="cf-dice-roll-overlay__assist-glyph"
+                    data-testid="dice-roll-overlay-assist-glyph"
+                    data-result={isCrit ? 'crit' : 'fumble'}
+                  >
+                    {isCrit ? '★' : '💀'}
+                  </span>
+                )}
               </div>
             </div>
           );

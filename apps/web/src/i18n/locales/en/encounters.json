@@ -4,7 +4,22 @@
     "vitals": {
       "editMaxHp": "Edit max HP",
       "maxHp": "Max HP",
-      "setMax": "Set Max"
+      "setMax": "Set Max",
+      "deathSaves": "Death Saves",
+      "dyingStrip": "You are dying — {{successes}} successes / {{failures}} failures",
+      "rollDeathSave": "Roll a death save"
+    },
+    "deathSave": {
+      "outcome": {
+        "revive": "Natural 20 — back on your feet!",
+        "dead": "Died.",
+        "stabilized": "Stabilized.",
+        "success": "Success (rolled {{natural}}).",
+        "failure": "Failure (rolled {{natural}})."
+      },
+      "spectatorToast": "{{name}} death save: {{outcome}} (rolled {{natural}})",
+      "spectatorOutcomeSuccess": "success",
+      "spectatorOutcomeFailure": "failure"
     },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
@@ -158,6 +173,12 @@
         "clearPlayers": "Clear player templates",
         "clearPlayersHint": "Remove every player-declared template",
         "declaredBy": "Declared by {{name}}"
+      },
+      "dragDistance": {
+        "budget": "used {{used}} of {{max}} {{unit}}",
+        "overSpeed": "over speed",
+        "movedMessage": "Moved {{feet}} {{unit}}.",
+        "undoneMessage": "Move undone."
       }
     },
     "workspace": {
@@ -233,7 +254,8 @@
       "none": "— none —",
       "noStatblock": "No statblock detail — HP/CR may be incomplete.",
       "heuristicDifficultyBadge": "Target band: heuristic",
-      "heuristicDifficultyHint": "Target band sized by D&D 5e's XP budget — this rule system has no difficulty math of its own."
+      "heuristicDifficultyHint": "Target band sized by D&D 5e's XP budget — this rule system has no difficulty math of its own.",
+      "homebrewBadge": "Homebrew"
     },
     "duplicate": "Duplicate",
     "duplicateCombatant": "Duplicate {{name}}",
@@ -265,6 +287,16 @@
       "loading": "Searching…",
       "typeToSearch": "Start typing to search rules & homebrew…",
       "searchError": "Failed to search rules."
+    },
+    "statblock": {
+      "reveal": "Reveal",
+      "revealed": "Revealed",
+      "revealToPlayers": "Reveal statblock to players",
+      "hideFromPlayers": "Hide statblock from players",
+      "revealedSummary": "Statblock (revealed to players)",
+      "killPrompt": "{{name}} dropped to 0 HP — reveal its statblock to players?",
+      "dismiss": "Dismiss",
+      "dismissKillPrompt": "Dismiss the statblock reveal prompt"
     }
   }
 }

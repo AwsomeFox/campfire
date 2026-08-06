@@ -4,10 +4,12 @@ import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
 import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
+import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
 import { GatedControl } from '../../components/GatedControl';
 import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
+import { classifyDeathSaveOutcome, deathSaveSpectatorToastInfo, type DeathSaveOutcome } from './combat/deathSaveOutcome';
 import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -76,7 +78,7 @@ import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMo
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
-import { tokenIdentityBackground } from './tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export { BattleMap } from './map/BattleMap';
@@ -429,12 +431,15 @@ function InitiativeStrip({
   charactersById,
   turnPulse = false,
   hpFeedbackByCombatant,
+  colorVisionAssist = false,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
   turnPulse?: boolean;
   hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
+  /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
+  colorVisionAssist?: boolean;
 }) {
   return (
     <div
@@ -469,10 +474,20 @@ function InitiativeStrip({
               }
             }}
           >
+            {colorVisionAssist && isCurrent && (
+              <span
+                data-testid="strip-token-turn-chevron"
+                aria-hidden="true"
+                style={{ fontSize: 11, lineHeight: 1, color: 'var(--color-accent)' }}
+              >
+                ▾
+              </span>
+            )}
             <div
               aria-current={isCurrent ? 'true' : undefined}
               className={`flex items-center justify-center overflow-hidden bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
               style={{
+                position: 'relative',
                 width: isCurrent ? 48 : 40,
                 height: isCurrent ? 48 : 40,
                 transition: 'all 0.2s ease',
@@ -490,6 +505,23 @@ function InitiativeStrip({
                 <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
                   {tokenInitials(c.name)}
                 </span>
+              )}
+              {colorVisionAssist && (
+                <span
+                  data-testid="strip-token-identity-shape"
+                  data-token-shape={tokenIdentityShape(c.id)}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    right: 2,
+                    bottom: 2,
+                    width: 9,
+                    height: 9,
+                    background: '#fff',
+                    clipPath: TOKEN_IDENTITY_SHAPE_CLIP_PATH[tokenIdentityShape(c.id)],
+                    boxShadow: '0 0 0 1px rgba(15,23,42,.7)',
+                  }}
+                />
               )}
             </div>
             <FloatingNumbers events={feedback} />
@@ -695,6 +727,11 @@ export default function RunSessionPage() {
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
   // optimistic and stay live even while a request is in flight.
   const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  // Issue #1926: combatants for which the DM has resolved (revealed from, or dismissed)
+  // the one-tap kill prompt this session. Client-local only — a page reload resets it,
+  // same as every other transient run-session UI state; the server-persisted
+  // `statblockRevealed` flag itself is the only thing that's actually authoritative.
+  const [dismissedKillPromptIds, setDismissedKillPromptIds] = useState<ReadonlySet<number>>(() => new Set());
   // React state disables the source row after render; the ref closes the same-tick
   // double-click window before that render can happen.
   const pendingDuplicateCombatantIds = useRef(new Set<number>());
@@ -1517,6 +1554,13 @@ export default function RunSessionPage() {
         // `sheetMirrored`, so this only piggybacks the invalidation when it's actually
         // needed.
         if (event.sheetMirrored) invalidateCampaignCharactersForOwnership();
+        // Issue #1919 — a death-save roll (like any other combatant write) emits only
+        // `encounter.updated`; the persisted combat-log/dice-log event it also wrote would
+        // otherwise wait for the events feed's own 5s backstop poll before another viewer's
+        // spectator toast (and CombatLog highlight) could appear. Piggybacking this cheap
+        // refetch on the SAME frame that already invalidates the encounter itself is enough
+        // to satisfy "after the encounter.updated-driven refetch (or within one poll cycle)".
+        void queryClient.invalidateQueries({ queryKey: queryKeys.encounterEvents(eid) });
       },
       [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
     ),
@@ -1549,6 +1593,20 @@ export default function RunSessionPage() {
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
+  // Issue #1919 — the roller's own settled death-save outcome (nat 20 revive / fresh
+  // death / fresh stabilization / plain success-or-failure), fed to the ONE combatant's
+  // tracker whose roll it belongs to. `deathSaveBeforeStateRef` captures the pre-roll
+  // deathState at the roll mutation's `onMutate` time (the classifier needs a before/after
+  // pair; the server response only carries "after"). `recentDeathSaveSelfRollRef` marks
+  // this client as the one that just rolled for a combatant, briefly, so the spectator-
+  // toast diff below (which reads the same persisted event this roll produces) does not
+  // also toast the roller their own roll a second time.
+  const deathSaveBeforeStateRef = useRef(new Map<number, string>());
+  const recentDeathSaveSelfRollRef = useRef(new Map<number, number>());
+  const [deathSaveOutcome, setDeathSaveOutcome] = useState<{ combatantId: number; outcome: DeathSaveOutcome } | null>(null);
+  const deathSaveOutcomeTimerRef = useRef<number | null>(null);
+  const DEATH_SAVE_SELF_ROLL_WINDOW_MS = 8_000;
+
   // The persisted event stream is the single announcement source for turn, HP,
   // condition, death, note, override, and correction updates. ID-based tracking
   // suppresses duplicate SSE/mutation/poll refetches; initial history is a silent
@@ -1557,6 +1615,14 @@ export default function RunSessionPage() {
     encounterId: number;
     cursor: CombatLogAnnouncementCursor;
   } | null>(null);
+  // Issue #1919 — "table side": a compact toast for anyone OTHER than the roller when a
+  // death-save roll appears in the same already role-projected event feed CombatLog reads
+  // (never a new SSE type or a raw dice-log read — see `deathSaveOutcome.ts`'s doc comment).
+  // `recentDeathSaveSelfRollRef` (set at the roll mutation's `onMutate`) suppresses the
+  // roller's OWN roll here, since that client already got the full dice-overlay treatment.
+  const deathSaveSpectatorToastSequence = useRef(0);
+  const [deathSaveSpectatorToast, setDeathSaveSpectatorToast] = useState<{ id: number; message: string } | null>(null);
+  const deathSaveSpectatorToastTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!eventsQuery.data) return;
 
@@ -1577,7 +1643,42 @@ export default function RunSessionPage() {
         dedupeKey: `combat-log:${eid}:${appended.length}:${firstId}:${lastId}`,
       });
     }
-  }, [eid, eventsQuery.data, announce]);
+
+    // A null cursor is the initial-history baseline (same rule as the SR announcement
+    // above) — a page freshly opened mid-encounter must not toast every past roll.
+    if (!cursor) return;
+    const now = Date.now();
+    for (const event of advanced.appendedEvents) {
+      // Issue #1919 secrecy boundary: `deathSaveSpectatorToastInfo` reads ONLY the
+      // already role-projected `event.target`/`detail` — the same fields CombatLog
+      // renders for every viewer via the server's `redactEncounterEventsForViewer`
+      // (issue #869). A hidden combatant's name arrives already masked to the
+      // "Unknown combatant" placeholder (never null); this never does its own lookup
+      // that could bypass that redaction. See `deathSaveOutcome.unit.spec.ts` for the
+      // pinned regression.
+      const info = deathSaveSpectatorToastInfo(event);
+      if (!info) continue;
+      const selfRolledAt = event.targetId != null ? recentDeathSaveSelfRollRef.current.get(event.targetId) : undefined;
+      if (selfRolledAt != null) {
+        if (event.targetId != null) recentDeathSaveSelfRollRef.current.delete(event.targetId);
+        if (now - selfRolledAt < DEATH_SAVE_SELF_ROLL_WINDOW_MS) continue;
+      }
+      const outcomeWord = info.outcomeKind === 'success'
+        ? t('encounters.deathSave.spectatorOutcomeSuccess', 'success')
+        : t('encounters.deathSave.spectatorOutcomeFailure', 'failure');
+      const toastMessage = t(
+        'encounters.deathSave.spectatorToast',
+        '{{name}} death save: {{outcome}} (rolled {{natural}})',
+        { name: info.name, outcome: outcomeWord, natural: info.natural },
+      );
+      if (deathSaveSpectatorToastTimerRef.current != null) window.clearTimeout(deathSaveSpectatorToastTimerRef.current);
+      const toastId = ++deathSaveSpectatorToastSequence.current;
+      setDeathSaveSpectatorToast({ id: toastId, message: toastMessage });
+      deathSaveSpectatorToastTimerRef.current = window.setTimeout(() => {
+        setDeathSaveSpectatorToast((current) => (current?.id === toastId ? null : current));
+      }, 4_000);
+    }
+  }, [eid, eventsQuery.data, announce, t]);
 
   // Ending an encounter does not currently append a combat-log row. Retain that
   // useful status announcement without restoring the old turn/HP diff path, which
@@ -2256,17 +2357,36 @@ export default function RunSessionPage() {
 
   const deathSaveRoll = useKeyedMutation({
     mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
-      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
+      api.post<{ combatant: Combatant; roll: DiceRoll }>(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
+      const before = encounter?.combatants.find((candidate) => candidate.id === combatantId);
+      deathSaveBeforeStateRef.current.set(combatantId, before?.deathState ?? 'dying');
+      recentDeathSaveSelfRollRef.current.set(combatantId, Date.now());
+      // Issue #1919 — no client-supplied die face: this only starts the shared tumble
+      // animation. The face it settles on always comes from `showRoll(data.roll)` below.
+      beginRollAnimation('1d20');
+    },
+    onSuccess: (data) => {
+      showRoll(data.roll);
+      const before = deathSaveBeforeStateRef.current.get(data.combatant.id) ?? 'dying';
+      const outcome: DeathSaveOutcome = {
+        natural: data.roll.total,
+        kind: classifyDeathSaveOutcome(data.roll.total, before, data.combatant.deathState),
+      };
+      if (deathSaveOutcomeTimerRef.current != null) window.clearTimeout(deathSaveOutcomeTimerRef.current);
+      setDeathSaveOutcome({ combatantId: data.combatant.id, outcome });
+      deathSaveOutcomeTimerRef.current = window.setTimeout(() => setDeathSaveOutcome(null), 2_600);
     },
     onError: (err) => {
+      cancelRollAnimation();
       if (isAmbiguousOutcome(err)) enterReconciling();
       else reportError(err);
     },
     onSettled: (_data, _err, { combatantId }) => {
       markCombatantPending(combatantId, false);
+      deathSaveBeforeStateRef.current.delete(combatantId);
       invalidateEncounter(queryClient, eid);
     },
   });
@@ -3564,8 +3684,12 @@ export default function RunSessionPage() {
           canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
+          currentTurnCombatantId={encounter.status === 'running' ? turnWorkspace?.current?.combatantId ?? null : null}
+          currentTurnMovementMaxFt={turnWorkspace?.movement?.maxFt ?? null}
+          onMoveFt={(combatantId, moveFt) => patchCombatantTurnState(combatantId, { moveFt })}
           onBatchTokens={batchMoveTokens}
           onUndoTokenBatch={undoTokenBatch}
           dismissTokenUndoNonce={dismissTokenUndoNonce}
@@ -3621,6 +3745,7 @@ export default function RunSessionPage() {
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
           movementDefault={movementDefault}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -3630,6 +3755,10 @@ export default function RunSessionPage() {
             if (reconcileBlocks) return;
             patchCombatant(id, { hpMax: max });
           }}
+          onRollDeathSave={(id) => rollDeathSave({ id })}
+          isDeathSaveBusy={(id) => pendingCombatantIds.has(id) || reconcileBlocks}
+          syncBlocked={riskyBlocked}
+          deathSaveOutcome={deathSaveOutcome}
         />
       )}
 
@@ -3768,6 +3897,13 @@ export default function RunSessionPage() {
             : turnWorkspace?.current?.combatantId === currentCombatantId
               && turnWorkspace?.isYourTurn === true)}
       />
+      {/* Issue #1919 "table side": visible-only, same convention as TurnChangeBeat above —
+          the combat-log Announcer already covers this exact roll for every viewer via SR. */}
+      {deathSaveSpectatorToast && (
+        <div key={deathSaveSpectatorToast.id} className="cf-death-save-spectator-toast" data-testid="death-save-spectator-toast">
+          {deathSaveSpectatorToast.message}
+        </div>
+      )}
 
       {pendingApply && (
         <ApplyDamageBar
@@ -3949,6 +4085,7 @@ export default function RunSessionPage() {
               charactersById={charactersById}
               turnPulse={turnPulse}
               hpFeedbackByCombatant={hpFeedbackByCombatant}
+              colorVisionAssist={me?.user.colorVisionAssist ?? false}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
@@ -3986,6 +4123,7 @@ export default function RunSessionPage() {
                   combatant={c}
                   hpFeedbackEvents={hpFeedbackByCombatant.get(c.id) ?? []}
                   isCurrentTurn={c.id === currentCombatantId}
+                  colorVisionAssist={me?.user.colorVisionAssist ?? false}
                   // Permission decides whether these controls MOUNT at all (issue #1746):
                   // a genuinely unauthorized viewer (wrong owner, ended encounter) never sees
                   // them. Whether the sync gate currently blocks writes is a separate, transient
@@ -3997,7 +4135,13 @@ export default function RunSessionPage() {
                   canEditPermission={canEditCombatantPermission(c)}
                   syncBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
-                  statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  // Issue #1926: a non-DM viewer mounts the same compendium statblock viewer
+                  // once the DM has revealed this combatant — the ruleEntryId link itself is
+                  // not campaign-secret (unchanged by this issue; see /rules/entries/:id), so
+                  // the server-enforced gate here is `statblockRevealed`, not `isDm`.
+                  statblock={(isDm || c.statblockRevealed) && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  showKillPrompt={isDm && shouldShowKillPrompt(c, dismissedKillPromptIds)}
+                  onDismissKillPrompt={() => setDismissedKillPromptIds((prev) => dismissKillPrompt(prev, c.id))}
                   canRemove={canDmWrite}
                   onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
                     ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))
@@ -4069,6 +4213,7 @@ export default function RunSessionPage() {
                   onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
                   onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
                   onRollDeathSave={() => rollDeathSave(c)}
+                  deathSaveOutcome={deathSaveOutcome?.combatantId === c.id ? deathSaveOutcome.outcome : null}
                   onRollInitiative={() => rollCombatantInitiative(c)}
                   onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
                   onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
