@@ -498,6 +498,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditions: fromJsonText<string[]>(row.conditions, []),
     ruleEntryId: row.ruleEntryId,
     sortOrder: row.sortOrder,
+    manualOrder: row.manualOrder ?? null,
     tokenX: row.tokenX,
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
@@ -7018,8 +7019,20 @@ export class EncountersService {
         combatantId,
         ...withoutMoved.slice(insertAt).map((c) => c.id),
       ];
+      // Issue #1923 review finding 1: on a running encounter, `sortCombatants` orders by
+      // initiative and breaks ties via the adapter's own comparator (e.g. 5e's
+      // initModDescThenSortOrderAsc, which compares initMod BEFORE sortOrder) — a
+      // sortOrder-only rewrite is silently discarded whenever the tied combatants have
+      // different initMod (different DEX), so the DM's drag has no visible effect. Stamp
+      // `manualOrder` on EVERY combatant in the newly computed order (not just the moved
+      // one) so sortCombatants can hold the whole roster at this position across a
+      // re-sort; not running is unaffected, since sortCombatants there orders by
+      // sortOrder alone and never reaches the adapter tiebreak.
       orderedIds.forEach((id, index) => {
-        tx.update(combatants).set({ sortOrder: index }).where(eq(combatants.id, id)).run();
+        tx.update(combatants)
+          .set(status === 'running' ? { sortOrder: index, manualOrder: index } : { sortOrder: index })
+          .where(eq(combatants.id, id))
+          .run();
       });
       const initiativeChanged = newInitiative !== moved.initiative;
       if (initiativeChanged) {

@@ -1814,6 +1814,10 @@ CREATE TABLE IF NOT EXISTS combatants (
   conditions TEXT NOT NULL DEFAULT '[]',
   rule_entry_id INTEGER REFERENCES rule_entries(id) ON DELETE SET NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
+  -- Issue #1923 review finding 1: DM manual-reorder override, consulted by sortCombatants
+  -- ahead of the adapter's initiative tiebreak when both compared rows have a non-null
+  -- value. NULL until the first manual reorder on a running encounter.
+  manual_order INTEGER,
   token_x REAL,
   token_y REAL,
   token_size TEXT NOT NULL DEFAULT 'medium',

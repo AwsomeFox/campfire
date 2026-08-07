@@ -50,6 +50,7 @@ function combatant(overrides: Partial<Combatant> = {}): Combatant {
     conditions: [],
     ruleEntryId: null,
     sortOrder: 0,
+    manualOrder: null,
     tokenX: null,
     tokenY: null,
     tokenSize: 'medium',

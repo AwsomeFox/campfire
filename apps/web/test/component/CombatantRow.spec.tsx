@@ -64,6 +64,7 @@ function baseCombatant(overrides: Partial<Combatant> = {}): Combatant {
     conditions: [],
     ruleEntryId: null,
     sortOrder: 0,
+    manualOrder: null,
     tokenX: null,
     tokenY: null,
     tokenSize: 'medium',
@@ -360,6 +361,30 @@ describe('CombatantRow reorder controls (issue #1923)', () => {
     expect(onMoveUp).not.toHaveBeenCalled();
   });
 
+  // Issue #2074 review finding 6: ReorderMenu's own doc comment claimed to mirror
+  // PageHeader's OverflowMenuPanel (outside-click dismissal included) without actually
+  // adding the listener.
+  test('a pointerdown outside the open reorder menu closes it (issue #2074 review finding 6)', () => {
+    renderRow({
+      reorder: {
+        canMoveUp: true,
+        canMoveDown: true,
+        onMoveUp: vi.fn(),
+        onMoveDown: vi.fn(),
+        menuTargets: [],
+        onMoveAfter: vi.fn(),
+        dragHandleProps: noopDragHandleProps,
+        isDragging: false,
+        isDropTarget: false,
+        busy: false,
+      },
+    });
+    fireEvent.click(screen.getByTestId('reorder-menu-trigger-Goblin'));
+    expect(screen.getByTestId('reorder-menu-panel-Goblin')).toBeTruthy();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByTestId('reorder-menu-panel-Goblin')).toBeNull();
+  });
+
   test('busy disables the menu trigger', () => {
     renderRow({
       reorder: {
@@ -377,5 +402,49 @@ describe('CombatantRow reorder controls (issue #1923)', () => {
     });
     const trigger = screen.getByTestId('reorder-menu-trigger-Goblin') as HTMLButtonElement;
     expect(trigger.disabled).toBe(true);
+  });
+
+  // Issue #2074 review finding 4: a second drag must not be able to start on the handle
+  // while the first move's write is still in flight (`reorder.busy`).
+  test('the drag handle withholds its pointer handlers while reorder.busy is true', () => {
+    const dragHandleProps = { onPointerDown: vi.fn(), onPointerMove: vi.fn(), onPointerUp: vi.fn(), onPointerCancel: vi.fn() };
+    renderRow({
+      reorder: {
+        canMoveUp: true,
+        canMoveDown: true,
+        onMoveUp: vi.fn(),
+        onMoveDown: vi.fn(),
+        menuTargets: [],
+        onMoveAfter: vi.fn(),
+        dragHandleProps,
+        isDragging: false,
+        isDropTarget: false,
+        busy: true,
+      },
+    });
+    const handle = screen.getByTestId('reorder-drag-handle-101');
+    fireEvent.pointerDown(handle, { pointerId: 1, isPrimary: true, clientX: 0, clientY: 0 });
+    expect(dragHandleProps.onPointerDown).not.toHaveBeenCalled();
+  });
+
+  test('the drag handle DOES fire its pointer handlers when reorder.busy is false (contrast case)', () => {
+    const dragHandleProps = { onPointerDown: vi.fn(), onPointerMove: vi.fn(), onPointerUp: vi.fn(), onPointerCancel: vi.fn() };
+    renderRow({
+      reorder: {
+        canMoveUp: true,
+        canMoveDown: true,
+        onMoveUp: vi.fn(),
+        onMoveDown: vi.fn(),
+        menuTargets: [],
+        onMoveAfter: vi.fn(),
+        dragHandleProps,
+        isDragging: false,
+        isDropTarget: false,
+        busy: false,
+      },
+    });
+    const handle = screen.getByTestId('reorder-drag-handle-101');
+    fireEvent.pointerDown(handle, { pointerId: 1, isPrimary: true, clientX: 0, clientY: 0 });
+    expect(dragHandleProps.onPointerDown).toHaveBeenCalledTimes(1);
   });
 });

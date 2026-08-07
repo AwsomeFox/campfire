@@ -69,6 +69,14 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
   const gestureRef = useRef<Gesture | null>(null);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [over, setOver] = useState<{ id: number; after: boolean } | null>(null);
+  // Issue #2074 review finding 5: `over` (React state) is only guaranteed current after
+  // a render commits. A pointerup that arrives in the same task as the pointermove just
+  // before it — a fast release — can fire against the PREVIOUS render's onPointerUp
+  // closure, whose `over` predates that final pointermove's setOver call. `overRef` is
+  // written synchronously in the same handler that computes the value, so onPointerUp
+  // always reads the value drop resolution actually intends, independent of whether
+  // React has re-rendered yet.
+  const overRef = useRef<{ id: number; after: boolean } | null>(null);
 
   const resolveOver = useCallback(
     (clientX: number, clientY: number, excludeId: number): { id: number; after: boolean } | null => {
@@ -87,6 +95,7 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
 
   const reset = useCallback(() => {
     gestureRef.current = null;
+    overRef.current = null;
     setDraggingId(null);
     setOver(null);
   }, []);
@@ -111,7 +120,9 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
         gesture.moved = true;
         setDraggingId(gesture.combatantId);
       }
-      setOver(resolveOver(e.clientX, e.clientY, gesture.combatantId));
+      const next = resolveOver(e.clientX, e.clientY, gesture.combatantId);
+      overRef.current = next;
+      setOver(next);
     },
     [resolveOver],
   );
@@ -121,13 +132,14 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
       const gesture = gestureRef.current;
       if (!gesture || gesture.pointerId !== e.pointerId) return;
       gesture.captureTarget.releasePointerCapture?.(e.pointerId);
-      if (gesture.moved && over) {
-        const afterId = afterCombatantIdForDrop(orderedIds, gesture.combatantId, over.id, over.after);
+      const resolvedOver = overRef.current;
+      if (gesture.moved && resolvedOver) {
+        const afterId = afterCombatantIdForDrop(orderedIds, gesture.combatantId, resolvedOver.id, resolvedOver.after);
         if (afterId !== null) onDrop(gesture.combatantId, afterId);
       }
       reset();
     },
-    [over, orderedIds, onDrop, reset],
+    [orderedIds, onDrop, reset],
   );
 
   const onPointerCancel = useCallback(

@@ -56,6 +56,7 @@ function combatant(id: number, initiative: number, sortOrder = id): Combatant {
     conditions: [],
     ruleEntryId: null,
     sortOrder,
+    manualOrder: null,
     tokenX: null,
     tokenY: null,
     tokenSize: 'medium',

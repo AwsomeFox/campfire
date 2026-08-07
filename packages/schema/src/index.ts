@@ -10682,6 +10682,18 @@ export const Combatant = z.object({
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
+  // DM manual-reorder override (issue #1923 review finding 1). Set on EVERY combatant in
+  // the roster (not just the moved one) whenever `reorderCombatant` runs against a
+  // running encounter, to the combatant's index in the newly computed order. Null until
+  // the first manual reorder on a running encounter (and for legacy rows). This exists
+  // because a running encounter's `sortCombatants` orders by initiative, and an adapter's
+  // `initiativeTiebreak` (e.g. 5e's `initModDescThenSortOrderAsc`) compares `initMod`
+  // BEFORE `sortOrder` — a pure `sortOrder` rewrite is silently discarded by the adapter
+  // tiebreak whenever the tied combatants have different `initMod` (different DEX).
+  // `sortCombatants` consults this ahead of the adapter tiebreak, but only when BOTH
+  // combatants in the comparison have a non-null value, so an unrelated tie (one or both
+  // never manually reordered) still falls through to the adapter's own rule untouched.
+  manualOrder: z.number().int().nullable().default(null),
   // Battle-map token position (issue #39): 0–100 percent overlay on the encounter's
   // map image, mirroring location.mapX/mapY. null = not yet placed on the map.
   tokenX: z.number().nullable().default(null),

@@ -5,8 +5,16 @@
  * (`afterCombatantIdForMoveUp`/`Down` and an explicit `afterCombatantId`) a drag resolves
  * to. Mirrors PageHeader's `OverflowMenuPanel` (`useDialog` for focus/Escape, `role="menu"`
  * / `role="menuitem"`) so this reads as the same kind of control, not a bespoke one.
+ *
+ * Issue #2074 review finding 6: `useDialog` deliberately does NOT close on an outside
+ * click — its own doc comment says the caller owns "backdrop click, …". PageHeader's
+ * `OverflowMenuPanel` (and StatusMenuButton) each add that themselves, one level up, via
+ * a `pointerdown` listener on a `containerRef` wrapping both the trigger and the panel.
+ * This component previously claimed to mirror that control without actually adding the
+ * listener, so a click anywhere outside the menu — including on another row's controls —
+ * left it open. Added here, same pattern.
  */
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useDialog } from '../../../components/useDialog';
 import { Btn } from '../../../components/ui';
@@ -36,12 +44,29 @@ export function ReorderMenu({
   const buttonId = useId();
   const menuId = useId();
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const menuRef = useDialog<HTMLDivElement>({ onClose: () => setOpen(false), trapFocus: false });
 
   const close = () => setOpen(false);
 
+  // Outside-click dismissal (issue #2074 review finding 6) — matches PageHeader's
+  // OverflowMenuPanel / StatusMenuButton: a pointerdown outside the trigger+panel
+  // container closes the menu without forcing focus back to the trigger (a forced
+  // refocus on pointerdown would fight whatever the user actually clicked next).
+  useEffect(() => {
+    if (!open) return;
+    const root = containerRef.current;
+    function onPointerDown(event: PointerEvent) {
+      if (!root) return;
+      if (event.target instanceof Node && root.contains(event.target)) return;
+      close();
+    }
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, [open]);
+
   return (
-    <div className="relative inline-flex" data-testid={`reorder-menu-${combatantName}`}>
+    <div ref={containerRef} className="relative inline-flex" data-testid={`reorder-menu-${combatantName}`}>
       <Btn
         ghost
         ref={buttonRef}

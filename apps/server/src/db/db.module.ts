@@ -2966,6 +2966,26 @@ function migrateCombatantsTableForNpcDispositionSnapshot(sqlite: Database.Databa
   if (!columns.some((c) => c.name === 'npc_disposition_snapshot')) sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_disposition_snapshot TEXT');
 }
 
+/**
+ * Issue #1923 review finding 1 — DM manual-reorder override. A running encounter's
+ * `sortCombatants` orders by initiative and breaks ties via the campaign's adapter
+ * (`initiativeTiebreak`); 5e and Open Legend compare `initMod` BEFORE `sortOrder`
+ * (`initModDescThenSortOrderAsc` in packages/schema/src/initiative-tiebreak.ts), so a
+ * pure `sortOrder` rewrite from a manual drag was silently discarded whenever the tied
+ * combatants had different `initMod` (different DEX) — the DM's reorder had no effect.
+ * Plain nullable ADD COLUMN, same per-table idiom as migrateCharacterCombatantSpeed1910
+ * above: NULL preserves upgrade compatibility (an existing row keeps reading as "never
+ * manually reordered", which is exactly the pre-migration behaviour — `sortCombatants`
+ * only consults this column when BOTH compared rows are non-null). New DBs never hit
+ * this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCombatantsTableForManualOrder1923(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'manual_order')) sqlite.exec('ALTER TABLE combatants ADD COLUMN manual_order INTEGER');
+}
+
 /** Issue #425: campaign-scoped homebrew monster library for clone/edit/reuse. */
 function migrateCampaignLibraryMonstersTable(sqlite: Database.Database): void {
   const hasCampaignsTable = sqlite
@@ -5310,9 +5330,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0169_check_requests_group_id_1943', run: migrateCheckRequestsTableForGroupId1943 },
   { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
-  // Next free ordinal at the time this branch was written — renumber if another PR lands
-  // 0172 first.
   { name: '0173_action_uses_tracking_1921', run: migrateActionUsesTracking1921 },
+  // 0172/0173 are CENTRALLY CLAIMED by other in-flight branches (#2050 table audio/haptics
+  // holds 0172; #1921 monster recharge abilities holds 0173 — see that branch's "chore(db):
+  // renumber the action-uses migration to 0173" commit). Confirmed free across every
+  // claude/codex/work/port/feat/fix remote branch at the time this was taken.
+  { name: '0174_combatants_manual_order_1923', run: migrateCombatantsTableForManualOrder1923 },
 ];
 
 /**

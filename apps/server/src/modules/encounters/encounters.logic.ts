@@ -477,6 +477,16 @@ export function sortCombatants(
     if (a.initiative === null) return 1;
     if (b.initiative === null) return -1;
     if (a.initiative !== b.initiative) return b.initiative - a.initiative;
+    // DM manual-reorder override (issue #1923 review finding 1): a running encounter's
+    // adapter tiebreak (e.g. 5e's initModDescThenSortOrderAsc) compares initMod BEFORE
+    // sortOrder, so a plain sortOrder rewrite from a drag is silently discarded whenever
+    // the tied combatants have different initMod. reorderCombatant stamps manualOrder on
+    // every combatant in the roster when it runs against a running encounter; consult it
+    // here ONLY when both sides have a value, so a tie where neither (or only one) side
+    // was ever manually reordered still falls through to the adapter's own rule
+    // unchanged. Deliberately checked before breakTie, not inside it — this is roster
+    // state the adapter itself never sees.
+    if (a.manualOrder !== null && b.manualOrder !== null) return a.manualOrder - b.manualOrder;
     return breakTie(a, b);
   });
 }

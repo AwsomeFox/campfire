@@ -977,7 +977,14 @@ export const CombatantRow = memo(function CombatantRow({
                     opacity: reorder.busy ? 0.5 : 1,
                     outline: reorder.isDropTarget ? '2px solid var(--color-accent)' : undefined,
                   }}
-                  {...reorder.dragHandleProps}
+                  // Issue #2074 review finding 4: while a reorder write is in flight
+                  // (`reorder.busy`), the handle must not start a NEW pointer gesture — the
+                  // shared drag hook keeps a single in-flight gesture ref across every row,
+                  // and starting a second drag on top of a first that hasn't been
+                  // acknowledged by the server yet raced two writes against each other.
+                  // Withhold the pointer handlers entirely rather than merely disabling the
+                  // visual affordance above.
+                  {...(reorder.busy ? {} : reorder.dragHandleProps)}
                 >
                   ⠿
                 </span>

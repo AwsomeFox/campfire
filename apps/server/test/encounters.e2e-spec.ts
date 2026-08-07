@@ -10179,6 +10179,87 @@ describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
     return { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion: started.body.turnVersion as number };
   }
 
+  /**
+   * Review finding 1 on PR #2074 — `seedFight` above ties Fighter/Rogue at the SAME
+   * initMod, which is the one case where the 5e adapter tiebreak
+   * (`initModDescThenSortOrderAsc`) degenerates to plain `sortOrder`: it compares
+   * `initMod` first and only falls back to `sortOrder` when `initMod` is equal, so a
+   * same-initMod fixture cannot tell a `sortOrder`-only rewrite apart from a real fix.
+   *
+   * Here Fighter(initMod=1) and Rogue(initMod=3) tie at initiative 14 with DIFFERENT
+   * initMod. The adapter's own rule (higher initMod first) already orders them Rogue,
+   * Fighter without any DM input — dragging Fighter ahead of Rogue only survives if the
+   * override this issue adds is actually consulted.
+   */
+  async function seedTiedDifferentDexFight(): Promise<{
+    encounterId: number;
+    wizardId: number;
+    fighterId: number;
+    rogueId: number;
+    clericId: number;
+    turnVersion: number;
+  }> {
+    const server = ctx.app.getHttpServer();
+    const running = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).query({ status: 'running' }).set(dm);
+    for (const e of running.body as Array<{ id: number }>) {
+      await request(server).post(`/api/v1/encounters/${e.id}/end`).set(dm);
+    }
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Reorder Drill (different DEX tie)', hidden: false });
+    const encounterId = created.body.id as number;
+    const wizard = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Wizard', hpMax: 10, initMod: 5 });
+    // Fighter has the LOWER initMod of the tied pair — the adapter tiebreak alone would
+    // always place Rogue ahead of it.
+    const fighter = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Fighter', hpMax: 12, initMod: 1 });
+    const rogue = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Rogue', hpMax: 8, initMod: 3 });
+    const cleric = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Cleric', hpMax: 9, initMod: 0 });
+    const wizardId = wizard.body.id as number;
+    const fighterId = fighter.body.id as number;
+    const rogueId = rogue.body.id as number;
+    const clericId = cleric.body.id as number;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${wizardId}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${fighterId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${rogueId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${clericId}`).set(dm).send({ initiative: 6 });
+    const started = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(started.status).toBe(201);
+    const orderedIds = (started.body.combatants as Array<{ id: number }>).map((c) => c.id);
+    // Confirms the fixture: absent any manual reorder, the adapter's own DEX-desc
+    // tiebreak already puts Rogue (initMod 3) ahead of Fighter (initMod 1).
+    expect(orderedIds).toEqual([wizardId, rogueId, fighterId, clericId]);
+    return { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion: started.body.turnVersion as number };
+  }
+
+  it('a manual reorder within a tie survives the adapter tiebreak when the tied combatants have different initMod (#2074 review finding 1)', async () => {
+    const { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion } = await seedTiedDifferentDexFight();
+    const server = ctx.app.getHttpServer();
+
+    // Drag the lower-DEX Fighter ahead of the higher-DEX Rogue — a pure same-value tie
+    // move (both stay at initiative 14). Without a persisted override, the very next
+    // sort recomputes the tie via the adapter (initMod desc) and silently puts Rogue
+    // back in front, discarding the drag.
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: wizardId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBe(fighterId);
+    expect(res.body.initiative).toBe(14); // same-value move: the number itself is untouched
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const afterIds = (after.body.combatants as Array<{ id: number }>).map((c) => c.id);
+    expect(afterIds).toEqual([wizardId, fighterId, rogueId, clericId]);
+
+    // Order survives reload (a fresh GET re-derives from persisted sortOrder/initiative/
+    // manualOrder, not from anything held in memory by the request that moved it).
+    const reload = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((reload.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([wizardId, fighterId, rogueId, clericId]);
+
+    // Neither tied combatant's initiative value moved — only which one sorts first.
+    const reloadCombatants = reload.body.combatants as Array<{ id: number; initiative: number }>;
+    expect(reloadCombatants.find((c) => c.id === fighterId)!.initiative).toBe(14);
+    expect(reloadCombatants.find((c) => c.id === rogueId)!.initiative).toBe(14);
+  });
+
   it('reorders within a tie: only sortOrder changes, initiative values are unchanged, and order survives reload', async () => {
     const { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion } = await seedFight();
     const server = ctx.app.getHttpServer();

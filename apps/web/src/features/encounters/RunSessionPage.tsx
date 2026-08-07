@@ -597,8 +597,6 @@ const InitiativeStrip = memo(function InitiativeStrip({
               scrollSnapAlign: 'center',
               ...(canReorder
                 ? {
-                    cursor: 'grab',
-                    touchAction: 'none',
                     opacity: isDragging ? 0.5 : 1,
                     outline: isDropTarget ? '2px solid var(--color-accent)' : undefined,
                     outlineOffset: 2,
@@ -609,7 +607,6 @@ const InitiativeStrip = memo(function InitiativeStrip({
               if (el) combatantRefs.current.set(c.id, el);
               else combatantRefs.current.delete(c.id);
             }}
-            {...(canReorder ? dragReorder.handleProps(c.id) : {})}
           >
             {c.turnState.delaying && (
               <span
@@ -644,6 +641,40 @@ const InitiativeStrip = memo(function InitiativeStrip({
               }}
               title={c.name}
             >
+              {canReorder && (
+                // Issue #2074 review finding 2: `touchAction: 'none'` used to cover the
+                // WHOLE tile, so a finger swipe anywhere on it dragged instead of scrolling
+                // this horizontally-scrollable strip. Confine the drag surface to this small
+                // handle — mirroring the roster's ⠿ handle (CombatantRow.tsx) — so the rest
+                // of the tile keeps native touch scrolling and only a deliberate touch on the
+                // handle starts a reorder gesture.
+                <span
+                  aria-hidden="true"
+                  data-testid={`initiative-strip-drag-handle-${c.id}`}
+                  style={{
+                    position: 'absolute',
+                    top: -4,
+                    left: -4,
+                    width: 16,
+                    height: 16,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderRadius: 8,
+                    background: 'var(--color-bg-surface-raised, #1e293b)',
+                    border: '1px solid var(--color-border, #475569)',
+                    color: 'var(--color-text-main, #f8fafc)',
+                    fontSize: 9,
+                    lineHeight: 1,
+                    cursor: 'grab',
+                    touchAction: 'none',
+                    zIndex: 10,
+                  }}
+                  {...dragReorder.handleProps(c.id)}
+                >
+                  ⠿
+                </span>
+              )}
               <div className="w-full h-full flex items-center justify-center overflow-hidden" style={{ borderRadius: 4 }}>
                 {character?.portraitUrl ? (
                   <img src={character.portraitUrl} alt={c.name} className="w-full h-full object-cover" />
@@ -3552,7 +3583,6 @@ export default function RunSessionPage() {
     if (el) combatantRowRefs.current.set(combatantId, el);
     else combatantRowRefs.current.delete(combatantId);
   }, []);
-<<<<<<< HEAD
   // Issue #1917 stage 1: `CombatantRow` is now `React.memo`-wrapped, so a per-row `rowRef`
   // callback recreated inline in the roster `.map()` below (`(el) => setCombatantRowRef(c.id,
   // el)`) would be a fresh function identity every render and defeat the memo for that prop
@@ -3571,7 +3601,7 @@ export default function RunSessionPage() {
       return bound;
     },
     [setCombatantRowRef],
-=======
+  );
 
   // Manual initiative reorder (issue #1923). `handleReorderDrop` is the single write
   // path both InitiativeStrip's drag and the roster's drag-handle/menu funnel through —
@@ -3609,11 +3639,16 @@ export default function RunSessionPage() {
         dragHandleProps: rosterDragReorder.handleProps(combatant.id),
         isDragging: rosterDragReorder.draggingId === combatant.id,
         isDropTarget: rosterDragReorder.overId === combatant.id,
-        busy: pendingCombatantIds.has(combatant.id) || reconcileBlocks,
+        // Issue #2074 review finding 3: reorder performs a write (POST .../reorder), so
+        // it must consult the live-sync gate (`riskyBlocked`) the same way every other
+        // write control on this row does — see CombatantRowProps.syncBlocked's own doc
+        // ("EVERY control that performs a write must consult both"). Omitting it left the
+        // drag handle and ReorderMenu draggable/clickable during an SSE outage that blocks
+        // every other conflict-prone write on the row.
+        busy: pendingCombatantIds.has(combatant.id) || reconcileBlocks || riskyBlocked,
       };
     },
-    [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks],
->>>>>>> 0dfb00a3c (feat(encounters): DM-only manual initiative reorder (issue #1923))
+    [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks, riskyBlocked],
   );
   const autoScrollSkipped = useRef(false);
   // `RunSessionPage` is reused across encounters; reset the first-load latch so

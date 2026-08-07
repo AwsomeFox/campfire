@@ -2747,4 +2747,26 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       sqlite.close();
     }
   });
+
+  it('0174 adds combatants.manual_order on upgrade; a pre-existing (pre-#1923) row reads back null (#1923)', () => {
+    expect(MIGRATION_NAMES).toContain('0174_combatants_manual_order_1923');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'combatants')).toContain('manual_order');
+
+      // writeOldSchemaDb already seeds a pre-existing combatant row (Legacy Goblin) written
+      // before this column existed — it must read back null, not silently gain a manual
+      // reorder position it never had.
+      const row = sqlite.prepare("SELECT manual_order FROM combatants WHERE name = 'Legacy Goblin'").get() as {
+        manual_order: number | null;
+      };
+      expect(row.manual_order).toBeNull();
+    } finally {
+      sqlite.close();
+    }
+  });
 });
