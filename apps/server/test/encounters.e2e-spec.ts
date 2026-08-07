@@ -15,8 +15,6 @@ import {
   diceRolls,
   combatantRemovalUndos,
   encounterOpIdempotency,
-  users as usersTable,
-  campaignMembers as campaignMembersTable,
 } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { AuditService } from '../src/modules/audit/audit.service';
