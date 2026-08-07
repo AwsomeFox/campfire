@@ -1,6 +1,6 @@
 {
   "apps/web/src/features/encounters/ActionUseFlow.tsx": 1,
-  "apps/web/src/features/encounters/CheckRequests.tsx": 4,
+  "apps/web/src/features/encounters/CheckRequests.tsx": 6,
   "apps/web/src/features/encounters/CombatantActionsList.tsx": 1,
   "apps/web/src/features/encounters/CombatantStatblockEditor.tsx": 5,
   "apps/web/src/features/encounters/EncounterAftermathPanel.tsx": 7,
