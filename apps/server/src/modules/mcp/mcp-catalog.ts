@@ -192,6 +192,7 @@ export const MCP_TOOL_NAMES = [
   'ping_map',
   'reveal_map_region',
   'generate_map',
+  'seed_sample_encounter',
   'generate_ai_map',
   'get_map_generation',
   'refine_ai_map',

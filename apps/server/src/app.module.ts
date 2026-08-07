@@ -52,6 +52,7 @@ import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
 import { TableSafetyModule } from './modules/safety/table-safety.module';
 import { MapsModule } from './modules/maps/maps.module';
+import { SampleEncounterModule } from './modules/sample-encounter/sample-encounter.module';
 import { AiMapModule } from './modules/ai-map/ai-map.module';
 import { EventsModule } from './modules/events/events.module';
 import { RollsModule } from './modules/rolls/rolls.module';
@@ -187,6 +188,7 @@ function serveStaticImports(): DynamicModule[] {
     // encounters/ai-driver edges.
     TableSafetyModule,
     MapsModule,
+    SampleEncounterModule,
     AiMapModule,
     EventsModule,
     RollsModule,

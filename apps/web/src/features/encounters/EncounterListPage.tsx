@@ -77,6 +77,21 @@ export default function EncounterListPage() {
   const fetchGeneration = useRef(0);
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
   const [quickFightLoading, setQuickFightLoading] = useState(false);
+  const [sampleFightLoading, setSampleFightLoading] = useState(false);
+
+  // Issue #1932: one-click seeded demo — 4 pregens, 4 monsters, and a generated map,
+  // composed server-side from the same write paths a DM would use manually.
+  const handleSampleFight = useCallback(async () => {
+    setSampleFightLoading(true);
+    setError(null);
+    try {
+      const result = await api.post<{ encounterId: number }>(`${API}/campaigns/${id}/sample-encounter`);
+      navigate(`/c/${id}/encounters/${result.encounterId}`);
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.sampleFight' }));
+      setSampleFightLoading(false);
+    }
+  }, [id, navigate, t]);
 
   const handleQuickFight = useCallback(async () => {
     setQuickFightLoading(true);
@@ -293,6 +308,18 @@ export default function EncounterListPage() {
               : isDm
                 ? t('encounters.empty.hintDm')
                 : t('encounters.empty.hintPlayer')
+          }
+          action={
+            !filtersActive && canDmWrite ? (
+              <Btn
+                type="button"
+                onClick={handleSampleFight}
+                disabled={sampleFightLoading}
+                data-testid="sample-fight-button"
+              >
+                {sampleFightLoading ? t('encounters.empty.sampleFightLoading') : t('encounters.empty.sampleFight')}
+              </Btn>
+            ) : undefined
           }
         />
       ) : (

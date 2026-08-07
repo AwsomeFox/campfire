@@ -119,6 +119,7 @@ export const IsoDate = z.string(); // ISO-8601, server-assigned
 export const IdempotencyKey = z.string().min(1).max(128).optional();
 
 export * from './encounter-aftermath';
+export * from './sample-encounter';
 
 // Campaign modules — package identity, lineage, three-way updates, overlays and
 // rollback (issue #585) — plus the semver helpers their compatibility/dependency

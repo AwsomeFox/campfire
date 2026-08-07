@@ -181,6 +181,7 @@ import { InvitesService } from '../membership/invites.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BulkNotificationSchema } from '../notifications/notifications.dto';
 import { InboxSweepService } from '../inbox-sweep/inbox-sweep.service';
+import { SampleEncounterService } from '../sample-encounter/sample-encounter.service';
 
 import { APP_VERSION } from '../../common/build-metadata';
 
@@ -519,6 +520,11 @@ export class McpToolsService {
     @InjectThrottlerStorage()
     private readonly throttlerStorage: ThrottlerStorage,
     private readonly safetyCharterValidator: SafetyCharterValidator,
+    // Issue #1932: "Try a sample fight" one-click demo seed. Appended LAST, matching the
+    // sessionZeroConsent/inboxSweep convention above — test/unit/mcp-rest-parity.spec.ts
+    // constructs this service positionally with placeholder arguments, so inserting a
+    // parameter anywhere but the end would silently shift every dependency after it.
+    private readonly sampleEncounter: SampleEncounterService,
   ) {}
 
   /**
@@ -4615,6 +4621,24 @@ export class McpToolsService {
           return this.maps.generateForEncounter(encounterId as number, campaignId as number, params, user, role);
         }
         return this.maps.generateForCampaign(campaignId as number, params, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'seed_sample_encounter',
+      'DM only: "Try a sample fight" one-click demo seed (issue #1932). Seeds, inside this campaign, 4 pregen ' +
+        'characters (active, unowned — players can claim them later, each with a resolvable attack and the caster ' +
+        'carrying spellSlots + a castable leveled spell), one `preparing` encounter ("Sample Fight") with 4 bandits ' +
+        'added via the inline-statblock path (no rule pack install required), and a generated, grid-aligned battle ' +
+        'map with a fixed seed — fully offline. Composes the same write paths as create_character/create_encounter/' +
+        'add_combatant/generate_map, so it needs no separate REST/MCP behavior. Safe to call again: a repeat call ' +
+        'never overwrites the first — it mints "Sample Fight 2", "Sample Fight 3", etc.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.sampleEncounter.seed(campaignId as number, user, role);
       },
     );
 
