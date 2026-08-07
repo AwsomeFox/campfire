@@ -156,6 +156,18 @@ const step2RegressedBackToOldBaseline = evaluateTranslationRatchet(
 );
 assert.strictEqual(step2RegressedBackToOldBaseline.length, 1); // MUST be caught, not slide through
 
+// Baseline entry for a file that is no longer scanned -> MUST fail telling author to remove stale entry
+const staleBaselineErrors = evaluateTranslationRatchet(
+  { 'apps/web/src/i18n/locales/ar/nav.json': 10 },
+  {
+    'apps/web/src/i18n/locales/ar/nav.json': 10,
+    'apps/web/src/i18n/locales/ar/deleted.json': 5,
+  },
+);
+assert.strictEqual(staleBaselineErrors.length, 1);
+assert.match(staleBaselineErrors[0], /deleted\.json/);
+assert.match(staleBaselineErrors[0], /no longer scanned/);
+
 // --- validateBaselineShape (issue #2069 part 2) ---
 
 // A well-formed baseline -> MUST pass

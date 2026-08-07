@@ -311,6 +311,14 @@ export function evaluateTranslationRatchet(counts, baseline) {
       );
     }
   }
+  for (const [file, allowed] of Object.entries(baseline)) {
+    if (!(file in counts)) {
+      errors.push(
+        `${file}: recorded baseline allowance of ${allowed} for a file that is no longer scanned. ` +
+          `Remove this stale entry from scripts/i18n-translation-baseline.json in the same PR.`,
+      );
+    }
+  }
   return errors;
 }
 
