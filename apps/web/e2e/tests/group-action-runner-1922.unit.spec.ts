@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { ActionResolveResult, ActionSpec, ActionUndoToken, Combatant, UsableAction } from '@campfire/schema';
 import { ApiError } from '../../src/lib/api';
@@ -266,5 +268,28 @@ test.describe('undoGroupActionsInReverseOrder (issue #1922 — Undo all)', () =>
     // 3 undone first (succeeds), then 2 attempted and fails — 1 is never reached.
     expect(calledOrder).toEqual([3, 2]);
     expect(outcome).toEqual({ undoneCount: 1, failed: true });
+  });
+
+});
+
+test.describe('the cross-package contract this runner depends on (issue #1922)', () => {
+  // The whole "skipped, never errored" acceptance criterion rests on ONE string literal
+  // matching a different one in another package, with nothing forcing them to agree. Every
+  // test above constructs its own `ApiError` carrying that literal, so they check the client
+  // against itself and would keep passing if the server renamed the code — at which point a
+  // spent-slot actor stops being skipped and becomes a loop-STOPPING failure, silently
+  // inverting the behavior the issue asks for. Pin it against the server source, the same way
+  // `resource-tracker.unit.spec.ts` pins server-side invariants it depends on.
+  test('the server still emits the exact code this runner skips on', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../../../../apps/server/src/modules/encounters/action-resolver.service.ts'),
+      'utf8',
+    );
+    // Skipping is only safe because that guard throws BEFORE any target consequence is
+    // written (the #1637 convention, "not late-and-unwind"), so the transaction rolls back
+    // clean and the actor is genuinely untouched. That property is the server's own
+    // invariant and is covered there; what is unguarded — and what this test exists for — is
+    // the code string crossing the package boundary.
+    expect(src).toContain("code: 'action_economy_exhausted',");
   });
 });
