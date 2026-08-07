@@ -291,7 +291,7 @@ export async function startFakePf2e(): Promise<FakePf2e> {
   });
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');
@@ -338,7 +338,7 @@ export async function startFakePf2eMixed(): Promise<FakePf2e> {
   });
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');
@@ -383,7 +383,7 @@ export async function startFakePf2eDuplicates(): Promise<FakePf2e> {
   });
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');
@@ -435,7 +435,7 @@ export async function startFakePf2eCrossSection(): Promise<FakePf2e> {
   });
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');

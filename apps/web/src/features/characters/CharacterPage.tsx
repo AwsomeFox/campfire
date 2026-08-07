@@ -148,7 +148,12 @@ import {
   skillRankLabel,
   type SkillProficiencyRank,
 } from './characterSheetA11y';
-import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
+import {
+  canAdjustSpecialResource,
+  findSpecialResource,
+  resourceAvailability,
+  specialResourceAdjustBody,
+} from './specialCharacterResource';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 import { adapterConditionLabel, adapterResourceLabel } from '../../lib/adapterVocabularyLabel';
 
@@ -2237,40 +2242,24 @@ function AdapterResourceCard({
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
 
-  const { max, used, available } = resourceAvailability(def, character);
+  const { max, available } = resourceAvailability(def, character);
   // Issue #2053 — display only. `def.name` itself keeps flowing to the server (see the
   // POST below) unchanged: the stored resource record is domain data, not presentation.
   const resourceLabel = adapterResourceLabel(t, def);
 
-  async function adjust(delta: number) {
-    if (busy) return;
+  // Issue #1944: the payload shape (first-touch creation vs. plain delta) now lives in
+  // `specialResourceAdjustBody` — shared with the encounter screen's DM-award and
+  // player-spend controls so the two surfaces cannot fork on what "spend"/"award" means.
+  // `canAdjustSpecialResource` mirrors the SAME gating the button `disabled` props below use.
+  async function adjust(direction: 'spend' | 'award') {
+    if (busy || !canAdjustSpecialResource(def, character, direction)) return;
     setBusy(true);
     onError(null);
     try {
-      const stored = character.resources[def.key];
-      // CharactersService.adjustResource applies `patch.max` whenever it is defined
-      // (not only on first touch). Only send max/name/recharge when creating the
-      // pool so a DM-configured override is preserved on later Spend/Restore.
-      // Untouched pools have nothing to Spend (see resourceAvailability); Restore
-      // awards by creating `{ max: adapterDefault, used: 0 }`.
-      if (!stored) {
-        if (delta >= 0) return;
-        await api.post(`${API}/characters/${character.id}/resources`, {
-          key: def.key,
-          max: def.defaultMax ?? 1,
-          used: 0,
-          name: def.name,
-          recharge: def.recharge,
-        });
-      } else {
-        await api.post(`${API}/characters/${character.id}/resources`, {
-          key: def.key,
-          delta,
-        });
-      }
+      await api.post(`${API}/characters/${character.id}/resources`, specialResourceAdjustBody(def, character, direction));
       onChange();
       announce(
-        delta > 0
+        direction === 'spend'
           ? t('characters.resources.announceSpent', { name: resourceLabel })
           : t('characters.resources.announceRestored', { name: resourceLabel }),
       );
@@ -2298,10 +2287,10 @@ function AdapterResourceCard({
         <span className="text-[11px] text-secondary">{t('characters.resources.count', { available, max })}</span>
         {canEdit && (
           <span className="inline-flex gap-1 ml-auto cf-print-hide">
-            <Btn density="xs" ghost className="text-xs" disabled={busy || available === 0} onClick={() => void adjust(1)}>
+            <Btn density="xs" ghost className="text-xs" disabled={busy || !canAdjustSpecialResource(def, character, 'spend')} onClick={() => void adjust('spend')}>
               {t('characters.resources.spend')}
             </Btn>
-            <Btn density="xs" ghost className="text-xs" disabled={busy || used === 0} onClick={() => void adjust(-1)}>
+            <Btn density="xs" ghost className="text-xs" disabled={busy || !canAdjustSpecialResource(def, character, 'award')} onClick={() => void adjust('award')}>
               {t('characters.resources.restore')}
             </Btn>
           </span>

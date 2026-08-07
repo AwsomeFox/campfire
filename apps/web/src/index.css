@@ -2523,6 +2523,17 @@ a:hover .cf-name-reveal {
 }
 .cf-hp-flash-heal { animation: cf-hp-flash-heal 0.5s ease-out both; }
 
+/* --- Special resource award flourish (PlayerVitalsHeader, issue #1944) --- */
+/* A DM award (5e inspiration / PF2e hero points) landing on the recipient's own pip via
+   the character.updated refetch — a brief accent glow, same fill-mode/shape as the HP
+   flash pair above so it reverts cleanly to the pip's normal look. */
+@keyframes cf-special-resource-award-flash {
+  0%   { box-shadow: 0 0 12px 3px var(--color-accent-300); filter: brightness(1.6); }
+  60%  { box-shadow: 0 0 6px 1px var(--color-accent-300); filter: brightness(1.2); }
+  100% { box-shadow: 0 0 0 0 transparent; filter: brightness(1); }
+}
+.cf-special-resource-award-flash { animation: cf-special-resource-award-flash 0.6s ease-out both; }
+
 /* --- Level up (CharacterPage XpCard) --- */
 /* "Ready to level up" tag gently breathes to draw the eye. */
 @keyframes cf-ready-pulse {
@@ -2640,6 +2651,7 @@ a:hover .cf-name-reveal {
   .cf-anim-hp-damage,
   .cf-hp-flash-damage,
   .cf-hp-flash-heal,
+  .cf-special-resource-award-flash,
   .cf-anim-ready,
   .cf-anim-levelup,
   .cf-sparkle,

@@ -13,7 +13,9 @@
  * DOM for each combination of (colorVisionAssist, isCurrentTurn).
  */
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, test, expect, vi, afterEach, beforeAll } from 'vitest';
+import { Character } from '@campfire/schema';
 import type { Combatant } from '@campfire/schema';
 import { MemoryRouter } from 'react-router-dom';
 import '../../src/i18n';
@@ -94,6 +96,8 @@ function renderRow(overrides: Partial<CombatantRowProps> = {}) {
     syncBlocked: false,
     canEditIdentity: false,
     canRemove: false,
+    // Issue #1944: DM-only Award control mount gate, same shape as canRemove above.
+    canAwardSpecialResource: false,
     canSetInitiative: false,
     running: false,
     character: null,
@@ -125,9 +129,15 @@ function renderRow(overrides: Partial<CombatantRowProps> = {}) {
     ...rest,
     combatant,
   };
+  // A PC row mounts CharacterStatCard, which issues a react-query useQuery for the
+  // combatant's usable actions — so the row needs a client in context. Retries off and
+  // a fresh client per render keep one test's fetch state out of the next one's.
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <MemoryRouter>
-      <CombatantRow {...props} />
+      <QueryClientProvider client={queryClient}>
+        <CombatantRow {...props} />
+      </QueryClientProvider>
     </MemoryRouter>,
   );
 }
@@ -205,5 +215,91 @@ describe('CombatantRow condition-tag rules hints (issue #1939)', () => {
     fireEvent.click(screen.getByTestId('rules-hint-trigger-Restrained'));
     const link = screen.getByRole('link');
     expect(link.getAttribute('href')).toBe('/c/7/compendium?q=Restrained');
+  });
+});
+
+/**
+ * Mount-gate coverage for the DM Award control (issue #1944).
+ *
+ * The helpers behind it (`findSpecialResource`, `canAdjustSpecialResource`,
+ * `specialResourceAdjustBody`) are unit-tested in
+ * `e2e/tests/character-special-resource.unit.spec.ts`, but nothing covered the
+ * four-condition JSX gate that decides whether the control appears at all:
+ * `kind === 'character' && character && canAwardSpecialResource && specialResourceDef`.
+ * That gate is where the consequential failures live — a non-DM seeing an Award
+ * button, or a 5e-shaped affordance appearing for a table whose adapter declares
+ * neither inspiration nor hero points. A source-scan test cannot tell `&&` from
+ * `||` here; this renders the real row for each combination instead.
+ */
+function pcCombatant() {
+  return baseCombatant({ id: 202, kind: 'character', characterId: 7, name: 'Ayla' });
+}
+
+// Built through the real schema rather than hand-written, so a new required field
+// on `Character` fails here loudly instead of being papered over by a blind cast.
+const partyCharacter: Character = Character.parse({
+  id: 7,
+  campaignId: 1,
+  name: 'Ayla',
+  resources: {},
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+});
+
+describe('CombatantRow special-resource Award gate (issue #1944)', () => {
+  test('renders for a DM on a PC row when the adapter declares inspiration', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, canAwardSpecialResource: true, ruleSystem: 'dnd5e' });
+    const award = screen.getByTestId('award-special-resource-202');
+    expect(award.textContent).toContain('Inspiration');
+  });
+
+  test('does not render for a non-DM viewer, even on the same PC row and adapter', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, canAwardSpecialResource: false, ruleSystem: 'dnd5e' });
+    expect(screen.queryByTestId('award-special-resource-202')).toBeNull();
+  });
+
+  test('does not render when the adapter declares neither inspiration nor hero points', () => {
+    // 'osr' declares no resources at all. Note the contrast with `ruleSystem: null`,
+    // which is NOT this case: `ruleSystemAdapter(null)` resolves to dnd5e app-wide, so an
+    // unset rule system deliberately DOES show Inspiration, consistent with every other
+    // 5e-shaped affordance on the page. Asserting null-means-nothing here would have
+    // pinned the wrong contract.
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, canAwardSpecialResource: true, ruleSystem: 'osr' });
+    expect(screen.queryByTestId('award-special-resource-202')).toBeNull();
+  });
+
+  test('does not render on a monster row, which has no character to award to', () => {
+    renderRow({ combatant: baseCombatant(), character: null, canAwardSpecialResource: true, ruleSystem: 'dnd5e' });
+    expect(screen.queryByTestId('award-special-resource-101')).toBeNull();
+  });
+
+  test('is enabled on an untouched pool (nothing awarded yet) and disabled at the adapter cap', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, canAwardSpecialResource: true, ruleSystem: 'dnd5e' });
+    const untouched = screen.getByTestId('award-special-resource-202').querySelector('button') as HTMLButtonElement;
+    expect(untouched.disabled).toBe(false);
+    cleanup();
+
+    // `used: 0` of `max: 1` is a FULL pool per `resourceAvailability` — there is
+    // nothing left to top up, so Award must be off. This is the boundary the sheet's
+    // own Restore button uses, and getting it backwards is invisible without a render.
+    // No `key` field — the map key IS the resource key in `Character.resources`.
+    const atCap: Character = { ...partyCharacter, resources: { inspiration: { name: 'Inspiration', max: 1, used: 0, recharge: 'special' } } };
+    renderRow({ combatant: pcCombatant(), character: atCap, canAwardSpecialResource: true, ruleSystem: 'dnd5e' });
+    const full = screen.getByTestId('award-special-resource-202').querySelector('button') as HTMLButtonElement;
+    expect(full.disabled).toBe(true);
+  });
+
+  // Issue #1944 review: `CombatantRowProps.syncBlocked`'s own doc says "EVERY control
+  // that performs a write must consult both — permission for mount, this for disabled".
+  // The Award button (added by this same feature) did not, until this fix.
+  test('is disabled while syncBlocked, even on an otherwise-awardable untouched pool', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, canAwardSpecialResource: true, ruleSystem: 'dnd5e', syncBlocked: false });
+    const notBlocked = screen.getByTestId('award-special-resource-202').querySelector('button') as HTMLButtonElement;
+    expect(notBlocked.disabled).toBe(false);
+    cleanup();
+
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, canAwardSpecialResource: true, ruleSystem: 'dnd5e', syncBlocked: true });
+    const blocked = screen.getByTestId('award-special-resource-202').querySelector('button') as HTMLButtonElement;
+    expect(blocked.disabled).toBe(true);
   });
 });

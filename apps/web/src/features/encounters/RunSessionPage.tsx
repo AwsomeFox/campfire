@@ -4133,6 +4133,8 @@ export default function RunSessionPage() {
           // unblockable by the scoped player override without touching any other row.
           syncBlocked={gateForWrite('own-combatant', { isOwnCombatant: true }, encounterSync, effectiveEncounterSyncOverride)}
           deathSaveOutcome={deathSaveOutcome}
+          customMechanicsProfile={campaign?.customMechanicsProfile}
+          onSpecialResourceError={surfaceActionError}
         />
       )}
 
@@ -4562,6 +4564,11 @@ export default function RunSessionPage() {
                   showKillPrompt={isDm && shouldShowKillPrompt(c, dismissedKillPromptIds)}
                   onDismissKillPrompt={() => setDismissedKillPromptIds((prev) => dismissKillPrompt(prev, c.id))}
                   canRemove={canDmWrite}
+                  // Issue #1944: DM-only Award for the adapter-declared special resource
+                  // (5e inspiration / PF2e hero points). Same DM-write gate as canRemove —
+                  // CombatantRow additionally requires a resolvable character and an
+                  // adapter that declares one of SPECIAL_RESOURCE_KEYS before it mounts.
+                  canAwardSpecialResource={canDmWrite}
                   onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
                     ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))
                     : undefined}

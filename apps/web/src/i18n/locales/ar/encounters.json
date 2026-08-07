@@ -460,6 +460,15 @@
           "unconscious": "عاجز، ولا يمكنه الحركة أو الكلام، وغير مدرك لمحيطه. يُسقط ما يحمله ويسقط أرضًا؛ الهجمات ضده تحظى بميزة، وأي إصابة من مسافة 5 أقدام تُعدّ ضربة حاسمة."
         }
       }
+    },
+    "specialResource": {
+      "award": "منح {{name}}",
+      "awardedAnnounce": "تم منح {{name}} إلى {{combatantName}}",
+      "spend": "استخدام {{name}}",
+      "spendConfirm": "استخدام {{name}}؟",
+      "spentToast": "تم استخدام {{name}}",
+      "available": "{{available}} من {{max}} من {{name}} متاح",
+      "receivedAnnounce": "لقد حصلت على {{name}}!"
     }
   }
 }
