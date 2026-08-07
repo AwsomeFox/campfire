@@ -32,6 +32,7 @@ import {
   turnChimeTones,
   vibrateIfEnabled,
   TableAudioEngine,
+  DICE_ROLL_REDUCED_MOTION_TUMBLE_MS,
   SETTLE_VIBRATION_PATTERN,
   YOUR_TURN_VIBRATION_PATTERN,
   type MinimalAudioContext,
@@ -407,8 +408,13 @@ test.describe('RollResultToastContext wiring (issue #1920, source-text scan — 
   });
 
   test('beginRollAnimation plays the tumble cue before the reduced-motion early return', () => {
-    const tumbleIdx = text.indexOf('tableAudioEngine.playTumble(tableAudioLevel);');
-    const reducedMotionIdx = text.indexOf('if (prefersReducedMotion()) return;');
+    // The call is now multi-line (it passes a compressed window on the reduced-motion
+    // path — Devin review on PR #2050), and the early return reads the hoisted
+    // `reducedMotion` const rather than calling prefersReducedMotion() inline. The
+    // INVARIANT is unchanged and is what this asserts: the cue is played before the
+    // return, so audio still fires when the overlay is skipped.
+    const tumbleIdx = text.indexOf('tableAudioEngine.playTumble(');
+    const reducedMotionIdx = text.indexOf('if (reducedMotion) return;');
     expect(tumbleIdx).toBeGreaterThan(-1);
     expect(reducedMotionIdx).toBeGreaterThan(-1);
     expect(tumbleIdx).toBeLessThan(reducedMotionIdx);
@@ -447,5 +453,34 @@ test.describe('PreferencesPage wiring (issue #1920, source-text scan — structu
     for (const level of ['off', 'low', 'medium', 'high']) {
       expect(text).toContain(`<option value="${level}">`);
     }
+  });
+});
+
+test.describe('reduced-motion clatter window (issue #1920, Devin review on PR #2050)', () => {
+  test('every tap finishes inside the compressed window when the overlay is skipped', () => {
+    // The default window is the OVERLAY's tumble duration. With reduced motion the
+    // overlay never runs and the toast lands as soon as the server responds, so a
+    // tap scheduled at ~640ms would still be rattling after the result is on screen
+    // and would overlap the crit sting. Every tap must fit inside the short window.
+    const taps = tumbleTaps('high', () => 0.9, DICE_ROLL_REDUCED_MOTION_TUMBLE_MS);
+    expect(taps.length).toBeGreaterThan(0);
+    for (const tap of taps) {
+      expect(tap.offsetMs).toBeGreaterThanOrEqual(0);
+      expect(tap.offsetMs).toBeLessThan(DICE_ROLL_REDUCED_MOTION_TUMBLE_MS);
+    }
+  });
+
+  test('the default window is still the full overlay duration — the animated path is unchanged', () => {
+    const taps = tumbleTaps('high', () => 0.9);
+    expect(taps.some((t) => t.offsetMs > DICE_ROLL_REDUCED_MOTION_TUMBLE_MS)).toBe(true);
+  });
+
+  test('RollResultToastContext passes the compressed window on the reduced-motion path only', () => {
+    const src = readFileSync(
+      resolve(__dirname, '../../src/components/RollResultToastContext.tsx'),
+      'utf8',
+    );
+    expect(src).toContain('DICE_ROLL_REDUCED_MOTION_TUMBLE_MS');
+    expect(src).toMatch(/reducedMotion \? DICE_ROLL_REDUCED_MOTION_TUMBLE_MS : undefined/);
   });
 });

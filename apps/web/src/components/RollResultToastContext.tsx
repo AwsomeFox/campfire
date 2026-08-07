@@ -9,7 +9,7 @@ import { d20Flavor } from '../lib/d20Flavor';
 import { looksLikeDamageRoll } from '../lib/looksLikeDamageRoll';
 import { expandDiceSidesFromExpr } from '../lib/parseDiceSidesFromExpr';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
-import { SETTLE_VIBRATION_PATTERN, tableAudioEngine, vibrateIfEnabled } from '../lib/tableAudio';
+import { DICE_ROLL_REDUCED_MOTION_TUMBLE_MS, SETTLE_VIBRATION_PATTERN, tableAudioEngine, vibrateIfEnabled } from '../lib/tableAudio';
 import { buildOverlayDice, DiceRollOverlay, DICE_ROLL_MIN_TUMBLE_MS, type DiceRollOverlayPhase } from './DiceRollOverlay';
 import { RollResultToast } from './RollResultToast';
 import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
@@ -138,9 +138,17 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     if (sides.length === 0) return;
     // Audio is independent of prefers-reduced-motion (that gates visuals only —
     // see the module doc on ../lib/tableAudio), so this fires before the
-    // reduced-motion early-return below.
-    tableAudioEngine.playTumble(tableAudioLevel);
-    if (prefersReducedMotion()) return;
+    // reduced-motion early-return below. The clatter WINDOW, however, is not
+    // independent of it: the default window is the overlay's tumble duration, and
+    // with no overlay the toast lands as soon as the server responds. Compress it
+    // so the clatter finishes before the result rather than under it.
+    const reducedMotion = prefersReducedMotion();
+    tableAudioEngine.playTumble(
+      tableAudioLevel,
+      undefined,
+      reducedMotion ? DICE_ROLL_REDUCED_MOTION_TUMBLE_MS : undefined,
+    );
+    if (reducedMotion) return;
     tumbleStartedAtRef.current = Date.now();
     const next: OverlayState = { sides, phase: 'tumbling' };
     overlayRef.current = next;

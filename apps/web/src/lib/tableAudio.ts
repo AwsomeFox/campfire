@@ -73,18 +73,32 @@ export interface TumbleTap {
  * imported rather than re-declared so the two can never silently disagree).
  * `rng` defaults to Math.random but is injectable for deterministic tests.
  */
-export function tumbleTaps(level: TableAudioLevel, rng: () => number = Math.random): TumbleTap[] {
+/**
+ * Clatter window for the reduced-motion path (Devin review, #2050). The default
+ * window exists ONLY because the visual overlay tumbles for that long; with the
+ * overlay skipped, `showRoll` applies the toast as soon as the server responds,
+ * so taps scheduled out at ~325ms and ~640ms would still be rattling after the
+ * result is on screen and would overlap the crit/fumble sting. Compressed to one
+ * short burst that finishes before the result can plausibly land.
+ */
+export const DICE_ROLL_REDUCED_MOTION_TUMBLE_MS = 120;
+
+export function tumbleTaps(
+  level: TableAudioLevel,
+  rng: () => number = Math.random,
+  windowMs: number = DICE_ROLL_MIN_TUMBLE_MS,
+): TumbleTap[] {
   if (level === 'off') return [];
   const gain = gainForLevel(level);
   const count = rng() < 0.5 ? 2 : 3;
   const taps: TumbleTap[] = [];
   for (let i = 0; i < count; i++) {
     // Spread taps across the window with a little jitter so they don't sound
-    // metronomic, but keep each firmly inside [0, DICE_ROLL_MIN_TUMBLE_MS).
-    const slot = (DICE_ROLL_MIN_TUMBLE_MS / count) * i;
-    const jitter = rng() * (DICE_ROLL_MIN_TUMBLE_MS / count) * 0.6;
+    // metronomic, but keep each firmly inside [0, windowMs).
+    const slot = (windowMs / count) * i;
+    const jitter = rng() * (windowMs / count) * 0.6;
     taps.push({
-      offsetMs: Math.min(DICE_ROLL_MIN_TUMBLE_MS - 10, Math.round(slot + jitter)),
+      offsetMs: Math.max(0, Math.min(windowMs - 10, Math.round(slot + jitter))),
       durationMs: 30 + Math.round(rng() * 20),
       freq: 900 + Math.round(rng() * 900),
       gain: gain * (0.7 + rng() * 0.3),
@@ -297,9 +311,9 @@ export class TableAudioEngine {
    */
 
   /** Dice-clatter taps spread across the tumble window. */
-  playTumble(level: TableAudioLevel, rng?: () => number): void {
+  playTumble(level: TableAudioLevel, rng?: () => number, windowMs?: number): void {
     if (level === 'off' || !this.ctx) return;
-    for (const tap of tumbleTaps(level, rng)) scheduleTap(this.ctx, tap);
+    for (const tap of tumbleTaps(level, rng, windowMs)) scheduleTap(this.ctx, tap);
   }
 
   /** Settle-time cue, routed by d20Flavor — null/plain rolls play nothing here. */
