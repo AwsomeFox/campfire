@@ -411,7 +411,8 @@
       "revealedSummary": "Statblock (revealed to players)",
       "killPrompt": "{{name}} dropped to 0 HP — reveal its statblock to players?",
       "dismiss": "Dismiss",
-      "dismissKillPrompt": "Dismiss the statblock reveal prompt"
+      "dismissKillPrompt": "Dismiss the statblock reveal prompt",
+      "maxHp": "Max HP"
     },
     "whisper": {
       "button": "Whisper",

@@ -34,7 +34,7 @@ export function CombatantStatblockEditor({
   ruleSystem?: string | null;
   customMechanicsProfile?: CustomMechanicsProfile | null;
 }) {
-  useTranslation();
+  const { t } = useTranslation();
   const statblock = useMemo(() => value ?? defaultCombatantStatblock(), [value]);
   const presentation = useMemo(() => statblockPresentation(ruleSystem), [ruleSystem]);
   const adapter = useMemo(
@@ -112,7 +112,7 @@ export function CombatantStatblockEditor({
         </label>
 
         <label className="flex flex-col gap-1 text-sm flex-1" style={{ minWidth: 100 }}>
-          <span title={COMBATANT_STATBLOCK_HELP.hp}>Max HP</span>
+          <span title={COMBATANT_STATBLOCK_HELP.hp}>{t('encounters.statblock.maxHp', { defaultValue: 'Max HP' })}</span>
           <input
             type="number"
             className="input"
