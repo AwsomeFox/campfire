@@ -2459,7 +2459,7 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
   it('rolls exactly one d6 for a spent recharge action at turn start, recharging on a hit and logging the outcome', async () => {
     dataDir = makeTempDataDir();
     const { orm, service, actions } = build();
-    const { encounterId, c1, drake } = seedAliceThenDrake(orm);
+    const { encounterId, drake } = seedAliceThenDrake(orm);
 
     // Alice's turn → the drake's turn: nothing spent yet, no roll should happen.
     const rollSpy = jest.spyOn(dice, 'rollDice');
@@ -2494,7 +2494,7 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
   it('leaves a spent recharge action spent on a miss, and logs the miss', async () => {
     dataDir = makeTempDataDir();
     const { orm, service, actions } = build();
-    const { encounterId, c1, drake } = seedAliceThenDrake(orm);
+    const { encounterId, drake } = seedAliceThenDrake(orm);
 
     await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Drake, round 1
     spendBreathWeapon(actions, encounterId, drake);
@@ -2527,7 +2527,7 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
   it('undoTurn restores the pre-tick spent state after a recharge roll cleared it', async () => {
     dataDir = makeTempDataDir();
     const { orm, service, actions } = build();
-    const { encounterId, c1, drake } = seedAliceThenDrake(orm);
+    const { encounterId, drake } = seedAliceThenDrake(orm);
 
     await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Drake, round 1
     spendBreathWeapon(actions, encounterId, drake);
