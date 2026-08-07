@@ -158,14 +158,28 @@ async function runAsRaceLoser<T>(
 
 describe('encounter idempotency: genuine two-connection race (issue #2032)', () => {
   let dataDir: string;
+  const openHandles: Array<{ close: () => void }> = [];
 
   afterEach(() => {
+    // Close every connection BEFORE removing the directory. better-sqlite3 holds native
+    // Statement objects tied to the Node environment; leaving handles open leaks file
+    // descriptors across the suite and makes teardown OS-dependent (Windows refuses to
+    // unlink an open DB). Closing is also what keeps the WAL/-shm sidecars from outliving
+    // the test (issue #2032 review).
+    for (const handle of openHandles.splice(0)) {
+      try {
+        handle.close();
+      } catch {
+        /* already closed — teardown must stay best-effort */
+      }
+    }
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
   function seed() {
     dataDir = makeTempDataDir();
-    const { orm: ormA } = openDatabase(dataDir);
+    const { sqlite: sqliteA, orm: ormA } = openDatabase(dataDir);
+    openHandles.push(sqliteA);
     const ts = new Date().toISOString();
     const [camp] = ormA.insert(campaigns).values({ name: 'Race', createdAt: ts, updatedAt: ts }).returning().all();
     const [enc] = ormA
@@ -173,7 +187,8 @@ describe('encounter idempotency: genuine two-connection race (issue #2032)', () 
       .values({ campaignId: camp.id, name: 'Fight', status: 'running', createdAt: ts, updatedAt: ts })
       .returning()
       .all();
-    const { orm: ormB } = openSecondConnection(dataDir);
+    const { sqlite: sqliteB, orm: ormB } = openSecondConnection(dataDir);
+    openHandles.push(sqliteB);
     return { ormA, ormB, campaignId: camp.id, encounterId: enc.id };
   }
 
@@ -378,14 +393,28 @@ describe('encounter idempotency: genuine two-connection race (issue #2032)', () 
 
 describe('encounter idempotency: resolveReplay guards a throwing caller-supplied parser (issue #2032, defect 2)', () => {
   let dataDir: string;
+  const openHandles: Array<{ close: () => void }> = [];
 
   afterEach(() => {
+    // Close every connection BEFORE removing the directory. better-sqlite3 holds native
+    // Statement objects tied to the Node environment; leaving handles open leaks file
+    // descriptors across the suite and makes teardown OS-dependent (Windows refuses to
+    // unlink an open DB). Closing is also what keeps the WAL/-shm sidecars from outliving
+    // the test (issue #2032 review).
+    for (const handle of openHandles.splice(0)) {
+      try {
+        handle.close();
+      } catch {
+        /* already closed — teardown must stay best-effort */
+      }
+    }
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
   it('a null stored body plus a naive replayCombatant falls back to a fresh read instead of throwing a raw TypeError', async () => {
     dataDir = makeTempDataDir();
-    const { orm: ormA } = openDatabase(dataDir);
+    const { sqlite: sqliteA, orm: ormA } = openDatabase(dataDir);
+    openHandles.push(sqliteA);
     const ts = new Date().toISOString();
     const [camp] = ormA.insert(campaigns).values({ name: 'Race', createdAt: ts, updatedAt: ts }).returning().all();
     const [enc] = ormA
@@ -399,7 +428,8 @@ describe('encounter idempotency: resolveReplay guards a throwing caller-supplied
       .returning()
       .all();
 
-    const { orm: ormB } = openSecondConnection(dataDir);
+    const { sqlite: sqliteB, orm: ormB } = openSecondConnection(dataDir);
+    openHandles.push(sqliteB);
     const { service: serviceA } = buildService(ormA);
     const { service: serviceB } = buildService(ormB);
 
