@@ -9449,6 +9449,19 @@ export type FogState = z.infer<typeof FogState>;
 export const GridType = z.enum(['square', 'hex']);
 export type GridType = z.infer<typeof GridType>;
 
+/**
+ * Per-encounter dial for how much monster/NPC HP a non-DM viewer is told (issue #1925).
+ * `band` (default) is today's behaviour: the coarse healthy/bloodied/critical/down status,
+ * unchanged. `exact` ships the real hpCurrent/hpMax/hpTemp to non-DMs (a tactical table that
+ * wants the numbers on the table). `hidden` ships neither the numbers nor the band — except a
+ * combatant at 0 HP still reports `hpBand: 'down'` in every mode, so the table always knows who
+ * dropped. The server enforces this in every player-facing serialization (`redactMonsterHp`)
+ * — never client-side hiding — so a player inspecting the network response cannot recover
+ * exact HP in `band` or `hidden` mode.
+ */
+export const MonsterHpDisplay = z.enum(['band', 'exact', 'hidden']);
+export type MonsterHpDisplay = z.infer<typeof MonsterHpDisplay>;
+
 /** Pointy-top vs flat-top hex orientation (issue #467). Default pointy matches legacy overlay. */
 export const HexOrientation = z.enum(['pointy', 'flat']);
 export type HexOrientation = z.infer<typeof HexOrientation>;
@@ -9614,6 +9627,12 @@ export const Encounter = z.object({
   // from every non-DM read (list/get/difficulty) until the DM reveals it (hidden=false).
   hidden: z.boolean().default(false),
   endedAt: IsoDate.nullable().default(null),
+  // Per-encounter monster-HP display dial for non-DM viewers (issue #1925). 'band' (default)
+  // preserves today's coarse healthy/bloodied/critical/down status; 'exact' ships real numbers;
+  // 'hidden' ships neither (except the 'down' band, always sent so the table knows who dropped).
+  // Enforced server-side in redactMonsterHp — this field itself is readable by players (it drives
+  // their own rendering) and leaks nothing about any combatant's HP.
+  monsterHpDisplay: MonsterHpDisplay.default('band'),
   // Turn timer (issue #1935): a server-stamped instant so every connected client agrees on
   // when the CURRENT turn began, without any client computing or guessing it. Stamped fresh
   // inside the same serialized transaction as start/nextTurn/endTurn/undoTurn; null when the
@@ -9681,6 +9700,9 @@ export const EncounterUpdate = z.object({
   // Entity-level secrecy (issue #262) — dm only. true hides the encounter (roster + difficulty)
   // from non-DM reads; the DM "reveals" it by patching hidden back to false.
   hidden: z.boolean().optional(),
+  // Monster-HP display dial (issue #1925) — dm only, enforced server-side. Switching modes
+  // mid-fight takes effect on the next non-DM read (SSE refetch); no combatant data changes.
+  monsterHpDisplay: MonsterHpDisplay.optional(),
   // Turn timer pacing limit (issue #1935) — dm only, like the rest of this shape. 0 turns the
   // limit off (elapsed-only, DM-facing). `turnStartedAt` is intentionally NOT here: it is
   // server-managed only and can never be set via PATCH.

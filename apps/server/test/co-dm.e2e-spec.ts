@@ -483,3 +483,130 @@ describe('co-DM authoring — adapter vocabulary & ruleset provenance', () => {
     expect(req.system).not.toContain('D&D');
   });
 });
+
+/**
+ * Issue #1993 — co-DM assembles `AiGenerationProvenance` on every draft; before this fix
+ * `consent` was silently omitted, indistinguishable from "the policy question was never
+ * asked". Audited finding (see `co-dm.service.ts#buildGenerationProvenance`): co-DM never
+ * assembles other-member-authored content (no notes/dice rolls/`performedBy`), so there is
+ * nothing for a per-member consent FILTER to strip — but the campaign's `aiExternalContentPolicy`
+ * (the same field scribe reads, #501) and whether the draft actually left the server must be
+ * recorded truthfully rather than omitted. These tests pin that against the actual assembled
+ * payload on each egress path, not a helper in isolation.
+ */
+describe('co-DM authoring — external-AI consent provenance is explicit, never omitted (issue #1993)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'eval-model' });
+    await h.enableExperimental();
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it('records consent.externalSend=false on the injected/no-op seam (the legacy default, no provider configured)', async () => {
+    const campaignId = await h.createCampaign('Consent Injected Seam');
+    await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+
+    h.script({ text: JSON.stringify({ name: 'Local Only Warden' }) });
+    const res = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
+      .set(dm)
+      .send({ target: 'npc', prompt: 'a warden' });
+
+    expect(res.status).toBe(201);
+    const consent = res.body.proposals[0].generationProvenance.consent;
+    expect(consent).toBeTruthy();
+    expect(consent.externalSend).toBe(false);
+    expect(consent.campaignPolicy).toBe('member_consent'); // campaign default
+    // Structurally zero on every co-DM draft — this path never assembles member content.
+    expect(consent.includedInboxCount).toBe(0);
+    expect(consent.excludedInboxByConsent).toBe(0);
+    expect(consent.excludedInboxPrivate).toBe(0);
+  });
+
+  it('records consent.externalSend=true when a real configured provider serves the draft (genuine external egress)', async () => {
+    const campaignId = await h.createCampaign('Consent External Provider');
+    await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+    const providerRes = await h.configureProvider(campaignId);
+    expect(providerRes.status).toBe(200);
+
+    // The factory-built provider (createAiProvider, not the harness's injected seam) echoes
+    // the last user message (#501's co-dm.e2e-spec.ts technique), so a JSON prompt drives the
+    // real configured branch deterministically.
+    const res = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
+      .set(dm)
+      .send({ target: 'npc', prompt: JSON.stringify({ name: 'External Warden' }) });
+
+    expect(res.status).toBe(201);
+    const consent = res.body.proposals[0].generationProvenance.consent;
+    expect(consent).toBeTruthy();
+    expect(consent.externalSend).toBe(true);
+    expect(consent.campaignPolicy).toBe('member_consent');
+  });
+
+  /**
+   * Review finding (post-#2041): a first draft of this fix set `externalSend = true`
+   * whenever a provider config resolved, which ignored `AI_PROVIDER_ENDPOINT_IS_LOCAL` —
+   * the operator's explicit declaration that the configured endpoint is on-box (an Ollama
+   * install, matching this project's one-Docker-image / no-required-external-services
+   * premise) — and so misreported a purely local generation as external. `ScribeService`
+   * and `InboxSweepService` already honored this flag via `resolveEgress`; co-DM now shares
+   * the exact same `resolveAiProvenanceEgress` helper (common/ai-provenance-endpoint.ts)
+   * rather than re-implementing half the rule.
+   */
+  it('records consent.externalSend=false when the operator has declared the configured endpoint local (AI_PROVIDER_ENDPOINT_IS_LOCAL)', async () => {
+    const campaignId = await h.createCampaign('Consent Operator-Declared Local');
+    await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+    const providerRes = await h.configureProvider(campaignId);
+    expect(providerRes.status).toBe(200);
+
+    const priorLocalFlag = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+    process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'true';
+    try {
+      const res = await request(h.server)
+        .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
+        .set(dm)
+        .send({ target: 'npc', prompt: JSON.stringify({ name: 'On-Box Warden' }) });
+
+      expect(res.status).toBe(201);
+      const consent = res.body.proposals[0].generationProvenance.consent;
+      expect(consent).toBeTruthy();
+      // A provider IS configured (genuinely serving the draft) but the operator declared
+      // the endpoint local, so nothing left the deployment — externalSend must be false.
+      expect(consent.externalSend).toBe(false);
+    } finally {
+      if (priorLocalFlag === undefined) delete process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+      else process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = priorLocalFlag;
+    }
+  });
+
+  it('reports campaignPolicy="disabled" truthfully on an external draft — never fabricated as member_consent, never omitted', async () => {
+    const campaignId = await h.createCampaign('Consent Disabled Policy');
+    await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+    await h.configureProvider(campaignId);
+
+    const policyRes = await request(h.server)
+      .patch(`/api/v1/campaigns/${campaignId}`)
+      .set(dm)
+      .send({ aiExternalContentPolicy: 'disabled' });
+    expect(policyRes.status).toBe(200);
+    expect(policyRes.body.aiExternalContentPolicy).toBe('disabled');
+
+    const res = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
+      .set(dm)
+      .send({ target: 'npc', prompt: JSON.stringify({ name: 'Disabled Policy Warden' }) });
+
+    expect(res.status).toBe(201);
+    const consent = res.body.proposals[0].generationProvenance.consent;
+    expect(consent.campaignPolicy).toBe('disabled');
+    // The disabled policy governs member-authored content this path never carries (see the
+    // audited finding on `buildGenerationProvenance`) — the draft is not refused, only
+    // truthfully recorded, so externalSend still reflects the real egress.
+    expect(consent.externalSend).toBe(true);
+  });
+});

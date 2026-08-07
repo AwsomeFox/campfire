@@ -1785,3 +1785,103 @@ describe('campaign import — character/combatant speed round-trip (issue #1910)
     expect(importedCombatant.speed).toBe(25);
   });
 });
+
+/**
+ * Issue #1925 review (Devin): monsterHpDisplay was carried on neither the export
+ * field allowlist nor the import encounter insert, so a DM's deliberate 'exact'/
+ * 'hidden' choice for a fight silently reset to the coarse-band default on every
+ * export -> import round trip. Same shape as the #1910 speed bug above (a field
+ * present on the create/PATCH path but missing from its export/import twins) —
+ * modeled on that describe block, including the projected-export coverage that
+ * caught the analogous PUBLISHABLE_FIELDS omission there.
+ */
+describe('campaign import — monsterHpDisplay round-trip (issue #1925)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let exportDoc: Record<string, unknown>;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'i1925-dm', password: 'dm-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'HP Dial Campaign' });
+    campaignId = campRes.body.id;
+
+    const exactEnc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Tactical showdown' });
+    await dmAgent.patch(`/api/v1/encounters/${exactEnc.body.id}`).send({ monsterHpDisplay: 'exact' });
+
+    const hiddenModeEnc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Gritty narrative fight' });
+    await dmAgent.patch(`/api/v1/encounters/${hiddenModeEnc.body.id}`).send({ monsterHpDisplay: 'hidden' });
+
+    const exportRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
+    exportDoc = exportRes.body;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it("the export payload carries each encounter's monsterHpDisplay", () => {
+    const exportedEncounters = exportDoc.encounters as Array<{ name: string; monsterHpDisplay: string }>;
+    expect(exportedEncounters.find((e) => e.name === 'Tactical showdown')?.monsterHpDisplay).toBe('exact');
+    expect(exportedEncounters.find((e) => e.name === 'Gritty narrative fight')?.monsterHpDisplay).toBe('hidden');
+  });
+
+  it("an 'exact' and a 'hidden' encounter each keep their mode through a full-backup export -> import round trip", async () => {
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+    expect(imported.id).not.toBe(campaignId);
+
+    const encs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);
+    const importedExact = encs.body.find((e: { name: string }) => e.name === 'Tactical showdown');
+    const importedHiddenMode = encs.body.find((e: { name: string }) => e.name === 'Gritty narrative fight');
+    expect(importedExact).toBeDefined();
+    expect(importedHiddenMode).toBeDefined();
+    expect(importedExact.monsterHpDisplay).toBe('exact');
+    expect(importedHiddenMode.monsterHpDisplay).toBe('hidden');
+  });
+
+  it("monsterHpDisplay survives a PROJECTED (handoff profile) export -> import round-trip, not just a full backup", async () => {
+    const projected = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json&profile=handoff`);
+    expect(projected.status).toBe(200);
+    const exportedEncounters = projected.body.encounters as Array<{ name: string; monsterHpDisplay: string }>;
+    expect(exportedEncounters.find((e) => e.name === 'Tactical showdown')?.monsterHpDisplay).toBe('exact');
+    expect(exportedEncounters.find((e) => e.name === 'Gritty narrative fight')?.monsterHpDisplay).toBe('hidden');
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(projected.body);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+
+    const encs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);
+    const importedExact = encs.body.find((e: { name: string }) => e.name === 'Tactical showdown');
+    const importedHiddenMode = encs.body.find((e: { name: string }) => e.name === 'Gritty narrative fight');
+    expect(importedExact.monsterHpDisplay).toBe('exact');
+    expect(importedHiddenMode.monsterHpDisplay).toBe('hidden');
+  });
+
+  // An import document is untrusted input (issue #1925 review): a missing or malformed
+  // monsterHpDisplay must fall back to 'band' — the safe direction, since it reveals
+  // LESS than trusting a possibly-forged value would, and never writes a mode a later
+  // read wouldn't recognize. Mutates a deep clone of the real exportDoc so it goes
+  // through the exact same import mapper as the round-trip test above.
+  it("a corrupted export with an unrecognized monsterHpDisplay imports as 'band', never the forged value", async () => {
+    const corrupted = JSON.parse(JSON.stringify(exportDoc)) as Record<string, unknown>;
+    const corruptedEncounters = corrupted.encounters as Array<{ name: string; monsterHpDisplay: unknown }>;
+    corruptedEncounters.find((e) => e.name === 'Tactical showdown')!.monsterHpDisplay = 'omniscient';
+    corruptedEncounters.find((e) => e.name === 'Gritty narrative fight')!.monsterHpDisplay = undefined;
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(corrupted);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+
+    const encs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);
+    const importedExact = encs.body.find((e: { name: string }) => e.name === 'Tactical showdown');
+    const importedHiddenMode = encs.body.find((e: { name: string }) => e.name === 'Gritty narrative fight');
+    expect(importedExact.monsterHpDisplay).toBe('band');
+    expect(importedHiddenMode.monsterHpDisplay).toBe('band');
+  });
+});

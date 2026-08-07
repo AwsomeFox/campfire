@@ -10,6 +10,7 @@ import { McpToolsService } from '../src/modules/mcp/mcp-tools';
 import { OPEN_LEGEND_PACK_SLUG, PF2E_PACK_SLUG } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { auditLog, campaigns } from '../src/db/schema';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 
 interface TextContent {
   type: 'text';
@@ -1278,6 +1279,71 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     ).toEqual({ ok: true });
   });
 
+  it('ping_map mirrors REST: stamped sender + label/color, viewer 403, hidden 404/no-fan-out (issue #1937)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const encounter = parseResult(
+      await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Ping Fight', hidden: false } }),
+    ) as { id: number };
+
+    const broadcasts: Array<{
+      type: string;
+      encounterId?: number;
+      ping?: { x: number; y: number; label: string | null; color: string | null; senderId: string | null; senderName: string | null };
+    }> = [];
+    const subscription = ctx.app.get(CampaignEventsService).streamFor(campaignId).subscribe((event) => broadcasts.push(event));
+
+    try {
+      const pinged = await dmClient.callTool({
+        name: 'ping_map',
+        arguments: { encounterId: encounter.id, x: 40, y: 60, label: 'Danger', color: '#ff0000' },
+      });
+      expect(pinged.isError).toBeFalsy();
+      expect(parseResult(pinged)).toEqual({ ok: true });
+
+      const pingEvents = broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === encounter.id);
+      expect(pingEvents).toHaveLength(1);
+      expect(pingEvents[0].ping).toMatchObject({ x: 40, y: 60, label: 'Danger', color: '#ff0000' });
+      // The server always stamps the CALLER's own identity — the tool has no senderId/
+      // senderName argument at all, so there is nothing for a caller to spoof through.
+      expect(pingEvents[0].ping?.senderId).toBeTruthy();
+      expect(pingEvents[0].ping?.senderName).toBeTruthy();
+
+      // Every tool's args are strict (issue #567) — an unknown key like a caller-supplied
+      // senderId is a validation error, not a silently-dropped spoof attempt.
+      const spoof = await dmClient.callTool({
+        name: 'ping_map',
+        arguments: { encounterId: encounter.id, x: 10, y: 10, senderId: 'someone-else' },
+      });
+      expect(spoof.isError).toBe(true);
+      expect(parseResult(spoof)).toMatchObject({ error: { status: 400, code: 'validation_failed' } });
+
+      // A viewer-scoped PAT is below the ping route's player-role floor (issue #1636 parity):
+      // 403, and nothing new is broadcast.
+      const viewerClient = await mcpClient(viewerToken);
+      const viewerPing = await viewerClient.callTool({ name: 'ping_map', arguments: { encounterId: encounter.id, x: 20, y: 20 } });
+      expect(viewerPing.isError).toBe(true);
+      expect(parseResult(viewerPing)).toMatchObject({ error: { status: 403 } });
+      expect(broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === encounter.id)).toHaveLength(1);
+
+      // Hidden encounter: a non-DM caller gets 404 (never 403), so a hidden fight's existence
+      // never leaks (issue #869). The DM's own ping on it still succeeds but is never fanned
+      // out to the campaign stream (issue #754).
+      const hidden = parseResult(
+        await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Hidden Ping Fight', hidden: true } }),
+      ) as { id: number };
+      const hiddenViewerPing = await viewerClient.callTool({ name: 'ping_map', arguments: { encounterId: hidden.id, x: 30, y: 30 } });
+      expect(hiddenViewerPing.isError).toBe(true);
+      expect(parseResult(hiddenViewerPing)).toMatchObject({ error: { status: 404 } });
+
+      const hiddenDmPing = await dmClient.callTool({ name: 'ping_map', arguments: { encounterId: hidden.id, x: 30, y: 30 } });
+      expect(hiddenDmPing.isError).toBeFalsy();
+      expect(parseResult(hiddenDmPing)).toEqual({ ok: true });
+      expect(broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === hidden.id)).toHaveLength(0);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
   it('get_encounter keeps a player declaration visible in unrevealed fog exactly like REST', async () => {
     const playerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-aoe-fog-player', scope: 'player', campaignId, writeScope: 'direct' });
     expect(playerTokenRes.status).toBe(201);
@@ -1662,6 +1728,69 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const viewerOgre = viewerView.combatants.find((c) => c.name === 'Hidden Ogre')!;
     expect(viewerOgre.hpCurrent).toBeNull();
     expect(viewerOgre.hpBand).toBeTruthy();
+  });
+
+  it('update_encounter sets monsterHpDisplay; a viewer-scoped get_encounter honors exact and hidden modes (issue #1925)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const viewerC = await mcpClient(viewerToken);
+    const enc = parseResult(
+      await dmC.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId, name: '1925 HP Dial', hidden: false },
+      }),
+    ) as { id: number };
+    const added = await dmC.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: enc.id, kind: 'monster', name: 'Dial Wraith', hpMax: 50 },
+    });
+    expect(added.isError).toBeFalsy();
+
+    // Default is 'band' — unchanged behavior.
+    const bandView = parseResult(
+      await dmC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { monsterHpDisplay: string };
+    expect(bandView.monsterHpDisplay).toBe('band');
+
+    // A non-DM PAT cannot set the mode (the whole update_encounter tool is DM-only).
+    const viewerAttempt = await viewerC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'exact' },
+    });
+    expect(viewerAttempt.isError).toBe(true);
+
+    // DM sets 'exact' — a viewer-scoped PAT now gets real numbers.
+    const exactUpdate = await dmC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'exact' },
+    });
+    expect(exactUpdate.isError).toBeFalsy();
+    expect((parseResult(exactUpdate) as { monsterHpDisplay: string }).monsterHpDisplay).toBe('exact');
+    const exactViewerView = parseResult(
+      await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { monsterHpDisplay: string; combatants: Array<{ name: string; hpCurrent: number | null; hpMax: number | null }> };
+    expect(exactViewerView.monsterHpDisplay).toBe('exact');
+    const exactWraith = exactViewerView.combatants.find((c) => c.name === 'Dial Wraith')!;
+    expect(exactWraith.hpCurrent).toBe(50);
+    expect(exactWraith.hpMax).toBe(50);
+
+    // DM sets 'hidden' — the viewer-scoped PAT gets neither the number nor the band.
+    const hiddenUpdate = await dmC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'hidden' },
+    });
+    expect(hiddenUpdate.isError).toBeFalsy();
+    const hiddenViewerRes = await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } });
+    expect(hiddenViewerRes.isError).toBeFalsy();
+    const hiddenViewerView = parseResult(hiddenViewerRes) as {
+      monsterHpDisplay: string;
+      combatants: Array<{ name: string; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>;
+    };
+    expect(hiddenViewerView.monsterHpDisplay).toBe('hidden');
+    const hiddenWraith = hiddenViewerView.combatants.find((c) => c.name === 'Dial Wraith')!;
+    expect(hiddenWraith.hpCurrent).toBeNull();
+    expect(hiddenWraith.hpMax).toBeNull();
+    expect(hiddenWraith.hpBand).toBeNull();
+    expect(JSON.stringify(hiddenViewerRes)).not.toMatch(/"hpCurrent":\s*50/);
   });
 
   it('list_encounter_events returns the persisted combat log with stable ids (issue #1068)', async () => {
@@ -4218,6 +4347,128 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
         const res = await client.callTool({ name, arguments: {} });
         expect((res as { isError?: boolean }).isError).toBe(true);
       }
+    });
+  });
+
+  describe('issue #1993 — co-DM external-AI provenance is explicit on the MCP surface too', () => {
+    let consentCampaignId: number;
+
+    beforeAll(async () => {
+      const created = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Co-DM Consent #1993' });
+      expect(created.status).toBe(201);
+      consentCampaignId = created.body.id;
+
+      const flagRes = await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: true });
+      expect(flagRes.status).toBe(200);
+
+      const seatRes = await dmAgent
+        .put(`/api/v1/campaigns/${consentCampaignId}/ai-dm`)
+        .send({ enabled: true, tokenBudget: 1_000_000 });
+      expect(seatRes.status).toBe(200);
+
+      // A STORED provider config (mock providerType) drives the real `createAiProvider`
+      // branch — the one #1993's `externalSend` must report `true` for — as opposed to the
+      // injected AI_DM_PROVIDER seam the rest of this file's draft_content tests never
+      // configure past (#501's co-dm.e2e-spec.ts established this technique).
+      const providerRes = await dmAgent
+        .put(`/api/v1/campaigns/${consentCampaignId}/ai-provider`)
+        .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-test-key-1234' });
+      expect(providerRes.status).toBe(200);
+    });
+
+    afterAll(async () => {
+      // Restore the global flag so later tests in this file see the feature disabled,
+      // matching the convention the #261 seat-redaction test above already establishes.
+      const restoreRes = await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: false });
+      expect(restoreRes.status).toBe(200);
+    });
+
+    /**
+     * The factory-built mock provider echoes the last user message (co-dm.e2e-spec.ts,
+     * #501), so putting the draft JSON straight in the prompt drives the real configured
+     * path deterministically without a network call.
+     */
+    const draftNpc = (name: string) =>
+      mcpClient(dmToken).then((client) =>
+        client.callTool({
+          name: 'draft_content',
+          arguments: { campaignId: consentCampaignId, target: 'npc', prompt: JSON.stringify({ name }) },
+        }),
+      );
+
+    it('records consent.externalSend=true and the live campaignPolicy for a genuinely external draft', async () => {
+      const res = await draftNpc('MCP Consent Warden');
+      expect(res.isError).toBeFalsy();
+      const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+      const provenance = proposal.generationProvenance as {
+        consent?: {
+          campaignPolicy: string;
+          externalSend: boolean;
+          includedInboxCount: number;
+          excludedInboxByConsent: number;
+          excludedInboxPrivate: number;
+        };
+      };
+      expect(provenance.consent).toBeTruthy();
+      expect(provenance.consent!.campaignPolicy).toBe('member_consent'); // campaign default
+      expect(provenance.consent!.externalSend).toBe(true);
+      // Nothing member-authored is ever assembled on this path (issue #1993 finding) —
+      // the counts are structurally zero, not merely zero this run.
+      expect(provenance.consent!.includedInboxCount).toBe(0);
+      expect(provenance.consent!.excludedInboxByConsent).toBe(0);
+      expect(provenance.consent!.excludedInboxPrivate).toBe(0);
+    });
+
+    /**
+     * Review finding (post-#2041): co-DM's first fix set `externalSend = true` whenever a
+     * provider config resolved, ignoring `AI_PROVIDER_ENDPOINT_IS_LOCAL` — the operator's
+     * explicit declaration that the configured endpoint is on-box (e.g. an Ollama install),
+     * documented in `website/docs/getting-started/installation.md`. That misreported a
+     * purely local generation as external. Scribe/inbox-sweep already honored this flag;
+     * co-DM now shares the same `resolveAiProvenanceEgress` helper, so this must hold on the
+     * MCP surface too, not only REST.
+     */
+    it('records consent.externalSend=false when the operator has declared the endpoint local (AI_PROVIDER_ENDPOINT_IS_LOCAL)', async () => {
+      const priorLocalFlag = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+      process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'true';
+      try {
+        const res = await draftNpc('MCP On-Box Warden');
+        expect(res.isError).toBeFalsy();
+        const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+        const consent = (proposal.generationProvenance as { consent?: { externalSend: boolean } }).consent;
+        expect(consent).toBeTruthy();
+        // A provider IS configured (genuinely serving the draft) but the operator declared
+        // the endpoint local, so nothing left the deployment.
+        expect(consent!.externalSend).toBe(false);
+      } finally {
+        if (priorLocalFlag === undefined) delete process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+        else process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = priorLocalFlag;
+      }
+    });
+
+    it('reports campaignPolicy="disabled" truthfully — never fabricated as member_consent, never omitted', async () => {
+      const policyRes = await dmAgent
+        .patch(`/api/v1/campaigns/${consentCampaignId}`)
+        .send({ aiExternalContentPolicy: 'disabled' });
+      expect(policyRes.status).toBe(200);
+      expect(policyRes.body.aiExternalContentPolicy).toBe('disabled');
+
+      const res = await draftNpc('MCP Disabled-Policy Warden');
+      expect(res.isError).toBeFalsy();
+      const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+      const consent = (proposal.generationProvenance as { consent?: { campaignPolicy: string; externalSend: boolean } }).consent;
+      expect(consent).toBeTruthy();
+      expect(consent!.campaignPolicy).toBe('disabled');
+      // The disabled policy governs member-authored content this path never carries — the
+      // draft itself is not refused (see co-dm.service.ts's `buildGenerationProvenance` doc
+      // comment for the audited finding this reflects), only truthfully recorded.
+      expect(consent!.externalSend).toBe(true);
+
+      // Restore the default policy so it cannot leak into a later test on this campaign.
+      const restorePolicy = await dmAgent
+        .patch(`/api/v1/campaigns/${consentCampaignId}`)
+        .send({ aiExternalContentPolicy: 'member_consent' });
+      expect(restorePolicy.status).toBe(200);
     });
   });
 

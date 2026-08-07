@@ -635,6 +635,37 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(detail.body.hidden).toBe(true);
   });
 
+  it('full clone preserves each encounter\'s monsterHpDisplay mode (issue #1925)', async () => {
+    const exactEnc = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'Tactical showdown', hidden: false });
+    expect(exactEnc.status).toBe(201);
+    const exactPatch = await dmAgent.patch(`/api/v1/encounters/${exactEnc.body.id}`).send({ monsterHpDisplay: 'exact' });
+    expect(exactPatch.status).toBe(200);
+
+    const hiddenModeEnc = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'Gritty narrative fight', hidden: false });
+    expect(hiddenModeEnc.status).toBe(201);
+    const hiddenModePatch = await dmAgent.patch(`/api/v1/encounters/${hiddenModeEnc.body.id}`).send({ monsterHpDisplay: 'hidden' });
+    expect(hiddenModePatch.status).toBe(200);
+
+    const cloneRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/clone`)
+      .send({ name: 'monsterHpDisplay copy probe' });
+    expect(cloneRes.status).toBe(201);
+
+    const encs = await dmAgent.get(`/api/v1/campaigns/${cloneRes.body.id}/encounters`);
+    const clonedExact = encs.body.find((e: { name: string }) => e.name === 'Tactical showdown');
+    const clonedHiddenMode = encs.body.find((e: { name: string }) => e.name === 'Gritty narrative fight');
+    expect(clonedExact).toBeDefined();
+    expect(clonedHiddenMode).toBeDefined();
+    // A DM who deliberately chose 'exact' or 'hidden' for a fight must not have that
+    // choice silently reset to the coarse-band default by duplicating the campaign.
+    expect(clonedExact.monsterHpDisplay).toBe('exact');
+    expect(clonedHiddenMode.monsterHpDisplay).toBe('hidden');
+  });
+
   it('403 for player (non-dm) on the source campaign', async () => {
     const res = await playerAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({});
     expect(res.status).toBe(403);

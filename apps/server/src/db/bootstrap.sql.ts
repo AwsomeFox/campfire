@@ -1348,6 +1348,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   grid_rotation REAL NOT NULL DEFAULT 0,
   grid_opacity REAL NOT NULL DEFAULT 0.35,
   hidden INTEGER NOT NULL DEFAULT 0,
+  monster_hp_display TEXT NOT NULL DEFAULT 'band',
   ended_at TEXT,
   aftermath_dismissed_at TEXT,
   aftermath_xp_awarded_at TEXT,
