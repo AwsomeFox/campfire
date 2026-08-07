@@ -52,6 +52,7 @@ function combatantWithCondition(condition: string): Combatant {
     conditions: [condition],
     ruleEntryId: null,
     sortOrder: 0,
+    manualOrder: null,
     tokenX: null,
     tokenY: null,
     tokenSize: 'medium',

@@ -2128,6 +2128,13 @@ export const combatants = sqliteTable('combatants', {
   conditions: text('conditions').notNull().default('[]'),
   ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
   sortOrder: integer('sort_order').notNull().default(0),
+  // Issue #1923 review finding 1: DM manual-reorder override. Nullable; set on every
+  // combatant row by EncountersService.reorderCombatant on a running encounter. See
+  // @campfire/schema's Combatant.manualOrder doc for why this exists — a pure sortOrder
+  // rewrite is not enough to hold a drag within a tie once the adapter tiebreak compares
+  // initMod before sortOrder. Added by migration on older DBs (see
+  // db/db.module.ts migrateCombatantsTableForManualOrder1923).
+  manualOrder: integer('manual_order'),
   // Battle-map token position (issue #39) — 0–100 percent overlay on the encounter's
   // map image, mirroring locations.map_x/map_y. Nullable; added by migration on older
   // DBs — see db/db.module.ts migrateCombatantsTableForTokenPosition. null = not placed.

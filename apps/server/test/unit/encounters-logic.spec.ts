@@ -137,6 +137,47 @@ describe('encounters — sortCombatants', () => {
     expect(sortCombatants(rows, 'running').map((c) => c.id)).toEqual([2, 1]);
   });
 
+  /**
+   * Issue #1923's manual-order override must be *absent* here, not merely unused. The
+   * `combatant()` helper above ends in `as Combatant`, so a field it does not set is
+   * `undefined` at runtime while TypeScript stays quiet — and the first version of the
+   * override tested `manualOrder !== null`, which `undefined` passes. The subtraction then
+   * produced NaN, the comparator returned NaN, and the whole tie group came back in an
+   * arbitrary order; that is what broke the four adapter-tiebreak cases in this file.
+   *
+   * These two pin the boundary explicitly rather than leaving it implied by fixtures that
+   * happen to omit the field.
+   */
+  describe('manual-order override (issue #1923)', () => {
+    it('an undefined manualOrder is treated as absent, not as a position — the adapter tiebreak still decides', () => {
+      const rows = [
+        combatant({ id: 1, initiative: 15, initMod: 1, sortOrder: 0 }),
+        combatant({ id: 2, initiative: 15, initMod: 3, sortOrder: 1 }),
+      ];
+      // Neither row has the field at all. Higher initMod must win, exactly as before the
+      // override existed. A NaN comparator returns insertion order [1, 2] here instead.
+      expect(rows.every((r) => r.manualOrder === undefined)).toBe(true);
+      expect(sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id)).toEqual([2, 1]);
+    });
+
+    it('when BOTH rows carry a manualOrder it overrides the adapter tiebreak, even against a higher initMod', () => {
+      const rows = [
+        combatant({ id: 1, initiative: 15, initMod: 1, sortOrder: 0, manualOrder: 0 }),
+        combatant({ id: 2, initiative: 15, initMod: 3, sortOrder: 1, manualOrder: 1 }),
+      ];
+      // The adapter alone would order [2, 1] (initMod 3 beats 1) — the DM's placement wins.
+      expect(sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id)).toEqual([1, 2]);
+    });
+
+    it('one row with a manualOrder and one without falls through to the adapter tiebreak', () => {
+      const rows = [
+        combatant({ id: 1, initiative: 15, initMod: 1, sortOrder: 0, manualOrder: 0 }),
+        combatant({ id: 2, initiative: 15, initMod: 3, sortOrder: 1 }),
+      ];
+      expect(sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id)).toEqual([2, 1]);
+    });
+  });
+
   it('running: two nulls keep sortOrder order', () => {
     const rows = [
       combatant({ id: 1, initiative: null, sortOrder: 1 }),

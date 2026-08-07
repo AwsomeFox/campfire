@@ -477,6 +477,25 @@ export function sortCombatants(
     if (a.initiative === null) return 1;
     if (b.initiative === null) return -1;
     if (a.initiative !== b.initiative) return b.initiative - a.initiative;
+    // DM manual-reorder override (issue #1923 review finding 1): a running encounter's
+    // adapter tiebreak (e.g. 5e's initModDescThenSortOrderAsc) compares initMod BEFORE
+    // sortOrder, so a plain sortOrder rewrite from a drag is silently discarded whenever
+    // the tied combatants have different initMod. reorderCombatant stamps manualOrder on
+    // every combatant in the roster when it runs against a running encounter; consult it
+    // here ONLY when both sides have a value, so a tie where neither (or only one) side
+    // was ever manually reordered still falls through to the adapter's own rule
+    // unchanged. Deliberately checked before breakTie, not inside it — this is roster
+    // state the adapter itself never sees.
+    // `?? null`, NOT `!== null`. The Zod schema defaults this to null, so anything parsed
+    // through it is null-or-number — but a Combatant assembled without going through the
+    // parser (`{...} as Combatant` fixtures, and any future hand-built row) leaves the field
+    // `undefined`. A strict `!== null` treats `undefined` as "has a manual order", and the
+    // subtraction then yields NaN, which makes this comparator return NaN and hands the
+    // whole tie group an arbitrary order. That is how the first version of this broke four
+    // pre-existing adapter-tiebreak tests (#2074 review round 2).
+    const aManual = a.manualOrder ?? null;
+    const bManual = b.manualOrder ?? null;
+    if (aManual !== null && bManual !== null) return aManual - bManual;
     return breakTie(a, b);
   });
 }

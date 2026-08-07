@@ -9606,6 +9606,13 @@ export const Encounter = z.object({
   // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
   currentCombatantId: Id.nullable().default(null),
+  // Monotonic generation counter bumped on every turn advance (issue #1923's
+  // compare-and-set token; the column itself predates this issue). Readable by every
+  // role — not a secret, purely a concurrency marker — so a client can echo the value
+  // it last rendered back as `expectedTurnVersion` on POST .../combatants/:cid/reorder
+  // and get a 409 instead of silently reordering a roster the turn has already moved on
+  // from.
+  turnVersion: z.number().int().nonnegative().default(0),
   // Boss-fight scheduling (issue #618): when `turnPhase` is `lair`, `currentCombatantId`
   // is null and `lairResumeCombatantId` is the next combatant after the lair slot resolves.
   turnPhase: EncounterTurnPhase.default('combatant'),
@@ -10675,6 +10682,18 @@ export const Combatant = z.object({
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
+  // DM manual-reorder override (issue #1923 review finding 1). Set on EVERY combatant in
+  // the roster (not just the moved one) whenever `reorderCombatant` runs against a
+  // running encounter, to the combatant's index in the newly computed order. Null until
+  // the first manual reorder on a running encounter (and for legacy rows). This exists
+  // because a running encounter's `sortCombatants` orders by initiative, and an adapter's
+  // `initiativeTiebreak` (e.g. 5e's `initModDescThenSortOrderAsc`) compares `initMod`
+  // BEFORE `sortOrder` — a pure `sortOrder` rewrite is silently discarded by the adapter
+  // tiebreak whenever the tied combatants have different `initMod` (different DEX).
+  // `sortCombatants` consults this ahead of the adapter tiebreak, but only when BOTH
+  // combatants in the comparison have a non-null value, so an unrelated tie (one or both
+  // never manually reordered) still falls through to the adapter's own rule untouched.
+  manualOrder: z.number().int().nullable().default(null),
   // Battle-map token position (issue #39): 0–100 percent overlay on the encounter's
   // map image, mirroring location.mapX/mapY. null = not yet placed on the map.
   tokenX: z.number().nullable().default(null),
@@ -10983,6 +11002,23 @@ export const CombatantRollInitiativeRequest = z.object({
   overwrite: z.boolean().optional(),
 });
 export type CombatantRollInitiativeRequest = z.infer<typeof CombatantRollInitiativeRequest>;
+
+/**
+ * Body for the DM-only manual reorder (issue #1923) — POST
+ * /encounters/:id/combatants/:cid/reorder. `sortCombatants`'s own tiebreak comparators
+ * (initiative-tiebreak.ts) are the automatic answer to a tie; this is the documented manual
+ * escape hatch, and the only mechanical expression of Delay/Ready ("the fighter acts after
+ * the wizard now"). `afterCombatantId` names the combatant the moved one should land
+ * immediately after under `sortCombatants`, or the literal `'top'` to become first.
+ * `expectedTurnVersion` is a compare-and-set against the encounter's monotonic
+ * `turnVersion` (bumped on every turn advance) — a stale drag issued after the turn moved
+ * on 409s instead of silently reordering against a roster the DM is no longer looking at.
+ */
+export const CombatantReorderRequest = z.object({
+  afterCombatantId: z.union([Id, z.literal('top')]),
+  expectedTurnVersion: z.number().int().nonnegative().optional(),
+});
+export type CombatantReorderRequest = z.infer<typeof CombatantReorderRequest>;
 
 /**
  * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
