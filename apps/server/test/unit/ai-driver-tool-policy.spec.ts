@@ -287,6 +287,9 @@ describe('driver-tool-policy (#474)', () => {
           },
         },
         { tool: 'update_encounter', args: { encounterId: 1, hidden: true }, assert: (r) => expect(r.ok).toBe(false) },
+        // Issue #1925: the monster-HP display dial is the same class of table-secrecy decision
+        // as `hidden` — the autonomous seat must not switch band/exact/hidden on its own.
+        { tool: 'update_encounter', args: { encounterId: 1, monsterHpDisplay: 'exact' }, assert: (r) => expect(r.ok).toBe(false) },
         { tool: 'adjust_treasury', args: { delta: { gp: -1 } }, assert: (r) => expect(r.ok).toBe(false) },
         {
           tool: 'add_inventory_item',

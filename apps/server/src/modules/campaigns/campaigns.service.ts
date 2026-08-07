@@ -23,6 +23,7 @@ import {
   CharacterAction,
   isRegisteredRuleSystemSlug,
   HomebrewMechanicsProfile,
+  MonsterHpDisplay,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { fromJsonText } from '../../common/json';
@@ -406,6 +407,17 @@ const boolOf = (v: unknown): boolean => v === true;
  * never accidentally reveal a private prep entity to players.
  */
 const hiddenOf = (v: unknown): boolean => v !== false;
+/**
+ * Monster-HP display dial (issue #1925) coercion for import — an import document is
+ * untrusted input, so the raw value goes through the shared enum's own validation
+ * rather than being trusted as-is. Missing or invalid falls back to 'band': the safe
+ * direction, since it reveals LESS than a possibly-forged 'exact'/'hidden' value would,
+ * and never writes a mode a later read wouldn't recognize.
+ */
+const monsterHpDisplayOf = (v: unknown): 'band' | 'exact' | 'hidden' => {
+  const parsed = MonsterHpDisplay.safeParse(v);
+  return parsed.success ? parsed.data : 'band';
+};
 /** Serialize a JSON-ish export field (object/array) back to the TEXT the column stores. */
 const jsonCol = (v: unknown, fallback: string): string => {
   if (v === undefined || v === null) return fallback;
@@ -1954,6 +1966,10 @@ export class CampaignsService {
               gridOpacity: e.gridOpacity,
               fog: e.fog,
               hidden: e.hidden,
+              // Monster-HP display dial (issue #1925) — a table-secrecy config choice, the
+              // same class as `hidden` just above; a duplicate must preserve it rather than
+              // silently resetting every fight to the coarse-band default.
+              monsterHpDisplay: e.monsterHpDisplay,
               endedAt: null,
               createdAt: ts,
               updatedAt: ts,
@@ -3135,6 +3151,12 @@ export class CampaignsService {
             fog: e.fog == null ? null : jsonCol(e.fog, ''),
             // #754: missing hidden on import → DM-only (same as create default).
             hidden: hiddenOf(e.hidden),
+            // Monster-HP display dial (issue #1925) — an import document is untrusted input,
+            // so validate against the enum rather than trusting the raw string; missing or
+            // invalid falls back to 'band' (the safe direction: it reveals LESS than a
+            // possibly-forged 'exact'/'hidden' value would, and never writes a mode a later
+            // read wouldn't recognize).
+            monsterHpDisplay: monsterHpDisplayOf(e.monsterHpDisplay),
             endedAt: typeof e.endedAt === 'string' ? e.endedAt : null,
             createdAt: ts,
             updatedAt: ts,

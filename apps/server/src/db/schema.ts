@@ -1571,6 +1571,9 @@ export const encounters = sqliteTable('encounters', {
   // difficulty are DM-only, and the encounter is dropped wholesale from non-DM reads until
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Monster-HP display dial for non-DM viewers (issue #1925): 'band'|'exact'|'hidden'.
+  // Added by migration on older DBs (see db/db.module.ts migrateEncountersTableForMonsterHpDisplay1925).
+  monsterHpDisplay: text('monster_hp_display').notNull().default('band'),
   endedAt: text('ended_at'),
   // Turn timer (issue #1935): server-stamped instant the CURRENT turn began, so every
   // connected client agrees on elapsed time — never client-computed. null when not actively

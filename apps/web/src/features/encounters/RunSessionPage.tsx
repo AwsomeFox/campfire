@@ -59,6 +59,7 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
+import { MonsterHpDisplayControl } from './MonsterHpDisplayControl';
 import { useAnnounce } from '../../components/Announcer';
 import { useRollApplyDamageBridge, useRollResultToast } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
@@ -3297,6 +3298,16 @@ export default function RunSessionPage() {
                 }
               : undefined
           }
+        />
+      )}
+
+      {canEditEncounter && (
+        <MonsterHpDisplayControl
+          value={encounter.monsterHpDisplay}
+          disabled={riskyBlocked}
+          onChange={(mode) => {
+            void queueEncounterPatch({ monsterHpDisplay: mode });
+          }}
         />
       )}
 

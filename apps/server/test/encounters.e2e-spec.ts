@@ -4080,6 +4080,126 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
   });
 });
 
+describe('encounters — issue #1925: per-encounter monsterHpDisplay modes (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let monsterId: number;
+
+  type Row = { id: number; hpCurrent: number | null; hpMax: number | null; hpTemp: number | null; hpBand: string | null; statblock: unknown };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'HP Dial' })).body.id;
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Dial Fight', hidden: false });
+    encounterId = encRes.body.id;
+    // A monster at 40/100 -> 40% -> 'bloodied'.
+    monsterId = (
+      await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Ogre', hpMax: 100 })
+    ).body.id;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${monsterId}`).set(dm).send({ hpSet: 40 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it("defaults to 'band' for a new encounter — unchanged behavior for a player", async () => {
+    const server = ctx.app.getHttpServer();
+    const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(dmRes.body.monsterHpDisplay).toBe('band');
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(res.body.monsterHpDisplay).toBe('band');
+    const boss = (res.body.combatants as Row[]).find((c) => c.id === monsterId)!;
+    expect(boss.hpCurrent).toBeNull();
+    expect(boss.hpMax).toBeNull();
+    expect(boss.hpBand).toBe('bloodied');
+  });
+
+  it('a non-DM (player) cannot PATCH monsterHpDisplay (403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ monsterHpDisplay: 'exact' });
+    expect(res.status).toBe(403);
+    // Unchanged: still 'band' after the rejected attempt.
+    const check = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(check.body.monsterHpDisplay).toBe('band');
+  });
+
+  it("DM PATCH to 'exact' ships real hpCurrent/hpMax/hpTemp to a non-DM; statblock stays null", async () => {
+    const server = ctx.app.getHttpServer();
+    const patch = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ monsterHpDisplay: 'exact' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.monsterHpDisplay).toBe('exact');
+
+    for (const headers of [player, viewer]) {
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
+      expect(res.body.monsterHpDisplay).toBe('exact');
+      const boss = (res.body.combatants as Row[]).find((c) => c.id === monsterId)!;
+      expect(boss.hpCurrent).toBe(40);
+      expect(boss.hpMax).toBe(100);
+      // Inline statblock stays withheld — a separate secrecy concern (#425), unaffected
+      // by the HP display mode.
+      expect(boss.statblock).toBeNull();
+      // The DM still sees the same exact numbers (DM view was never redacted).
+      const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const dmBoss = (dmRes.body.combatants as Row[]).find((c) => c.id === monsterId)!;
+      expect(dmBoss.hpCurrent).toBe(40);
+      expect(dmBoss.hpMax).toBe(100);
+    }
+  });
+
+  it("DM PATCH to 'hidden' ships neither exact numbers NOR the band to a non-DM", async () => {
+    const server = ctx.app.getHttpServer();
+    const patch = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ monsterHpDisplay: 'hidden' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.monsterHpDisplay).toBe('hidden');
+
+    for (const headers of [player, viewer]) {
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(headers);
+      expect(res.body.monsterHpDisplay).toBe('hidden');
+      const boss = (res.body.combatants as Row[]).find((c) => c.id === monsterId)!;
+      expect(boss.hpCurrent).toBeNull();
+      expect(boss.hpMax).toBeNull();
+      expect(boss.hpTemp).toBeNull();
+      expect(boss.hpBand).toBeNull();
+      // The raw serialized body must not leak the exact number OR the band string.
+      const raw = JSON.stringify(boss);
+      expect(raw).not.toMatch(/"hpCurrent":\s*40/);
+      expect(raw).not.toMatch(/"hpBand":\s*"bloodied"/);
+    }
+    // The DM is unaffected: still exact.
+    const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const dmBoss = (dmRes.body.combatants as Row[]).find((c) => c.id === monsterId)!;
+    expect(dmBoss.hpCurrent).toBe(40);
+  });
+
+  it("'hidden' mode still ships hpBand 'down' for a monster at 0 HP — the table always knows who dropped", async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${monsterId}`).set(dm).send({ hpSet: 0 });
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(res.body.monsterHpDisplay).toBe('hidden');
+    const boss = (res.body.combatants as Row[]).find((c) => c.id === monsterId)!;
+    expect(boss.hpCurrent).toBeNull();
+    expect(boss.hpMax).toBeNull();
+    expect(boss.hpBand).toBe('down');
+    // Restore HP for any later test in this block.
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${monsterId}`).set(dm).send({ hpSet: 40 });
+  });
+
+  it("switching back to 'band' restores the coarse-band-only behavior for a non-DM", async () => {
+    const server = ctx.app.getHttpServer();
+    const patch = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ monsterHpDisplay: 'band' });
+    expect(patch.status).toBe(200);
+    expect(patch.body.monsterHpDisplay).toBe('band');
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const boss = (res.body.combatants as Row[]).find((c) => c.id === monsterId)!;
+    expect(boss.hpCurrent).toBeNull();
+    expect(boss.hpMax).toBeNull();
+    expect(boss.hpBand).toBe('bloodied');
+  });
+});
+
 describe('encounters — issue #86: concurrent HP updates are not lost (e2e)', () => {
   let ctx: TestAppContext;
   // The app under test is only `.init()`-ed (not listening). supertest opens an

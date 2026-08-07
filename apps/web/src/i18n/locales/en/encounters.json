@@ -65,6 +65,15 @@
       "checking": "Checking committed state — confirming whether that change was saved before you act again.",
       "done": "Checked. Displayed state now matches the server."
     },
+    "monsterHpDisplay": {
+      "label": "Monster HP shown to players",
+      "band": "Band",
+      "exact": "Exact",
+      "hidden": "Hidden",
+      "bandDescription": "Coarse status only (Healthy/Bloodied/Critical/Down) — no exact numbers.",
+      "exactDescription": "Ship the real hit-point numbers to players.",
+      "hiddenDescription": "No numbers or status — a downed monster still shows Down."
+    },
     "sync": {
       "overridePrompt": "You may be working from stale state.",
       "overrideConfirm": "Continue anyway",
