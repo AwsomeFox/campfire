@@ -324,6 +324,20 @@
       "killPrompt": "وصل {{name}} إلى 0 نقطة حياة — هل تريد كشف بطاقة إحصائياته للاعبين؟",
       "dismiss": "تجاهل",
       "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات"
+    },
+    "whisper": {
+      "button": "همس",
+      "buttonLabel": "همس إلى {{name}}",
+      "panelTitle": "همسة سريعة للاعب",
+      "recipientLabel": "المستلم",
+      "selectRecipient": "اختر لاعباً…",
+      "messageLabel": "رسالة الهمسة",
+      "title": "همس إلى {{name}}",
+      "placeholder": "اكتب همسة خاصة…",
+      "send": "إرسال الهمسة",
+      "cancel": "إلغاء",
+      "sent": "تم إرسال الهمسة إلى {{name}}",
+      "error": "تعذر إرسال الهمسة."
     }
   }
 }

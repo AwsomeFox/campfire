@@ -8,8 +8,9 @@ import { CharacterStatCard } from '../../../components/CharacterStatCard';
 import { Btn, HpBar, TextInput } from '../../../components/ui';
 import { GatedControl } from '../../../components/GatedControl';
 import { isImeComposing } from '../../../lib/compositionSafeSubmit';
-import { UI_ICON_SIZE } from '../../../lib/uiIcons';
+import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../../lib/uiIcons';
 import { CombatantActionsList } from '../CombatantActionsList';
+import { EncounterWhisperComposer } from '../EncounterWhisperComposer';
 import { CombatantStatblockEditor } from '../CombatantStatblockEditor';
 import { isDown } from '../encounterEndedSummary';
 import { canStabilizeCombatant } from '../combatantLifecycle';
@@ -75,6 +76,8 @@ export type CombatantRowProps = {
    * Undefined while SSE is offline/reconnecting so obsolete modifiers cannot be rolled (#421).
    */
   campaignId: number | undefined;
+  /** Route campaign id — stable ID for operations like whisper notes not tied to sheet staleness. */
+  routeCampaignId?: number;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
@@ -139,6 +142,8 @@ export type CombatantRowProps = {
   showKillPrompt?: boolean;
   /** Dismiss the kill prompt for this combatant for the rest of the session (client-local only). */
   onDismissKillPrompt?: () => void;
+  isDm?: boolean;
+  myUserId?: string | number;
 };
 
 export function CombatantRow({
@@ -158,6 +163,7 @@ export function CombatantRow({
   openCardByDefault,
   openCardOnActiveTurn,
   campaignId,
+  routeCampaignId,
   onRollError,
   onApplyDamage,
   onUseAction,
@@ -191,8 +197,11 @@ export function CombatantRow({
   colorVisionAssist = false,
   showKillPrompt = false,
   onDismissKillPrompt,
+  isDm = false,
+  myUserId,
 }: CombatantRowProps) {
   const { t } = useTranslation();
+  const [showWhisper, setShowWhisper] = useState(false);
   // Issue #1746: one shared reason string for every write control this row disables while
   // the sync gate blocks — kept as a single computed value so every site stays in agreement
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
@@ -1517,6 +1526,38 @@ export function CombatantRow({
           <UIIcon name="close" size="xs" />
         </button>
       )}
+      {(() => {
+        const whisperCid = routeCampaignId ?? campaignId;
+        if (!whisperCid || !character?.ownerUserId || String(character.ownerUserId) === String(myUserId)) return null;
+        return (
+          <>
+            {isDm && (
+              <button
+                type="button"
+                className="btn btn-icon btn-ghost cf-target-44"
+                style={{ width: 44, height: 44, flex: 'none' }}
+                disabled={busy}
+                onClick={() => setShowWhisper((w) => !w)}
+                aria-label={t('encounters.whisper.buttonLabel', { name: combatant.name })}
+                title={t('encounters.whisper.buttonLabel', { name: combatant.name })}
+                data-testid={`whisper-button-${combatant.id}`}
+              >
+                <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} />
+              </button>
+            )}
+            {showWhisper && (
+              <div style={{ flexBasis: '100%', width: '100%' }}>
+                <EncounterWhisperComposer
+                  campaignId={whisperCid}
+                  recipientUserId={String(character.ownerUserId)}
+                  recipientName={combatant.name}
+                  onClose={() => setShowWhisper(false)}
+                />
+              </div>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }
