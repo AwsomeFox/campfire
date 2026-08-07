@@ -24,6 +24,7 @@ export function CombatantActionsList({
    */
   disabledReason,
   onUseAction,
+  onUseGroupAction,
 }: {
   encounterId: number;
   combatantId: number;
@@ -32,6 +33,13 @@ export function CombatantActionsList({
   enabled: boolean;
   disabledReason?: string;
   onUseAction: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
+  /**
+   * Issue #1922: open the group action runner instead of the single-actor Use flow — same
+   * DM-only gating as `onUseAction` (undefined for a player/viewer or a linked-character row),
+   * plus the full `UsableAction` row so the caller can derive the (name, toHit, damage)
+   * fingerprint other combatants are matched against.
+   */
+  onUseGroupAction?: (actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => void;
 }) {
   const { t } = useTranslation();
   
@@ -67,17 +75,33 @@ export function CombatantActionsList({
             />
             {a.notes && <span className="text-xs text-muted">({a.notes})</span>}
           </div>
-          <Btn
-            type="button"
-            ghost
-            className="!min-h-8 shrink-0 text-xs"
-            disabled={!!disabledReason}
-            title={disabledReason}
-            aria-describedby={disabledReason ? blockedReasonId : undefined}
-            onClick={() => a.spec && onUseAction(a.index, a.name, a.spec)}
-          >
-            {t('encounters.actions.use', { defaultValue: 'Use' })}
-          </Btn>
+          <div className="flex items-center gap-1 shrink-0">
+            {onUseGroupAction && (
+              <Btn
+                type="button"
+                ghost
+                className="!min-h-8 text-xs"
+                data-testid={`combatant-actions-${combatantId}-use-group-${a.index}`}
+                disabled={!!disabledReason}
+                title={disabledReason}
+                aria-describedby={disabledReason ? blockedReasonId : undefined}
+                onClick={() => a.spec && onUseGroupAction(a.index, a.name, a.spec, a)}
+              >
+                {t('encounters.actions.useGroup', { defaultValue: 'Run for group' })}
+              </Btn>
+            )}
+            <Btn
+              type="button"
+              ghost
+              className="!min-h-8 text-xs"
+              disabled={!!disabledReason}
+              title={disabledReason}
+              aria-describedby={disabledReason ? blockedReasonId : undefined}
+              onClick={() => a.spec && onUseAction(a.index, a.name, a.spec)}
+            >
+              {t('encounters.actions.use', { defaultValue: 'Use' })}
+            </Btn>
+          </div>
         </div>
       ))}
     </div>

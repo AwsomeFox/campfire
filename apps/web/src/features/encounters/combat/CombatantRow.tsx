@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { ActionSpec, Character, Combatant, TokenSize, CustomMechanicsProfile } from '@campfire/schema';
+import type { ActionSpec, Character, Combatant, TokenSize, CustomMechanicsProfile, UsableAction } from '@campfire/schema';
 import { defaultCombatantStatblock, hasDeathSavesForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
 import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
@@ -91,6 +91,9 @@ export type CombatantRowProps = {
    */
   onUseAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
+  /** Issue #1922: open the group action runner for a monster/NPC action row — same DM-only
+   *  gating as `onUseMonsterAction`, plus the fetched `UsableAction` row itself. */
+  onUseGroupAction?: (actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
@@ -196,6 +199,7 @@ export function CombatantRow({
   onApplyDamage,
   onUseAction,
   onUseMonsterAction,
+  onUseGroupAction,
   busy,
   conditionSuggestions,
   conditionSourceOptions,
@@ -1423,6 +1427,7 @@ export function CombatantRow({
               enabled
               disabledReason={syncBlockedReason}
               onUseAction={onUseMonsterAction}
+              onUseGroupAction={onUseGroupAction}
             />
           </div>
         )}
