@@ -938,11 +938,12 @@ export default function RunSessionPage() {
     const key = ++pingSeq.current;
     // Issue #1937: a labeled ping (an intent chosen from the long-press/right-click
     // menu) announces the intent alongside the sender; a plain tap keeps the original
-    // wording unchanged.
+    // wording unchanged. Issue #2048: both branches derive from the same i18n keys
+    // as the visible ping log in BattleMap so the sentence never mixes languages.
     if (ping.senderName && ping.label) {
-      announce(`${ping.senderName} pings: ${ping.label}`);
+      announce(t('encounters.map.ping.log.labeled', { name: ping.senderName, label: ping.label }));
     } else if (ping.senderName) {
-      announce(`${ping.senderName} pinged the map`);
+      announce(t('encounters.map.ping.log.plain', { name: ping.senderName }));
     } else {
       announce('A map ping arrived');
     }
@@ -951,7 +952,7 @@ export default function RunSessionPage() {
       return next.slice(-10);
     });
     setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 10000);
-  }, [announce]);
+  }, [announce, t]);
   const dismissPing = useCallback((key: number) => {
     setPings((prev) => prev.filter((p) => p.key !== key));
   }, []);

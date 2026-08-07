@@ -25,6 +25,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type {
   CampaignSummary,
   CastSafetyState,
@@ -221,6 +222,7 @@ async function castRequest<T>(token: string, path: string, init?: RequestInit & 
 }
 
 export default function PlayerDisplayPage() {
+  const { t } = useTranslation();
   const { campaignId, token: castToken } = useParams<{ campaignId: string; token?: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
@@ -495,11 +497,13 @@ export default function PlayerDisplayPage() {
   const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null; label?: string | null }) => {
     const key = ++mapPingSeq.current;
     // Issue #1937: mirrors RunSessionPage's announcement — a labeled (intent) ping
-    // includes the intent, a plain tap keeps the original wording.
+    // includes the intent, a plain tap keeps the original wording. Issue #2048:
+    // both branches derive from the same i18n keys as the visible ping log in
+    // BattleMap so the sentence never mixes languages.
     if (ping.senderName && ping.label) {
-      announce(`${ping.senderName} pings: ${ping.label}`);
+      announce(t('encounters.map.ping.log.labeled', { name: ping.senderName, label: ping.label }));
     } else if (ping.senderName) {
-      announce(`${ping.senderName} pinged the map`);
+      announce(t('encounters.map.ping.log.plain', { name: ping.senderName }));
     } else {
       announce('A map ping arrived');
     }
@@ -510,7 +514,7 @@ export default function PlayerDisplayPage() {
     window.setTimeout(() => {
       setMapPings((prev) => prev.filter((p) => p.key !== key));
     }, 10000);
-  }, [announce]);
+  }, [announce, t]);
 
   const dismissMapPing = useCallback((key: number) => {
     setMapPings((prev) => prev.filter((p) => p.key !== key));
