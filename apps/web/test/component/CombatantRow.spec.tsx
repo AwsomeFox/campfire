@@ -12,11 +12,22 @@
  * real row + the real HpBar underneath it and asserts on what appears in the
  * DOM for each combination of (colorVisionAssist, isCurrentTurn).
  */
-import { render, screen, cleanup } from '@testing-library/react';
-import { describe, test, expect, vi, afterEach } from 'vitest';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { describe, test, expect, vi, afterEach, beforeAll } from 'vitest';
 import type { Combatant } from '@campfire/schema';
+import { MemoryRouter } from 'react-router-dom';
 import '../../src/i18n';
 import { CombatantRow, type CombatantRowProps } from '../../src/features/encounters/combat/CombatantRow';
+
+// jsdom has no ResizeObserver; RulesHintPopover (issue #1939) only uses it to re-run its
+// viewport-clamped positioning math, which these tests do not assert on.
+beforeAll(() => {
+  (globalThis as { ResizeObserver?: unknown }).ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+});
 
 afterEach(() => cleanup());
 
@@ -114,7 +125,11 @@ function renderRow(overrides: Partial<CombatantRowProps> = {}) {
     ...rest,
     combatant,
   };
-  return render(<CombatantRow {...props} />);
+  return render(
+    <MemoryRouter>
+      <CombatantRow {...props} />
+    </MemoryRouter>,
+  );
 }
 
 describe('CombatantRow colorVisionAssist gates (issue #1942, harness issue #2025)', () => {
@@ -143,5 +158,52 @@ describe('CombatantRow colorVisionAssist gates (issue #1942, harness issue #2025
   test('HpBar renders no danger glyph when colorVisionAssist is off, even at low HP', () => {
     renderRow({ colorVisionAssist: false });
     expect(screen.queryByTestId('hp-tone-glyph')).toBeNull();
+  });
+});
+
+describe('CombatantRow condition-tag rules hints (issue #1939)', () => {
+  test('a 5e campaign shows a rules-hint affordance on a condition tag, and it opens the mechanical summary', () => {
+    renderRow({ ruleSystem: 'dnd5e', combatant: baseCombatant({ conditions: ['Restrained'] }) });
+    const trigger = screen.getByTestId('rules-hint-trigger-Restrained');
+    fireEvent.click(trigger);
+    const panel = screen.getByTestId('rules-hint-panel-Restrained');
+    expect(panel.textContent).toContain('Speed becomes 0');
+  });
+
+  test('an adapter with no authored hints (Starforged) shows no affordance and no 5e text', () => {
+    renderRow({ ruleSystem: 'starforged', combatant: baseCombatant({ conditions: ['Restrained'] }) });
+    expect(screen.queryByTestId('rules-hint-trigger-Restrained')).toBeNull();
+    expect(screen.queryByText(/Speed becomes 0/)).toBeNull();
+  });
+
+  test('a leveled instance ("Frightened 2") resolves the same base-name hint as its unleveled form', () => {
+    renderRow({ ruleSystem: 'dnd5e', combatant: baseCombatant({ conditions: ['Frightened 2'] }) });
+    const trigger = screen.getByTestId('rules-hint-trigger-Frightened 2');
+    fireEvent.click(trigger);
+    const panel = screen.getByTestId('rules-hint-panel-Frightened 2');
+    expect(panel.textContent).toContain('disadvantage on ability checks and attack rolls');
+  });
+
+  test('no "Full rule" link when rulesHintCompendiumAvailable is false', () => {
+    renderRow({
+      ruleSystem: 'dnd5e',
+      combatant: baseCombatant({ conditions: ['Restrained'] }),
+      rulesHintCompendiumAvailable: false,
+      rulesHintCampaignId: 7,
+    });
+    fireEvent.click(screen.getByTestId('rules-hint-trigger-Restrained'));
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  test('a "Full rule" link to the compendium search appears once rulesHintCompendiumAvailable is true', () => {
+    renderRow({
+      ruleSystem: 'dnd5e',
+      combatant: baseCombatant({ conditions: ['Restrained'] }),
+      rulesHintCompendiumAvailable: true,
+      rulesHintCampaignId: 7,
+    });
+    fireEvent.click(screen.getByTestId('rules-hint-trigger-Restrained'));
+    const link = screen.getByRole('link');
+    expect(link.getAttribute('href')).toBe('/c/7/compendium?q=Restrained');
   });
 });

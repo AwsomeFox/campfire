@@ -21,6 +21,7 @@ import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../componen
 import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
+import { rulesetCapabilitiesForSelection } from '../../lib/rules';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
@@ -1533,13 +1534,27 @@ export default function RunSessionPage() {
   }, [syncRevision?.lastSyncAt, formattingLocale, timeFormat]);
 
   // Issue #431: tailor preparing next-steps to whether a monster pack is installed.
+  // Issue #1939: also open to non-DM players — the "Full rule" link on a rules-hint
+  // popover needs the same installed-pack data DM prep already fetched, and the read
+  // endpoint (GET /rules/packs) is any-authenticated-user already (rules.controller.ts).
   const packsQuery = useQuery({
     queryKey: ['rules', 'packs'],
     queryFn: () => api.get<RulePack[]>(`${API}/rules/packs`),
-    enabled: Number.isFinite(cid) && isDm,
+    enabled: Number.isFinite(cid),
     staleTime: 60_000,
   });
   const campaignHasCompendium = (packsQuery.data?.length ?? 0) > 0;
+  // Issue #1939: whether the campaign's resolved rule pack has searchable compendium
+  // entries — gates the rules-hint popovers' "Full rule" link. Identical for DM and
+  // players (hints are public rules text; criterion 4), unlike `campaignHasCompendium`
+  // above which only asks "is ANY pack installed server-wide".
+  const rulesHintCompendiumAvailable = useMemo(
+    () =>
+      rulesetCapabilitiesForSelection(ruleSystem, packsQuery.data).capabilities.find(
+        (c) => c.key === 'compendium',
+      )?.status === 'available',
+    [ruleSystem, packsQuery.data],
+  );
 
   const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
   const loadError =
@@ -4099,6 +4114,9 @@ export default function RunSessionPage() {
           colorVisionAssist={me?.user.colorVisionAssist ?? false}
           turnStartedAt={encounter.turnStartedAt}
           turnTimerSeconds={encounter.turnTimerSeconds}
+          ruleSystem={ruleSystem}
+          campaignId={cid}
+          rulesHintCompendiumAvailable={rulesHintCompendiumAvailable}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
@@ -4178,6 +4196,8 @@ export default function RunSessionPage() {
           isCombatantPending={(combatantId) => pendingCombatantIds.has(combatantId)}
           gridUnit={encounter.gridUnit}
           gridScale={encounter.gridScale}
+          campaignId={cid}
+          rulesHintCompendiumAvailable={rulesHintCompendiumAvailable}
           onRollDeathSave={rollDeathSave}
           onUpdateSpellSlot={
             // Review fix: derive the actor from turnWorkspace.current (the SAME data the
@@ -4612,6 +4632,8 @@ export default function RunSessionPage() {
                   conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
                   defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
                   ruleSystem={ruleSystem}
+                  rulesHintCampaignId={cid}
+                  rulesHintCompendiumAvailable={rulesHintCompendiumAvailable}
                   onHpDelta={(delta) => {
                     // Belt-and-braces with the `busy` prop above: never let a second damage
                     // intent start while the outcome of the previous one is still unknown (#580).
