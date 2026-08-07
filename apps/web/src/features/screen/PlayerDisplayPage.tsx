@@ -269,7 +269,7 @@ export default function PlayerDisplayPage() {
    * paging deterministically. */
   const [sceneTick, setSceneTick] = useState(0);
   /** Transient battle-map pings mirrored from the live encounter (issue #484). */
-  const [mapPings, setMapPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
+  const [mapPings, setMapPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null; label: string | null }>>([]);
   const mapPingSeq = useRef(0);
   const fullscreenActiveRef = useRef(isFullscreen);
   /** A popup gets one best-effort fullscreen request. Browser activation rules
@@ -492,15 +492,19 @@ export default function PlayerDisplayPage() {
 
   usePollWhileVisible(() => void loadCastSafety(), POLL_MS, isCastMode);
 
-  const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
+  const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null; label?: string | null }) => {
     const key = ++mapPingSeq.current;
-    if (ping.senderName) {
+    // Issue #1937: mirrors RunSessionPage's announcement — a labeled (intent) ping
+    // includes the intent, a plain tap keeps the original wording.
+    if (ping.senderName && ping.label) {
+      announce(`${ping.senderName} pings: ${ping.label}`);
+    } else if (ping.senderName) {
       announce(`${ping.senderName} pinged the map`);
     } else {
       announce('A map ping arrived');
     }
     setMapPings((prev) => {
-      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null }];
+      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);
     });
     window.setTimeout(() => {

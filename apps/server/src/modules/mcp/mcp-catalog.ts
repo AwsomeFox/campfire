@@ -189,6 +189,7 @@ export const MCP_TOOL_NAMES = [
   'update_encounter',
   'declare_aoe_template',
   'remove_aoe_template',
+  'ping_map',
   'reveal_map_region',
   'generate_map',
   'generate_ai_map',

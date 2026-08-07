@@ -1,5 +1,6 @@
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { UIIcon } from '../../../components/UIIcon';
 import { GatedControl } from '../../../components/GatedControl';
 import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridType, TokenSize } from '@campfire/schema';
@@ -31,7 +32,7 @@ import { formatRulerReadout, gridCellUnitPlural, measureToolHelp, rulerDistanceF
 import { hexAoeCirclePolygons, hexPolygons, hexKeyboardStepPx, mapPercentGridDistance, snapFogRectToHexGrid, snapMapPercentToHex, tokenFootprintDiameterPx } from '../hexGeometry';
 import { dragBudget, dragMoveFt, isCurrentActorDrag, type DragBudget } from '../dragDistance';
 import { scrollBehavior, prefersReducedMotion } from '../../../lib/prefersReducedMotion';
-import { armMapPingTap, decideMapPingTapRelease, isMapPingKeyboardActivation, mapPingTapExceededSlop, MAP_PING_KEYBOARD_POINT, type MapPingTapArm } from '../mapPingTap';
+import { armMapPingTap, decideMapPingTapRelease, isMapPingKeyboardActivation, mapPingTapExceededSlop, MAP_PING_KEYBOARD_POINT, MAP_PING_TAP_MAX_MS, type MapPingTapArm } from '../mapPingTap';
 import { applyPinch, applyWheelZoom, clampPan, DEFAULT_MAP_VIEWPORT, fitViewport, formatViewportZoomPercent, MAP_VIEWPORT_PAN_STEP_PX, MAP_VIEWPORT_ZOOM_STEP, panBy, resetViewport, surfaceToContentPoint, viewportTransformStyle, zoomByFactor, type MapViewportState, type PinchGesture } from '../mapViewport';
 import { tokenDiameterPx } from '../tokenFootprint';
 import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from '../tokenIdentity';
@@ -80,6 +81,19 @@ type MapTool = 'move' | 'token-select' | 'measure' | 'reveal' | 'erase' | 'selec
 
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
+
+/**
+ * Ping intents (issue #1937) — a fixed, small set (not an extensible taxonomy), matching
+ * the icons already used elsewhere in the app for the same concepts: `eyeball`
+ * (EntitySecrecyControls), `hazard-sign` (StuckLadder), `position-marker`
+ * (LocationStatusLabel / SessionLog).
+ */
+const PING_INTENTS = [
+  { key: 'look', icon: 'eyeball' },
+  { key: 'danger', icon: 'hazard-sign' },
+  { key: 'move', icon: 'position-marker' },
+] as const;
+type PingIntentKey = (typeof PING_INTENTS)[number]['key'];
 
 // Creature token footprints live in ./tokenFootprint; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
@@ -208,8 +222,9 @@ export type BattleMapProps = {
   onImportMap?: (attachmentId: number) => void;
   showGuidance?: boolean;
   onDismissGuidance?: () => void;
-  onPing: (x: number, y: number) => void;
-  pings: ReadonlyArray<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>;
+  /** `label` is set only for an intent chosen from the long-press/right-click menu (issue #1937). */
+  onPing: (x: number, y: number, label?: string | null) => void;
+  pings: ReadonlyArray<{ key: number; x: number; y: number; senderName: string | null; color: string | null; label: string | null }>;
   onDismissPing: (key: number) => void;
   onError: (message: string) => void;
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
@@ -280,6 +295,19 @@ export function BattleMap({
   const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
   const { t } = useTranslation();
   const announce = useAnnounce();
+  const pingIntentLabel = useCallback((key: PingIntentKey) => t(`encounters.map.ping.intents.${key}`), [t]);
+  // A received ping's `label` is plain text — the schema deliberately carries no separate
+  // intent slug (issue #1937 keeps the wire shape to color+label only) — so an incoming
+  // label is matched against THIS viewer's own translated intent strings to find its icon.
+  // A ping labeled in a different locale than the viewer's still renders (plain text, no
+  // icon) rather than breaking; it just doesn't match any of the three known intents.
+  const pingIntentIconForLabel = useCallback(
+    (label: string | null): string | null => {
+      if (!label) return null;
+      return PING_INTENTS.find((intent) => pingIntentLabel(intent.key) === label)?.icon ?? null;
+    },
+    [pingIntentLabel],
+  );
   const [dmTokenDetailMode, setDmTokenDetailMode] = useState<TokenDetailMode>(() =>
     readTokenDetailMode(typeof localStorage === 'undefined' ? null : localStorage),
   );
@@ -335,6 +363,20 @@ export function BattleMap({
   // reuses the same UndoSnackbar the DM's token-batch undo does, one pending move at a time.
   const [dragMoveUndo, setDragMoveUndo] = useState<{ combatantId: number; origin: MapPoint; moveFt: number } | null>(null);
   const [tool, setTool] = useState<MapTool>('move');
+  // Issue #1937: long-press (past the tap window) or right-click, with Ping armed, opens a
+  // small Look/Danger/Move-here intent menu at the point instead of publishing a plain ping.
+  // `pingHoldTimeoutRef` is armed alongside the ordinary tap gesture below and cleared by
+  // every path that ends that gesture before it fires (release, slop-cancel, or any other
+  // `cancelActiveGesture` — see there), so a completed plain tap never also opens the menu.
+  const [pingIntentMenu, setPingIntentMenu] = useState<{ x: number; y: number; clientX: number; clientY: number } | null>(null);
+  const pingHoldTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearPingHoldTimer = useCallback(() => {
+    if (pingHoldTimeoutRef.current != null) {
+      clearTimeout(pingHoldTimeoutRef.current);
+      pingHoldTimeoutRef.current = null;
+    }
+  }, []);
+  useEffect(() => () => clearPingHoldTimer(), [clearPingHoldTimer]);
   const [ruler, setRuler] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [revealCorners, setRevealCorners] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [selectedFogRegionId, setSelectedFogRegionId] = useState<string | null>(null);
@@ -443,6 +485,10 @@ export function BattleMap({
       // dispatch lostpointercapture. That follow-up must observe an already-cancelled gesture.
       activeGestureRef.current = null;
       successfulPointerUpRef.current = null;
+      // Issue #1937: this is the single choke point every non-release ping-ending path
+      // (slop-cancel, pointercancel, lostpointercapture, tab-hidden, page-hide, rotation)
+      // funnels through, so the pending long-press timer never survives past its gesture.
+      if (gesture.kind === 'ping') clearPingHoldTimer();
       if (clearPreview) clearGesturePreview(gesture.kind);
       try {
         if (gesture.captureTarget.hasPointerCapture?.(gesture.pointerId)) {
@@ -452,7 +498,7 @@ export function BattleMap({
         // The browser may already have dropped capture while backgrounding or unmounting.
       }
     },
-    [clearGesturePreview],
+    [clearGesturePreview, clearPingHoldTimer],
   );
 
   useEffect(() => {
@@ -723,7 +769,7 @@ export function BattleMap({
    * `clamp` is set (in-progress drags stay pinned to the map edge). Inverse-applies
    * the local viewport transform first (issue #712).
    */
-  function pointerToPercent(e: ReactPointerEvent, clamp = false): MapPoint | null {
+  function pointerToPercent(e: { clientX: number; clientY: number }, clamp = false): MapPoint | null {
     if (!mapRect) return null;
     const rect = surfaceRef.current?.getBoundingClientRect();
     if (!rect) return null;
@@ -1061,22 +1107,37 @@ export function BattleMap({
     const pct = pointerToPercent(e);
     if (!pct) return;
     if (tool === 'ping') {
+      // Issue #1937: the secondary (right) mouse button never arms a plain-tap ping — it
+      // opens the intent menu instead, through the dedicated onContextMenu handler below.
+      // (Belt-and-suspenders with onSurfaceContextMenu's own cancelActiveGesture() call —
+      // this guard alone matters when a right button's own pointerup lands before any
+      // contextmenu event ever reaches the surface, e.g. a suppressed native menu.)
+      if (e.button === 2) return;
       // Arm on press; publish only from a matching completed tap (pointer-up inside slop/time).
       e.currentTarget.setPointerCapture?.(e.pointerId);
       successfulPointerUpRef.current = null;
-      activeGestureRef.current = {
-        kind: 'ping',
+      const arm = armMapPingTap({
         pointerId: e.pointerId,
-        captureTarget: e.currentTarget,
-        arm: armMapPingTap({
-          pointerId: e.pointerId,
-          clientX: e.clientX,
-          clientY: e.clientY,
-          startedAt: performance.now(),
-          x: pct.x,
-          y: pct.y,
-        }),
-      };
+        clientX: e.clientX,
+        clientY: e.clientY,
+        startedAt: performance.now(),
+        x: pct.x,
+        y: pct.y,
+      });
+      activeGestureRef.current = { kind: 'ping', pointerId: e.pointerId, captureTarget: e.currentTarget, arm };
+      // Issue #1937: held past the tap window (which used to just cancel on release) opens
+      // the Look/Danger/Move-here intent menu instead, at the armed point. A release before
+      // this fires still takes the ordinary decideMapPingTapRelease path in onSurfacePointerUp
+      // completely unchanged — this timer only ever fires for a hold that outlasts a tap.
+      const pointerId = e.pointerId;
+      clearPingHoldTimer();
+      pingHoldTimeoutRef.current = setTimeout(() => {
+        pingHoldTimeoutRef.current = null;
+        const gesture = activeGestureRef.current;
+        if (!gesture || gesture.kind !== 'ping' || gesture.pointerId !== pointerId) return;
+        cancelActiveGesture(pointerId, false);
+        setPingIntentMenu({ x: gesture.arm.x, y: gesture.arm.y, clientX: gesture.arm.clientX, clientY: gesture.arm.clientY });
+      }, MAP_PING_TAP_MAX_MS + 1);
       return;
     }
     if (tool === 'token-select' && effectiveIsDm) {
@@ -1237,6 +1298,12 @@ export function BattleMap({
     // Ping: decide publish/cancel first, then always clear ownership + release capture so a
     // completed (or cancelled) tap never leaves `kind: 'ping'` armed for a later pointerup.
     if (gesture.kind === 'ping') {
+      // A normal release always happens strictly before or strictly after the long-press
+      // timer (never both fire the same gesture — the timer only checks a still-armed
+      // 'ping' gesture, which this release is about to clear), but clear it here too so a
+      // release that lands in the last instant before MAP_PING_TAP_MAX_MS never leaves a
+      // stray timer that could theoretically outlive this gesture's pointerId being reused.
+      clearPingHoldTimer();
       const decision = decideMapPingTapRelease(gesture.arm, {
         pointerId: e.pointerId,
         clientX: e.clientX,
@@ -1364,6 +1431,46 @@ export function BattleMap({
     if (activeGestureRef.current) return;
     onPing(MAP_PING_KEYBOARD_POINT.x, MAP_PING_KEYBOARD_POINT.y);
   }
+
+  /** Right-click, with Ping armed, opens the intent menu directly (issue #1937) — the
+   * mirror of the long-press path above, for a mouse user who never holds the button. */
+  function onSurfaceContextMenu(e: ReactMouseEvent<HTMLDivElement>) {
+    if (tool !== 'ping') return;
+    e.preventDefault();
+    const pct = pointerToPercent(e);
+    if (!pct) return;
+    // A synthetic pointerdown may already be armed from the right-click's own press —
+    // drop it so it can never also publish a plain ping on some later stray pointerup.
+    cancelActiveGesture();
+    setPingIntentMenu({ x: pct.x, y: pct.y, clientX: e.clientX, clientY: e.clientY });
+  }
+
+  function choosePingIntent(key: PingIntentKey) {
+    const menu = pingIntentMenu;
+    if (!menu) return;
+    setPingIntentMenu(null);
+    onPing(menu.x, menu.y, pingIntentLabel(key));
+  }
+
+  function dismissPingIntentMenu() {
+    setPingIntentMenu(null);
+  }
+
+  // Close the intent menu on Escape or an outside pointerdown, matching the established
+  // long-press/right-click popover pattern (RollContextMenu).
+  useEffect(() => {
+    if (!pingIntentMenu) return;
+    const closeOnOutside = () => dismissPingIntentMenu();
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dismissPingIntentMenu();
+    };
+    window.addEventListener('pointerdown', closeOnOutside);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutside);
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [pingIntentMenu]);
 
   function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
     trackPinchPointer(e, 'cancel');
@@ -2446,6 +2553,7 @@ export function BattleMap({
             onPointerCancel={onSurfacePointerCancel}
             onLostPointerCapture={onSurfaceLostPointerCapture}
             onKeyDown={onViewportKeyDown}
+            onContextMenu={onSurfaceContextMenu}
             onDragStart={(e) => e.preventDefault()}
           >
             <div
@@ -3110,6 +3218,9 @@ export function BattleMap({
                 {pings.map((p) => {
                   const isReduced = prefersReducedMotion();
                   const color = p.color || 'var(--color-accent)';
+                  // Issue #1937: an intent-labeled ping (chosen from the long-press/right-click
+                  // menu) shows its icon + label above the ripple for the ping's whole lifetime.
+                  const intentIcon = pingIntentIconForLabel(p.label);
                   return (
                     <div
                       key={p.key}
@@ -3120,6 +3231,15 @@ export function BattleMap({
                         transform: 'translate(-50%, -50%)',
                       }}
                     >
+                      {p.label && (
+                        <div
+                          className="mb-1 px-1.5 py-0.5 rounded text-xs whitespace-nowrap bg-surface-raised font-semibold shadow-sm flex items-center gap-1"
+                          style={{ color: 'var(--color-text)', border: `1px solid ${color}` }}
+                        >
+                          {intentIcon && <GameIcon slug={intentIcon} size={UI_ICON_SIZE.xs} />}
+                          <span>{p.label}</span>
+                        </div>
+                      )}
                       <div className="relative flex items-center justify-center" style={{ width: 24, height: 24 }}>
                         {!isReduced && (
                           <div
@@ -3156,19 +3276,67 @@ export function BattleMap({
             {/* Ping Log */}
             {pings.length > 0 && (
               <div className="absolute top-2 left-2 flex flex-col gap-1 z-20 pointer-events-none" style={{ maxWidth: 200 }}>
-                {pings.slice().reverse().map((p) => (
-                  <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
-                    <span className="truncate mr-2 font-medium">{p.senderName || 'Someone'} pinged</span>
-                    <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
-                      <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
-                    </button>
-                  </div>
-                ))}
+                {pings.slice().reverse().map((p) => {
+                  const intentIcon = pingIntentIconForLabel(p.label);
+                  return (
+                    <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
+                      <span className="truncate mr-2 font-medium flex items-center gap-1">
+                        {intentIcon && <GameIcon slug={intentIcon} size={UI_ICON_SIZE.xs} />}
+                        {p.senderName || 'Someone'} {p.label ? `pings: ${p.label}` : 'pinged'}
+                      </span>
+                      <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
+                        <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
             </div>
             <style>{'@keyframes cfPing{0%{transform:scale(.4);opacity:.9}70%{opacity:.55}100%{transform:scale(3);opacity:0}}'}</style>
           </div>
+
+          {/* Ping intent menu (issue #1937) — long-press or right-click with Ping armed. */}
+          {pingIntentMenu && createPortal(
+            <div
+              role="menu"
+              aria-label={t('encounters.map.ping.menuLabel')}
+              data-testid="map-ping-intent-menu"
+              className="cf-popover"
+              style={{
+                position: 'fixed',
+                left: pingIntentMenu.clientX,
+                top: pingIntentMenu.clientY,
+                zIndex: 10000,
+                background: 'var(--color-bg-elevated, #ffffff)',
+                border: '1px solid var(--color-border, #e5e5e5)',
+                borderRadius: 6,
+                padding: 4,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+                minWidth: 160,
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              {PING_INTENTS.map((intent) => (
+                <button
+                  key={intent.key}
+                  type="button"
+                  role="menuitem"
+                  className="cf-menu-item"
+                  data-testid={`map-ping-intent-${intent.key}`}
+                  onClick={() => choosePingIntent(intent.key)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                >
+                  <GameIcon slug={intent.icon} size={UI_ICON_SIZE.xs} />
+                  <span>{pingIntentLabel(intent.key)}</span>
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )}
 
           {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
             <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">

@@ -192,6 +192,14 @@
         "clearPlayersHint": "Remove every player-declared template",
         "declaredBy": "Declared by {{name}}"
       },
+      "ping": {
+        "menuLabel": "Ping intent",
+        "intents": {
+          "look": "Look",
+          "danger": "Danger",
+          "move": "Move here"
+        }
+      },
       "dragDistance": {
         "budget": "used {{used}} of {{max}} {{unit}}",
         "overSpeed": "over speed",
