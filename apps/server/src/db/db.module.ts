@@ -2925,6 +2925,40 @@ function migrateCombatantsTableForStatblockRevealed1926(sqlite: Database.Databas
   }
 }
 
+/**
+ * Issue #1921 — persist limited-use/recharge action spends. Two plain ADD COLUMNs, no
+ * table rebuild: `combatants.action_uses` (the live spend map, see
+ * ActionResolverService.applyInternal/undo) and `action_apply_chains.uses_key` /
+ * `.uses_spent` (the exact spend an apply wrote, so undo() can refund it without
+ * re-deriving from a possibly-since-edited action spec). Both default to "nothing spent"
+ * for every pre-existing row, which is the correct backfill — an upgrade must never
+ * retroactively mark an action as exhausted that was never tracked before this column
+ * existed.
+ */
+function migrateActionUsesTracking1921(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'action_uses')) {
+      sqlite.exec('ALTER TABLE combatants ADD COLUMN action_uses TEXT');
+    }
+  }
+  const hasChainsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='action_apply_chains'")
+    .get();
+  if (hasChainsTable) {
+    const chainColumns = sqlite.prepare('PRAGMA table_info(action_apply_chains)').all() as Array<{ name: string }>;
+    if (!chainColumns.some((c) => c.name === 'uses_key')) {
+      sqlite.exec('ALTER TABLE action_apply_chains ADD COLUMN uses_key TEXT');
+    }
+    if (!chainColumns.some((c) => c.name === 'uses_spent')) {
+      sqlite.exec('ALTER TABLE action_apply_chains ADD COLUMN uses_spent INTEGER NOT NULL DEFAULT 0');
+    }
+  }
+}
+
 function migrateCombatantsTableForNpcDispositionSnapshot(sqlite: Database.Database): void {
   const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
   if (!hasTable) return;
@@ -5276,6 +5310,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0169_check_requests_group_id_1943', run: migrateCheckRequestsTableForGroupId1943 },
   { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
+  // Next free ordinal at the time this branch was written — renumber if another PR lands
+  // 0172 first.
+  { name: '0173_action_uses_tracking_1921', run: migrateActionUsesTracking1921 },
 ];
 
 /**

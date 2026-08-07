@@ -56,6 +56,10 @@ const ACTION: UsableAction = {
     outcomes: {},
     provenance: { ruleSystem: '', source: '', ref: '' },
   },
+  // Issue #1921 made `uses` a required field on UsableAction (server-computed remaining-use
+  // state). `null` is the "this action has no limited-use tracking" case, which is what this
+  // fixture is: a plain at-will shortbow.
+  uses: null,
   source: '',
 };
 

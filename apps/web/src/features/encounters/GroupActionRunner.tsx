@@ -232,7 +232,11 @@ export function GroupActionRunner({
       case 'applied':
         return t('encounters.groupAction.status.applied', { defaultValue: 'Applied' });
       case 'skipped':
-        return t('encounters.groupAction.status.skipped', { defaultValue: 'Skipped — no action left' });
+        // Two different reasons, two different sentences: `noUses` means the combatant still
+        // HAS its action but the ability is spent, which "no action left" would misdescribe.
+        return row.reason === 'noUses'
+          ? t('encounters.groupAction.status.skippedNoUses', { defaultValue: 'Skipped — no uses left' })
+          : t('encounters.groupAction.status.skipped', { defaultValue: 'Skipped — no action left' });
       case 'failed':
         return t('encounters.groupAction.status.failed', { defaultValue: 'Failed' });
       default:

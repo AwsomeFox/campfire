@@ -10787,6 +10787,31 @@ export type CombatantRemoveUndo = z.infer<typeof CombatantRemoveUndo>;
 export const DamageSaveOutcome = z.enum(['full', 'half']);
 export type DamageSaveOutcome = z.infer<typeof DamageSaveOutcome>;
 
+/**
+ * DM force-toggle of a combatant's limited-use action pool (issue #1921) — sets `spent`
+ * directly to a value in `[0, max]` (server-clamped), rather than a relative delta, so a
+ * single call both forces a recharge (`spent: 0`) and forces an exhaust (`spent: max`).
+ * The target action is identified the SAME way `resolve_action`/`list_usable_actions`
+ * identify one — by `actionIndex` or `actionName` on the combatant's current sheet/
+ * statblock action list — never by the server's internal fingerprint+source spend key,
+ * which is an implementation detail no caller should have to construct.
+ */
+export const CombatantActionUsesPatch = z
+  .object({
+    actionIndex: z.number().int().min(0).max(99).optional(),
+    actionName: z.string().max(120).optional(),
+    spent: z.number().int().min(0).max(99),
+  })
+  // Both identifiers optional individually, but at least one is required: a patch naming no
+  // action at all is not a meaningful request, and letting it through only defers the failure
+  // into `resolveActionUsesTarget` as a confusing "Action undefined not found" at write time.
+  // Reject it at parse time, where the caller gets a field-level 400 instead.
+  .refine((v) => v.actionIndex !== undefined || v.actionName !== undefined, {
+    message: 'Provide actionIndex or actionName to identify which action to set.',
+    path: ['actionIndex'],
+  });
+export type CombatantActionUsesPatch = z.infer<typeof CombatantActionUsesPatch>;
+
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
   // Direct encounter damage metadata (issue #605).  These fields are meaningful only
@@ -10858,6 +10883,10 @@ export const CombatantUpdate = z.object({
   // name/hpMax/initMod/tokenSize/initiative above). Toggling logs a combat-log
   // 'note' event and an audit row.
   statblockRevealed: z.boolean().optional(),
+  // DM force-toggle of a limited-use/recharge action's spend state (issue #1921) — dm
+  // only, enforced server-side (rejected outright for a non-DM patch, same list as
+  // statblockRevealed above). Audit-logged; does not touch action-economy or spell slots.
+  actionUses: CombatantActionUsesPatch.optional(),
   // Issue #580: per-intent operation id. `hpDelta` / `spDelta` / `rpDelta` are
   // relative writes — replaying one double-damages. Send a key
   // minted at the click and a retry after a lost response replays the ORIGINAL

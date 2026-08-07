@@ -31,6 +31,8 @@ import {
   generateEncounterGroup,
   redactEncounterEventsForViewer,
   UNKNOWN_COMBATANT_LABEL,
+  rollRechargeAtTurnStart,
+  undoActionUsesRecharge,
 } from '../../src/modules/encounters/encounters.logic';
 import type { CombatantHpState, GeneratorCandidate } from '../../src/modules/encounters/encounters.logic';
 
@@ -1184,5 +1186,95 @@ describe('initialEncounterTurnState (issue #1459)', () => {
     expect(result.currentCombatantId).toBe(null);
     expect(result.turnIndex).toBe(0);
     expect(result.phase).toBe('combatant');
+  });
+});
+
+describe('rollRechargeAtTurnStart / undoActionUsesRecharge (issue #1921)', () => {
+  it('rolls only spent entries, recharges on a hit, and records a delta for undo', () => {
+    const uses = { 'statblock:abc': { spent: 1 } };
+    const rolls = [6, 5]; // ignored: 6 (>= needs 5) recovers first call
+    let i = 0;
+    const roll = () => rolls[i++];
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5, max: 1 }], roll);
+    expect(result.rolls).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', roll: 6, needs: 5, recovered: true }]);
+    expect(result.uses['statblock:abc']).toEqual({ spent: 0 });
+    expect(result.delta).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', max: 1 }]);
+  });
+
+  it('leaves an action spent on a miss, with no undo delta', () => {
+    const uses = { 'statblock:abc': { spent: 1 } };
+    const roll = () => 3; // below needs 5
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5, max: 1 }], roll);
+    expect(result.rolls).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', roll: 3, needs: 5, recovered: false }]);
+    expect(result.uses['statblock:abc']).toEqual({ spent: 1 });
+    expect(result.delta).toEqual([]);
+  });
+
+  it('never rolls an entry that has not been spent (nothing to recharge)', () => {
+    const uses = {};
+    const roll = jest.fn(() => 6);
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5, max: 1 }], roll);
+    expect(roll).not.toHaveBeenCalled();
+    expect(result.rolls).toEqual([]);
+    expect(result.delta).toEqual([]);
+  });
+
+  it('rolls multiple spent recharge actions independently in one tick', () => {
+    const uses = { 'statblock:a': { spent: 1 }, 'statblock:b': { spent: 1 } };
+    const rollsQueue = [6, 1]; // a recharges, b does not
+    let i = 0;
+    const roll = () => rollsQueue[i++];
+    const result = rollRechargeAtTurnStart(
+      uses,
+      [
+        { key: 'statblock:a', name: 'Breath Weapon', min: 5, max: 1 },
+        { key: 'statblock:b', name: 'Frost Ray', min: 6, max: 1 },
+      ],
+      roll,
+    );
+    expect(result.uses).toEqual({ 'statblock:a': { spent: 0 }, 'statblock:b': { spent: 1 } });
+    expect(result.delta).toEqual([{ key: 'statblock:a', actionName: 'Breath Weapon', max: 1 }]);
+  });
+
+  it('gives back exactly ONE use of a multi-use pool, not the whole pool', () => {
+    // `{ max: 3, recharge: 'recharge-5-6' }` is authorable (statblock editor, MCP
+    // `update_combatant`) and reaches this tick because `parseRechargeRange` matches. Two of
+    // the three uses are spent; one lucky die must return one of them, not both.
+    const uses = { 'statblock:abc': { spent: 2 } };
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5, max: 3 }], () => 6);
+    expect(result.uses['statblock:abc']).toEqual({ spent: 1 });
+    expect(result.delta).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', max: 3 }]);
+    // Undo with nothing in between puts the one use straight back.
+    expect(undoActionUsesRecharge(result.uses, result.delta).uses['statblock:abc']).toEqual({ spent: 2 });
+  });
+
+  // Devin review on PR #2062, follow-on to the one-use fix above: the undo used to ASSIGN the
+  // pre-roll count, which silently swallowed a spend made during the undone turn. On a pool of
+  // one the two are indistinguishable (0 and 1 are the only reachable values), which is why
+  // every other case here passes against the bug — seeing it at all requires `max: 3`.
+  it('undoActionUsesRecharge composes with a spend made during the undone turn', () => {
+    const delta = [{ key: 'statblock:abc', actionName: 'Breath Weapon', max: 3 }];
+    // Pre-turn spent 2 -> the roll recharges to 1 -> the monster fires it that turn, back to 2.
+    // Undoing the turn must reach 3: the pre-turn 2, plus the new use, minus the recharge.
+    // Assigning the recorded pre-roll 2 would hand the monster a free extra firing.
+    expect(undoActionUsesRecharge({ 'statblock:abc': { spent: 2 } }, delta).uses['statblock:abc']).toEqual({ spent: 3 });
+    // And it never runs past the pool ceiling.
+    expect(undoActionUsesRecharge({ 'statblock:abc': { spent: 3 } }, delta).uses['statblock:abc']).toEqual({ spent: 3 });
+  });
+
+  it('undoActionUsesRecharge restores spent state from the recorded delta', () => {
+    const afterRecharge = { 'statblock:abc': { spent: 0 } };
+    const { uses, restoredNames } = undoActionUsesRecharge(afterRecharge, [
+      { key: 'statblock:abc', actionName: 'Breath Weapon', max: 1 },
+    ]);
+    expect(uses['statblock:abc']).toEqual({ spent: 1 });
+    expect(restoredNames).toEqual(['Breath Weapon']);
+  });
+
+  it('undoActionUsesRecharge is a no-op for an empty delta', () => {
+    const currentUses = { 'statblock:abc': { spent: 0 } };
+    const { uses, restoredNames } = undoActionUsesRecharge(currentUses, []);
+    expect(uses).toBe(currentUses);
+    expect(restoredNames).toEqual([]);
   });
 });

@@ -3,7 +3,12 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
+  // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
+  // the turn tick, the same pure math the resolver uses so this service can never decide a
+  // pool recharges differently than an apply/reject message described it.
+  parseRechargeRange,
+  effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -51,6 +56,7 @@ import {
   resetLegendaryUsage,
   resetTurnStateForStart,
   retreatEncounterTurn,
+  rollRechargeAtTurnStart,
   sortCombatants,
   sortEncountersForList,
   concentrationCheckForDamage,
@@ -58,6 +64,7 @@ import {
   tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
   turnIndexFor,
+  undoActionUsesRecharge,
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
 import {
@@ -65,7 +72,7 @@ import {
   buildEncounterAftermathRecapDraft,
   suggestedXpFromDifficulty,
 } from './encounter-aftermath.logic';
-import type { CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
+import type { ActionUsesMap, ActionUsesRechargeDelta, CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
@@ -126,6 +133,10 @@ type TurnTickCombatantDelta = {
   conditionExpired: ConditionInstance[];
   effectTicks: TurnTickedEffect[];
   effectExpired: ActiveEffect[];
+  /** Issue #1921: recharge rolls that cleared a spent action on this combatant's turn
+   *  start — empty for the 'ending' side, which never rolls recharge. Lets undoTurn put
+   *  a recharged action back to "spent" without re-deriving it from the current spec. */
+  actionUsesRecharged?: ActionUsesRechargeDelta[];
 };
 type TurnTickDelta = {
   ending?: TurnTickCombatantDelta;
@@ -4808,12 +4819,16 @@ export class EncountersService {
         patch.statblock !== undefined ||
         patch.statblockRevealed !== undefined ||
         patch.eac !== undefined ||
-        patch.kac !== undefined
+        patch.kac !== undefined ||
+        // Issue #1921: DM force-toggle of a limited-use/recharge action's spend state joins
+        // the same absolute-rule list — a player never needs to override their own or a
+        // monster's spend, and (per the acceptance criteria) must get a 403, not a silent no-op.
+        patch.actionUses !== undefined
       ) {
         throw new ForbiddenException({
           code: 'COMBATANT_FIELD_DM_ONLY',
           message:
-            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, eac, or kac — roll your own initiative via the dedicated roll-initiative action.',
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, eac, kac, or actionUses — roll your own initiative via the dedicated roll-initiative action.',
         });
       }
       if (!existing.characterId) {
@@ -4906,6 +4921,34 @@ export class EncountersService {
     }
     // Statblock reveal toggle (issue #1926) — DM-only (see the ForbiddenException above).
     if (patch.statblockRevealed !== undefined && isDm) staticUpdate.statblockRevealed = patch.statblockRevealed;
+    // DM force-toggle of a limited-use/recharge action's spend state (issue #1921) — DM-only
+    // (see the ForbiddenException above). The target action is resolved from the CURRENT
+    // sheet/statblock action list by index/name, through the SAME resolveActionUsesTarget a
+    // resolve/apply spend uses, so this can never touch a different action's spend key than
+    // the one the DM actually named. `spent` is clamped into [0, max] server-side — the field
+    // is a direct set (not a delta), so both "force recharge" (spent: 0) and "force exhaust"
+    // (spent: max) are one call.
+    let actionUsesLabel: string | null = null;
+    // Resolved here but MERGED INSIDE the transaction against the fresh row — see the
+    // `actionUsesPatch` block beside the condition rebase below. `action_uses` is one JSON
+    // blob covering every tracked action, so building it from the pre-transaction `existing`
+    // snapshot and writing it wholesale would silently revert any OTHER action's spend that
+    // landed in between (a concurrent apply, or a turn-start recharge) — the same lost-update
+    // hazard conditions already avoid by rebasing (issue #747). Resolving the target here is
+    // safe: it reads the action LIST, not the spend map.
+    let actionUsesPatch: { key: string; spent: number } | null = null;
+    if (patch.actionUses !== undefined && isDm) {
+      if (!this.actionResolver) {
+        throw new BadRequestException('Action-uses override is unavailable.');
+      }
+      const target = this.actionResolver.resolveActionUsesTarget(
+        existing,
+        { actionIndex: patch.actionUses.actionIndex, actionName: patch.actionUses.actionName },
+        encounterRow.campaignId,
+      );
+      actionUsesPatch = { key: target.key, spent: Math.max(0, Math.min(patch.actionUses.spent, target.max)) };
+      actionUsesLabel = target.name;
+    }
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
@@ -4948,6 +4991,10 @@ export class EncountersService {
     if (
       Object.keys(staticUpdate).length === 0 &&
       !recomputeHp &&
+      // `actionUses` no longer lands in `staticUpdate` (it is merged against the fresh row
+      // inside the transaction), so it needs its own term here or an actionUses-only patch
+      // would early-return as a no-op and silently persist nothing.
+      actionUsesPatch === null &&
       !conditionFieldsTouched &&
       !spFieldsTouched &&
       !deathStateTouched &&
@@ -5146,6 +5193,16 @@ export class EncountersService {
         _beforeSucc = fresh.deathSaveSuccesses;
         _beforeFail = fresh.deathSaveFailures;
         const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+        if (actionUsesPatch) {
+          // Rebase the DM's uses override against the FRESH row, for the same reason the
+          // condition block below does (issue #747): `action_uses` is a single JSON map of
+          // EVERY tracked action's spend, so merging into a pre-transaction snapshot would
+          // clobber a concurrent spend or turn-start recharge of a DIFFERENT action rather
+          // than merging with it — letting an already-spent ability quietly become available
+          // again. Only the named key is written; every other key carries over from `fresh`.
+          const currentUses = fromJsonText<Record<string, { spent?: number }>>(fresh.actionUses, {});
+          writeSet.actionUses = toJsonText({ ...currentUses, [actionUsesPatch.key]: { spent: actionUsesPatch.spent } });
+        }
         if (conditionFieldsTouched) {
           // Rebase every condition mutation against the FRESH row (issue #747 / #423).
           // Legacy string deltas and structured instance deltas share this path so a
@@ -5508,6 +5565,7 @@ export class EncountersService {
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
       staticUpdate.statblockRevealed !== undefined ||
+      actionUsesPatch !== null ||
       defenseOrStatblockChanged ||
       hpMaxChanged;
     if (changedNonHp) {
@@ -5538,6 +5596,21 @@ export class EncountersService {
         target: targetName,
         targetId: combatantId,
         detail: staticUpdate.statblockRevealed ? "'s statblock is revealed to players" : "'s statblock is hidden again",
+      });
+    }
+
+    // Issue #1921: log the DM's manual override of an action's limited-use/recharge spend.
+    // The ability's NAME is deliberately omitted for the same reason as the turn-start
+    // recharge log (see `rechargeRolls` in nextTurn): the combat log is readable by every
+    // campaign member, `redactEncounterEventsForViewer` masks only hidden-combatant
+    // identity rather than action names, and this fires for a monster whose statblock may
+    // be deliberately unrevealed (#1926). `actionUsesLabel` is still resolved — it gates
+    // whether the event is written at all — but only the COMBATANT lands on the event.
+    if (actionUsesPatch && actionUsesLabel) {
+      await this.appendEvent(encounterId, round, 'resource_changed', {
+        target: targetName,
+        targetId: combatantId,
+        detail: 'limited-use ability uses set by DM',
       });
     }
 
@@ -7218,6 +7291,9 @@ export class EncountersService {
     let skippedTurns: Array<{ id: number; name: string; round: number }> = [];
     const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
     const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
+    // Issue #1921: recharge rolls for the starting combatant's spent recharge actions,
+    // logged AFTER commit (mirrors expiredEffects/expiredConditions above).
+    const rechargeRolls: Array<{ combatantId: number; combatantName: string; actionName: string; roll: number; needs: number; recovered: boolean }> = [];
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
     const turnTickSnapshot: TurnTickDelta = {
@@ -7379,6 +7455,45 @@ export class EncountersService {
             starting.id === ending?.id ? (endingConditionKept ?? starting.conditionInstances ?? []) : (starting.conditionInstances ?? []);
           const condTick = tickConditionInstancesAtTurnStart(startConditionPre);
           const conditionDelta = buildConditionTickDelta(startConditionPre, condTick.kept);
+
+          // Issue #1921: roll recharge for every currently-spent recharge action of the
+          // combatant starting its turn, in this SAME transaction as resetTurnStateForStart
+          // below. X/day pools never reach rollRechargeAtTurnStart at all — only entries
+          // whose `uses.recharge` actually parses as `recharge-N-M` are passed in.
+          const startingRow = rows.find((r) => r.id === starting.id);
+          const rechargeEntries = startingRow
+            ? (this.actionResolver?.usesTrackedActions(startingRow, fresh.campaignId) ?? [])
+                .map((entry) => {
+                  const range = parseRechargeRange(entry.uses.recharge);
+                  // `max` rides along so the undo delta can clamp its `spent + 1` revert to
+                  // the pool ceiling without re-resolving the action list at undo time.
+                  return range
+                    ? { key: entry.key, name: entry.name, min: range.min, max: effectiveActionUsesMax(entry.uses) }
+                    : null;
+                })
+                .filter((e): e is { key: string; name: string; min: number; max: number } => e !== null)
+            : [];
+          let actionUsesRecharged: ActionUsesRechargeDelta[] = [];
+          let nextActionUses: ActionUsesMap | null = null;
+          if (startingRow && rechargeEntries.length > 0) {
+            const currentUses = fromJsonText<ActionUsesMap>(startingRow.actionUses, {});
+            const rolled = rollRechargeAtTurnStart(currentUses, rechargeEntries, () => rollDice('1d6').total);
+            if (rolled.rolls.length > 0) {
+              actionUsesRecharged = rolled.delta;
+              nextActionUses = rolled.uses;
+              for (const r of rolled.rolls) {
+                rechargeRolls.push({
+                  combatantId: starting.id,
+                  combatantName: starting.name,
+                  actionName: r.actionName,
+                  roll: r.roll,
+                  needs: r.needs,
+                  recovered: r.recovered,
+                });
+              }
+            }
+          }
+
           // Active effects are not ticked at turn start; no effect delta to record.
           turnTickSnapshot.starting = {
             combatantId: starting.id,
@@ -7386,6 +7501,7 @@ export class EncountersService {
             conditionExpired: conditionDelta.expired,
             effectTicks: [],
             effectExpired: [],
+            actionUsesRecharged,
           };
           const reset = resetTurnStateForStart(starting.turnState);
           const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
@@ -7397,6 +7513,9 @@ export class EncountersService {
               expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
             }
             Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
+          }
+          if (nextActionUses) {
+            startSet.actionUses = toJsonText(nextActionUses);
           }
           tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
         } else if (phase === 'lair') {
@@ -7502,6 +7621,37 @@ export class EncountersService {
         detail: `condition expired: ${ex.conditionName}`,
       });
     }
+    // Issue #1921: one combat-log line per recharge roll on the starting combatant's turn —
+    // both outcomes are logged (acceptance criterion), under the NEW round (the roll happens
+    // at the start of the combatant's turn, not the end of the prior one).
+    //
+    // The ability's NAME, the die result, and the THRESHOLD are all deliberately absent from
+    // `detail`. An earlier revision embedded the name, reasoning by analogy with
+    // `resolution.actionName` elsewhere in this file — but that analogy breaks: an action USE
+    // is logged because the table just watched it happen. A recharge roll is invisible
+    // bookkeeping that fires every turn for an ability that may never have been used, on a
+    // monster whose statblock the DM may have deliberately left unrevealed (#1926) and whose
+    // action list 403s a non-DM. The combat log is readable by every campaign member and
+    // `redactEncounterEventsForViewer` masks only hidden-combatant identity, not action
+    // names, so naming the ability here would hand players a statblock the server otherwise
+    // withholds.
+    //
+    // `needed N+` is the same category of secret and had to go with it: it IS the statblock's
+    // recharge condition, stated verbatim. Dropping the threshold alone would not have been
+    // enough either — `rolled 3` plus `stays spent` bounds the threshold from below, and two
+    // or three rounds of those lines converge on it exactly, so the roll goes too. What
+    // survives is the acceptance criterion itself: both outcomes are logged, once per roll.
+    //
+    // Recovering the name, roll, and threshold FOR THE DM needs a DM-only log channel, which
+    // does not exist yet (`metadata.dmText` is only scrubbed when the actor is a hidden NPC,
+    // so it is not one) — that is the follow-up, not a reason to leak now.
+    for (const r of rechargeRolls) {
+      await this.appendEvent(encounterId, newRound, 'resource_changed', {
+        actor: r.combatantName,
+        actorId: r.combatantId,
+        detail: r.recovered ? 'a limited-use ability recharges' : 'a limited-use ability stays spent',
+      });
+    }
     if (escalationLogDetail) {
       await this.appendEvent(encounterId, newRound, 'override', {
         detail: escalationLogDetail,
@@ -7584,6 +7734,7 @@ export class EncountersService {
       combatantName: string;
       conditionNames: string[];
       effectNames: string[];
+      actionUsesNames: string[];
     }> = [];
 
     this.db.transaction((tx) => {
@@ -7697,14 +7848,17 @@ export class EncountersService {
         combatantName: string;
         conditionNames: string[];
         effectNames: string[];
+        actionUsesNames: string[];
       }> = [];
       if (snapshot) {
         type Working = {
           row: typeof combatants.$inferSelect;
           conditions: ConditionInstance[];
           effects: ActiveEffect[];
+          actionUses: ActionUsesMap;
           conditionRestored: string[];
           effectRestored: string[];
+          actionUsesRestored: string[];
         };
         const workByCombatant = new Map<number, Working>();
         for (const side of ['ending', 'starting'] as const) {
@@ -7718,8 +7872,10 @@ export class EncountersService {
               row,
               conditions: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
               effects: parseActiveEffects(row.activeEffects),
+              actionUses: fromJsonText<ActionUsesMap>(row.actionUses, {}),
               conditionRestored: [],
               effectRestored: [],
+              actionUsesRestored: [],
             };
             workByCombatant.set(entry.combatantId, working);
           }
@@ -7730,23 +7886,35 @@ export class EncountersService {
           working.effects = effectResult.merged;
           working.conditionRestored.push(...conditionResult.restoredNames);
           working.effectRestored.push(...effectResult.restoredNames);
+          // Issue #1921: put a recharged action back to "spent" if THIS is the turn-start
+          // tick that recharged it — mirrors condition/effect tick undo above.
+          if (entry.actionUsesRecharged && entry.actionUsesRecharged.length > 0) {
+            const usesResult = undoActionUsesRecharge(working.actionUses, entry.actionUsesRecharged);
+            working.actionUses = usesResult.uses;
+            working.actionUsesRestored.push(...usesResult.restoredNames);
+          }
         }
 
         for (const [combatantId, working] of workByCombatant) {
           const conditionNames = [...new Set(working.conditionRestored)];
           const effectNames = [...new Set(working.effectRestored)];
-          if (conditionNames.length > 0 || effectNames.length > 0) {
+          const actionUsesNames = [...new Set(working.actionUsesRestored)];
+          if (conditionNames.length > 0 || effectNames.length > 0 || actionUsesNames.length > 0) {
             restoredLog.push({
               combatantId,
               combatantName: working.row.name,
               conditionNames,
               effectNames,
+              actionUsesNames,
             });
 
             const writeSet: Partial<typeof combatants.$inferInsert> = {
               activeEffects: toJsonText(working.effects),
               ...conditionWriteSetFromInstances(working.conditions),
             };
+            if (actionUsesNames.length > 0) {
+              writeSet.actionUses = toJsonText(working.actionUses);
+            }
             tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).run();
           }
         }
@@ -7824,6 +7992,16 @@ export class EncountersService {
           actor: entry.combatantName,
           actorId: entry.combatantId,
           detail: `effect restored: ${name}`,
+        });
+      }
+      // Issue #1921: undoing a turn advance that recharged an action puts it back to spent.
+      // The ability's NAME stays out of `detail` for the same secrecy reason as the forward
+      // recharge log — this is player-visible and would expose an unrevealed statblock.
+      for (const _name of entry.actionUsesNames) {
+        await this.appendEvent(encounterId, newRound, 'resource_changed', {
+          actor: entry.combatantName,
+          actorId: entry.combatantId,
+          detail: 'limited-use ability recharge undone',
         });
       }
     }

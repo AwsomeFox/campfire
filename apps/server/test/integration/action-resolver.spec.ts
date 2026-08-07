@@ -165,6 +165,52 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() => service.listUsableActions(encounterId, actor, bob, 'player')).toThrow(/your own character/i);
   });
 
+  // Issue #1921: listUsableActions surfaces remaining-uses state, and it tracks a real spend.
+  it('#1921: listUsableActions reports uses:null for an at-will action and the live pool for a recharge action', () => {
+    const { orm, service, encounterId } = seed();
+    const [monster] = orm
+      .insert(combatants)
+      .values({
+        encounterId,
+        kind: 'monster',
+        name: 'Listed Drake',
+        initiative: 5,
+        hpCurrent: 80,
+        hpMax: 80,
+        sortOrder: 3,
+        statblockJson: JSON.stringify({
+          ac: 18,
+          abilityScores: { STR: 22, DEX: 10, CON: 18, INT: 10, WIS: 12, CHA: 14 },
+          actions: [
+            { name: 'Claw', kind: 'action', spec: { mode: 'attack', attack: { bonus: '+5' }, cost: { slot: '', count: 0 }, targets: { count: 0, allow: 'enemy' }, outcomes: {} } },
+            {
+              name: 'Breath Weapon',
+              kind: 'action',
+              spec: {
+                mode: 'attack',
+                attack: { bonus: '+9' },
+                cost: { slot: '', count: 0 },
+                uses: { recharge: 'recharge-5-6' },
+                targets: { count: 0, allow: 'enemy' },
+                outcomes: {},
+              },
+            },
+          ],
+        }),
+      })
+      .returning()
+      .all();
+
+    const before = service.listUsableActions(encounterId, monster.id, dmUser, 'dm');
+    expect(before.find((a) => a.name === 'Claw')!.uses).toBeNull();
+    expect(before.find((a) => a.name === 'Breath Weapon')!.uses).toEqual({ max: 1, recharge: 'recharge-5-6', spent: 0, available: 1 });
+
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: monster.id, actionIndex: 1, targetIds: [], commit: true }), dmUser, 'dm');
+
+    const after = service.listUsableActions(encounterId, monster.id, dmUser, 'dm');
+    expect(after.find((a) => a.name === 'Breath Weapon')!.uses).toEqual({ max: 1, recharge: 'recharge-5-6', spent: 1, available: 0 });
+  });
+
   // Issue #1326 — equipped inventory items surface as usable actions, merged after the
   // manually-authored sheet actions, and are resolvable/applyable through the SAME pipeline.
   const dagger = {
@@ -696,6 +742,94 @@ describe('action resolver (real SQLite, service layer)', () => {
     const body = (threw as { getResponse?: () => unknown }).getResponse?.();
     expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'legendary', remaining: 0, max: 0 });
     expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.turnState ?? '{}').used?.legendary ?? 0).toBe(0);
+  });
+
+  // Issue #1921: limited-use/recharge action pools — persisted spend, rejection of a second
+  // apply while exhausted, and undo refund.
+  function seedRechargeMonster(orm: ReturnType<typeof build>['orm'], encounterId: number) {
+    const [monster] = orm
+      .insert(combatants)
+      .values({
+        encounterId,
+        kind: 'monster',
+        name: 'Recharge Drake',
+        initiative: 5,
+        hpCurrent: 80,
+        hpMax: 80,
+        sortOrder: 3,
+        statblockJson: JSON.stringify({
+          ac: 18,
+          abilityScores: { STR: 22, DEX: 10, CON: 18, INT: 10, WIS: 12, CHA: 14 },
+          actions: [
+            {
+              name: 'Breath Weapon',
+              kind: 'action',
+              spec: {
+                mode: 'attack',
+                attack: { bonus: '+9' },
+                // No action-economy cost (isolates the uses-pool check from the
+                // per-turn action-economy check — a second call in the same test
+                // would otherwise be rejected by economy exhaustion first).
+                cost: { slot: '', count: 0 },
+                uses: { recharge: 'recharge-5-6' },
+                targets: { count: 0, allow: 'enemy' },
+                outcomes: {},
+              },
+            },
+          ],
+        }),
+      })
+      .returning()
+      .all();
+    return monster.id;
+  }
+
+  it('#1921: applying a recharge action twice is refused once spent, naming the recharge condition', () => {
+    const { orm, service, encounterId } = seed();
+    const monsterId = seedRechargeMonster(orm, encounterId);
+    const req = ActionResolveRequest.parse({ actorCombatantId: monsterId, actionIndex: 0, targetIds: [], commit: true });
+
+    const first = service.resolve(encounterId, req, dmUser, 'dm');
+    expect(first.applied).toBe(true);
+    const row = orm.select().from(combatants).where(eq(combatants.id, monsterId)).get()!;
+    const uses = JSON.parse(row.actionUses ?? '{}');
+    const usesKeys = Object.keys(uses);
+    expect(usesKeys).toHaveLength(1);
+    expect(usesKeys[0]).toMatch(/^statblock:/);
+    expect(uses[usesKeys[0]]).toEqual({ spent: 1 });
+
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, dmUser, 'dm');
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeDefined();
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_uses_exhausted', max: 1, remaining: 0 });
+    expect((body as { message: string }).message).toContain('Recharge 5–6');
+  });
+
+  it('#1921: undo refunds a spent recharge action back to usable', () => {
+    const { orm, service, encounterId } = seed();
+    const monsterId = seedRechargeMonster(orm, encounterId);
+    const req = ActionResolveRequest.parse({ actorCombatantId: monsterId, actionIndex: 0, targetIds: [], commit: true });
+
+    const applied = service.resolve(encounterId, req, dmUser, 'dm');
+    expect(applied.applied).toBe(true);
+    const spentRow = orm.select().from(combatants).where(eq(combatants.id, monsterId)).get()!;
+    const spentUses = JSON.parse(spentRow.actionUses ?? '{}');
+    const usesKey = Object.keys(spentUses)[0];
+    expect(spentUses[usesKey].spent).toBe(1);
+
+    service.undo(encounterId, applied.undoToken!, dmUser, 'dm');
+    const refundedRow = orm.select().from(combatants).where(eq(combatants.id, monsterId)).get()!;
+    const refundedUses = JSON.parse(refundedRow.actionUses ?? '{}');
+    expect(refundedUses[usesKey].spent).toBe(0);
+
+    // Usable again after the refund — a third resolve+apply succeeds.
+    const secondApply = service.resolve(encounterId, req, dmUser, 'dm');
+    expect(secondApply.applied).toBe(true);
   });
 
   it('OSR descending-AC attack evidence shows the effective ascending threshold, not native descending AC as the threshold', () => {

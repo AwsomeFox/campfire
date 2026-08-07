@@ -1828,7 +1828,10 @@ CREATE TABLE IF NOT EXISTS combatants (
   -- Issue #425: inline homebrew statblock JSON for manual monsters.
   statblock_json TEXT,
   -- Issue #1926: DM-controlled reveal of this combatant's statblock to non-DM viewers.
-  statblock_revealed INTEGER NOT NULL DEFAULT 0
+  statblock_revealed INTEGER NOT NULL DEFAULT 0,
+  -- Issue #1921: limited-use/recharge action spend, JSON map keyed by fingerprint+source to
+  -- { spent }. Null = nothing spent yet.
+  action_uses TEXT
 );
 
 CREATE TABLE IF NOT EXISTS combatant_removal_undos (
@@ -2292,6 +2295,9 @@ CREATE TABLE IF NOT EXISTS action_apply_chains (
   cost_slot TEXT NOT NULL DEFAULT '', cost_count INTEGER NOT NULL DEFAULT 0, spell_level_spent INTEGER NOT NULL DEFAULT 0,
   concentration_before TEXT, pending_concentration_checks_before_json TEXT NOT NULL DEFAULT '[]',
   started_concentration INTEGER NOT NULL DEFAULT 0, targets_json TEXT NOT NULL DEFAULT '[]',
+  -- Issue #1921: the limited-use/recharge spend key + amount this apply wrote, so undo()
+  -- can refund the exact spend rather than re-deriving it from the current action spec.
+  uses_key TEXT, uses_spent INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, undone_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_chains(encounter_id);

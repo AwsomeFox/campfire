@@ -2156,6 +2156,11 @@ export const combatants = sqliteTable('combatants', {
   // NOT NULL DEFAULT false — added by migration on older DBs (see
   // db/db.module.ts migrateCombatantsTableForStatblockRevealed1926).
   statblockRevealed: integer('statblock_revealed', { mode: 'boolean' }).notNull().default(false),
+  // Issue #1921: limited-use/recharge action spend, a JSON map keyed by the server's
+  // action fingerprint+source (see ActionResolverService.actionFingerprint/usesKeyFor) to
+  // `{ spent }`. Nullable; added by migration on older DBs — see db/db.module.ts
+  // migrateActionUsesTracking1921(). null = no action spent yet (all at max).
+  actionUses: text('action_uses'),
 });
 
 /** One-shot, short-lived exact-row snapshots for combatant removal undo (issue #1469). */
@@ -2301,6 +2306,12 @@ export const actionApplyChains = sqliteTable('action_apply_chains', {
   concentrationBefore: text('concentration_before'),
   pendingConcentrationChecksBeforeJson: text('pending_concentration_checks_before_json').notNull().default('[]'),
   startedConcentration: integer('started_concentration', { mode: 'boolean' }).notNull().default(false),
+  // Issue #1921: the limited-use/recharge spend key this apply wrote to the actor's
+  // combatants.action_uses map (null when the action was untracked / at-will), and how much
+  // was spent (0 when usesKey is null). undo() reads these to refund the exact spend rather
+  // than re-deriving it from the (possibly since-edited) action spec.
+  usesKey: text('uses_key'),
+  usesSpent: integer('uses_spent').notNull().default(0),
   // The ActionUndoTarget[] pre-apply snapshot — the authoritative source undo() restores from.
   targetsJson: text('targets_json').notNull().default('[]'),
   createdAt: text('created_at').notNull(),
