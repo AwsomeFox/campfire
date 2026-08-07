@@ -299,8 +299,24 @@ const ProposeArg = z
       'pending until a dm calls approve_proposal/reject_proposal. Ignored on tools with no REST proposal path ' +
       '(objectives, notes, campaign status, members, encounters).',
   );
-const LimitArg = (max: number, fallback: number) =>
-  z.number().int().positive().max(max).optional().describe(`Max rows to return (default ${fallback}, max ${max})`);
+// `fallback` must name a real service default — the page size actually applied when the
+// caller omits `limit`. For an endpoint with no service default (an omitted `limit` leaves
+// pagination opt-in and every visible row is returned, per `applyPage`'s no-op behaviour),
+// pass `UNBOUNDED` instead of guessing a number: the rendered description says so honestly
+// rather than repeating `max` as a fake default (issue #2058).
+const UNBOUNDED = Symbol('unbounded');
+const LimitArg = (max: number, fallback: number | typeof UNBOUNDED) =>
+  z
+    .number()
+    .int()
+    .positive()
+    .max(max)
+    .optional()
+    .describe(
+      fallback === UNBOUNDED
+        ? `Max rows to return (max ${max}; omitted returns every row — no default page size)`
+        : `Max rows to return (default ${fallback}, max ${max})`,
+    );
 const OffsetArg = z.number().int().nonnegative().optional().describe('Rows to skip, for paging (default 0)');
 const BulkNotificationArgs = {
   ids: z.array(Id).optional().describe('Specific notification ids (from list_notifications)'),
@@ -1098,7 +1114,7 @@ export class McpToolsService {
       server,
       'get_session_recaps',
       'List session recaps for a campaign, newest first.',
-      { campaignId: CampaignIdArg, limit: LimitArg(100, 100), offset: OffsetArg },
+      { campaignId: CampaignIdArg, limit: LimitArg(100, UNBOUNDED), offset: OffsetArg },
       async ({ campaignId, limit, offset }) => {
         const role = await this.access.requireMember(user, campaignId as number);
         // issue #71: limit/offset pushed into SQL (was rows.slice() after a full read).
@@ -2175,7 +2191,7 @@ export class McpToolsService {
         campaignId: CampaignIdArg,
         entityType: EntityType.describe('The entity type the thread is anchored to'),
         entityId: Id.describe('The entity id the thread is anchored to'),
-        limit: LimitArg(500, 500),
+        limit: LimitArg(500, UNBOUNDED),
         offset: OffsetArg,
       },
       async ({ campaignId, entityType, entityId, limit, offset }) => {
@@ -4470,7 +4486,7 @@ export class McpToolsService {
       {
         campaignId: CampaignIdArg,
         status: z.enum(['pending', 'resolved']).optional().describe('Filter by request status'),
-        limit: LimitArg(CHECK_REQUEST_LIST_MAX_LIMIT, CHECK_REQUEST_LIST_MAX_LIMIT),
+        limit: LimitArg(CHECK_REQUEST_LIST_MAX_LIMIT, UNBOUNDED),
         offset: OffsetArg,
       },
       async ({ campaignId, status, limit, offset }) => {
