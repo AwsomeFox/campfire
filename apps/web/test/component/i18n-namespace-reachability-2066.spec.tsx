@@ -26,6 +26,27 @@ import { CombatLog } from '../../src/features/encounters/CombatLog';
 const ARABIC = /[؀-ۿ]/;
 const LATIN_LETTERS = /[A-Za-z]/;
 
+/**
+ * Copilot review on PR #2072 flagged switching the language on the imported `src/i18n` as a
+ * cross-file flake risk, on the reading that other component specs asserting English UI text
+ * ("Use", "Run for group", "Save") could run concurrently against a shared singleton.
+ *
+ * Measured, not assumed: vitest's defaults here are `pool: 'forks'` with `isolate: true` — this
+ * config sets no `pool`, `isolate`, or `fileParallelism` — so every spec FILE gets its own module
+ * registry, and `import i18n from '../../src/i18n'` is a distinct instance per file rather than
+ * one shared object. Probe: deleting the `afterAll` restore entirely and running the whole tier
+ * still passed 8 files / 47 tests, English assertions included. Under a shared singleton that
+ * probe would have failed.
+ *
+ * The restore below is kept anyway — it costs nothing and makes the file correct in isolation.
+ *
+ * What this DOES depend on, stated so a future config change cannot break it silently: if
+ * `apps/web/vitest.config.ts` ever sets `isolate: false` (or moves to a pool that shares module
+ * state), these files would share one i18n instance and this switch WOULD leak. The fix then is
+ * not to clone the instance here — importing the REAL singleton is the point of this test, since
+ * the bug it guards is a component failing to reach the app's actual catalog — but to keep the
+ * tier isolated.
+ */
 const ORIGINAL_LANGUAGE = i18n.language;
 
 beforeAll(async () => {
