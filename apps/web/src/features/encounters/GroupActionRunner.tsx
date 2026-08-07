@@ -50,6 +50,7 @@ export function GroupActionRunner({
   encounterId,
   actorCombatantId,
   actorName,
+  actionIndex,
   actionName,
   spec,
   sourceAction,
@@ -61,6 +62,8 @@ export function GroupActionRunner({
   encounterId: number;
   actorCombatantId: number;
   actorName: string;
+  /** The originating actor's own action index — the row the DM actually opened. */
+  actionIndex: number;
   actionName: string;
   spec: ActionSpec;
   sourceAction: { name: string; toHit: string; damage: string };
@@ -109,7 +112,13 @@ export function GroupActionRunner({
     const data = actionQueries[i]?.data;
     if (data) actionsByCombatantId.set(id, data);
   });
-  const candidates = findGroupActionCandidates({ combatants, actorCombatantId, sourceAction, actionsByCombatantId });
+  const otherCandidates = findGroupActionCandidates({ combatants, actorCombatantId, sourceAction, actionsByCombatantId });
+  // The DM opened THIS actor's action row to start the group flow in the first place — "run
+  // for all N" means every other matching combatant PLUS this one, not just the others (issue
+  // #1922 acceptance: "8 same-statblock goblins ... at most 3 interactions" reads as 8 rolls,
+  // not 7). Its own index/spec are already known — no eligibility lookup needed.
+  const actorCandidate: GroupActionCandidate = { combatantId: actorCombatantId, combatantName: actorName, actionIndex, actionName, spec };
+  const candidates = [actorCandidate, ...otherCandidates];
 
   // Selection auto-tracks every loaded candidate until the DM manually (de)selects one, at
   // which point it freezes to their explicit choice.
@@ -260,12 +269,12 @@ export function GroupActionRunner({
               {t('encounters.groupAction.loadingCandidates', { defaultValue: 'Checking the roster for matching combatants…' })}
             </p>
           )}
-          {!loadingCandidates && candidates.length === 0 && (
+          {!loadingCandidates && otherCandidates.length === 0 && (
             <p className="text-muted" style={{ fontSize: 12, margin: 0 }} data-testid="group-action-empty">
               {t('encounters.groupAction.noCandidates', { defaultValue: 'No other living combatants match this action.' })}
             </p>
           )}
-          {candidates.length > 0 && (
+          {!loadingCandidates && (
             <>
               <div>
                 <span className="card-kicker" style={{ marginBottom: 6, display: 'block' }}>

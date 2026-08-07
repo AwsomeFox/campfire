@@ -840,6 +840,7 @@ export default function RunSessionPage() {
     id: number;
     combatantId: number;
     actorName: string;
+    actionIndex: number;
     actionName: string;
     spec: ActionSpec;
     sourceAction: { name: string; toHit: string; damage: string };
@@ -1937,7 +1938,7 @@ export default function RunSessionPage() {
   // Issue #1922: same trigger shape as `onUseActionRequested` above, plus the fetched
   // `UsableAction` row so the group runner can derive its (name, toHit, damage) fingerprint.
   const onUseGroupActionRequested = useCallback(
-    (combatantId: number, actorName: string, _actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => {
+    (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => {
       const id = ++pendingGroupActionUseSequence.current;
       pendingActionUseIdRef.current = null;
       setPendingApply(null);
@@ -1946,6 +1947,7 @@ export default function RunSessionPage() {
         id,
         combatantId,
         actorName,
+        actionIndex,
         actionName,
         spec,
         sourceAction: { name: action.name, toHit: action.toHit, damage: action.damage },
@@ -4345,6 +4347,7 @@ export default function RunSessionPage() {
           encounterId={eid}
           actorCombatantId={pendingGroupActionUse.combatantId}
           actorName={pendingGroupActionUse.actorName}
+          actionIndex={pendingGroupActionUse.actionIndex}
           actionName={pendingGroupActionUse.actionName}
           spec={pendingGroupActionUse.spec}
           sourceAction={pendingGroupActionUse.sourceAction}
