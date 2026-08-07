@@ -325,11 +325,20 @@ export function evaluateTranslationRatchet(counts, baseline) {
 /**
  * Validates that a parsed baseline is a plain object mapping file paths to non-negative integers
  * (issue #2069 part 2). `evaluateTranslationRatchet`'s `count > allowed` / `count < allowed`
- * comparisons are silently false for every count when `allowed` is `NaN`, a numeric string, an
- * object, an array, etc. (`5 > {}` and `5 < {}` are both `false`), which turns a single malformed
- * hand-edit — the baseline file's documented workflow — into "this file is no longer enforced" while
- * the check still reports `ok`. Reject that shape up front, naming the bad key, instead of letting
- * a silently-false comparison swallow it.
+ * comparisons are BOTH silently false when `allowed` is not a comparable number (`5 > {}` and
+ * `5 < {}` are both `false`), which turns a single malformed hand-edit — the baseline file's
+ * documented workflow — into "this file is no longer enforced" while the check still reports `ok`.
+ *
+ * Measured against the pre-guard code, the values that actually bypassed enforcement were a plain
+ * object, a non-numeric string, and `NaN`. Of those, only the first two are reachable from the
+ * baseline FILE: `JSON.parse` cannot produce `NaN`, so that case only arises if this function is
+ * called with a programmatically built object. It is still rejected, and still covered, because
+ * this is an exported pure function and its contract should not depend on its one current caller
+ * happening to come from `JSON.parse`.
+ *
+ * The guard rejects every non-integer entry, not just the bypassing ones: `[]`, `"5"`, and `true`
+ * are caught today only by numeric coercion the check never asked for and could lose to a
+ * refactor, and no such entry is ever intentional.
  * @param {unknown} baseline
  * @returns {string[]} errors; empty when the shape is valid
  */
@@ -344,8 +353,11 @@ export function validateBaselineShape(baseline) {
   const errors = [];
   for (const [file, value] of Object.entries(baseline)) {
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      // NOT `JSON.stringify` alone: it renders `NaN` as `null`, so the message would name a
+      // value the file does not contain and send the reader looking for the wrong entry.
+      const shown = typeof value === 'number' && Number.isNaN(value) ? 'NaN' : JSON.stringify(value);
       errors.push(
-        `scripts/i18n-translation-baseline.json: entry "${file}" is ${JSON.stringify(value)}, expected a non-negative integer`,
+        `scripts/i18n-translation-baseline.json: entry "${file}" is ${shown}, expected a non-negative integer`,
       );
     }
   }

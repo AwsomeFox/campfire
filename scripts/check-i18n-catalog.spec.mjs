@@ -188,6 +188,10 @@ assert.strictEqual(validateBaselineShape(5).length, 1);
 // Measured against the pre-fix code with `count: 999999`, the entries that actually SILENTLY
 // BYPASSED enforcement are exactly three: a plain object (`{}`), a non-numeric string (`"x"`),
 // and `NaN` — all cases where both `count > allowed` and `count < allowed` evaluate false.
+// Of those three, only the object and the string are reachable from the baseline FILE: JSON has
+// no NaN literal, so `JSON.parse` can never produce one. It is covered anyway because
+// `validateBaselineShape` is an exported pure function whose contract should not rest on its one
+// current caller happening to be `JSON.parse`.
 // `[]`, `"5"`, `true` coerce to comparable numbers and were caught; `null` and a missing key
 // are caught because `baseline[file] ?? 0` substitutes 0 before the comparison.
 //
