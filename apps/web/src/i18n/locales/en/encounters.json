@@ -265,6 +265,39 @@
       "noTargets": "No legal targets.",
       "systemMathNotice": "Resolved with math that hasn't been audited for your system — verify the result."
     },
+    "actions": {
+      "title": "Actions",
+      "use": "Use",
+      "useGroup": "Run for group"
+    },
+    "groupAction": {
+      "heading": "{{actorName}} · {{actionName}} · group",
+      "regionLabel": "Run {{actionName}} for the group",
+      "dismissLabel": "Cancel group action",
+      "cancel": "Cancel",
+      "loadingCandidates": "Checking the roster for matching combatants…",
+      "noCandidates": "No other living combatants match this action.",
+      "runForAllCount": "Run for all {{count}}",
+      "targetShared": "Shared target",
+      "targetPerActor": "Target individually",
+      "pickTargets": "Pick target(s) ({{selected}}/{{max}})",
+      "roll": "Roll for group",
+      "rolling": "Rolling…",
+      "announceComplete": "{{applied}} of {{total}} applied.",
+      "stoppedEarly": "Stopped after a failure — {{applied}} applied, {{notRun}} not run.",
+      "status": {
+        "applied": "Applied",
+        "skipped": "Skipped — no action left",
+        "failed": "Failed",
+        "notRun": "Not run"
+      },
+      "undo": "Undo",
+      "undone": "Undone",
+      "undoAll": "Undo all",
+      "undoingAll": "Undoing…",
+      "undoAllFailed": "Some undos failed — reload to check the encounter state.",
+      "close": "Close"
+    },
     "checks": {
       "requestCheck": "Request a check",
       "targets": "Targets",

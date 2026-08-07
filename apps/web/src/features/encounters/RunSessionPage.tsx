@@ -18,7 +18,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -56,6 +56,7 @@ import { shouldRevealInitiative } from './initiativeReveal';
 import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
 import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
 import { ActionUsePanel, legalTargets } from './ActionUseFlow';
+import { GroupActionRunner } from './GroupActionRunner';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { NotFoundState } from '../../components/NotFoundState';
@@ -830,6 +831,21 @@ export default function RunSessionPage() {
   const pendingActionUseIdRef = useRef<number | null>(null);
   const [actionTargetIds, setActionTargetIds] = useState<number[]>([]);
   const [actionTargetsDeclared, setActionTargetsDeclared] = useState(false);
+  // Issue #1922: group action rolls — run one monster/NPC action for every selected identical
+  // combatant in one pass. A separate pending slot from `pendingActionUse` above (mutually
+  // exclusive in the UI; opening one dismisses the other) because the group flow's own step
+  // machine (candidate + target selection -> sequential loop -> summary card) has nothing in
+  // common with the single-actor preview/apply flow.
+  const [pendingGroupActionUse, setPendingGroupActionUse] = useState<{
+    id: number;
+    combatantId: number;
+    actorName: string;
+    actionIndex: number;
+    actionName: string;
+    spec: ActionSpec;
+    sourceAction: { name: string; toHit: string; damage: string };
+  } | null>(null);
+  const pendingGroupActionUseSequence = useRef(0);
   const [actionImpactTargetIds, setActionImpactTargetIds] = useState<number[]>([]);
   const actionImpactTimerRef = useRef<number | null>(null);
   const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
@@ -1913,7 +1929,29 @@ export default function RunSessionPage() {
       setPendingApply(null);
       setActionTargetIds([]);
       setActionTargetsDeclared(false);
+      setPendingGroupActionUse(null);
       setPendingActionUse({ id, combatantId, actorName, actionIndex, actionName, spec });
+    },
+    [],
+  );
+
+  // Issue #1922: same trigger shape as `onUseActionRequested` above, plus the fetched
+  // `UsableAction` row so the group runner can derive its (name, toHit, damage) fingerprint.
+  const onUseGroupActionRequested = useCallback(
+    (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => {
+      const id = ++pendingGroupActionUseSequence.current;
+      pendingActionUseIdRef.current = null;
+      setPendingApply(null);
+      setPendingActionUse(null);
+      setPendingGroupActionUse({
+        id,
+        combatantId,
+        actorName,
+        actionIndex,
+        actionName,
+        spec,
+        sourceAction: { name: action.name, toHit: action.toHit, damage: action.damage },
+      });
     },
     [],
   );
@@ -4303,6 +4341,26 @@ export default function RunSessionPage() {
         />
       )}
 
+      {pendingGroupActionUse && (
+        <GroupActionRunner
+          key={pendingGroupActionUse.id}
+          encounterId={eid}
+          actorCombatantId={pendingGroupActionUse.combatantId}
+          actorName={pendingGroupActionUse.actorName}
+          actionIndex={pendingGroupActionUse.actionIndex}
+          actionName={pendingGroupActionUse.actionName}
+          spec={pendingGroupActionUse.spec}
+          sourceAction={pendingGroupActionUse.sourceAction}
+          combatants={orderedCombatants}
+          // Same gate as ActionUsePanel's own `applyDisabled`/`applyGateReason` above — the
+          // group runner's "Roll for group" button applies (commits), so it is gated exactly
+          // like a single Apply: sync-blocked always, safety-hold-blocked too (#599/#1933).
+          applyDisabled={riskyBlocked}
+          applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
+          onDismiss={() => setPendingGroupActionUse(null)}
+        />
+      )}
+
       {/*
           Keep the tracker and its live history in the same cockpit on large screens.
           The source order deliberately remains tracker → logs: on smaller viewports the
@@ -4438,6 +4496,15 @@ export default function RunSessionPage() {
                     // "Use" buttons via `syncBlocked` below rather than unmounting the list.
                     canEditCombatantPermission(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
                       ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
+                      : undefined
+                  }
+                  // Issue #1922: identical gating to `onUseMonsterAction` above — DM-only
+                  // (`canEditCombatantPermission` reduces to `canDmWrite` once `characterId`
+                  // is null), monster/npc rows only. The sync gate disables the rendered
+                  // button the same way, via `disabledReason` inside `CombatantActionsList`.
+                  onUseGroupAction={
+                    canEditCombatantPermission(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
+                      ? (actionIndex, actionName, spec, action) => onUseGroupActionRequested(c.id, c.name, actionIndex, actionName, spec, action)
                       : undefined
                   }
                   busy={pendingCombatantIds.has(c.id) || reconcileBlocks}

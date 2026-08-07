@@ -294,6 +294,39 @@
       "noTargets": "No legal targets.",
       "systemMathNotice": "تمت التسوية بحسابات لم تُدقَّق لنظام قواعدك — تحقّق من النتيجة."
     },
+    "actions": {
+      "title": "الإجراءات",
+      "use": "استخدام",
+      "useGroup": "تنفيذ للمجموعة"
+    },
+    "groupAction": {
+      "heading": "{{actorName}} · {{actionName}} · المجموعة",
+      "regionLabel": "تنفيذ {{actionName}} للمجموعة",
+      "dismissLabel": "إلغاء الإجراء الجماعي",
+      "cancel": "إلغاء",
+      "loadingCandidates": "جارٍ التحقق من القائمة بحثًا عن مقاتلين مطابقين…",
+      "noCandidates": "لا يوجد مقاتلون أحياء آخرون يطابقون هذا الإجراء.",
+      "runForAllCount": "تنفيذ لـ {{count}} مقاتلين",
+      "targetShared": "هدف مشترك",
+      "targetPerActor": "استهداف فردي",
+      "pickTargets": "اختر الهدف/الأهداف ({{selected}}/{{max}})",
+      "roll": "الرمي للمجموعة",
+      "rolling": "جارٍ الرمي…",
+      "announceComplete": "تم تطبيق {{applied}} من أصل {{total}}.",
+      "stoppedEarly": "توقف بعد فشل — تم تطبيق {{applied}}، ولم يُنفَّذ {{notRun}}.",
+      "status": {
+        "applied": "تم التنفيذ",
+        "skipped": "تم التخطي — لا يوجد إجراء متبقٍ",
+        "failed": "فشل",
+        "notRun": "لم يُنفَّذ"
+      },
+      "undo": "تراجع",
+      "undone": "تم التراجع",
+      "undoAll": "تراجع عن الكل",
+      "undoingAll": "جارٍ التراجع…",
+      "undoAllFailed": "فشل بعض التراجعات — أعد التحميل للتحقق من حالة المواجهة.",
+      "close": "إغلاق"
+    },
     "wizard": {
       "step1": "1. Parameters",
       "step2": "2. Roster",
