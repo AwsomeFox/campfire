@@ -263,6 +263,49 @@ class FakeAudioContext implements MinimalAudioContext {
   }
 }
 
+test.describe('review fixes (issue #1920 review)', () => {
+  test('unlock() stays locked and silent when the AudioContext factory throws, instead of escaping the gesture handler', () => {
+    // A browser without AudioContext/webkitAudioContext, or one refusing to construct it, must
+    // not take down the unrelated UI whose pointerdown handler called us. Staying locked is the
+    // correct degraded state: every playX no-ops while ctx is null.
+    const engine = new TableAudioEngine(() => {
+      throw new Error('no WebAudio in this browser');
+    });
+    expect(() => engine.unlock()).not.toThrow();
+    expect(engine.unlocked).toBe(false);
+    // and it must still be silent afterwards rather than half-initialised
+    expect(() => engine.playTurnChime('high')).not.toThrow();
+  });
+
+  test("vibrateIfEnabled does not touch navigator at all on the default 'off' path", () => {
+    // The module's contract says 'off' returns before doing anything else. Calling canVibrate()
+    // eagerly broke that quietly: it reads navigator on every roll for every user, including the
+    // default-off majority. Asserted by making navigator access itself the failure.
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    let touched = false;
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      get() {
+        touched = true;
+        return { vibrate: () => true };
+      },
+    });
+    try {
+      vibrateIfEnabled([10], 'off', false);
+      expect(touched).toBe(false);
+      // reduced-motion is the other short-circuit and must behave the same way
+      vibrateIfEnabled([10], 'high', true);
+      expect(touched).toBe(false);
+      // control: an enabled, motion-allowed call DOES reach navigator
+      vibrateIfEnabled([10], 'high', false);
+      expect(touched).toBe(true);
+    } finally {
+      if (original) Object.defineProperty(globalThis, 'navigator', original);
+      else delete (globalThis as { navigator?: unknown }).navigator;
+    }
+  });
+});
+
 test.describe('TableAudioEngine — gesture gating (issue #1920 acceptance criterion, mocked AudioContext)', () => {
   test('the factory is never called at construction time — no AudioContext before a gesture', () => {
     let factoryCalls = 0;

@@ -158,8 +158,16 @@ export function shouldVibrate(level: TableAudioLevel, reducedMotion: boolean, vi
   return level !== 'off' && !reducedMotion && vibrateSupported;
 }
 
-/** Fires a vibration pattern only when every `shouldVibrate` condition holds. Never throws. */
+/**
+ * Fires a vibration pattern only when every `shouldVibrate` condition holds. Never throws.
+ *
+ * The two cheap, `navigator`-free conditions are checked FIRST so the common `'off'` path (the
+ * default for every user) returns without touching `navigator` at all — the module's stated
+ * contract is that `'off'` returns before doing anything else, and calling `canVibrate()`
+ * eagerly quietly broke it (issue #1920 review).
+ */
 export function vibrateIfEnabled(pattern: readonly number[], level: TableAudioLevel, reducedMotion: boolean): void {
+  if (level === 'off' || reducedMotion) return;
   if (!shouldVibrate(level, reducedMotion, canVibrate())) return;
   navigator.vibrate(pattern as number[]);
 }
@@ -248,11 +256,32 @@ export class TableAudioEngine {
     return this.ctx !== null;
   }
 
-  /** Call ONLY from a user-gesture handler. Idempotent — a second call is a no-op. */
+  /**
+   * Call ONLY from a user-gesture handler. Idempotent — a second call is a no-op.
+   *
+   * Best-effort by construction: a browser with no `AudioContext`/`webkitAudioContext`, or one
+   * that refuses to construct it, must leave the engine locked and silent rather than throwing
+   * out of the gesture handler that called us — that handler belongs to unrelated UI, and an
+   * exception there would take a working control down with it (issue #1920 review). Staying
+   * locked is already the correct degraded state: every `playX` below no-ops while `ctx` is
+   * null, so failure here costs the cues and nothing else.
+   */
   unlock(): void {
     if (this.ctx) return;
-    this.ctx = this.factory();
-    if (this.ctx.state === 'suspended') void this.ctx.resume();
+    let ctx: MinimalAudioContext;
+    try {
+      ctx = this.factory();
+    } catch {
+      return;
+    }
+    this.ctx = ctx;
+    if (ctx.state === 'suspended') {
+      try {
+        void ctx.resume();
+      } catch {
+        /* resume is advisory — a rejected/throwing resume still leaves a usable locked state */
+      }
+    }
   }
 
   /**
