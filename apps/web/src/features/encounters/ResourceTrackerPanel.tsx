@@ -20,6 +20,7 @@ import {
   removePendingKey,
   type PipOwnerScope,
 } from './resourceTrackerLogic';
+import { adapterResourceLabel } from '../../lib/adapterVocabularyLabel';
 
 function Pips({
   max,
@@ -544,7 +545,11 @@ export function ResourceTrackerPanel({
                   return (
                     <div key={key} className="flex items-center justify-between gap-4 flex-wrap">
                       <div className="text-sm min-w-0 break-words">
-                        {res.name || key}
+                        {/* Issue #2053 — `res.name` is whatever English name was stored when this
+                            pool was first created (see CharacterPage's AdapterResourceCard); the
+                            catalog lookup is keyed by the stable `key` instead so a known adapter
+                            resource still renders translated regardless of what was persisted. */}
+                        {adapterResourceLabel(t, { key, name: res.name || key })}
                         {res.recharge && <span className="ml-2 text-xs opacity-70">({res.recharge})</span>}
                         {sourceText && <span className="ml-2 text-xs opacity-70">[{sourceText}]</span>}
                       </div>

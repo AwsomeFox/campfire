@@ -10,6 +10,7 @@ import { FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, erase
 import { useQuery } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../../lib/api';
 import { reconcileFogSyncState } from '../fogSyncState';
+import { adapterConditionLabel } from '../../../lib/adapterVocabularyLabel';
 import { initials as tokenInitials } from '../../../lib/avatarText';
 import { Card, TextInput } from '../../../components/ui';
 import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapSrcSet, encounterMapUrl, playerDisplayEncounterMapUrl, uploadAttachment } from '../../../components/ImageUpload';
@@ -2905,10 +2906,14 @@ export function BattleMap({
                             {conditionBadges.visible.map((badge, index) => {
                               const placement = conditionPlacements[index];
                               if (!placement) return null;
+                              // Issue #2053 — `badge.condition` is the adapter-declared condition
+                              // name (or a DM-typed custom one); translate for display, falling
+                              // back to the name itself when there's no catalog entry.
+                              const conditionLabel = adapterConditionLabel(t, badge.condition);
                               return (
                                 <button key={badge.condition} type="button" data-testid={`map-token-condition-${c.id}-${index}`}
                                   tabIndex={conditionDetailsInteractive ? 0 : -1}
-                                  aria-label={t('encounters.map.tokenDetails.conditions', { name: c.name, conditions: badge.condition })} title={badge.condition}
+                                  aria-label={t('encounters.map.tokenDetails.conditions', { name: c.name, conditions: conditionLabel })} title={conditionLabel}
                                   onPointerDown={conditionDetailsInteractive ? (event) => { event.preventDefault(); event.stopPropagation(); } : undefined}
                                   onKeyDown={(event) => event.stopPropagation()}
                                   onClick={(event) => { if (!conditionDetailsInteractive) return; event.stopPropagation(); focusTokenConditionDetails(c.id); }}

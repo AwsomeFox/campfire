@@ -150,6 +150,7 @@ import {
 } from './characterSheetA11y';
 import { findSpecialResource, resourceAvailability } from './specialCharacterResource';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { adapterConditionLabel, adapterResourceLabel } from '../../lib/adapterVocabularyLabel';
 
 export default function CharacterPage() {
   const { campaignId, characterId } = useParams<{ campaignId: string; characterId: string }>();
@@ -2237,6 +2238,9 @@ function AdapterResourceCard({
   const announce = useAnnounce();
 
   const { max, used, available } = resourceAvailability(def, character);
+  // Issue #2053 — display only. `def.name` itself keeps flowing to the server (see the
+  // POST below) unchanged: the stored resource record is domain data, not presentation.
+  const resourceLabel = adapterResourceLabel(t, def);
 
   async function adjust(delta: number) {
     if (busy) return;
@@ -2265,9 +2269,13 @@ function AdapterResourceCard({
         });
       }
       onChange();
-      announce(`${def.name} ${delta > 0 ? 'spent' : 'restored'}`);
+      announce(
+        delta > 0
+          ? t('characters.resources.announceSpent', { name: resourceLabel })
+          : t('characters.resources.announceRestored', { name: resourceLabel }),
+      );
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : t('characters.resources.updateError', { name: def.name }));
+      onError(err instanceof ApiError ? err.message : t('characters.resources.updateError', { name: resourceLabel }));
     } finally {
       setBusy(false);
     }
@@ -2275,11 +2283,11 @@ function AdapterResourceCard({
 
   return (
     <Card className="space-y-2.5">
-      <h3 id={`${characterSheetSectionId('resources')}-heading`} className="card-kicker mb-0">{def.name}</h3>
+      <h3 id={`${characterSheetSectionId('resources')}-heading`} className="card-kicker mb-0">{resourceLabel}</h3>
       <div className="flex items-center gap-2.5 flex-wrap">
         <span
           className="tracking-[3px] text-[15px] leading-none"
-          aria-label={t('characters.resources.available', { available, max, name: def.name })}
+          aria-label={t('characters.resources.available', { available, max, name: resourceLabel })}
         >
           {Array.from({ length: max }, (_, i) => (
             <span key={i} style={{ color: i < available ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}>
@@ -2404,6 +2412,9 @@ function ConditionLevelRow({
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
   const level = conditionLevel(track, character);
+  // Issue #2053 — display only. `track.name` itself keeps flowing to the server (see
+  // the POST below) unchanged: it identifies which stored track to adjust.
+  const conditionLabel = adapterConditionLabel(t, track.name);
 
   async function adjust(delta: number) {
     if (busy) return;
@@ -2412,9 +2423,13 @@ function ConditionLevelRow({
     try {
       await api.post(`${API}/characters/${character.id}/conditions/level`, { name: track.name, delta });
       onChange();
-      announce(`${track.name} ${delta > 0 ? 'raised' : 'lowered'} to level ${level + delta}`);
+      announce(
+        delta > 0
+          ? t('characters.conditionLevel.announceRaised', { name: conditionLabel, level: level + delta })
+          : t('characters.conditionLevel.announceLowered', { name: conditionLabel, level: level + delta }),
+      );
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : t('characters.conditionLevel.updateError', { name: track.name }));
+      onError(err instanceof ApiError ? err.message : t('characters.conditionLevel.updateError', { name: conditionLabel }));
     } finally {
       setBusy(false);
     }
@@ -2422,10 +2437,10 @@ function ConditionLevelRow({
 
   return (
     <div className="flex items-center gap-2.5 flex-wrap">
-      <span className="text-[11px] text-secondary font-bold uppercase">{track.name}</span>
+      <span className="text-[11px] text-secondary font-bold uppercase">{conditionLabel}</span>
       <span
         className="tracking-[3px] text-[15px] leading-none"
-        aria-label={t('characters.conditionLevel.level', { level, max: track.max, name: track.name })}
+        aria-label={t('characters.conditionLevel.level', { level, max: track.max, name: conditionLabel })}
       >
         {Array.from({ length: track.max }, (_, i) => (
           <span key={i} style={{ color: i < level ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}>

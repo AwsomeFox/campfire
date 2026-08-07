@@ -9,14 +9,18 @@
       "lower": "خفض",
       "level": "{{level}} من {{max}} — مستوى {{name}}",
       "count": "{{level}}/{{max}}",
-      "updateError": "تعذّر تحديث {{name}}."
+      "updateError": "تعذّر تحديث {{name}}.",
+      "announceRaised": "تم رفع {{name}} إلى المستوى {{level}}",
+      "announceLowered": "تم خفض {{name}} إلى المستوى {{level}}"
     },
     "resources": {
       "spend": "إنفاق",
       "restore": "استعادة",
       "available": "{{available}} من {{max}} — {{name}} متاح",
       "count": "{{available}}/{{max}}",
-      "updateError": "تعذّر تحديث {{name}}."
+      "updateError": "تعذّر تحديث {{name}}.",
+      "announceSpent": "تم إنفاق {{name}}",
+      "announceRestored": "تمت استعادة {{name}}"
     },
     "ddbImport": {
       "summaryTitle": "تم الاستيراد من D&D Beyond",
