@@ -3659,13 +3659,19 @@ export default function RunSessionPage() {
     },
     [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks, riskyBlocked],
   );
-  // Drop the previous encounter's cached ref bindings and DOM refs on switch. React clears
-  // `combatantRowRefs` itself by invoking each ref with null on unmount, so this is belt-and-
-  // braces there; `combatantRowRefCallbacks` has no such lifecycle and would otherwise only
-  // ever grow.
+  // Drop the previous encounter's cached ref bindings on switch, so the cache stays bounded
+  // across a long session.
+  //
+  // ONLY the callback cache. Clearing `combatantRowRefs` here too is actively wrong (#2083
+  // review): with the target encounter already in the React Query cache, `encounter` is
+  // non-null in the same render `eid` changes, so rows mount and attach their refs during that
+  // commit — and this passive effect, running afterwards, would drop refs for rows that are
+  // still mounted. React does not re-invoke a ref until its identity changes, so those entries
+  // would stay missing until the next render and the turn auto-scroll would silently fall back
+  // to a `querySelector`. React already clears that map on unmount by invoking each ref with
+  // null, so the belt-and-braces line was not harmless.
   useEffect(() => {
     combatantRowRefCallbacks.current.clear();
-    combatantRowRefs.current.clear();
   }, [eid]);
   const autoScrollSkipped = useRef(false);
   // `RunSessionPage` is reused across encounters; reset the first-load latch so
