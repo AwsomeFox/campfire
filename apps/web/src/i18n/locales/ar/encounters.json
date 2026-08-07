@@ -56,6 +56,12 @@
       "delayingBadge": "مؤجَّل",
       "announcement": "تم نقل {{name}} في ترتيب المبادرة."
     },
+    "controller": {
+      "giveControlTo": "منح التحكم لـ {{name}}",
+      "giveControl": "منح التحكم للاعب",
+      "clearControl": "إلغاء تحكم اللاعب",
+      "controlledBy": "تحت تحكم {{name}}"
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
