@@ -8,7 +8,7 @@ import {
   runGroupActionSequence,
   undoGroupActionsInReverseOrder,
   type GroupActionCandidate,
-} from '../../src/features/encounters/groupActionRunner';
+} from '../../src/features/encounters/groupActionRunnerLogic';
 
 const SPEC: ActionSpec = {
   mode: 'attack',
