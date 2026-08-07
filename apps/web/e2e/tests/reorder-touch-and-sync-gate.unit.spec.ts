@@ -105,7 +105,12 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
 
   test('the initiative strip\'s canReorder withdraws the affordance during an outage, not just the drop', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    const propMatch = source.match(/canReorder=\{([^}]+)\}/);
+    // Anchored to a JSX attribute on its own line. `handleReorderDrop`'s comment above
+    // quotes the OLD `canReorder={canEditEncounter}` to explain what changed, and an
+    // unanchored match found THAT first and read the pre-fix expression — this assertion
+    // failed against the very fix it exists to pin. Prose naming the old code is exactly
+    // what a source scan must not mistake for the code.
+    const propMatch = source.match(/^\s*canReorder=\{([^}]+)\}$/m);
     expect(propMatch).not.toBeNull();
     const expression = propMatch![1];
     expect(expression).toContain('canEditEncounter');
