@@ -357,6 +357,24 @@ function migrateUsersTableForColorVisionAssist1942(sqlite: Database.Database): v
 }
 
 /**
+ * Migration for DBs created before table audio & haptics (issue #1920):
+ * `users.table_audio` didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN,
+ * modeled on migrateUsersTableForColorVisionAssist1942 above.
+ */
+function migrateUsersTableForTableAudio1920(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasTableAudio = columns.some((c) => c.name === 'table_audio');
+  if (hasTableAudio) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN table_audio TEXT NOT NULL DEFAULT 'off'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -5330,6 +5348,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0169_check_requests_group_id_1943', run: migrateCheckRequestsTableForGroupId1943 },
   { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
+  // #1925 landed on main taking 0171; this branch takes 0172 as the centrally claimed ordinal.
+  { name: '0172_users_table_audio_1920', run: migrateUsersTableForTableAudio1920 },
   { name: '0173_action_uses_tracking_1921', run: migrateActionUsesTracking1921 },
   // 0172/0173 are CENTRALLY CLAIMED by other in-flight branches (#2050 table audio/haptics
   // holds 0172; #1921 monster recharge abilities holds 0173 — see that branch's "chore(db):

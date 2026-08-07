@@ -240,6 +240,7 @@ export class MeController {
           animateOthersRolls: true,
           canCreateCampaigns: true,
           colorVisionAssist: false,
+          tableAudio: 'off',
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },
