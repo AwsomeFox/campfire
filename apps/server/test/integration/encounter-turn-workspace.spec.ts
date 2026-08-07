@@ -2610,6 +2610,63 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
     expect(JSON.parse(row.actionUses ?? '{}')[usesKey].spent).toBe(1);
   });
 
+  // Regression (Devin review on PR #2062): `action_uses` is ONE JSON blob holding every
+  // tracked action's spend. The DM override used to build the merged map from the row read
+  // BEFORE the write transaction opened, then write it wholesale — so any other action's
+  // spend that landed in between was reverted, letting an already-used ability fire again.
+  // The merge now rebases against the fresh transaction-local row, the same way condition
+  // mutations do (issue #747).
+  //
+  // The concurrent write is injected through `adapterForCampaign`, which `updateCombatant`
+  // awaits at a point strictly AFTER it reads the combatant row and strictly BEFORE it opens
+  // the write transaction. That is the exact window the bug lived in, and hooking the awaited
+  // call hits it deterministically — simply not awaiting the call and writing straight after
+  // does NOT: the function yields at an earlier await, so the write lands before the row is
+  // even read and the test passes against the bug.
+  it('a DM uses-override merges against the fresh row, so a concurrent spend of another action is not reverted', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, actions } = build();
+    const { encounterId, drake } = seedAliceThenDrake(orm);
+    spendBreathWeapon(actions, encounterId, drake);
+    const usesKey = Object.keys(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}'))[0];
+
+    const svc = service as unknown as { adapterForCampaign: (campaignId: number) => Promise<unknown> };
+    const originalAdapterFor = svc.adapterForCampaign.bind(service);
+    let injected = false;
+    svc.adapterForCampaign = async (campaignId: number) => {
+      const adapter = await originalAdapterFor(campaignId);
+      if (!injected) {
+        injected = true;
+        const mid = JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}');
+        orm
+          .update(combatants)
+          .set({ actionUses: JSON.stringify({ ...mid, 'other-action': { spent: 1 } }) })
+          .where(eq(combatants.id, drake))
+          .run();
+      }
+      return adapter;
+    };
+
+    try {
+      await service.updateCombatant(
+        encounterId,
+        drake,
+        { actionUses: { actionIndex: 0, spent: 0 }, idempotencyKey: 'concurrent-merge-1' } as any,
+        dmUser,
+        'dm',
+      );
+    } finally {
+      svc.adapterForCampaign = originalAdapterFor;
+    }
+    expect(injected).toBe(true);
+
+    const row = JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}');
+    // The DM's own override applied...
+    expect(row[usesKey].spent).toBe(0);
+    // ...without clobbering the concurrent spend of the other action.
+    expect(row['other-action']).toEqual({ spent: 1 });
+  });
+
   it('DM force-toggle sets an action’s spend state directly, clamped to [0, max], and is audit-logged', async () => {
     dataDir = makeTempDataDir();
     const { orm, service, actions } = build();

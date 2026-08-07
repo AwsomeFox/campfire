@@ -4928,6 +4928,14 @@ export class EncountersService {
     // is a direct set (not a delta), so both "force recharge" (spent: 0) and "force exhaust"
     // (spent: max) are one call.
     let actionUsesLabel: string | null = null;
+    // Resolved here but MERGED INSIDE the transaction against the fresh row — see the
+    // `actionUsesPatch` block beside the condition rebase below. `action_uses` is one JSON
+    // blob covering every tracked action, so building it from the pre-transaction `existing`
+    // snapshot and writing it wholesale would silently revert any OTHER action's spend that
+    // landed in between (a concurrent apply, or a turn-start recharge) — the same lost-update
+    // hazard conditions already avoid by rebasing (issue #747). Resolving the target here is
+    // safe: it reads the action LIST, not the spend map.
+    let actionUsesPatch: { key: string; spent: number } | null = null;
     if (patch.actionUses !== undefined && isDm) {
       if (!this.actionResolver) {
         throw new BadRequestException('Action-uses override is unavailable.');
@@ -4937,9 +4945,7 @@ export class EncountersService {
         { actionIndex: patch.actionUses.actionIndex, actionName: patch.actionUses.actionName },
         encounterRow.campaignId,
       );
-      const spent = Math.max(0, Math.min(patch.actionUses.spent, target.max));
-      const currentUses = fromJsonText<Record<string, { spent?: number }>>(existing.actionUses, {});
-      staticUpdate.actionUses = toJsonText({ ...currentUses, [target.key]: { spent } });
+      actionUsesPatch = { key: target.key, spent: Math.max(0, Math.min(patch.actionUses.spent, target.max)) };
       actionUsesLabel = target.name;
     }
 
@@ -4984,6 +4990,10 @@ export class EncountersService {
     if (
       Object.keys(staticUpdate).length === 0 &&
       !recomputeHp &&
+      // `actionUses` no longer lands in `staticUpdate` (it is merged against the fresh row
+      // inside the transaction), so it needs its own term here or an actionUses-only patch
+      // would early-return as a no-op and silently persist nothing.
+      actionUsesPatch === null &&
       !conditionFieldsTouched &&
       !spFieldsTouched &&
       !deathStateTouched &&
@@ -5182,6 +5192,16 @@ export class EncountersService {
         _beforeSucc = fresh.deathSaveSuccesses;
         _beforeFail = fresh.deathSaveFailures;
         const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+        if (actionUsesPatch) {
+          // Rebase the DM's uses override against the FRESH row, for the same reason the
+          // condition block below does (issue #747): `action_uses` is a single JSON map of
+          // EVERY tracked action's spend, so merging into a pre-transaction snapshot would
+          // clobber a concurrent spend or turn-start recharge of a DIFFERENT action rather
+          // than merging with it — letting an already-spent ability quietly become available
+          // again. Only the named key is written; every other key carries over from `fresh`.
+          const currentUses = fromJsonText<Record<string, { spent?: number }>>(fresh.actionUses, {});
+          writeSet.actionUses = toJsonText({ ...currentUses, [actionUsesPatch.key]: { spent: actionUsesPatch.spent } });
+        }
         if (conditionFieldsTouched) {
           // Rebase every condition mutation against the FRESH row (issue #747 / #423).
           // Legacy string deltas and structured instance deltas share this path so a
@@ -5544,7 +5564,7 @@ export class EncountersService {
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
       staticUpdate.statblockRevealed !== undefined ||
-      staticUpdate.actionUses !== undefined ||
+      actionUsesPatch !== null ||
       defenseOrStatblockChanged ||
       hpMaxChanged;
     if (changedNonHp) {
@@ -5582,7 +5602,7 @@ export class EncountersService {
     // The action's own name is freely embedded in `detail` (it is not combatant identity —
     // see `resolution.actionName` usage elsewhere in this file); only the COMBATANT's name
     // stays off `detail` (#869), same convention as the reveal toggle above.
-    if (staticUpdate.actionUses !== undefined && actionUsesLabel) {
+    if (actionUsesPatch && actionUsesLabel) {
       await this.appendEvent(encounterId, round, 'resource_changed', {
         target: targetName,
         targetId: combatantId,

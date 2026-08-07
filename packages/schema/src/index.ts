@@ -10796,11 +10796,20 @@ export type DamageSaveOutcome = z.infer<typeof DamageSaveOutcome>;
  * statblock action list — never by the server's internal fingerprint+source spend key,
  * which is an implementation detail no caller should have to construct.
  */
-export const CombatantActionUsesPatch = z.object({
-  actionIndex: z.number().int().min(0).max(99).optional(),
-  actionName: z.string().max(120).optional(),
-  spent: z.number().int().min(0).max(99),
-});
+export const CombatantActionUsesPatch = z
+  .object({
+    actionIndex: z.number().int().min(0).max(99).optional(),
+    actionName: z.string().max(120).optional(),
+    spent: z.number().int().min(0).max(99),
+  })
+  // Both identifiers optional individually, but at least one is required: a patch naming no
+  // action at all is not a meaningful request, and letting it through only defers the failure
+  // into `resolveActionUsesTarget` as a confusing "Action undefined not found" at write time.
+  // Reject it at parse time, where the caller gets a field-level 400 instead.
+  .refine((v) => v.actionIndex !== undefined || v.actionName !== undefined, {
+    message: 'Provide actionIndex or actionName to identify which action to set.',
+    path: ['actionIndex'],
+  });
 export type CombatantActionUsesPatch = z.infer<typeof CombatantActionUsesPatch>;
 
 export const CombatantUpdate = z.object({

@@ -390,9 +390,13 @@ export function effectiveActionUsesMax(uses: ActionUses): number {
 
 /**
  * Human-readable label for an action's limited-use pool (issue #1921) — "Recharge 5–6",
- * "Recharge 6", "3/Day" — or '' for an at-will action (no pool). Shared by the server's
- * exhausted-action rejection message and the web action-list badge so the two surfaces
- * never describe the same pool two different ways.
+ * "Recharge 6", "3/Day" — or '' for an at-will action (no pool).
+ *
+ * Used by the server's exhausted-action rejection message. The web action-list badge does
+ * NOT call this: it formats the same pool through the i18n catalog
+ * (`encounters.actions.uses.*`) so the label can be translated, which a plain string helper
+ * in the locale-free schema package cannot do. The two are deliberately parallel
+ * implementations of one format, not a shared one.
  */
 export function describeActionUses(uses: ActionUses): string {
   const recharge = uses.recharge.trim();
