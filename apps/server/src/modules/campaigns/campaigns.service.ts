@@ -877,7 +877,7 @@ export class CampaignsService {
     const cleanReason = (reason ?? '').trim().slice(0, 500);
     await this.db.insert(campaignStatusTransitions).values({
       campaignId: id,
-      actorUserId: auditActor(user),
+      actorUserId: auditActor(user).slice(0, 120),
       actorName: (user.name ?? '').slice(0, 200),
       fromStatus,
       toStatus,
@@ -3796,16 +3796,24 @@ export class CampaignsService {
       const t = (entry ?? {}) as Record<string, unknown>;
       const fromStatus = str(t.fromStatus);
       const toStatus = str(t.toStatus);
-      if (!fromStatus || !toStatus) continue; // no from/to pair carries no provenance
+      // Defensive (#846 review): an export is a loose document — only accept rows whose
+      // from/to are real campaign statuses and whose timestamp parses as ISO, so a malformed
+      // or hand-edited export can't plant invalid statuses/non-ISO times that break ordering
+      // and UI formatting. Skipped rows carry no provenance and never fail the import.
+      const VALID_STATUSES = new Set(['active', 'paused', 'completed']);
+      if (!VALID_STATUSES.has(fromStatus) || !VALID_STATUSES.has(toStatus)) continue;
+      const rawCreated = str(t.createdAt);
+      const parsedCreatedAt = rawCreated ? Date.parse(rawCreated) : NaN;
+      if (Number.isNaN(parsedCreatedAt)) continue;
       try {
         await this.db.insert(campaignStatusTransitions).values({
           campaignId: newId,
-          actorUserId: str(t.actorUserId) || auditActor(user),
-          actorName: str(t.actorName) || (user.name ?? ''),
+          actorUserId: str(t.actorUserId).slice(0, 120) || auditActor(user),
+          actorName: str(t.actorName).slice(0, 200) || (user.name ?? ''),
           fromStatus,
           toStatus,
           reason: str(t.reason).slice(0, 500),
-          createdAt: str(t.createdAt) || nowIso(),
+          createdAt: new Date(parsedCreatedAt).toISOString(),
         });
       } catch {
         // skip a single bad provenance row; never fail the import over it

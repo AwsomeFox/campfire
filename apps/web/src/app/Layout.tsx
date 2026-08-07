@@ -365,7 +365,7 @@ function ConnectionSyncBanner({
  * Player-visible line only — the DM-only `reason` is omitted here on purpose
  * (members see actor + status + time; the reason stays in Settings).
  */
-function ArchivedProvenance({ campaignId }: { campaignId: number }) {
+function ArchivedProvenance({ campaignId, status }: { campaignId: number; status: string }) {
   const { t } = useTranslation();
   const [latest, setLatest] = useState<CampaignStatusTransition | null>(null);
   useEffect(() => {
@@ -381,7 +381,7 @@ function ArchivedProvenance({ campaignId }: { campaignId: number }) {
     return () => {
       cancelled = true;
     };
-  }, [campaignId]);
+  }, [campaignId, status]);
   if (!latest) return null;
   return (
     <span style={{ opacity: 0.85 }}>
@@ -1101,7 +1101,7 @@ function LayoutContent() {
             role="status"
           >
             {t('nav.archivedBanner', { status: campaign.status })}
-            {campaignId !== undefined && <ArchivedProvenance campaignId={campaignId} />}
+            {campaignId !== undefined && <ArchivedProvenance campaignId={campaignId} status={campaign.status} />}
             {isDm && (
               <>
                 {' '}
