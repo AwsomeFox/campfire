@@ -6553,6 +6553,17 @@ export const DiceTheme = z.enum([
   'mahogany_wood',
 ]);
 export type DiceTheme = z.infer<typeof DiceTheme>;
+
+/**
+ * Table audio & haptics level (issue #1920): a single field covers both the
+ * on/off toggle and a 3-step volume, so there is no separate "enabled" boolean
+ * that could disagree with the level. 'off' is the default and produces zero
+ * sound and zero vibration — every cue call site must check this before
+ * synthesizing audio or calling `navigator.vibrate`. No media assets are
+ * involved: cues are synthesized client-side via WebAudio.
+ */
+export const TableAudioLevel = z.enum(['off', 'low', 'medium', 'high']);
+export type TableAudioLevel = z.infer<typeof TableAudioLevel>;
 export { TimeFormat, DEFAULT_TIME_FORMAT } from './timeFormat';
 import { TimeFormat } from './timeFormat';
 
@@ -6591,6 +6602,13 @@ export const User = z.object({
    * default so default-path rendering is unchanged.
    */
   colorVisionAssist: z.boolean().default(false),
+  /**
+   * Table audio & haptics (issue #1920): synthesized dice-clatter/crit/fumble/
+   * your-turn cues and vibration. 'off' by default — no sound or vibration
+   * plays until the user opts in. No DM/player distinction and no secrecy
+   * interaction: cues fire only on events the viewer already sees.
+   */
+  tableAudio: TableAudioLevel.default('off'),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -6617,6 +6635,7 @@ export const PreferencesUpdate = z.object({
   timeFormat: TimeFormat.optional(),
   animateOthersRolls: z.boolean().optional(),
   colorVisionAssist: z.boolean().optional(),
+  tableAudio: TableAudioLevel.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 

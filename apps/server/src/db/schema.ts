@@ -1025,6 +1025,9 @@ export const users = sqliteTable('users', {
   canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(false),
   // Color-vision-assist mode: adds non-color channels to combat indicators (issue #1942).
   colorVisionAssist: integer('color_vision_assist', { mode: 'boolean' }).notNull().default(false),
+  // Table audio & haptics level: 'off' | 'low' | 'medium' | 'high' — synthesized dice/turn
+  // cues and vibration, default off (issue #1920).
+  tableAudio: text('table_audio').notNull().default('off'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
