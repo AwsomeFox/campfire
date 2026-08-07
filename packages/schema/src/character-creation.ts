@@ -422,7 +422,7 @@ function dnd5eTemplates(level: number): CharacterStarterTemplate[] {
         },
       ],
       breakdown: [
-        `AC 15 = leather armor (11) + DEX (+${fighterDexMod})`,
+        `AC 15 = leather armor (11) + DEX (+${rogueDexMod})`,
         `HP ${rogueHp} = level ${level} rogue hit dice + CON modifier`,
         `Attack ${rapierToHit} = DEX (${signed(rogueDexMod)}) + proficiency (+${prof})`,
         'Stealth starts at expertise; other skills at proficiency',

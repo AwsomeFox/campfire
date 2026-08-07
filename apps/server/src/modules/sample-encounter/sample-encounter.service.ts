@@ -157,8 +157,13 @@ export class SampleEncounterService {
         baseNameTaken = true;
         continue;
       }
-      const match = /^Sample Fight (\d+)$/.exec(name);
-      if (match) highest = Math.max(highest, Number(match[1]));
+      const prefix = `${SAMPLE_FIGHT_BASE_NAME} `;
+      if (name.startsWith(prefix)) {
+        const suffix = name.slice(prefix.length);
+        if (/^\d+$/.test(suffix)) {
+          highest = Math.max(highest, Number(suffix));
+        }
+      }
     }
     if (!baseNameTaken && highest === 0) return SAMPLE_FIGHT_BASE_NAME;
     return `${SAMPLE_FIGHT_BASE_NAME} ${Math.max(highest, 1) + 1}`;
