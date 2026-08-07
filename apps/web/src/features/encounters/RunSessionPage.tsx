@@ -1500,7 +1500,7 @@ export default function RunSessionPage() {
     overrideAuthority.canDmWrite
     && !overrideAuthority.staleIdentity
     && encounterOverrideOfferable(encounterSync)
-    && !effectiveEncounterSyncOverride.active;
+    && !(effectiveEncounterSyncOverride.active && effectiveEncounterSyncOverride.scope === 'dm');
   // Issue #1914: the scoped, player-facing counterpart — offered only to a non-DM viewer
   // with current player-write authority, gated by every other precondition
   // `encounterOverrideAuthorized` will itself require once granted (fresh identity,
@@ -4532,6 +4532,7 @@ export default function RunSessionPage() {
                   // and every DM row (unaffected — a 'dm' override already covers it) sees
                   // exactly `riskyBlocked`, unchanged.
                   syncBlocked={combatantWriteBlocked(c)}
+                  turnTopologyBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
                   // Issue #1926: a non-DM viewer mounts the same compendium statblock viewer
                   // once the DM has revealed this combatant — the ruleEntryId link itself is
