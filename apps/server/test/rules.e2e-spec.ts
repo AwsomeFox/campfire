@@ -2158,6 +2158,46 @@ describe('rules / rule packs — a campaign that already stores an importer-only
       await fake.close();
     }
   });
+
+  it('JSON import (POST /campaigns/import) drops an importer-only ruleSystem instead of selecting it, matching the existing dangling-slug degrade-not-fail path', async () => {
+    // importCampaign() is a THIRD write path for `ruleSystem` — separate from create()/update()
+    // — that inserts a new campaign row directly rather than going through validateRuleSystem.
+    // An untrusted export document naming an installed-but-importer-only pack must not be able
+    // to select it through this path either.
+    const { startFakeCepheus } = await import('./fake-cepheus');
+    const fake = await startFakeCepheus();
+    try {
+      const install = await request(server).post('/api/v1/rules/packs/install').set(preexistingDm).send({ source: 'cepheus', url: fake.baseUrl });
+      expect(install.status).toBe(202);
+      const job = await pollJob(server, preexistingDm, install.body.id);
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('cepheus-srd');
+
+      const doc = {
+        campaign: {
+          name: 'Imported Cepheus Campaign',
+          ruleSystem: 'cepheus-srd',
+          dmControlsProgression: false,
+          dmControlsTurns: false,
+          requireDmTurnConfirmation: false,
+          publicRecapSharingEnabled: true,
+          catalogPrivacy: 'private',
+          aiExternalContentPolicy: 'blocked',
+          narrationLanguage: 'en',
+          status: 'active',
+        },
+      };
+      const importRes = await request(server).post('/api/v1/campaigns/import').set(preexistingDm).send(doc);
+      // The import itself is NOT rejected wholesale (unlike create()/update()) — it degrades
+      // exactly like every other unusable ruleSystem case importCampaign already handles
+      // (an uninstalled pack, an invalid narrationLanguage): the rest of the document still
+      // imports, just without selecting the adapterless slug.
+      expect(importRes.status).toBe(201);
+      expect(importRes.body.ruleSystem).toBe('');
+    } finally {
+      await fake.close();
+    }
+  });
 });
 
 /**
