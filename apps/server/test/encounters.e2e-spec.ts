@@ -10260,6 +10260,51 @@ describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
     expect(reloadCombatants.find((c) => c.id === rogueId)!.initiative).toBe(14);
   });
 
+  it('a reorder performed while PREPARING still holds after /start re-sorts in running mode (#2074 review finding 2)', async () => {
+    const server = ctx.app.getHttpServer();
+    const running = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).query({ status: 'running' }).set(dm);
+    for (const e of running.body as Array<{ id: number }>) {
+      await request(server).post(`/api/v1/encounters/${e.id}/end`).set(dm);
+    }
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Prep Reorder Drill', hidden: false });
+    const encounterId = created.body.id as number;
+
+    // Same different-DEX tie as the running case above: the adapter's own rule (initMod
+    // desc) puts Rogue ahead of Fighter, so a prep-time drag of Fighter past Rogue only
+    // survives /start if the DM's intent is carried across the status transition.
+    const wizard = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Wizard', hpMax: 10, initMod: 5 });
+    const fighter = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Fighter', hpMax: 12, initMod: 1 });
+    const rogue = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Rogue', hpMax: 8, initMod: 3 });
+    const wizardId = wizard.body.id as number;
+    const fighterId = fighter.body.id as number;
+    const rogueId = rogue.body.id as number;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${wizardId}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${fighterId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${rogueId}`).set(dm).send({ initiative: 14 });
+
+    // Still PREPARING — no expectedTurnVersion, because there is no turn order yet.
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: wizardId });
+    expect(res.status).toBe(201);
+
+    // While preparing, sortCombatants orders by sortOrder alone, so this much passed even
+    // before the fix — it is the control, not the assertion under test.
+    const beforeStart = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((beforeStart.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([wizardId, fighterId, rogueId]);
+
+    // /start re-sorts the whole roster with sortCombatantsWithAdapter(..., 'running', …).
+    // Without a manualOrder stamped during preparing, the adapter tiebreak recomputes this
+    // tie from initMod and puts Rogue back ahead of Fighter, silently discarding the prep.
+    const started = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(started.status).toBe(201);
+    expect((started.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([wizardId, fighterId, rogueId]);
+
+    const afterStart = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((afterStart.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([wizardId, fighterId, rogueId]);
+  });
+
   it('reorders within a tie: only sortOrder changes, initiative values are unchanged, and order survives reload', async () => {
     const { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion } = await seedFight();
     const server = ctx.app.getHttpServer();

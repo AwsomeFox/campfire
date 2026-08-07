@@ -7026,13 +7026,18 @@ export class EncountersService {
       // different initMod (different DEX), so the DM's drag has no visible effect. Stamp
       // `manualOrder` on EVERY combatant in the newly computed order (not just the moved
       // one) so sortCombatants can hold the whole roster at this position across a
-      // re-sort; not running is unaffected, since sortCombatants there orders by
-      // sortOrder alone and never reaches the adapter tiebreak.
+      // re-sort.
+      //
+      // Stamped for a PREPARING encounter too (#2074 review finding 2). It is inert while
+      // preparing — `sortCombatants` orders by sortOrder alone there and never reaches the
+      // adapter tiebreak — but `/start` re-sorts the roster in RUNNING mode, so without it
+      // a prep-time reorder is discarded at exactly the moment the fight begins, by exactly
+      // the mechanism above. Gating the stamp on status reintroduced the bug on the
+      // preparing→running edge; the doc on this method already promised the opposite ("a
+      // preparing-time reorder is establishing tie-break order for later"), and only
+      // stamping unconditionally makes that true.
       orderedIds.forEach((id, index) => {
-        tx.update(combatants)
-          .set(status === 'running' ? { sortOrder: index, manualOrder: index } : { sortOrder: index })
-          .where(eq(combatants.id, id))
-          .run();
+        tx.update(combatants).set({ sortOrder: index, manualOrder: index }).where(eq(combatants.id, id)).run();
       });
       const initiativeChanged = newInitiative !== moved.initiative;
       if (initiativeChanged) {

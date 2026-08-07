@@ -486,7 +486,16 @@ export function sortCombatants(
     // was ever manually reordered still falls through to the adapter's own rule
     // unchanged. Deliberately checked before breakTie, not inside it — this is roster
     // state the adapter itself never sees.
-    if (a.manualOrder !== null && b.manualOrder !== null) return a.manualOrder - b.manualOrder;
+    // `?? null`, NOT `!== null`. The Zod schema defaults this to null, so anything parsed
+    // through it is null-or-number — but a Combatant assembled without going through the
+    // parser (`{...} as Combatant` fixtures, and any future hand-built row) leaves the field
+    // `undefined`. A strict `!== null` treats `undefined` as "has a manual order", and the
+    // subtraction then yields NaN, which makes this comparator return NaN and hands the
+    // whole tie group an arbitrary order. That is how the first version of this broke four
+    // pre-existing adapter-tiebreak tests (#2074 review round 2).
+    const aManual = a.manualOrder ?? null;
+    const bManual = b.manualOrder ?? null;
+    if (aManual !== null && bManual !== null) return aManual - bManual;
     return breakTie(a, b);
   });
 }
