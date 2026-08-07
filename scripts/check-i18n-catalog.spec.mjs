@@ -133,6 +133,35 @@ assert.strictEqual(bankedSlackErrors.length, 1);
 assert.match(bankedSlackErrors[0], /nav\.json/);
 assert.match(bankedSlackErrors[0], /below the recorded baseline of 76/);
 
+// Baseline entry for a file no longer scanned -> MUST fail, telling the author to delete the line.
+// The equality rule above cannot catch this: its loop walks `counts`, so a baseline-only key is
+// never compared to anything and its allowance survives indefinitely (Devin review on PR #2076).
+const staleEntryErrors = evaluateTranslationRatchet(
+  { 'apps/web/src/i18n/locales/ar/nav.json': 76 },
+  { 'apps/web/src/i18n/locales/ar/nav.json': 76, 'apps/web/src/i18n/locales/ar/deleted.json': 40 },
+);
+assert.strictEqual(staleEntryErrors.length, 1);
+assert.match(staleEntryErrors[0], /deleted\.json/);
+assert.match(staleEntryErrors[0], /no longer scanned/);
+
+// A live file matching its baseline alongside it stays clean — the stale-entry rule must not
+// start flagging entries that ARE scanned.
+assert.deepStrictEqual(
+  evaluateTranslationRatchet(
+    { 'apps/web/src/i18n/locales/ar/nav.json': 76 },
+    { 'apps/web/src/i18n/locales/ar/nav.json': 76 },
+  ),
+  [],
+);
+
+// `validateBaselineShape` renders NaN as NaN, not as `null` (Copilot review on PR #2076):
+// `JSON.stringify(NaN)` is `"null"`, which would name a value the file cannot contain. NaN is
+// unreachable from the baseline FILE at all — JSON has no NaN literal — but this is an exported
+// pure function whose contract should not rest on its one caller being `JSON.parse`.
+const nanShapeErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': NaN });
+assert.strictEqual(nanShapeErrors.length, 1);
+assert.match(nanShapeErrors[0], /is NaN/);
+
 // A file with no recorded baseline entry defaults to an allowance of 0 (new file starts clean)
 assert.strictEqual(
   evaluateTranslationRatchet({ 'apps/web/src/i18n/locales/ar/newFile.json': 1 }, {}).length,

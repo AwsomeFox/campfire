@@ -351,6 +351,20 @@ export function evaluateTranslationRatchet(counts, baseline) {
       );
     }
   }
+  // A baseline entry for a file that is no longer scanned is the SAME banked-slack loophole
+  // wearing a different hat, and the equality rule above cannot see it: that loop walks `counts`,
+  // so a key present only in the baseline is never compared to anything. Delete or rename a
+  // locale file and its allowance survives forever; recreate that path later and untranslated
+  // values up to the old number pass unchallenged.
+  for (const file of Object.keys(baseline)) {
+    if (file in counts) continue;
+    errors.push(
+      `${file}: has a baseline entry of ${baseline[file]} but is no longer scanned ` +
+        `(the file was deleted or renamed, or its locale has no script detector). ` +
+        `Remove this line from scripts/i18n-translation-baseline.json — a stale allowance is ` +
+        `reusable headroom if that path ever comes back (issue #2069).`,
+    );
+  }
   return errors;
 }
 
@@ -376,8 +390,11 @@ export function validateBaselineShape(baseline) {
   const errors = [];
   for (const [file, value] of Object.entries(baseline)) {
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      // NOT `JSON.stringify` alone: it renders `NaN` as `null`, so the message would name a
+      // value the file does not contain and send the reader looking for the wrong entry.
+      const shown = typeof value === 'number' && Number.isNaN(value) ? 'NaN' : JSON.stringify(value);
       errors.push(
-        `scripts/i18n-translation-baseline.json: entry "${file}" is ${JSON.stringify(value)}, expected a non-negative integer`,
+        `scripts/i18n-translation-baseline.json: entry "${file}" is ${shown}, expected a non-negative integer`,
       );
     }
   }
