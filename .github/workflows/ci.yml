@@ -310,6 +310,15 @@ jobs:
   # Only packages/schema/dist is needed (36 specs import @campfire/schema), so it builds
   # that directly rather than waiting for the full shared build. The job starts
   # immediately and finishes in roughly two minutes.
+  #
+  # Issue #2025: this job also runs the jsdom + Testing Library component-render tier
+  # (`apps/web/test/component/**/*.spec.tsx`, `npm run test:component -w apps/web`) —
+  # a Vitest runner, not Playwright, chosen because apps/web is already Vite-based
+  # (`vite.config.ts`, `import.meta.glob` in the i18n catalog loader) so Vitest reuses
+  # that transform instead of introducing a second bundler's worth of shimming the
+  # way apps/server's Jest setup would have. It rides the same install/cache and the
+  # same schema build as the specs above, so it costs no new job and no meaningful
+  # wall-clock (a couple of seconds, not a new shard).
   unit-web:
     name: unit-web
     runs-on: ubuntu-latest
@@ -335,6 +344,8 @@ jobs:
         run: npm run build -w packages/schema
       - name: Run web unit specs
         run: npm run test:unit -w apps/web
+      - name: Run web component specs
+        run: npm run test:component -w apps/web
 
   # Browser E2E (Playwright). Consumes the shared schema + server + web dist and
   # runs the suite against the real built server serving the built SPA on one
