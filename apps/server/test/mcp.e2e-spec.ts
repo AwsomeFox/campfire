@@ -5194,6 +5194,13 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
   describe('issue #1923 — reorder_combatant MCP parity', () => {
     it('DM reorders a tied combatant to the top; sortOrder flips, initiative stays tied; a player scope is refused', async () => {
+      // Issue #744: only one running encounter is authoritative per campaign. This
+      // campaignId is shared across the whole file — end whatever an earlier test left
+      // running before starting a fresh one, or /start 409s.
+      const running = await dmAgent.get(`/api/v1/campaigns/${campaignId}/encounters`).query({ status: 'running' });
+      for (const e of running.body as Array<{ id: number }>) {
+        await dmAgent.post(`/api/v1/encounters/${e.id}/end`);
+      }
       const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'MCP Reorder Drill', hidden: false });
       expect(created.status).toBe(201);
       const encounterId = created.body.id as number;
@@ -5207,17 +5214,32 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       const rogueId = rogue.body.id as number;
       await dmAgent.patch(`/api/v1/encounters/${encounterId}/combatants/${fighterId}`).send({ initiative: 14 });
       await dmAgent.patch(`/api/v1/encounters/${encounterId}/combatants/${rogueId}`).send({ initiative: 14 });
+      // The shared campaignId's party may have grown across earlier tests in this file;
+      // `create()` auto-adds every active party character as a combatant, and /start 400s
+      // unless EVERY combatant has initiative. Bulk roll-initiative only fills still-null
+      // values (Fighter/Rogue above are already set, so their 14s are untouched) — this
+      // fills in whatever party members rode along, regardless of how many there are.
+      await dmAgent.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
       const started = await dmAgent.post(`/api/v1/encounters/${encounterId}/start`);
       expect(started.status).toBe(201);
       const beforeOrder = (started.body.combatants as Array<{ id: number }>).map((c) => c.id);
       expect(beforeOrder.indexOf(fighterId)).toBeLessThan(beforeOrder.indexOf(rogueId));
       const turnVersion = started.body.turnVersion as number;
 
+      // Move Rogue to land immediately BEFORE Fighter — i.e. after whatever currently
+      // precedes Fighter (or 'top' if Fighter already leads). This keeps Fighter as
+      // Rogue's new NEXT neighbor regardless of how many other combatants (an
+      // auto-added party, possibly with a higher rolled initiative) sit ahead of the
+      // tied pair in this shared campaign — Fighter's own initiative (14) is what makes
+      // this a same-tie move, not raw position.
+      const fighterIndex = beforeOrder.indexOf(fighterId);
+      const afterArg: number | 'top' = fighterIndex > 0 ? beforeOrder[fighterIndex - 1] : 'top';
+
       const client = await mcpClient(dmToken);
       const reordered = parseResult(
         await client.callTool({
           name: 'reorder_combatant',
-          arguments: { encounterId, combatantId: rogueId, afterCombatantId: 'top', expectedTurnVersion: turnVersion },
+          arguments: { encounterId, combatantId: rogueId, afterCombatantId: afterArg, expectedTurnVersion: turnVersion },
         }),
       ) as { id: number; initiative: number };
       expect(reordered.id).toBe(rogueId);
