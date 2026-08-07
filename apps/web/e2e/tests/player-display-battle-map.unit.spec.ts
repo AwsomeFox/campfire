@@ -59,7 +59,9 @@ test.describe('Player Display battle map (issue #484)', () => {
 
   test('BattleMap exports a cast projection mode for the table-facing surface', () => {
     const source = readFileSync(BATTLE_MAP, 'utf8');
-    expect(source).toContain("export function BattleMap");
+    // Issue #1917: BattleMap is now React.memo-wrapped (`export const BattleMap = memo(...)`)
+    // rather than a plain function declaration.
+    expect(source).toContain("export const BattleMap = memo(function BattleMap(");
     expect(source).toContain("projection?: 'session' | 'cast'");
     expect(source).toContain("data-testid={isCast ? 'cf-cast-battle-map' : 'battle-map'}");
   });
