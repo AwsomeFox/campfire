@@ -239,8 +239,11 @@ assert.strictEqual(blankedErrors.length, 1);
 assert.match(blankedErrors[0], /locales\/en/);
 assert.match(blankedErrors[0], /encounters\.whisper\.error/);
 
-// Whitespace-only value -> MUST flag, same as a fully empty string (a screen reads a
-// whitespace-only string as falsy in `{localError && <p>...}` exactly like `""`)
+// Whitespace-only value -> MUST flag, for a DIFFERENT reason than `""` and worth stating
+// precisely (Copilot review on PR #2077). `'   '` is TRUTHY in JavaScript, so a guard like
+// `{localError && <p>…}` does mount its paragraph — the element is there, rendering nothing
+// visible. So `""` fails by never mounting and `'   '` fails by mounting blank; both leave the
+// user with no message, which is what this rule is about, but only the empty case is falsy.
 const whitespaceErrors = findEmptyValues({ nav: { dashboard: '   ' } }, 'ar');
 assert.strictEqual(whitespaceErrors.length, 1);
 assert.match(whitespaceErrors[0], /locales\/ar/);
