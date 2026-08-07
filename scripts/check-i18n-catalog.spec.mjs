@@ -5,6 +5,8 @@ import {
   looksUntranslated,
   countUntranslatedInCatalog,
   evaluateTranslationRatchet,
+  validateBaselineShape,
+  findEmptyValues,
   NON_LATIN_SCRIPT_DETECTORS,
 } from './check-i18n-catalog.mjs';
 
@@ -118,19 +120,145 @@ assert.deepStrictEqual(
   [],
 );
 
-// Count fallen below baseline (someone translated more) -> MUST pass, not required to lower it
-assert.deepStrictEqual(
-  evaluateTranslationRatchet(
-    { 'apps/web/src/i18n/locales/ar/nav.json': 10 },
-    { 'apps/web/src/i18n/locales/ar/nav.json': 76 },
-  ),
-  [],
+// Count fallen below baseline (someone translated more) -> MUST now fail, forcing the baseline
+// entry to be lowered in the same PR (issue #2069 part 1: this used to pass silently, banking
+// slack that a later regression back up to the stale baseline could occupy with the check still
+// reporting `ok` — see the two-step regression fixture below for the exact scenario that happened
+// in #2053/PR #2065 + PR #2056).
+const bankedSlackErrors = evaluateTranslationRatchet(
+  { 'apps/web/src/i18n/locales/ar/nav.json': 10 },
+  { 'apps/web/src/i18n/locales/ar/nav.json': 76 },
 );
+assert.strictEqual(bankedSlackErrors.length, 1);
+assert.match(bankedSlackErrors[0], /nav\.json/);
+assert.match(bankedSlackErrors[0], /below the recorded baseline of 76/);
 
 // A file with no recorded baseline entry defaults to an allowance of 0 (new file starts clean)
 assert.strictEqual(
   evaluateTranslationRatchet({ 'apps/web/src/i18n/locales/ar/newFile.json': 1 }, {}).length,
   1,
 );
+
+// Reproduces the exact #2069 part-1 regression end-to-end: #2053/PR #2065 translated a value in
+// ar/encounters.json (count 130 -> 129) but left the baseline at 130; PR #2056 then added one new
+// untranslated string (count back up to 130), landing exactly on the stale baseline, and
+// check:i18n reported exit 0. With the equality requirement, step one already fails — the
+// baseline must be lowered to 129 in the same PR — so there is no free slot left for step two to
+// silently reuse.
+const step1TranslatedButBaselineUntouched = evaluateTranslationRatchet(
+  { 'apps/web/src/i18n/locales/ar/encounters.json': 129 },
+  { 'apps/web/src/i18n/locales/ar/encounters.json': 130 },
+);
+assert.strictEqual(step1TranslatedButBaselineUntouched.length, 1); // MUST fail now, not pass
+const step1CorrectlyLowered = { 'apps/web/src/i18n/locales/ar/encounters.json': 129 };
+const step2RegressedBackToOldBaseline = evaluateTranslationRatchet(
+  { 'apps/web/src/i18n/locales/ar/encounters.json': 130 }, // new untranslated string added
+  step1CorrectlyLowered,
+);
+assert.strictEqual(step2RegressedBackToOldBaseline.length, 1); // MUST be caught, not slide through
+
+// --- validateBaselineShape (issue #2069 part 2) ---
+
+// A well-formed baseline -> MUST pass
+assert.deepStrictEqual(
+  validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': 76 }),
+  [],
+);
+assert.deepStrictEqual(validateBaselineShape({}), []);
+
+// Top-level shape wrong (not a plain object) -> MUST fail naming the problem
+assert.strictEqual(validateBaselineShape(null).length, 1);
+assert.strictEqual(validateBaselineShape([1, 2, 3]).length, 1);
+assert.strictEqual(validateBaselineShape('not an object').length, 1);
+assert.strictEqual(validateBaselineShape(5).length, 1);
+
+// Per-file entry with the wrong type -> MUST fail naming that key.
+//
+// Measured against the pre-fix code with `count: 999999`, the entries that actually SILENTLY
+// BYPASSED enforcement are exactly three: a plain object (`{}`), a non-numeric string (`"x"`),
+// and `NaN` — all cases where both `count > allowed` and `count < allowed` evaluate false.
+// `[]`, `"5"`, `true` coerce to comparable numbers and were caught; `null` and a missing key
+// are caught because `baseline[file] ?? 0` substitutes 0 before the comparison.
+//
+// The guard rejects every non-integer entry regardless, not just the three that bypassed. A
+// baseline of `"5"` or `true` is caught today only by numeric coercion the check never asked
+// for and could lose to a refactor, and no such entry is ever intentional — the shape check is
+// the thing that should decide, not the coercion rules of `>`.
+const nullEntryErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': null });
+assert.strictEqual(nullEntryErrors.length, 1);
+assert.match(nullEntryErrors[0], /nav\.json/);
+
+const stringEntryErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': '130' });
+assert.strictEqual(stringEntryErrors.length, 1);
+assert.match(stringEntryErrors[0], /nav\.json/);
+
+const nanEntryErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': NaN });
+assert.strictEqual(nanEntryErrors.length, 1);
+
+const objectEntryErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': {} });
+assert.strictEqual(objectEntryErrors.length, 1);
+
+const arrayEntryErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': [1, 2] });
+assert.strictEqual(arrayEntryErrors.length, 1);
+
+const negativeEntryErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': -1 });
+assert.strictEqual(negativeEntryErrors.length, 1);
+
+const nonIntegerEntryErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': 3.5 });
+assert.strictEqual(nonIntegerEntryErrors.length, 1);
+
+// Zero is a legitimate baseline (fully translated file) -> MUST pass
+assert.deepStrictEqual(validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': 0 }), []);
+
+// One bad entry among otherwise-valid ones -> MUST report only the bad one, by name
+const mixedErrors = validateBaselineShape({
+  'apps/web/src/i18n/locales/ar/nav.json': 76,
+  'apps/web/src/i18n/locales/ar/common.json': 'oops',
+});
+assert.strictEqual(mixedErrors.length, 1);
+assert.match(mixedErrors[0], /common\.json/);
+
+// --- findEmptyValues (issue #2073) ---
+
+// A catalog with no empty values -> MUST NOT flag
+assert.deepStrictEqual(
+  findEmptyValues({ nav: { dashboard: 'Dashboard' }, shortcut: 'Shift+Enter' }, 'en'),
+  [],
+);
+
+// Reproduces the exact #2073 regression: a leaf value blanked to the empty string. This is the
+// case key parity (checkKeyParity) cannot see — the key exists on both sides, so parity holds,
+// and it hit both catalogs identically, which the untranslated-value ratchet (comparing en vs.
+// ar) also cannot see, since a blanked ar value equal to a blanked en value never "differs".
+// findEmptyValues looks at one catalog in isolation, so it catches it regardless.
+const blankedErrors = findEmptyValues(
+  { encounters: { whisper: { error: '' } } },
+  'en',
+);
+assert.strictEqual(blankedErrors.length, 1);
+assert.match(blankedErrors[0], /locales\/en/);
+assert.match(blankedErrors[0], /encounters\.whisper\.error/);
+
+// Whitespace-only value -> MUST flag, for a DIFFERENT reason than `""` and worth stating
+// precisely (Copilot review on PR #2077). `'   '` is TRUTHY in JavaScript, so a guard like
+// `{localError && <p>…}` does mount its paragraph — the element is there, rendering nothing
+// visible. So `""` fails by never mounting and `'   '` fails by mounting blank; both leave the
+// user with no message, which is what this rule is about, but only the empty case is falsy.
+const whitespaceErrors = findEmptyValues({ nav: { dashboard: '   ' } }, 'ar');
+assert.strictEqual(whitespaceErrors.length, 1);
+assert.match(whitespaceErrors[0], /locales\/ar/);
+assert.match(whitespaceErrors[0], /nav\.dashboard/);
+
+// Non-string leaf values (numbers, arrays) are not this rule's concern -> MUST NOT flag
+assert.deepStrictEqual(findEmptyValues({ count: 0, list: [] }, 'en'), []);
+
+// Multiple empty values across nested keys -> MUST report each, by locale and dotted path
+const multipleEmptyErrors = findEmptyValues(
+  { a: { b: '' }, c: '  ', d: 'fine' },
+  'ar',
+);
+assert.strictEqual(multipleEmptyErrors.length, 2);
+assert.ok(multipleEmptyErrors.some((e) => /a\.b/.test(e)));
+assert.ok(multipleEmptyErrors.some((e) => /^locales\/ar: key "c"/.test(e)));
 
 console.log('check-i18n-catalog.spec: ok — all self-test fixtures passed');

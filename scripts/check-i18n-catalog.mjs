@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 /**
- * CI guard for issue #629, #1940, and #2059 — translation catalog completeness, i18n surface
- * checks, JSX text ratchet, and a per-file untranslated-value ratchet.
+ * CI guard for issue #629, #1940, #2059, #2069, and #2073 — translation catalog completeness,
+ * i18n surface checks, JSX text ratchet, and a per-file untranslated-value ratchet.
  *
  * 1. Every non-English catalog under `locales/<lng>/` mirrors the English keys.
  * 2. Target feature surfaces must not contain obvious hardcoded user-facing strings.
  * 3. Encounters surface (issue #1940) ratchets against hardcoded plain JSX text nodes using scripts/i18n-jsx-baseline.json.
- * 4. Catalog values (issue #2059) ratchet against values that still read as untranslated English
- *    using scripts/i18n-translation-baseline.json. Key parity (#1) only checks that a key exists in
- *    both catalogs, not that the non-English value differs from the English one — this closes that
- *    gap without demanding every existing gap be translated up front.
+ * 4. Catalog values (issue #2059, tightened by #2069) ratchet against values that still read as
+ *    untranslated English using scripts/i18n-translation-baseline.json — an exact match against the
+ *    baseline, not just a ceiling, and with the baseline's own shape validated (see
+ *    `evaluateTranslationRatchet` and `validateBaselineShape`). Key parity (#1) only checks that a
+ *    key exists in both catalogs, not that the non-English value differs from the English one —
+ *    this closes that gap without demanding every existing gap be translated up front.
+ * 5. No leaf value in any catalog may be the empty string or whitespace-only (issue #2073). This
+ *    is a hard failure, not a ratchet: there is no catalog entry for which `""` is intended
+ *    content, and a real key deprecation removes the key rather than blanking it. Key parity (#1)
+ *    and the untranslated-value ratchet (#4) both compare two catalogs to each other, so neither
+ *    can see a value blanked identically on both sides of the comparison — see `checkEmptyValues`.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -105,6 +112,41 @@ function checkKeyParity() {
     }
   }
 
+  return errors;
+}
+
+/**
+ * Pure hard-failure rule (issue #2073): no leaf value in a catalog may be the empty string or
+ * whitespace-only. Reports the offending locale and dotted key path.
+ *
+ * Deliberately narrow: this is NOT a "value must be non-trivial" heuristic, not a minimum
+ * length, and not a "value differs between en and ar" rule — some keys legitimately match across
+ * locales (proper nouns, symbols), and that broader rule would be noise for no extra coverage
+ * over the empty-string case. Empty is unambiguous: real content is never `""`, and a real key
+ * deprecation removes the key rather than blanking it, so there is no ratchet/baseline here —
+ * every occurrence is a bug the moment it lands. Unlike key parity (#1) and the untranslated-value
+ * ratchet (#4), which both compare two catalogs to each other, this looks at one catalog in
+ * isolation, so it can see a value blanked identically on both sides of that comparison.
+ * @param {Record<string, unknown>} catalog
+ * @param {string} locale
+ * @returns {string[]}
+ */
+export function findEmptyValues(catalog, locale) {
+  const errors = [];
+  for (const [key, value] of flattenEntries(catalog)) {
+    if (typeof value === 'string' && value.trim() === '') {
+      errors.push(`locales/${locale}: key "${key}" is empty or whitespace-only (${JSON.stringify(value)})`);
+    }
+  }
+  return errors;
+}
+
+function checkEmptyValues() {
+  const errors = [];
+  for (const lang of ['en', ...listLocaleDirs()]) {
+    const catalog = loadMergedLocale(join(localesRoot, lang));
+    errors.push(...findEmptyValues(catalog, lang));
+  }
   return errors;
 }
 
@@ -268,10 +310,25 @@ export function countUntranslatedInCatalog(enCatalog, targetCatalog, scriptRe) {
 }
 
 /**
- * Pure ratchet evaluation (issue #2059, matching the shape of the #1940 JSX ratchet): fails only
- * when a file's untranslated count RISES above its recorded baseline. A count that falls below
- * baseline is not an error — same as the JSX ratchet, which also only flags increases and leaves
- * lowering the number to a manual, human-initiated baseline edit.
+ * Pure ratchet evaluation (issue #2059; tightened by #2069). Requires the recorded baseline to
+ * EXACTLY match the current count, both directions:
+ *  - a RISE above baseline fails, same as before — the ordinary regression case;
+ *  - a FALL below baseline now also fails, forcing the baseline entry to be lowered in the same PR.
+ *
+ * The fall case closes "banked slack" (#2069 part 1): under the old rise-only rule, a PR that
+ * translated a value but left the baseline untouched banked headroom, and a later PR could add a
+ * new untranslated string back up to that same baseline with the check reporting `ok` the whole
+ * time — this is exactly what happened across #2053/PR #2065 and #2056 within hours of the
+ * ratchet (#2059) landing. Requiring equality means the baseline can never drift into an upper
+ * bound that overstates the real count, so there is no headroom left to bank.
+ *
+ * This is the simpler of the fixes #2069 lists (vs. e.g. auto-regenerating and committing the
+ * baseline): it needs no new write-back mechanism, and every translation PR touching the baseline
+ * file is a readable signal of what changed, not a maintenance cost worth avoiding.
+ *
+ * Deliberately NOT applied here to the #1940 JSX ratchet (`scripts/i18n-jsx-baseline.json`), which
+ * has the identical rise-only gap per #2069's own text — that is a distinct rule/baseline file and
+ * out of scope for this fix.
  * @param {Record<string, number>} counts current untranslated count per file (relative path)
  * @param {Record<string, number>} baseline recorded allowed count per file (relative path)
  */
@@ -286,6 +343,42 @@ export function evaluateTranslationRatchet(counts, baseline) {
           `Translate the new/changed value(s), or if staying identical to English is deliberate, ` +
           `raise this file's entry in scripts/i18n-translation-baseline.json in the same PR.`,
       );
+    } else if (count < allowed) {
+      errors.push(
+        `${file}: ${count} untranslated value(s) (no target-script characters detected), below the recorded baseline of ${allowed}. ` +
+          `Lower this file's entry in scripts/i18n-translation-baseline.json to ${count} in the same PR — ` +
+          `leaving a stale, higher baseline banks slack that a later regression could silently reuse (issue #2069).`,
+      );
+    }
+  }
+  return errors;
+}
+
+/**
+ * Validates that a parsed baseline is a plain object mapping file paths to non-negative integers
+ * (issue #2069 part 2). `evaluateTranslationRatchet`'s `count > allowed` / `count < allowed`
+ * comparisons are silently false for every count when `allowed` is `NaN`, a numeric string, an
+ * object, an array, etc. (`5 > {}` and `5 < {}` are both `false`), which turns a single malformed
+ * hand-edit — the baseline file's documented workflow — into "this file is no longer enforced" while
+ * the check still reports `ok`. Reject that shape up front, naming the bad key, instead of letting
+ * a silently-false comparison swallow it.
+ * @param {unknown} baseline
+ * @returns {string[]} errors; empty when the shape is valid
+ */
+export function validateBaselineShape(baseline) {
+  if (baseline === null || typeof baseline !== 'object' || Array.isArray(baseline)) {
+    const gotType = baseline === null ? 'null' : Array.isArray(baseline) ? 'an array' : typeof baseline;
+    return [
+      `scripts/i18n-translation-baseline.json: expected a JSON object mapping file paths to non-negative integers, got ${gotType}`,
+    ];
+  }
+  /** @type {string[]} */
+  const errors = [];
+  for (const [file, value] of Object.entries(baseline)) {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      errors.push(
+        `scripts/i18n-translation-baseline.json: entry "${file}" is ${JSON.stringify(value)}, expected a non-negative integer`,
+      );
     }
   }
   return errors;
@@ -298,6 +391,11 @@ function checkTranslationRatchet() {
     baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
   } catch (err) {
     return [`missing or invalid scripts/i18n-translation-baseline.json: ${err.message}`];
+  }
+
+  const shapeErrors = validateBaselineShape(baseline);
+  if (shapeErrors.length > 0) {
+    return shapeErrors;
   }
 
   const enFiles = readdirSync(enDir).filter((f) => f.endsWith('.json'));
@@ -325,7 +423,14 @@ function main() {
   const surfaceErrors = checkHardcodedSurfaces();
   const ratchetErrors = checkJsxTextRatchet();
   const translationRatchetErrors = checkTranslationRatchet();
-  const errors = [...parityErrors, ...surfaceErrors, ...ratchetErrors, ...translationRatchetErrors];
+  const emptyValueErrors = checkEmptyValues();
+  const errors = [
+    ...parityErrors,
+    ...surfaceErrors,
+    ...ratchetErrors,
+    ...translationRatchetErrors,
+    ...emptyValueErrors,
+  ];
 
   if (errors.length > 0) {
     console.error('check-i18n-catalog: failures:\n- ' + errors.join('\n- '));
