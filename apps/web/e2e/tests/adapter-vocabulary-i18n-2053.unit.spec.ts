@@ -192,8 +192,10 @@ test.describe('adapter resource/condition name localization (#2053)', () => {
       fallbackLng: 'en',
     });
     const ct = charTranslator.t.bind(charTranslator);
-    const arInspiration = 'الإلهام';
-    const arExhaustion = 'الإنهاك';
+    // The same values the encounters catalog holds for these two, so the fixture reads as the
+    // real thing rather than an arbitrary Arabic word; the frame is what is under test here.
+    const arInspiration = encountersAr.encounters.adapterResource.inspiration;
+    const arExhaustion = encountersAr.encounters.adapterCondition.Exhaustion;
 
     for (const key of ['characters.resources.announceSpent', 'characters.resources.announceRestored']) {
       const sentence = ct(key, { name: arInspiration });
