@@ -320,6 +320,33 @@
       "ambiguousResolved": "لم نتمكن من تأكيد اكتمال هذا الإجراء في حينه، لكن القيم المعروضة محدثة الآن — تحقق منها قبل إعادة المحاولة.",
       "setUsedTitle": "تعيين المستخدم إلى {{val}}"
     },
+    "adapterResource": {
+      "hitDice": "مكعبات الحياة",
+      "rage": "الغضب",
+      "actionSurge": "اندفاع الأفعال",
+      "kiPoints": "نقاط التركيز/الكي",
+      "recharge": "سمة إعادة الشحن",
+      "inspiration": "الإلهام",
+      "focusPoints": "نقاط التركيز",
+      "heroPoints": "نقاط البطولة"
+    },
+    "adapterCondition": {
+      "Blinded": "أعمى",
+      "Charmed": "مسحور",
+      "Deafened": "أصم",
+      "Exhaustion": "الإرهاق",
+      "Frightened": "خائف",
+      "Grappled": "ممسوك",
+      "Incapacitated": "عاجز",
+      "Invisible": "غير مرئي",
+      "Paralyzed": "مشلول",
+      "Petrified": "متحجر",
+      "Poisoned": "مسموم",
+      "Prone": "ملقى أرضًا",
+      "Restrained": "مقيد",
+      "Stunned": "مذهول",
+      "Unconscious": "فاقد الوعي"
+    },
     "rulesLookup": {
       "heading": "البحث السريع في القواعد",
       "placeholder": "ابحث في القواعد والابتكارات…",

@@ -320,6 +320,33 @@
       "ambiguousResolved": "We couldn't confirm that action completed at the time, but the values shown are now up to date — check them before retrying.",
       "setUsedTitle": "Set used to {{val}}"
     },
+    "adapterResource": {
+      "hitDice": "Hit Dice",
+      "rage": "Rage",
+      "actionSurge": "Action Surge",
+      "kiPoints": "Focus / Ki Points",
+      "recharge": "Recharge Feature",
+      "inspiration": "Inspiration",
+      "focusPoints": "Focus Points",
+      "heroPoints": "Hero Points"
+    },
+    "adapterCondition": {
+      "Blinded": "Blinded",
+      "Charmed": "Charmed",
+      "Deafened": "Deafened",
+      "Exhaustion": "Exhaustion",
+      "Frightened": "Frightened",
+      "Grappled": "Grappled",
+      "Incapacitated": "Incapacitated",
+      "Invisible": "Invisible",
+      "Paralyzed": "Paralyzed",
+      "Petrified": "Petrified",
+      "Poisoned": "Poisoned",
+      "Prone": "Prone",
+      "Restrained": "Restrained",
+      "Stunned": "Stunned",
+      "Unconscious": "Unconscious"
+    },
     "rulesLookup": {
       "heading": "Rules quick lookup",
       "placeholder": "Search rules & homebrew…",
