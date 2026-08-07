@@ -6077,9 +6077,12 @@ export function ruleSystemAdapter(
   customMechanicsProfile?: unknown,
 ): RuleSystemAdapter {
   if (ruleSystem && isRegisteredRuleSystemSlug(ruleSystem)) return ADAPTERS[ruleSystem];
-  if (customMechanicsProfile && typeof customMechanicsProfile === 'object') {
-    const adapter = tryCreateHomebrewRuleSystemAdapter(customMechanicsProfile);
-    if (adapter) return adapter;
+  if (customMechanicsProfile && typeof customMechanicsProfile === 'object' && customMechanicsProfile !== null) {
+    const profileSlug = (customMechanicsProfile as { slug?: string }).slug;
+    if (!ruleSystem || profileSlug === ruleSystem) {
+      const adapter = tryCreateHomebrewRuleSystemAdapter(customMechanicsProfile);
+      if (adapter) return adapter;
+    }
   }
   return Dnd5eAdapter;
 }
