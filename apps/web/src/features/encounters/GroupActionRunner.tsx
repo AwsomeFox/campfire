@@ -3,8 +3,12 @@
  * combatant in one pass." Purely web-orchestrated: this component loops the EXISTING per-actor
  * `POST /encounters/:id/actions/resolve` (`commit: true`) sequentially, the same call an MCP
  * caller could already make one at a time. No new REST endpoint, no MCP change, no resolver
- * policy change — see `groupActionRunner.ts` for the eligibility/loop/undo-order logic this
- * component wires up to real API calls.
+ * policy change — see `groupActionRunnerLogic.ts` for the eligibility/loop/undo-order logic
+ * this component wires up to real API calls. That module is named `groupActionRunnerLogic.ts`
+ * (not `groupActionRunner.ts`) so it cannot differ from this file's name by case alone — see
+ * issue #2070: on a case-insensitive filesystem (macOS/Windows) a same-case-differing pair in
+ * one directory makes an extensionless import ambiguous and TypeScript's `.ts`-before-`.tsx`
+ * resolution order silently picks the wrong module.
  *
  * DM-only entry point: mounted only when `CombatantActionsList` was given `onUseGroupAction`,
  * which `RunSessionPage` wires with the exact same gating as the single-actor
@@ -29,7 +33,7 @@ import {
   type GroupActionCandidate,
   type GroupActionRowResult,
   type GroupActionRunOutcome,
-} from './groupActionRunner';
+} from './groupActionRunnerLogic';
 
 type Step = 'targets' | 'summary';
 type TargetMode = 'shared' | 'perActor';

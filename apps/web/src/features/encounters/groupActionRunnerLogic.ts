@@ -16,6 +16,13 @@
  *  - {@link undoGroupActionsInReverseOrder} — "Undo all" replays captured undo tokens in
  *    REVERSE apply order, mirroring how a stack of consequences unwinds (issue #1922
  *    acceptance: "Undo all restores all targets' HP, replaying in reverse order").
+ *
+ * Named `groupActionRunnerLogic.ts`, not `groupActionRunner.ts` — the latter differed from
+ * `GroupActionRunner.tsx` (this module's component) only by case, which is ambiguous on a
+ * case-insensitive filesystem (macOS/Windows): an extensionless `./GroupActionRunner` import
+ * resolves through TypeScript's `.ts`-before-`.tsx` order and silently lands here instead of
+ * the component (issue #2070). Keep this name distinct by more than case — don't "tidy" it
+ * back to match the component's casing.
  */
 import type { ActionResolveResult, ActionSpec, ActionUndoToken, Combatant, UsableAction } from '@campfire/schema';
 import { ApiError } from '../../lib/api';

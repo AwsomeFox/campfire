@@ -57,7 +57,7 @@ import { shouldRevealInitiative } from './initiativeReveal';
 import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
 import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
 import { ActionUsePanel, legalTargets } from './ActionUseFlow';
-import { GroupActionRunner } from './GroupActionRunner.tsx';
+import { GroupActionRunner } from './GroupActionRunner';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { NotFoundState } from '../../components/NotFoundState';
