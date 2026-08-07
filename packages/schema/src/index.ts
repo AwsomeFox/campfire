@@ -6149,8 +6149,14 @@ export function isRegisteredRuleSystemSlug(ruleSystem: string): boolean {
  * issue is about. A homebrew slug backed by its own `customMechanicsProfile` never reaches
  * this predicate at all — the server's `validateRuleSystem` short-circuits on a
  * `customMechanicsProfile` before ever doing the installed-pack lookup this predicate needs.
+ *
+ * Empty `ruleSystem` (the "no rule system picked" sentinel, `''`) always returns false
+ * regardless of `isInstalledPack` — no `rule_packs` row can have an empty slug, so a true
+ * `isInstalledPack` paired with `''` cannot occur from a real lookup, and the function stays
+ * safe to call without first checking `ruleSystem` for truthiness.
  */
 export function isImporterOnlyRuleSystemSlug(ruleSystem: string, isInstalledPack: boolean): boolean {
+  if (!ruleSystem) return false;
   return isInstalledPack && !isRegisteredRuleSystemSlug(ruleSystem);
 }
 
