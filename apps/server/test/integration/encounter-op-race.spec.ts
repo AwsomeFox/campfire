@@ -14,6 +14,7 @@ import { AttachmentsService } from '../../src/modules/attachments/attachments.se
 import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
+import { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import * as idempotency from '../../src/modules/encounters/encounter-idempotency';
 import type { RequestUser } from '../../src/common/user.types';
@@ -65,10 +66,27 @@ function buildService(orm: any): { service: EncountersService; rolls: RollsServi
   const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
   const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
   const campaignLibrary = new CampaignLibraryService(orm, audit, events);
-  const service = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, {
+  // AGENTS.md: annotate the double against `Pick<RealService, 'methodsActuallyUsed'>` rather
+  // than casting blindly — an annotation is checked for missing/misspelled members, whereas an
+  // assertion (and `as any` especially) checks nothing. `EncountersService` declares this
+  // dependency as the concrete class, so the final cast is unavoidable; the annotation above it
+  // is what does the work. Note the known limit of the double-side-only variant: it will NOT
+  // catch production code starting to call a THIRD notifications method, since the Pick list
+  // isn't forced to grow. That would need consumer-side narrowing, which is out of scope here.
+  const notifications: Pick<NotificationsService, 'notifyCampaign' | 'notifyUser'> = {
     notifyCampaign: jest.fn().mockResolvedValue(undefined),
     notifyUser: jest.fn().mockResolvedValue(undefined),
-  } as any);
+  };
+  const service = new EncountersService(
+    orm,
+    audit,
+    events,
+    rolls,
+    revisions,
+    attachments,
+    campaignLibrary,
+    notifications as unknown as NotificationsService,
+  );
   return { service, rolls };
 }
 
