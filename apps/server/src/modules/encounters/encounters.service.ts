@@ -12,7 +12,7 @@ import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
-import { fromJsonText, toJsonText } from '../../common/json';
+import { deepJsonEqual, fromJsonText, toJsonText } from '../../common/json';
 import { CharactersService } from '../characters/characters.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { QuestsService } from '../quests/quests.service';
@@ -95,7 +95,16 @@ type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 /** Server-only field: public REST/MCP schemas deliberately cannot supply a death-save face. */
-type CombatantInternalUpdateInput = CombatantUpdateInput & { deathSaveRoll?: number; expectedUpdatedAt?: string };
+type CombatantInternalUpdateInput = CombatantUpdateInput & {
+  deathSaveRoll?: number;
+  expectedUpdatedAt?: string;
+  /** Issue #1992: content-based CAS for the `statblock` field only. The `statblock` write
+   * is rejected with 409 when the row's CURRENTLY STORED statblock no longer deep-equals
+   * this value. An hp/condition/position write to this same combatant does not change the
+   * stored statblock, so it cannot trip this guard — only a genuine concurrent `statblock`
+   * write can. Ignored unless `statblock` is also present in the same patch. */
+  expectedStatblock?: CombatantStatblock;
+};
 type CombatantTransactionHook = (
   tx: SyncDb,
   fresh: typeof combatants.$inferSelect,
@@ -5098,6 +5107,34 @@ export class EncountersService {
         if (!fresh || fresh.encounterId !== encounterId) {
           throw new NotFoundException(`Combatant ${combatantId} not found`);
         }
+        // Issue #1992: guard a `statblock` write against the STATBLOCK'S OWN prior
+        // content, not a row/encounter revision token. Two earlier approaches were tried
+        // and rejected: pinning the ENCOUNTER's `updatedAt` (any OTHER combatant's write
+        // anywhere in the fight invalidated an in-progress edit) and pinning a
+        // per-COMBATANT revision bumped on every write to that row (an ordinary hp tick
+        // on the very monster being edited still invalidated it, since that column
+        // advanced on hp/condition/position writes too — neither one ever touches the
+        // statblock). Comparing the actual stored content sidesteps both: an
+        // hp/condition/position write never touches `statblockJson`, so it structurally
+        // cannot trip this check — only a genuine concurrent `statblock` write (this
+        // row's stored statblock no longer matches what the caller started from) can.
+        // Deliberately a content compare, not a hash: `CombatantStatblock` is bounded
+        // (actions ≤50, traits ≤30, notes ≤2000 chars) and already sent in full on every
+        // whole-statblock PATCH, so comparing the actual value costs nothing extra worth
+        // optimizing away, and needs no extra column. Only relevant to a `statblock`
+        // write itself — ignored (not even parsed) when `patch.statblock` is absent from
+        // this same call.
+        if (patch.statblock !== undefined && patch.expectedStatblock !== undefined) {
+          const storedStatblock = parseCombatantStatblock(fresh.statblockJson);
+          if (!deepJsonEqual(storedStatblock, patch.expectedStatblock)) {
+            throw new ConflictException({
+              code: 'STALE_WRITE',
+              message:
+                'This statblock was changed by someone else since you loaded it — saving now would erase their edit. ' +
+                'Reload to get the latest version, reapply your changes, then save again.',
+            });
+          }
+        }
         // A caller may attach a tightly-scoped transactional side effect after the
         // fresh lifecycle read but before this mutation. A failure rolls both it and
         // the ensuing combatant write back. Used only for #1462's mandatory dice-log
@@ -9873,10 +9910,11 @@ export class EncountersService {
 
           // Issue #1909 review (Devin + Copilot, same defect): this write touches the
           // COMBATANT row directly, exactly like updateCombatant's own writes — advance the
-          // ENCOUNTER's `updatedAt` (the CAS token `PATCH .../combatants/:cid`'s
-          // `expectedUpdatedAt` validates, since there is no per-combatant revision column).
-          // Without this, a second writer holding a pre-spend token could still PATCH the
-          // whole statblock, pass `assertNotStale`, and silently revert this spend.
+          // ENCOUNTER's `updatedAt` too (the CAS token `PATCH .../combatants/:cid`'s
+          // `expectedUpdatedAt` validates against). Without this, a second writer holding a
+          // pre-spend token could still PATCH the whole statblock, pass `assertNotStale` on
+          // the encounter-wide check, and silently revert this spend.
+          //
           // `combatantStateVersion` moves too, mirroring `updateCombatant`'s own
           // unconditional-when-running rule (issue #1637's action-preview ABA guard): a
           // statblock resource spend is a real combatant-state change and must invalidate an

@@ -35,6 +35,7 @@ import {
   CombatantCreate,
   CombatantRemoveRequest, CombatantRemoveUndo,
   CombatantResourceAdjust,
+  CombatantStatblock,
   CombatantTurnStatePatch,
   CombatantUpdate,
   DifficultyBand,
@@ -4772,15 +4773,25 @@ export class McpToolsService {
         'the statblock until this is true — logs a combat-log note event and an audit row). ' +
         'Battle-map token position tokenX/tokenY (0–100 percent overlay, clamped) moves the combatant\'s token on the ' +
         'encounter map. DM may modify any combatant; a player may only touch hp/temp-hp/death-saves/conditions/token ' +
-        'on a combatant linked to a character they own.',
+        'on a combatant linked to a character they own. When sending statblock, pass expectedStatblock (the statblock ' +
+        'get_encounter last showed for THIS combatant, issue #1992) to opt into a content-based optimistic-concurrency ' +
+        'check: it 409s only when the currently STORED statblock no longer matches what you started from, so an ' +
+        'unrelated hp/condition/position change to this same combatant never invalidates the edit, while a genuine ' +
+        'concurrent statblock write still does.',
       {
         encounterId: Id.describe('Encounter id'),
         combatantId: Id.describe('Combatant id — from get_encounter'),
         expectedUpdatedAt: ExpectedUpdatedAt,
+        expectedStatblock: CombatantStatblock.optional().describe(
+          'Content-based CAS guard for the statblock field only (issue #1992): the statblock get_encounter last ' +
+            'showed for THIS combatant. Rejected with 409 only when the currently stored statblock no longer ' +
+            'deep-equals this value — an unrelated hp/condition/position write to the same combatant does not ' +
+            'trip it.',
+        ),
         ...CombatantUpdate.shape,
         deathSaveRoll: z.number().optional().describe('Removed: use roll_death_save instead'),
       },
-      async ({ encounterId, combatantId, deathSaveRoll, expectedUpdatedAt, ...fields }) => {
+      async ({ encounterId, combatantId, deathSaveRoll, expectedUpdatedAt, expectedStatblock, ...fields }) => {
         if (deathSaveRoll !== undefined) {
           throw new BadRequestException({
             code: 'validation_failed',
@@ -4799,7 +4810,11 @@ export class McpToolsService {
         return this.encounters.updateCombatant(
           encounterId as number,
           combatantId as number,
-          { ...validated, expectedUpdatedAt: expectedUpdatedAt as string | undefined },
+          {
+            ...validated,
+            expectedUpdatedAt: expectedUpdatedAt as string | undefined,
+            expectedStatblock: expectedStatblock as CombatantStatblock | undefined,
+          },
           user,
           role,
         );

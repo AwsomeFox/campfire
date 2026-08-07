@@ -2,6 +2,7 @@ import { CombatLog } from './CombatLog';
 import { ApplyDamageBar, BattleMap, type EncounterGridPatch } from './map/BattleMap';
 import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay } from './combat/CombatantRow';
+import { combatantPatchUrl } from './combat/combatantPatchUrl';
 import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
@@ -2033,8 +2034,11 @@ export default function RunSessionPage() {
   // pending, onSettled clears it and reconciles. Concurrent edits to different combatants
   // don't block each other.
   const combatantPatch = useMutation({
-    mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
-      api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, patch),
+    // Issue #1992 (round 7): the URL is built from `encounterId` — a per-call variable
+    // supplied by the caller — never from the outer `eid` closure. See
+    // `combatantPatchUrl`'s own doc comment for why that distinction is the entire fix.
+    mutationFn: ({ combatantId, encounterId, patch }: { combatantId: number; encounterId: number; patch: Record<string, unknown> }) =>
+      api.patch<Combatant>(combatantPatchUrl(API, encounterId, combatantId), patch),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
@@ -2523,12 +2527,32 @@ export default function RunSessionPage() {
   // statblock — is unaffected: the pip path went through `adjustCombatantResource`'s
   // delta-based endpoint from the very first round and never depended on this mechanism.
   const patchCombatant = useCallback(
-    (combatantId: number, patch: Record<string, unknown>) => {
+    // Issue #1992 review: returns whether the write actually landed (never rejects — both
+    // outcomes RESOLVE) so a caller that needs to know (the statblock editor's save-on-blur,
+    // which must not clear its local draft on a rejected write) can await it, while every
+    // OTHER call site keeps ignoring the return value exactly as before. combatantPatch's own
+    // onError still fires unconditionally (the generic error toast), so nothing here changes
+    // what the user is told — only whether CombatantRow discards its draft afterward.
+    //
+    // Round 5: no longer resolves an `updatedAt` — the statblock draft (the only consumer
+    // of that value) moved off a revision-token guard entirely in favor of a content
+    // compare (`expectedStatblock`, see combatantStatblockDraft.ts), so there is nothing
+    // left that needs this write's row-level token.
+    //
+    // Round 7 (Devin): `encounterId` is now a required, explicit parameter — every call
+    // site passes it (usually the page's own `eid`, but `CombatantRow`'s statblock
+    // save-on-blur passes ITS OWN `encounterId` prop instead) rather than this function
+    // resolving it from the surrounding closure. See `combatantPatchUrl`'s doc comment for
+    // why that distinction is what actually fixes the wrong-encounter-on-navigation defect.
+    (encounterId: number, combatantId: number, patch: Record<string, unknown>) => {
       const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
       const actorCombatantId =
         needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
       const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId, isDm) : patch;
-      combatantPatch.mutate({ combatantId, patch: enriched });
+      return combatantPatch.mutateAsync({ combatantId, encounterId, patch: enriched }).then(
+        () => ({ ok: true }),
+        () => ({ ok: false }),
+      );
     },
     [combatantPatch, encounter?.status, encounter?.currentCombatantId, isDm],
   );
@@ -3093,7 +3117,7 @@ export default function RunSessionPage() {
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
-  const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(combatantId, { tokenX: x, tokenY: y });
+  const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(eid, combatantId, { tokenX: x, tokenY: y });
   const tokenUndoKeys = useRef(new Map<string, string>());
   const tokenBatchApplyIntents = useRef(new Map<string, { previewToken: string; idempotencyKey: string }>());
   // Batch map changes deliberately use the preview/apply protocol rather than a loop of
@@ -3131,9 +3155,9 @@ export default function RunSessionPage() {
   // Unplace a token (issue #271): clear its position back to null so it returns to the
   // "Unplaced" tray WITHOUT deleting the combatant (its HP/conditions/initiative survive).
   // An explicit null is required — `undefined` would be a no-op patch server-side.
-  const unplaceToken = (combatantId: number) => patchCombatant(combatantId, { tokenX: null, tokenY: null });
+  const unplaceToken = (combatantId: number) => patchCombatant(eid, combatantId, { tokenX: null, tokenY: null });
   // Token size category (issue #40, phase 2) — DM-only, server-enforced.
-  const setTokenSize = (combatantId: number, size: TokenSize) => patchCombatant(combatantId, { tokenSize: size });
+  const setTokenSize = (combatantId: number, size: TokenSize) => patchCombatant(eid, combatantId, { tokenSize: size });
 
   // Header run-control group shares one pending flag (see runControl above).
   // `reconcileBlocks` folds into the same busy flag the header already honors (issue
@@ -3964,7 +3988,7 @@ export default function RunSessionPage() {
           }}
           onSetHpMax={(id, max) => {
             if (reconcileBlocks) return;
-            patchCombatant(id, { hpMax: max });
+            patchCombatant(eid, id, { hpMax: max });
           }}
           onRollDeathSave={(id) => rollDeathSave({ id })}
           isDeathSaveBusy={(id) => pendingCombatantIds.has(id) || reconcileBlocks}
@@ -4428,19 +4452,19 @@ export default function RunSessionPage() {
                     const actorId = hpLogActorId(currentCombatantId, c.id);
                     hpDelta.mutate({ combatantId: c.id, delta, actorId });
                   }}
-                  onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
-                  onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
+                  onSetTempHp={(value) => patchCombatant(eid, c.id, { hpTemp: value })}
+                  onSetDeathSaves={(patch) => patchCombatant(eid, c.id, patch)}
                   onRollDeathSave={() => rollDeathSave(c)}
                   deathSaveOutcome={deathSaveOutcome?.combatantId === c.id ? deathSaveOutcome.outcome : null}
                   onRollInitiative={() => rollCombatantInitiative(c)}
-                  onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
-                  onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
-                  onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
-                  onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
-                  onRename={(name) => patchCombatant(c.id, { name })}
-                  onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
+                  onSetInitiative={(value) => patchCombatant(eid, c.id, { initiative: value })}
+                  onClearInitiative={() => patchCombatant(eid, c.id, { initiative: null })}
+                  onAddCondition={(cond) => patchCombatant(eid, c.id, { addConditions: [cond] })}
+                  onRemoveCondition={(cond) => patchCombatant(eid, c.id, { removeConditions: [cond] })}
+                  onRename={(name) => patchCombatant(eid, c.id, { name })}
+                  onSetHpMax={(value) => patchCombatant(eid, c.id, { hpMax: value })}
                   onSetTokenSize={(size) => setTokenSize(c.id, size)}
-                  onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
+                  onPatchCombatant={(patch, targetEncounterId) => patchCombatant(targetEncounterId, c.id, patch)}
                   onPatchSourceTurnState={
                     canDmWrite || c.id === currentCombatantId
                       ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)

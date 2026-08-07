@@ -7091,6 +7091,75 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
       );
       expect(rCombatant?.statblock.resources.kiPoints.used).toBe(1);
     });
+
+    /**
+     * Issue #1992: an earlier round guarded `statblock` with a per-combatant REVISION
+     * token, and found it too coarse — it also advances on an hp/condition/position write
+     * to the SAME combatant, none of which touch the statblock. `expectedStatblock`
+     * instead compares the row's CURRENTLY STORED statblock content against what the
+     * caller says it started from, so an hp tick on the monster being edited cannot
+     * invalidate the edit — exactly the reported dead end: open an edit, tick the same
+     * monster's hp, then save.
+     */
+    it('an hp tick on the SAME monster mid-edit does not invalidate a content-guarded statblock save (round-5 dead end)', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1992 HP-Tick-Mid-Edit Fight' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Damaged Mid-Edit Boss', hpMax: 20, statblock: { ac: 14, notes: 'original' } });
+      const combatantId = addRes.body.id;
+      const editedStatblock = addRes.body.statblock as { ac: number; notes: string };
+
+      // DM opens the editor; its base is the statblock it just read.
+      // Anyone damages this SAME monster mid-edit — an ordinary, unrelated hp tick.
+      const hpTick = await request(server).patch(`/api/v1/encounters/${rEncounterId}/combatants/${combatantId}`).set(dm).send({ hpDelta: -3 });
+      expect(hpTick.status).toBe(200);
+      expect(hpTick.body.hpCurrent).toBe(17);
+
+      // The statblock edit still saves — the hp tick never touched the statblock, so the
+      // content the editor started from is still exactly what is stored.
+      const save = await request(server)
+        .patch(`/api/v1/encounters/${rEncounterId}/combatants/${combatantId}`)
+        .set(dm)
+        .send({ statblock: { ac: 14, notes: 'edited after an hp tick on this same monster' }, expectedStatblock: editedStatblock });
+      expect(save.status).toBe(200);
+      expect(save.body.statblock.notes).toBe('edited after an hp tick on this same monster');
+      // The hp tick survived too — this write only touched the statblock.
+      expect(save.body.hpCurrent).toBe(17);
+    });
+
+    it('a concurrent statblock write to the SAME combatant still invalidates a stale content-guarded save', async () => {
+      const server = ctx.app.getHttpServer();
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: '1992 Content-Guard Genuine Conflict' });
+      const rEncounterId = encRes.body.id;
+      const addRes = await request(server)
+        .post(`/api/v1/encounters/${rEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Contested Statblock Boss', hpMax: 10, statblock: { ac: 12, notes: 'original' } });
+      const combatantId = addRes.body.id;
+      const staleBaseline = addRes.body.statblock as { ac: number; notes: string };
+
+      // A genuine concurrent statblock write from someone else lands first.
+      const otherWrite = await request(server)
+        .patch(`/api/v1/encounters/${rEncounterId}/combatants/${combatantId}`)
+        .set(dm)
+        .send({ statblock: { ac: 12, notes: 'changed by someone else' } });
+      expect(otherWrite.status).toBe(200);
+
+      // A save still carrying the STALE (pre-write) statblock as its baseline must 409 —
+      // the content genuinely diverged, so this is a real conflict, not a false one.
+      const staleSave = await request(server)
+        .patch(`/api/v1/encounters/${rEncounterId}/combatants/${combatantId}`)
+        .set(dm)
+        .send({ statblock: { ac: 12, notes: 'silently overwritten if this landed' }, expectedStatblock: staleBaseline });
+      expect(staleSave.status).toBe(409);
+
+      const after = await request(server).get(`/api/v1/encounters/${rEncounterId}`).set(dm);
+      const combatant = (after.body.combatants as Array<{ id: number; statblock: { notes: string } }>).find((c) => c.id === combatantId);
+      expect(combatant?.statblock.notes).toBe('changed by someone else');
+    });
   });
 
   describe('fog of war + server-side token redaction', () => {

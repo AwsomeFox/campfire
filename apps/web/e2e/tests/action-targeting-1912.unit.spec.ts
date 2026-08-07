@@ -36,7 +36,11 @@ test('target row convenience ignores label and summary interactions', async () =
   expect(rosterSource).toContain('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock], [data-combatant-detail]');
   expect(rosterSource).toContain('{statblock && <div data-combatant-statblock>{statblock}</div>}');
   expect(rosterSource).toContain('<div data-combatant-detail>');
-  expect(rosterSource).toContain('<details className="mt-2" data-combatant-detail>');
+  // Issue #1992 added an onBlur handler to this <details> (save-on-blur for the
+  // statblock editor's CAS guard), so the tag itself now spans several lines — matched
+  // by a regex rather than the old single-line literal, but still pinning the same
+  // invariant: this wrapper still carries `data-combatant-detail`.
+  expect(rosterSource).toMatch(/<details\s+className="mt-2"\s+data-combatant-detail/);
 });
 
 test('action impact flash replaces its previous expiry and cleans up on unmount', async () => {
