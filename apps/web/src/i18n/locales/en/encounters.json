@@ -1,6 +1,7 @@
 {
   "encounters": {
     "title": "Encounters",
+    "combatLogHeading": "Combat log",
     "vitals": {
       "editMaxHp": "Edit max HP",
       "maxHp": "Max HP",

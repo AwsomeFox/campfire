@@ -25,7 +25,7 @@ const EVENT_ICON: Record<string, string> = {
 };
 
 export const CombatLog = React.memo(function CombatLog({ events }: { events: EncounterEvent[] }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const headingId = 'combat-log-heading';
   const logRef = useRef<HTMLDivElement>(null);
   const preservedScrollTopRef = useRef(0);
@@ -52,7 +52,7 @@ export const CombatLog = React.memo(function CombatLog({ events }: { events: Enc
 
   return (
     <Card className="space-y-2 min-w-0" id="combat-log">
-      <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>{t('combatLogHeading', 'Combat log')}</h2>
+      <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>{t('encounters.combatLogHeading', 'Combat log')}</h2>
       <div
         ref={logRef}
         role="log"

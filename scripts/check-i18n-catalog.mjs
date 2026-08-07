@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * CI guard for issue #629, #1940, #2059, #2069, and #2073 — translation catalog completeness,
- * i18n surface checks, JSX text ratchet, and a per-file untranslated-value ratchet.
+ * CI guard for issue #629, #1940, #2059, #2069, #2073, and #2066 — translation catalog
+ * completeness, i18n surface checks, JSX text ratchet, a per-file untranslated-value ratchet,
+ * an empty-value hard failure, and a namespace-reachability check.
  *
  * 1. Every non-English catalog under `locales/<lng>/` mirrors the English keys.
  * 2. Target feature surfaces must not contain obvious hardcoded user-facing strings.
@@ -17,6 +18,11 @@
  *    content, and a real key deprecation removes the key rather than blanking it. Key parity (#1)
  *    and the untranslated-value ratchet (#4) both compare two catalogs to each other, so neither
  *    can see a value blanked identically on both sides of the comparison — see `checkEmptyValues`.
+ * 6. No `useTranslation(...)` call anywhere in `apps/web/src` may pass a namespace argument
+ *    (issue #2066), because `apps/web/src/i18n/index.ts` registers only one namespace
+ *    (`translation`). Checks 1-5 all inspect catalogs; a component that asks for a namespace
+ *    that was never registered still passes every one of them while every `t()` call in it
+ *    silently returns its English default forever — this is the only check that catches that.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -150,15 +156,19 @@ function checkEmptyValues() {
   return errors;
 }
 
-/** @param {string} dir */
-function walkSourceFiles(dir) {
+/**
+ * @param {string} dir
+ * @param {string[]} [extensions] file extensions to include (default `.tsx` only, the
+ *   pre-#2066 behavior every existing caller relies on).
+ */
+function walkSourceFiles(dir, extensions = ['.tsx']) {
   /** @type {string[]} */
   const out = [];
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, ent.name);
     if (ent.isDirectory()) {
-      out.push(...walkSourceFiles(p));
-    } else if (ent.name.endsWith('.tsx')) {
+      out.push(...walkSourceFiles(p, extensions));
+    } else if (extensions.some((ext) => ent.name.endsWith(ext))) {
       out.push(p);
     }
   }
@@ -237,6 +247,57 @@ function checkJsxTextRatchet() {
       errors.push(
         `${rel}: has ${nodes.length} hardcoded JSX text node(s), exceeding baseline limit of ${allowedCount}. ` +
           `New hardcoded strings (e.g. "${nodes[0]}") must be translated with t() / useTranslation.`,
+      );
+    }
+  }
+  return errors;
+}
+
+/**
+ * Extracts every argument passed to `useTranslation(...)` in a source file (issue #2066).
+ * Returns the raw (trimmed) argument text for each call that passes ANY argument — a namespace
+ * string, an options object, anything other than an empty parameter list.
+ * @param {string} src
+ * @returns {string[]}
+ */
+export function extractUseTranslationNamespaceArgs(src) {
+  /** @type {string[]} */
+  const args = [];
+  const callRe = /\buseTranslation\s*\(\s*([^)]*?)\s*\)/g;
+  let match;
+  while ((match = callRe.exec(src)) !== null) {
+    const arg = match[1].trim();
+    if (arg.length > 0) args.push(arg);
+  }
+  return args;
+}
+
+/**
+ * Guard for issue #2066. `apps/web/src/i18n/index.ts` registers exactly ONE i18next namespace
+ * (`translation`) — no `ns`, `defaultNS`, or `fallbackNS`. Calling `useTranslation('someNs')`
+ * (or passing any other argument) asks react-i18next to resolve against a namespace that was
+ * never registered: every `t()` call in that file then misses and falls straight through to its
+ * inline default, in EVERY locale, forever — silently, because the two-argument `t(key,
+ * fallback)` form never lets a raw catalog key surface on screen to reveal the break. Key parity
+ * (#629), the JSX text ratchet (#1940), and the untranslated-value ratchet (#2059) all inspect
+ * the CATALOGS; none of them can tell whether a component can actually reach one. This is the
+ * only check that does — a straight fail, not a ratchet, because there is no legitimate call
+ * shape to grandfather in while the app registers a single namespace.
+ */
+function checkUseTranslationNamespaceArgument() {
+  /** @type {string[]} */
+  const errors = [];
+  const srcDir = join(root, 'apps/web/src');
+  for (const file of walkSourceFiles(srcDir, ['.ts', '.tsx'])) {
+    const rel = file.slice(root.length + 1);
+    const src = readFileSync(file, 'utf8');
+    for (const arg of extractUseTranslationNamespaceArgs(src)) {
+      errors.push(
+        `${rel}: useTranslation(${arg}) passes an argument, but apps/web/src/i18n/index.ts registers ` +
+          `only a single "translation" namespace (no ns/defaultNS/fallbackNS). A namespace argument here ` +
+          `silently disables every t() call in this file — each one misses the unregistered namespace and ` +
+          `falls through to its inline default, in every locale, forever (issue #2066). Drop the argument: ` +
+          `useTranslation().`,
       );
     }
   }
@@ -441,12 +502,14 @@ function main() {
   const ratchetErrors = checkJsxTextRatchet();
   const translationRatchetErrors = checkTranslationRatchet();
   const emptyValueErrors = checkEmptyValues();
+  const namespaceErrors = checkUseTranslationNamespaceArgument();
   const errors = [
     ...parityErrors,
     ...surfaceErrors,
     ...ratchetErrors,
     ...translationRatchetErrors,
     ...emptyValueErrors,
+    ...namespaceErrors,
   ];
 
   if (errors.length > 0) {
