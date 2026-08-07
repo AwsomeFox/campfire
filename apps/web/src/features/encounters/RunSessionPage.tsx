@@ -12,7 +12,7 @@ import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lif
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
 import { classifyDeathSaveOutcome, deathSaveSpectatorToastInfo, type DeathSaveOutcome } from './combat/deathSaveOutcome';
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
@@ -79,7 +79,7 @@ import { useDisclosure } from '../../components/useDisclosure';
 import { advanceCombatLogAnnouncements, formatCombatLogAnnouncementBatch, type CombatLogAnnouncementCursor } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { type AoeHitLayout } from './aoeHitTest';
-import { type TargetDamageApplication } from './directDamage';
+import { type DirectDamageMetadata, type TargetDamageApplication } from './directDamage';
 import { resolveGridCalibration } from './mapRenderedBounds';
 import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMotion';
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
@@ -432,7 +432,7 @@ function EncounterLinks({
 // Non-DM viewers see a monster's HP as a coarse status band, never exact numbers
 // (issue #43 — the server redacts hpCurrent/hpMax to null and sends hpBand instead).
 
-function InitiativeStrip({
+const InitiativeStrip = memo(function InitiativeStrip({
   combatants,
   currentCombatantId,
   charactersById,
@@ -670,7 +670,7 @@ function InitiativeStrip({
       })}
     </div>
   );
-}
+});
 
 
 /** Combat-log actor for HP/death patches (issues #620, #494). Omit self-attribution. */
@@ -804,6 +804,12 @@ export default function RunSessionPage() {
   const [actionError, setActionError] = useState<ActionErrorState>(null);
   const [encounterPatchConflict, setEncounterPatchConflict] = useState<string | null>(null);
   const [pendingFog, setPendingFog] = useState<ScopedPendingFog | undefined>(undefined);
+  // Issue #1917: hoisted out of BattleMap's `pendingFog` JSX prop, which called this at the
+  // call site on every render. `pendingFogForEncounter` itself already returns a referentially
+  // stable value (either `undefined` or the SAME `pendingFog.fog` object already held in
+  // state) — the useMemo here is a belt-and-braces guard against that invariant silently
+  // breaking later, and documents the prop as intentionally stabilized for BattleMap's memo.
+  const battleMapPendingFog = useMemo(() => pendingFogForEncounter(pendingFog, eid), [pendingFog, eid]);
   const pendingEncounterPatches = useRef(new Map<string, QueuedEncounterPatch>());
   const lastLocalEncounterRevision = useRef(new Map<number, string>());
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
@@ -1942,20 +1948,29 @@ export default function RunSessionPage() {
   // rather than a `.find` over all characters on every render (issue: large encounters).
   const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
-  function canEditCombatantPermission(c: Combatant): boolean {
-    // An ended encounter is immutable server-side (assertMutable, #163/#470): the interactive
-    // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
-    // status like canSetInitiative so an ended encounter renders read-only (#368).
-    if (encounter?.status === 'ended') return false;
-    if (canDmWrite) return true;
-    if (!canPlayerWrite) return false;
-    return c.characterId != null && ownedCharacterIds.has(c.characterId);
-  }
+  // Issue #1917: `useCallback`, not a plain function declaration — `canEditCombatant` is
+  // passed BY REFERENCE as `BattleMap`'s `canMoveToken` prop (below), and `BattleMap` is now
+  // React.memo-wrapped. A fresh function identity here every render would defeat that.
+  const canEditCombatantPermission = useCallback(
+    (c: Combatant): boolean => {
+      // An ended encounter is immutable server-side (assertMutable, #163/#470): the interactive
+      // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
+      // status like canSetInitiative so an ended encounter renders read-only (#368).
+      if (encounter?.status === 'ended') return false;
+      if (canDmWrite) return true;
+      if (!canPlayerWrite) return false;
+      return c.characterId != null && ownedCharacterIds.has(c.characterId);
+    },
+    [encounter?.status, canDmWrite, canPlayerWrite, ownedCharacterIds],
+  );
 
-  function canEditCombatant(c: Combatant): boolean {
-    if (riskyBlocked) return false;
-    return canEditCombatantPermission(c);
-  }
+  const canEditCombatant = useCallback(
+    (c: Combatant): boolean => {
+      if (riskyBlocked) return false;
+      return canEditCombatantPermission(c);
+    },
+    [riskyBlocked, canEditCombatantPermission],
+  );
 
   /** Issue #1914: the combatant the ACTING viewer owns (a player's own character link). */
   function isOwnCombatant(c: Combatant): boolean {
@@ -2030,6 +2045,23 @@ export default function RunSessionPage() {
   const actionTargetsAtCapacity = !!pendingActionUse
     && pendingActionUse.spec.targets.count > 0
     && actionTargetIds.length >= pendingActionUse.spec.targets.count;
+
+  // Issue #1917: hoisted out of BattleMap's `targeting` JSX prop, which built a fresh object
+  // literal on every render regardless of whether any of its fields actually changed.
+  const battleMapTargeting = useMemo(
+    () =>
+      pendingActionUse && pendingActionUse.spec.targets.count > 0
+        ? {
+            actorId: pendingActionUse.combatantId,
+            legalIds: actionLegalTargetIds,
+            selectedIds: actionTargetIds,
+            declared: actionTargetsDeclared,
+            atCapacity: actionTargetsAtCapacity,
+            onToggle: toggleActionTarget,
+          }
+        : null,
+    [pendingActionUse, actionLegalTargetIds, actionTargetIds, actionTargetsDeclared, actionTargetsAtCapacity, toggleActionTarget],
+  );
 
   const onAoeHitLayoutChange = useCallback((layout: AoeHitLayout | null) => {
     setAoeHitLayout(layout);
@@ -2759,6 +2791,11 @@ export default function RunSessionPage() {
     (combatantId: number, patch: Record<string, unknown>) => combatantTurnState.mutate({ combatantId, patch }),
     [combatantTurnState],
   );
+  // Issue #1917: hoisted out of BattleMap's `onMoveFt` JSX prop.
+  const handleMoveFt = useCallback(
+    (combatantId: number, moveFt: number) => patchCombatantTurnState(combatantId, { moveFt }),
+    [patchCombatantTurnState],
+  );
 
   /** One server roll drives both the death-save outcome and its shared dice-log entry. */
   const rollDeathSave = useCallback(
@@ -3120,6 +3157,17 @@ export default function RunSessionPage() {
       queueEncounterPatch({ mapAttachmentId: attachmentId, mapAlignment: alignment }),
     [queueEncounterPatch],
   );
+  // Issue #1917: hoisted out of BattleMap's `onImportMap`/`onDismissGuidance` JSX props —
+  // both were freshly bound arrows every render, defeating BattleMap's new React.memo.
+  const handleImportMap = useCallback(
+    (id: number) => {
+      setEncounterMap(id);
+      setShowMapGuidance(true);
+      announce('Map imported. Check the grid, set fog, then place tokens.');
+    },
+    [setEncounterMap, announce],
+  );
+  const handleDismissMapGuidance = useCallback(() => setShowMapGuidance(false), []);
   // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
   const setEncounterGrid = useCallback((patch: EncounterGridPatch) => queueEncounterPatch(patch), [queueEncounterPatch]);
   // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
@@ -3167,6 +3215,36 @@ export default function RunSessionPage() {
     if (failed) throw failed.reason;
   }, [eid, encounter?.aoe, queryClient]);
 
+  // Issue #1917: `BattleMap`'s `onDeclareAoe`/`onUpdateAoe`/`onRemoveAoe`/`onClearPlayerAoe`
+  // props each wrapped an already-stable mutator (above) in a fresh inline arrow at the JSX
+  // call site — hoisted here so BattleMap's React.memo boundary sees stable references.
+  const handleDeclareAoe = useCallback(
+    (template: Omit<AoeTemplate, 'declaredByUserId'>) => {
+      void declareAoeTemplate(template).catch(reportError);
+    },
+    [declareAoeTemplate, reportError],
+  );
+  const handleUpdateAoe = useCallback(
+    async (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => {
+      try {
+        await updateAoeTemplate(templateId, patch);
+      } catch (error) {
+        reportError(error);
+        throw error;
+      }
+    },
+    [updateAoeTemplate, reportError],
+  );
+  const handleRemoveAoe = useCallback(
+    (templateId: string) => {
+      void removeAoeTemplate(templateId).catch(reportError);
+    },
+    [removeAoeTemplate, reportError],
+  );
+  const handleClearPlayerAoe = useCallback(() => {
+    void clearPlayerAoeTemplates().catch(reportError);
+  }, [clearPlayerAoeTemplates, reportError]);
+
   // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
   // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
   // saves it hidden (never on the player Handouts card), sets it as the encounter's battle
@@ -3210,12 +3288,20 @@ export default function RunSessionPage() {
   // set only when the caller chose an intent from the long-press/right-click menu; a
   // plain tap keeps sending null, byte-identical to before this issue. senderId/senderName
   // stay null — the server stamps the authenticated caller's identity (issue #869/#1636).
-  const sendPing = (x: number, y: number, label: string | null = null) =>
-    pingMap.mutate({ x, y, color: pingIdentityColor(String(myUserId ?? '')), label, senderId: null, senderName: null } as unknown as MapPing);
+  // Issue #1917: hoisted from an inline JSX arrow into a stable useCallback — BattleMap is
+  // now React.memo-wrapped, so a fresh function identity here on every render would defeat it.
+  const sendPing = useCallback(
+    (x: number, y: number, label: string | null = null) =>
+      pingMap.mutate({ x, y, color: pingIdentityColor(String(myUserId ?? '')), label, senderId: null, senderName: null } as unknown as MapPing),
+    [pingMap, myUserId],
+  );
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
-  const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(eid, combatantId, { tokenX: x, tokenY: y });
+  const moveToken = useCallback(
+    (combatantId: number, x: number, y: number) => patchCombatant(eid, combatantId, { tokenX: x, tokenY: y }),
+    [patchCombatant, eid],
+  );
   const tokenUndoKeys = useRef(new Map<string, string>());
   const tokenBatchApplyIntents = useRef(new Map<string, { previewToken: string; idempotencyKey: string }>());
   // Batch map changes deliberately use the preview/apply protocol rather than a loop of
@@ -3253,9 +3339,15 @@ export default function RunSessionPage() {
   // Unplace a token (issue #271): clear its position back to null so it returns to the
   // "Unplaced" tray WITHOUT deleting the combatant (its HP/conditions/initiative survive).
   // An explicit null is required — `undefined` would be a no-op patch server-side.
-  const unplaceToken = (combatantId: number) => patchCombatant(eid, combatantId, { tokenX: null, tokenY: null });
+  const unplaceToken = useCallback(
+    (combatantId: number) => patchCombatant(eid, combatantId, { tokenX: null, tokenY: null }),
+    [patchCombatant, eid],
+  );
   // Token size category (issue #40, phase 2) — DM-only, server-enforced.
-  const setTokenSize = (combatantId: number, size: TokenSize) => patchCombatant(eid, combatantId, { tokenSize: size });
+  const setTokenSize = useCallback(
+    (combatantId: number, size: TokenSize) => patchCombatant(eid, combatantId, { tokenSize: size }),
+    [patchCombatant, eid],
+  );
 
   // Header run-control group shares one pending flag (see runControl above).
   // `reconcileBlocks` folds into the same busy flag the header already honors (issue
@@ -3391,6 +3483,25 @@ export default function RunSessionPage() {
     if (el) combatantRowRefs.current.set(combatantId, el);
     else combatantRowRefs.current.delete(combatantId);
   }, []);
+  // Issue #1917 stage 1: `CombatantRow` is now `React.memo`-wrapped, so a per-row `rowRef`
+  // callback recreated inline in the roster `.map()` below (`(el) => setCombatantRowRef(c.id,
+  // el)`) would be a fresh function identity every render and defeat the memo for that prop
+  // alone. `setCombatantRowRef` itself is already a stable (`[]` deps) top-level callback, so
+  // the per-combatant-id binding below can be cached forever once built — no invalidation
+  // needed, since the thing it closes over never changes identity.
+  const combatantRowRefCallbacks = useRef(new Map<number, (el: HTMLElement | null) => void>());
+  const getCombatantRowRef = useCallback(
+    (combatantId: number) => {
+      const cache = combatantRowRefCallbacks.current;
+      let bound = cache.get(combatantId);
+      if (!bound) {
+        bound = (el: HTMLElement | null) => setCombatantRowRef(combatantId, el);
+        cache.set(combatantId, bound);
+      }
+      return bound;
+    },
+    [setCombatantRowRef],
+  );
   const autoScrollSkipped = useRef(false);
   // `RunSessionPage` is reused across encounters; reset the first-load latch so
   // each new encounter starts with the header controls visible.
@@ -3423,6 +3534,55 @@ export default function RunSessionPage() {
     });
     return () => cancelAnimationFrame(frame);
   }, [encounter?.status, currentCombatantId]);
+
+  // Issue #1917: `ApplyDamageBar` is now React.memo-wrapped, so its `targets`/`aoeHitContext`
+  // array/object props and its `onApply`/`onApplyToAll`/`onDismiss` handlers are hoisted out
+  // of the JSX call site (below) rather than rebuilt inline on every render. Placed above the
+  // `!encounter` early returns (below) — like every other hook in this component — so hook
+  // order stays identical across renders regardless of loading/not-found/error state.
+  const applyDamageBarTargets = useMemo(
+    () => (encounter?.combatants ?? []).filter((c) => canEditCombatantPermission(c) && c.hpCurrent != null),
+    [encounter?.combatants, canEditCombatantPermission],
+  );
+  const applyDamageBarAoeHitContext = useMemo(
+    () =>
+      encounter &&
+      encounter.gridSize != null &&
+      encounter.gridSize > 0 &&
+      encounter.gridScale != null &&
+      encounter.gridScale > 0 &&
+      aoeHitLayout
+        ? {
+            gridSize: encounter.gridSize,
+            gridScale: encounter.gridScale,
+            mapRect: aoeHitLayout.mapRect,
+            cellPx: aoeHitLayout.cellPx,
+            gridType: encounter.gridType ?? 'square',
+            hexOrientation: encounter.hexOrientation ?? 'pointy',
+            calibration: resolveGridCalibration(encounter),
+          }
+        : null,
+    [encounter, aoeHitLayout],
+  );
+  const applyDamageBarOnApply = useCallback(
+    (combatantId: number, delta: number, damage: DirectDamageMetadata) => {
+      if (!pendingApply) return;
+      const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
+      hpDelta.mutate({ combatantId, delta, actorId, ...damage });
+      setPendingApply(null);
+    },
+    [pendingApply, currentCombatantId, hpDelta],
+  );
+  const applyDamageBarOnApplyToAll = useCallback(
+    (applications: TargetDamageApplication[], delta: number) => {
+      const actorId = pendingApply?.actorCombatantId ?? currentCombatantId ?? undefined;
+      void applyHpDeltaBulk(applications, delta, actorId)
+        .then(() => setPendingApply(null))
+        .catch(() => undefined);
+    },
+    [pendingApply, currentCombatantId, applyHpDeltaBulk],
+  );
+  const applyDamageBarOnDismiss = useCallback(() => setPendingApply(null), []);
 
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
@@ -3485,6 +3645,7 @@ export default function RunSessionPage() {
   const pendingConcentrationCheck = concentrationCheckCombatant?.turnState.pendingConcentrationChecks[0] ?? null;
   const canResolveConcentrationCheck =
     concentrationCheckCombatant != null && canEditCombatantPermission(concentrationCheckCombatant);
+
   // Issue #420: DM header actions come from an explicit lifecycle matrix (not
   // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
   const lifecycle = dmLifecycleActions(encounter.status);
@@ -4054,7 +4215,7 @@ export default function RunSessionPage() {
           onMoveToken={moveToken}
           currentTurnCombatantId={encounter.status === 'running' ? turnWorkspace?.current?.combatantId ?? null : null}
           currentTurnMovementMaxFt={turnWorkspace?.movement?.maxFt ?? null}
-          onMoveFt={(combatantId, moveFt) => patchCombatantTurnState(combatantId, { moveFt })}
+          onMoveFt={handleMoveFt}
           onBatchTokens={batchMoveTokens}
           onUndoTokenBatch={undoTokenBatch}
           dismissTokenUndoNonce={dismissTokenUndoNonce}
@@ -4063,34 +4224,19 @@ export default function RunSessionPage() {
           onSetTokenSize={setTokenSize}
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
-          pendingFog={pendingFogForEncounter(pendingFog, eid)}
+          pendingFog={battleMapPendingFog}
           onSetAoe={setEncounterAoe}
           aoeDeclarerNames={aoeDeclarerNames}
           canDeclareAoe={!riskyBlocked && encounter.status !== 'ended' && (canDmWrite || canPlayerWrite)}
-          onDeclareAoe={(template) => { void declareAoeTemplate(template).catch(reportError); }}
-          onUpdateAoe={async (templateId, patch) => {
-            try {
-              await updateAoeTemplate(templateId, patch);
-            } catch (error) {
-              reportError(error);
-              throw error;
-            }
-          }}
-          onRemoveAoe={(templateId) => { void removeAoeTemplate(templateId).catch(reportError); }}
-          onClearPlayerAoe={canEditEncounter ? () => { void clearPlayerAoeTemplates().catch(reportError); } : undefined}
+          onDeclareAoe={handleDeclareAoe}
+          onUpdateAoe={handleUpdateAoe}
+          onRemoveAoe={handleRemoveAoe}
+          onClearPlayerAoe={canEditEncounter ? handleClearPlayerAoe : undefined}
           hpFeedbackByCombatant={hpFeedbackByCombatant}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
-          onImportMap={
-            canEditEncounter
-              ? (id) => {
-                  setEncounterMap(id);
-                  setShowMapGuidance(true);
-                  announce('Map imported. Check the grid, set fog, then place tokens.');
-                }
-              : undefined
-          }
+          onImportMap={canEditEncounter ? handleImportMap : undefined}
           showGuidance={showMapGuidance}
-          onDismissGuidance={() => setShowMapGuidance(false)}
+          onDismissGuidance={handleDismissMapGuidance}
           onPing={sendPing}
           pings={pings}
           onDismissPing={dismissPing}
@@ -4098,7 +4244,7 @@ export default function RunSessionPage() {
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
           customMechanicsProfile={campaign?.customMechanicsProfile}
-          targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: toggleActionTarget } : null}
+          targeting={battleMapTargeting}
           impactTargetIds={actionImpactTargetIds}
         />
       )}
@@ -4300,39 +4446,14 @@ export default function RunSessionPage() {
           diceTotal={pendingApply.diceTotal}
           ruleSystem={campaign?.ruleSystem}
           customMechanicsProfile={campaign?.customMechanicsProfile}
-          targets={orderedCombatants.filter((c) => canEditCombatantPermission(c) && c.hpCurrent != null)}
+          targets={applyDamageBarTargets}
           applyDisabled={riskyBlocked}
           aoeTemplates={encounter.aoe ?? []}
-          aoeHitContext={
-            encounter.gridSize != null &&
-            encounter.gridSize > 0 &&
-            encounter.gridScale != null &&
-            encounter.gridScale > 0 &&
-            aoeHitLayout
-              ? {
-                  gridSize: encounter.gridSize,
-                  gridScale: encounter.gridScale,
-                  mapRect: aoeHitLayout.mapRect,
-                  cellPx: aoeHitLayout.cellPx,
-                  gridType: encounter.gridType ?? 'square',
-                  hexOrientation: encounter.hexOrientation ?? 'pointy',
-                  calibration: resolveGridCalibration(encounter),
-                }
-              : null
-          }
+          aoeHitContext={applyDamageBarAoeHitContext}
           isStarfinder={isStarfinder}
-          onApply={(combatantId, delta, damage) => {
-            const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
-            hpDelta.mutate({ combatantId, delta, actorId, ...damage });
-            setPendingApply(null);
-          }}
-          onApplyToAll={(applications, delta) => {
-            const actorId = pendingApply.actorCombatantId ?? currentCombatantId ?? undefined;
-            void applyHpDeltaBulk(applications, delta, actorId)
-              .then(() => setPendingApply(null))
-              .catch(() => undefined);
-          }}
-          onDismiss={() => setPendingApply(null)}
+          onApply={applyDamageBarOnApply}
+          onApplyToAll={applyDamageBarOnApplyToAll}
+          onDismiss={applyDamageBarOnDismiss}
         />
       )}
 
@@ -4528,7 +4649,7 @@ export default function RunSessionPage() {
                 <CombatantRow
                   key={c.id}
                   customMechanicsProfile={campaign?.customMechanicsProfile}
-                  rowRef={(el) => setCombatantRowRef(c.id, el)}
+                  rowRef={getCombatantRowRef(c.id)}
                   encounterId={eid}
                   combatant={c}
                   hpFeedbackEvents={hpFeedbackByCombatant.get(c.id) ?? []}

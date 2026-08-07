@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { UIIcon } from '../../../components/UIIcon';
 import { GatedControl } from '../../../components/GatedControl';
@@ -49,6 +49,7 @@ import {
   type TokenDetailMode,
 } from '../tokenStateBadges';
 import { UI_ICON_SIZE } from '../../../lib/uiIcons';
+import { GridOverlay } from './GridOverlay';
 export const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
 
 /** Measure an element's rendered pixel box, tracking resizes — used for square grid cells + the ruler. */
@@ -244,7 +245,7 @@ export type BattleMapProps = {
   colorVisionAssist?: boolean;
 };
 
-export function BattleMap({
+export const BattleMap = memo(function BattleMap({
   encounter,
   campaignId,
   isDm,
@@ -1739,6 +1740,12 @@ export function BattleMap({
     [gridOn, gridType, mapRect, calibrationPx, hexOrientation],
   );
 
+  // A primitive value, not memoized (issue #1917 stage 2): comparing two equal numbers is
+  // always `===` regardless of how many times this line runs, so `<GridOverlay>`'s memo
+  // boundary skips just as cleanly as if this were wrapped in its own useMemo. Kept beside
+  // `hexCells` since both feed `<GridOverlay>`'s geometry-only prop surface.
+  const gridOverlayOpacity = calibrationPx?.opacity ?? DEFAULT_GRID_OPACITY;
+
   function changeTool(next: MapTool) {
     // Leaving a mode drops any armed/incomplete gesture (including an unfinished ping tap).
     cancelActiveGesture();
@@ -2600,46 +2607,21 @@ export function BattleMap({
                 {/* Grid overlay (issue #40 / #238 / #417) — a calibrated square grid (origin
                     offset, independent cell w/h, rotation, opacity via an SVG pattern) or a
                     pointy-top hex SVG. The pattern honours the SAME calibration as snapping +
-                    the ruler, so the overlay a player sees matches the DM's exactly. */}
-                {gridOn && gridType === 'square' && calibrationPx && calibrationPx.cellWpx > 1 && calibrationPx.cellHpx > 1 && (
-                  <svg
-                    data-testid="battle-map-grid"
-                    className="absolute inset-0"
-                    width={mapRect.width}
-                    height={mapRect.height}
-                    style={{ opacity: calibrationPx.opacity }}
-                  >
-                    <defs>
-                      <pattern
-                        id={`grid-${encounter.id}`}
-                        patternUnits="userSpaceOnUse"
-                        width={calibrationPx.cellWpx}
-                        height={calibrationPx.cellHpx}
-                        patternTransform={`translate(${calibrationPx.originXpx} ${calibrationPx.originYpx}) rotate(${calibrationPx.rotationDeg})`}
-                      >
-                        <path
-                          d={`M ${calibrationPx.cellWpx} 0 L 0 0 0 ${calibrationPx.cellHpx}`}
-                          fill="none"
-                          stroke="rgb(148,163,184)"
-                          strokeWidth={1}
-                        />
-                      </pattern>
-                    </defs>
-                    <rect width={mapRect.width} height={mapRect.height} fill={`url(#grid-${encounter.id})`} />
-                  </svg>
-                )}
-                {gridOn && gridType === 'hex' && hexCells.length > 0 && (
-                  <svg
-                    className="absolute inset-0"
-                    width={mapRect.width}
-                    height={mapRect.height}
-                    style={{ opacity: calibrationPx?.opacity ?? DEFAULT_GRID_OPACITY }}
-                  >
-                    {hexCells.map((pts, i) => (
-                      <polygon key={i} points={pts} fill="none" stroke="rgb(148,163,184)" strokeWidth={1} />
-                    ))}
-                  </svg>
-                )}
+                    the ruler, so the overlay a player sees matches the DM's exactly. Extracted
+                    into its own memoized component (issue #1917 stage 2) whose props are
+                    geometry inputs only, so a token drag or an unrelated HP/roster update never
+                    re-renders this subtree — see `gridOverlayOpacity` above for why that stays a
+                    primitive derived value rather than reading `encounter` here. */}
+                <GridOverlay
+                  gridOn={gridOn}
+                  gridType={gridType}
+                  mapRect={mapRect}
+                  calibrationPx={calibrationPx}
+                  hexOrientation={hexOrientation}
+                  hexCells={hexCells}
+                  opacity={gridOverlayOpacity}
+                  encounterId={encounter.id}
+                />
 
                 {/* Calibration anchors (issue #417) — DM-only, only in the Calibrate tool.
                     Drag the origin anchor to a corner of the map's printed grid, then drag the
@@ -3519,7 +3501,7 @@ export function BattleMap({
       )}
     </Card>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 
@@ -3546,7 +3528,7 @@ export type ApplyDamageBarProps = {
   onDismiss: () => void;
 };
 
-export function ApplyDamageBar({
+export const ApplyDamageBar = memo(function ApplyDamageBar({
   amount,
   label,
   diceTotal,
@@ -3772,4 +3754,4 @@ export function ApplyDamageBar({
       </button>
     </div>
   );
-}
+});

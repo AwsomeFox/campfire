@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ActionSpec, Character, Combatant, TokenSize, CustomMechanicsProfile, UsableAction } from '@campfire/schema';
 import { defaultCombatantStatblock, hasDeathSavesForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
@@ -205,7 +205,7 @@ export type CombatantRowProps = {
   rulesHintCompendiumAvailable?: boolean;
 };
 
-export function CombatantRow({
+export const CombatantRow = memo(function CombatantRow({
   rowRef,
   encounterId,
   combatant,
@@ -1899,4 +1899,4 @@ export function CombatantRow({
       })()}
     </div>
   );
-}
+});

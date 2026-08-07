@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { RuleEntry, CustomMechanicsProfile } from '@campfire/schema';
 import { api, API } from '../../../lib/api';
@@ -20,7 +20,7 @@ export type Props = {
   campaignId?: number;
 };
 
-export function CombatantStatblock({ ruleEntryId, ruleSystem, customMechanicsProfile, campaignId }: Props) {
+export const CombatantStatblock = memo(function CombatantStatblock({ ruleEntryId, ruleSystem, customMechanicsProfile, campaignId }: Props) {
   useTranslation();
   const { open, setOpen, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
@@ -90,4 +90,4 @@ export function CombatantStatblock({ ruleEntryId, ruleSystem, customMechanicsPro
       )}
     </div>
   );
-}
+});

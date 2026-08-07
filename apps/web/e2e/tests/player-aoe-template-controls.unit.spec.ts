@@ -37,7 +37,12 @@ test.describe('player AoE template controls (issue #1913)', () => {
     expect(BATTLE_MAP).toContain('const template = aoeTemplates.find((candidate) => candidate.id === id);');
     expect(BATTLE_MAP).toContain('setAoeDraft(template ? {');
     expect(BATTLE_MAP).toContain('x: String(template.x),');
-    expect(RUN_SESSION).toContain('onUpdateAoe={async (templateId, patch) =>');
+    // Issue #1917: the async try/catch/reportError/rethrow wrapper was hoisted out of the
+    // inline `onUpdateAoe` JSX prop into a stable top-level `handleUpdateAoe` useCallback
+    // (BattleMap is now React.memo-wrapped, so a fresh arrow at the call site every render
+    // would defeat it) — same behavior, different definition site.
+    expect(RUN_SESSION).toContain('const handleUpdateAoe = useCallback(\n    async (templateId: string, patch:');
+    expect(RUN_SESSION).toContain('onUpdateAoe={handleUpdateAoe}');
     expect(RUN_SESSION).toContain('throw error;');
   });
 
