@@ -16,7 +16,7 @@ Grounded in the code as of this decision:
 | Surface | What it is | Where |
 |---|---|---|
 | `Character.notes` | Public bio/story prose field on a character sheet | `packages/schema/src/index.ts:682` |
-| `Session.dmSecret` (+ same field on quests/NPCs/locations/factions) | DM-only secret prose paired with one canon entity | `packages/schema/src/index.ts:1293` (session); the same pattern recurs on NPC/quest/location/faction — see the file's own header note at `packages/schema/src/index.ts:10` |
+| `dmSecret` fields | DM-only secret prose paired with one canon entity | `packages/schema/src/index.ts:10` (header note documenting the convention across canon entities, e.g. `Session.dmSecret` at `:1293`) |
 | `notes` module | A standalone row a member writes: `Note` with `visibility ∈ {private, dm_shared, party_shared, whisper}` and `kind ∈ {note, inbox}` | `packages/schema/src/index.ts:2898-2941` (schema), `apps/server/src/modules/notes/notes.service.ts`, `apps/server/src/modules/notes/notes.controller.ts` |
 | `comments` module | Threaded, always-shared discussion anchored to an entity; no per-comment visibility | `packages/schema/src/index.ts:3130` (schema), `apps/server/src/modules/comments/comments.service.ts:97-109` |
 | `scribe` / `inbox-sweep` | AI services that *consume* `kind: 'inbox'` notes and file proposals from them | `apps/server/src/modules/inbox-sweep/inbox-sweep.service.ts`, `apps/server/src/modules/scribe/scribe.service.ts:363` |
@@ -26,12 +26,12 @@ Grounded in the code as of this decision:
 - **`Character.notes`** — no visibility of its own. Redaction follows the whole
   character read: hidden/foreign-campaign characters already 404 before this
   field is reached. It is a plain prose field, not a row with its own ACL.
-- **`Session.dmSecret`** (and the NPC/quest/location/faction siblings) —
-  stripped server-side for any non-DM reader, on every read path (get/list/
-  export/MCP). This is the single `dmSecret` convention documented once at
-  `packages/schema/src/index.ts:10` and reused across canon entities; it has
-  nothing to do with the `notes` module below except sharing the English word
-  "secret"/"notes".
+- **`dmSecret` fields** — stripped server-side for any non-DM reader, on every
+  read path (get/list/export/MCP). This is the single `dmSecret` convention
+  documented once at `packages/schema/src/index.ts:10` and reused across canon
+  entities (sessions, characters, quests, NPCs, locations, timeline events,
+  factions, etc.); it has nothing to do with the `notes` module below except
+  sharing the English word "secret"/"notes".
 - **`notes` module** — visibility is enforced in one predicate,
   `canSee()` at `apps/server/src/common/note-visibility.ts:23-36`: `private`
   → author only; `dm_shared` → author + dm; `party_shared` → everyone;
@@ -118,8 +118,8 @@ with; they only read that way because of vocabulary overlap:
   field already carries a plain doc comment ("public character bio/story") —
   now extended in this change (`packages/schema/src/index.ts:682`) to say
   explicitly that it is not a `notes`-system row.
-- **`Session.dmSecret` (and NPC/quest/location/faction `dmSecret`) vs the
-  `notes` module** — same story: this is the established per-entity-secret
+- **`dmSecret` fields vs the `notes` module** — same story: this is the established
+  per-entity-secret
   pattern used across canon entities, unrelated to the standalone `Note`
   entity beyond both being DM-facing prose at some point. Collapsing it into
   the `notes` module (e.g. "a session's DM secret is just a `dm_shared` note

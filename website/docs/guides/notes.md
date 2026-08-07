@@ -57,9 +57,10 @@ they are not part of this system — each solves a different job:
   story/background prose that lives on the character itself, like its stats or
   portrait. It has one visibility (everyone who can see the character sees it) and
   no author-vs-DM split — it is not a row in the notes/inbox list above.
-- **A session's DM secret** (and the `dmSecret` field on quests, NPCs, locations,
-  and factions) is DM-only prep text that lives on that entity, redacted for
-  everyone else. It is the same secrecy pattern used across canon entities, not a
+- **Entity DM secrets** (the `dmSecret` field present across canon entities —
+  such as sessions, characters, quests, NPCs, locations, timeline events, and
+  factions) are DM-only prep text that lives on that entity, redacted for
+  everyone else. It is the general secrecy pattern used across canon entities, not a
   personal note someone wrote.
 - **Comments** are a separate, always-shared discussion thread anchored to a quest,
   NPC, location, session, character, or campaign — closer to play-by-post chat than
