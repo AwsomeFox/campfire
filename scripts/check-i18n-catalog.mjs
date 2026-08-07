@@ -184,6 +184,25 @@ const HARDCODED_PATTERNS = [
   { name: 'setError err.message fallback', re: /err instanceof ApiError\s*\?\s*err\.message\s*:/ },
 ];
 
+/**
+ * Files under {@link SURFACE_ROOTS} that legitimately render NO user-facing text and therefore
+ * have nothing to translate. Each entry must say why.
+ *
+ * This is deliberately an explicit list, not a heuristic: "no text today" is a property that can
+ * change, and a silent rule would let a file drift into rendering copy without anyone re-deciding.
+ *
+ * It is also not a hole. An exempted file is still walked by the #1940 JSX-text ratchet, which
+ * scans the whole `apps/web/src/features/encounters` tree and defaults an unlisted file to an
+ * allowance of ZERO — so the moment one of these gains a hardcoded user-facing string, that check
+ * fails. The exemption removes only the `useTranslation` requirement, which for a file with no
+ * copy would otherwise force an unused hook whose sole purpose is satisfying this check.
+ */
+const NO_USER_FACING_TEXT = {
+  // Pure SVG geometry (issue #1917): grid lines, hex polygons, a <pattern> def. Every prop is a
+  // number, a geometry enum, or an opacity — there is no string rendered to a human here.
+  'apps/web/src/features/encounters/map/GridOverlay.tsx': 'renders only SVG grid geometry',
+};
+
 function checkHardcodedSurfaces() {
   const errors = [];
   for (const relRoot of SURFACE_ROOTS) {
@@ -191,7 +210,7 @@ function checkHardcodedSurfaces() {
     for (const file of walkSourceFiles(abs)) {
       const rel = file.slice(root.length + 1);
       const src = readFileSync(file, 'utf8');
-      if (!src.includes('useTranslation')) {
+      if (!src.includes('useTranslation') && !(rel in NO_USER_FACING_TEXT)) {
         errors.push(`${rel}: missing useTranslation() import/hook`);
       }
       for (const { name, re } of HARDCODED_PATTERNS) {
