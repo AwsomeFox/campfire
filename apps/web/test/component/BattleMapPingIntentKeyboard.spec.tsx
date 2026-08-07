@@ -152,13 +152,35 @@ describe('BattleMap ping intent menu keyboard path (issue #2047)', () => {
     expect(props.onPing).toHaveBeenCalledWith(50, 50);
   });
 
-  test('opening the menu via keyboard moves focus onto the first menu item', () => {
+  test('opening the menu via keyboard moves focus onto the first menu item on keyup', () => {
     renderBattleMap();
     armPingTool();
 
     const surface = screen.getByTestId('battle-map-surface');
     fireEvent.keyDown(surface, { key: 'Enter', shiftKey: true });
+    fireEvent.keyUp(window, { key: 'Enter' });
 
+    const firstItem = screen.getByTestId('map-ping-intent-look');
+    expect(document.activeElement).toBe(firstItem);
+  });
+
+  test('holding Shift+Enter (auto-repeat while down) does not trigger auto-activation of the first menu item', () => {
+    const { props } = renderBattleMap();
+    armPingTool();
+
+    const surface = screen.getByTestId('battle-map-surface');
+    fireEvent.keyDown(surface, { key: 'Enter', shiftKey: true });
+    expect(screen.getByTestId('map-ping-intent-menu')).toBeTruthy();
+
+    // OS key repeat while key is held down delivers repeated keydowns to surface
+    fireEvent.keyDown(surface, { key: 'Enter', shiftKey: true, repeat: true });
+    fireEvent.keyDown(surface, { key: 'Enter', shiftKey: true, repeat: true });
+
+    expect(screen.getByTestId('map-ping-intent-menu')).toBeTruthy();
+    expect(props.onPing).not.toHaveBeenCalled();
+
+    // Key release moves focus to the first menu item
+    fireEvent.keyUp(window, { key: 'Enter' });
     const firstItem = screen.getByTestId('map-ping-intent-look');
     expect(document.activeElement).toBe(firstItem);
   });

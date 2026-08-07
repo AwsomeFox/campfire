@@ -1472,6 +1472,7 @@ export const BattleMap = memo(function BattleMap({
     e.preventDefault();
     // Discrete keyboard activation never shares ownership with an armed pointer tap.
     if (activeGestureRef.current) return;
+    pingIntentOpenedByKeyboardRef.current = true;
     const rect = surfaceRef.current?.getBoundingClientRect();
     setPingIntentMenu({
       x: MAP_PING_KEYBOARD_POINT.x,
@@ -1495,13 +1496,31 @@ export const BattleMap = memo(function BattleMap({
     setPingIntentMenu(null);
   }
 
-  // The first menu item is focused as soon as the menu opens (issue #2047) — the intent
+  // The first menu item is focused once the menu opens (issue #2047) — the intent
   // menu is a portal appended at the end of `document.body`, so its DOM tab order does
   // not follow the map surface; without an explicit focus move, a keyboard user who just
   // opened it via Shift+Enter/Space would have no reliable way to reach it at all.
+  // When opened via keyboard, focus move is deferred until keyup so holding Shift+Enter
+  // does not immediately auto-repeat into native button activation on the first item.
+  const pingIntentOpenedByKeyboardRef = useRef(false);
   const pingIntentFirstItemRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (pingIntentMenu) pingIntentFirstItemRef.current?.focus();
+    if (!pingIntentMenu) return;
+    if (pingIntentOpenedByKeyboardRef.current) {
+      const handleKeyUp = (e: KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+          pingIntentOpenedByKeyboardRef.current = false;
+          pingIntentFirstItemRef.current?.focus();
+          window.removeEventListener('keyup', handleKeyUp);
+        }
+      };
+      window.addEventListener('keyup', handleKeyUp);
+      return () => {
+        pingIntentOpenedByKeyboardRef.current = false;
+        window.removeEventListener('keyup', handleKeyUp);
+      };
+    }
+    pingIntentFirstItemRef.current?.focus();
   }, [pingIntentMenu]);
 
   // Close the intent menu on Escape or an outside pointerdown, matching the established
