@@ -225,14 +225,23 @@ function rechargeFromUsage(raw: unknown): string {
 function usesMaxFromUsage(raw: unknown): number {
   const u = asRecord(raw);
   if (!u) return 0;
+  // Floor and clamp into `ActionUses.max`'s domain (integer, 0–99). Statblock JSON is
+  // external data — a compendium row, a DDB import, a homebrew paste — so `uses: 100`,
+  // `uses: 2.5`, or a five-digit `N/Day` label are all reachable, and every one of them
+  // makes `ActionSpec.parse` throw. That throw escapes `expandRawStatblockAction`, which
+  // `expandStatblockActions` calls in an unguarded loop, so ONE malformed usage object
+  // takes out the whole creature's action list and `listUsableActions` 500s. Degrading to
+  // a clamped pool matches how every other unparseable statblock field here behaves:
+  // produce nothing rather than throw.
+  const clamp = (n: number) => Math.max(0, Math.min(99, Math.floor(n)));
   const type = typeof u.type === 'string' ? u.type.toLowerCase() : '';
   if (type === 'perday') {
     const n = numberOrNull(u.uses ?? u.param);
-    if (n !== null && n > 0) return n;
+    if (n !== null && n > 0) return clamp(n);
   }
   const label = typeof u.label === 'string' ? u.label : '';
   const m = label.match(/^\s*(\d+)\s*\/\s*Day\s*$/i);
-  if (m) return Number(m[1]);
+  if (m) return clamp(Number(m[1]));
   return 0;
 }
 

@@ -186,6 +186,35 @@ describe('combatant statblock expansion (issue #425)', () => {
       expect(action.spec?.uses.max).toBe(2);
     });
 
+    // Devin review on PR #2062: statblock JSON is external, so an out-of-domain per-day count
+    // is reachable — and `ActionUses.max` is `int().min(0).max(99)`, so it throws out of
+    // `expandRawStatblockAction`. `expandStatblockActions` loops without a per-item guard, so
+    // one bad usage object would take out the creature's WHOLE action list and 500
+    // `listUsableActions`. The assertion that matters is the second one in each pair: that
+    // expansion of the OTHER actions survives.
+    it.each([
+      ['above the schema ceiling', { type: 'perDay', uses: 250, label: '250/Day' }, 99],
+      ['fractional', { type: 'perDay', uses: 2.5, label: '2.5/Day' }, 2],
+      ['a five-digit free-text label', { label: '100000/Day' }, 99],
+    ])('a per-day count that is %s clamps instead of throwing the whole expansion away', (_why, usage, expected) => {
+      const action = expandRawStatblockAction({ name: 'Odd Ability', desc: 'A trick.', attack_bonus: 4, usage }, 'action');
+      expect(action.spec?.uses.max).toBe(expected);
+
+      // The real damage was collateral: a sibling action on the same creature is what a DM
+      // actually loses when the malformed one throws.
+      const all = expandStatblockActions(
+        {
+          actions: [
+            { name: 'Claw', desc: 'A basic attack.', attackBonus: 5, damage: [{ expression: '1d6', type: 'slashing' }] },
+            { name: 'Odd Ability', desc: 'A trick.', attackBonus: 4, usage },
+          ],
+        },
+        Dnd5eAdapter,
+        'dnd5e',
+      );
+      expect(all.map((a) => a.name)).toEqual(['Claw', 'Odd Ability']);
+    });
+
     it('an at-will action (no usage object at all) has an empty uses block — effectiveActionUsesMax is 0', () => {
       const action = expandRawStatblockAction(
         { name: 'Claw', desc: 'A basic attack.', attack_bonus: 5, damage: [{ expression: '1d6', type: 'slashing' }] },
