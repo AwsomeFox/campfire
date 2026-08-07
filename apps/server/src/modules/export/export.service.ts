@@ -11,7 +11,7 @@ import { and, desc, eq, gt, inArray, isNotNull, or, sql } from 'drizzle-orm';
 import { toScheduledSessionExport } from '@campfire/schema';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats, aiScribeConfigs, aiScribeJobs, combatants } from '../../db/schema';
+import { aiDmSeats, aiScribeConfigs, aiScribeJobs, combatants, campaignStatusTransitions } from '../../db/schema';
 import { loadCompendiumExportContext } from '../campaigns/compendium-import';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
@@ -456,11 +456,28 @@ export class ExportService {
 
     const auditMeta = await this.audit.finalizeCampaignExportMeta(campaignId, auditExport.meta);
 
+    // Issue #846: lifecycle-status provenance round-trips with the campaign (newest last, so
+    // import re-inserts in chronological order). Loose objects — importCampaign is defensive.
+    const statusTransitionRows = await this.db
+      .select()
+      .from(campaignStatusTransitions)
+      .where(eq(campaignStatusTransitions.campaignId, campaignId))
+      .orderBy(campaignStatusTransitions.createdAt, campaignStatusTransitions.id);
+    const statusTransitions = statusTransitionRows.map((r) => ({
+      actorUserId: r.actorUserId,
+      actorName: r.actorName,
+      fromStatus: r.fromStatus,
+      toStatus: r.toStatus,
+      reason: r.reason,
+      createdAt: r.createdAt,
+    }));
+
     const document = {
       campaign,
       quests: questList,
       npcs: npcList,
       locations: locationList,
+      statusTransitions,
       sessions: sessionList,
       characters: characterList,
       notes: noteList,

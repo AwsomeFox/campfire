@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, count, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
@@ -25,7 +25,7 @@ import {
   HomebrewMechanicsProfile,
   MonsterHpDisplay,
 } from '@campfire/schema';
-import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
+import type { Campaign, CampaignClonePreview, CampaignStatus, CampaignStatusTransition, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { fromJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -78,6 +78,7 @@ import {
   auditLog,
   participantSupportPreferences,
   campaignPurgeTombstones,
+  campaignStatusTransitions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
@@ -833,6 +834,72 @@ export class CampaignsService {
     return toDomain(row);
   }
 
+  /**
+   * Issue #846: list this campaign's lifecycle-status transitions, newest first. The
+   * newest row is the current provenance surfaced in the archived banner/settings;
+   * older rows are the history that survives reactivation. Member-readable (actor +
+   * status + time are shown to players; `reason` is DM-only and the caller redacts it
+   * for non-DM viewers — see the controller).
+   */
+  async listStatusTransitions(id: number): Promise<CampaignStatusTransition[]> {
+    const rows = await this.db
+      .select()
+      .from(campaignStatusTransitions)
+      .where(eq(campaignStatusTransitions.campaignId, id))
+      .orderBy(desc(campaignStatusTransitions.createdAt), desc(campaignStatusTransitions.id));
+    return rows.map((r) => ({
+      id: r.id,
+      campaignId: r.campaignId,
+      actorUserId: r.actorUserId,
+      actorName: r.actorName,
+      fromStatus: r.fromStatus as CampaignStatus,
+      toStatus: r.toStatus as CampaignStatus,
+      reason: r.reason,
+      createdAt: r.createdAt,
+    }));
+  }
+
+  /**
+   * Issue #846: append a durable status-transition provenance row + an audit entry.
+   * Append-only by design — reactivation and re-archiving accumulate history rather
+   * than overwrite it, so the newest row is always the current provenance. `reason`
+   * is DM operational text and never reaches players; the audit `detail` carries it
+   * for incident reviewers. Best-effort on the audit side (a failed audit write must
+   * not unwind a successful status change), mirroring the auditBestEffort pattern.
+   */
+  private async recordStatusTransition(
+    id: number,
+    fromStatus: string,
+    toStatus: string,
+    reason: string,
+    user: RequestUser,
+  ): Promise<void> {
+    const cleanReason = (reason ?? '').trim().slice(0, 500);
+    await this.db.insert(campaignStatusTransitions).values({
+      campaignId: id,
+      actorUserId: auditActor(user),
+      actorName: (user.name ?? '').slice(0, 200),
+      fromStatus,
+      toStatus,
+      reason: cleanReason,
+      createdAt: nowIso(),
+    });
+    await auditBestEffort(
+      this.audit,
+      this.logger,
+      {
+        actor: auditActor(user),
+        actorRole: auditActorRole(user),
+        action: 'campaign.status_change',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: JSON.stringify({ from: fromStatus, to: toStatus, ...(cleanReason ? { reason: cleanReason } : {}) }),
+      },
+      (e) => `audit campaign.status_change failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
   async update(
     id: number,
     input: CampaignUpdateInput,
@@ -844,20 +911,25 @@ export class CampaignsService {
     // customMechanicsProfile is pulled out too (issue #1502) — it needs cross-field validation
     // against the EFFECTIVE ruleSystem and JSON serialization before it can join campaignInput,
     // which is spread directly into `.set()` below.
-    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, ...campaignInput } = input;
+    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, statusChangeReason, ...campaignInput } = input;
     const shouldResetPins =
       mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
     // or paused <-> completed) — any other field requires un-archiving first.
     if (existing.status !== 'active') {
-      const extraKeys = Object.keys(input).filter((k) => k !== 'status' && input[k as keyof CampaignUpdateInput] !== undefined);
+      const extraKeys = Object.keys(input).filter(
+        (k) => k !== 'status' && k !== 'statusChangeReason' && input[k as keyof CampaignUpdateInput] !== undefined,
+      );
       if (extraKeys.length > 0) {
         throw new ForbiddenException(
           `Campaign is ${existing.status} (read-only) — only 'status' can be changed; set it back to 'active' first (rejected: ${extraKeys.join(', ')})`,
         );
       }
     }
+    // Issue #846: a genuine status change (active<->paused<->completed) records durable
+    // provenance via recordStatusTransition in each status-flipping return path below.
+    const statusChanging = input.status !== undefined && existing.status !== input.status;
     // Issue #1502: resolve the EFFECTIVE ruleSystem this write applies against — the incoming
     // value, or the campaign's existing one when this request doesn't touch ruleSystem — so a
     // customMechanicsProfile write is validated against the slug it will actually pair with.
@@ -994,6 +1066,9 @@ export class CampaignsService {
         entityId: id,
         campaignId: id,
       });
+      if (statusChanging) {
+        await this.recordStatusTransition(id, existing.status, 'active', statusChangeReason ?? '', user);
+      }
       return toDomain(updatedRow);
     }
 
@@ -1086,6 +1161,9 @@ export class CampaignsService {
         campaignId: id,
         detail: JSON.stringify({ revoked }),
       });
+      if (statusChanging) {
+        await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
+      }
       return toDomain(row);
     }
 
@@ -1166,6 +1244,12 @@ export class CampaignsService {
       campaignId: id,
       detail: shouldResetPins ? JSON.stringify({ mapAlignment: 'reset', pinsCleared }) : undefined,
     });
+    // Issue #846: record durable status-transition provenance for any genuine change
+    // reaching this path (paused<->completed, and the plain archive path without
+    // ?revokeInvites). Reactivating and archive+revoke recorded theirs above.
+    if (statusChanging) {
+      await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
+    }
     // Archive (active → paused/completed) suspends public invites. Restore/
     // unarchive never flips the flag back — deliberate reactivation required (#857).
     if (archiving) {
@@ -3702,6 +3786,31 @@ export class CampaignsService {
     // transaction, so nothing told the in-memory proactive watcher it exists. An archive
     // carrying `proactiveSettings.enabled: true` would otherwise import as ON-but-inert.
     await this.aiDm.syncProactiveWatcher(newId);
+
+    // Issue #846: re-insert lifecycle-status provenance. Best-effort and per-row defensive
+    // (provenance is non-critical): a malformed entry is skipped, never failing the import.
+    // Imported campaigns start 'active', but their transition HISTORY is preserved so the
+    // archived banner/settings can still show who paused/completed it and when.
+    const importedTransitions = Array.isArray(input.statusTransitions) ? input.statusTransitions : [];
+    for (const entry of importedTransitions) {
+      const t = (entry ?? {}) as Record<string, unknown>;
+      const fromStatus = str(t.fromStatus);
+      const toStatus = str(t.toStatus);
+      if (!fromStatus || !toStatus) continue; // no from/to pair carries no provenance
+      try {
+        await this.db.insert(campaignStatusTransitions).values({
+          campaignId: newId,
+          actorUserId: str(t.actorUserId) || auditActor(user),
+          actorName: str(t.actorName) || (user.name ?? ''),
+          fromStatus,
+          toStatus,
+          reason: str(t.reason).slice(0, 500),
+          createdAt: str(t.createdAt) || nowIso(),
+        });
+      } catch {
+        // skip a single bad provenance row; never fail the import over it
+      }
+    }
 
     const campaign = await this.getOrThrow(newId);
     return {
