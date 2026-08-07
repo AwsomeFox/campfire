@@ -54,6 +54,7 @@ function baseMe(overrides: Partial<Me['user']> = {}): Me {
       accentColor: null,
       textSize: 'default',
       diceTheme: 'nocturne',
+      tableAudio: 'off',
       timeFormat: 'system',
       animateOthersRolls: true,
       canCreateCampaigns: false,
