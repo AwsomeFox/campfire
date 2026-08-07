@@ -48,6 +48,24 @@ quest, update an NPC, or drop a line in a recap. Resolving clears it from the qu
     Prefer your own assistant? [Connect one](../ai/connect.md) (with a direct-write DM token) and ask it to sweep
     the inbox — it calls the exact same `sweep_inbox` operation the button does.
 
+## "Notes" elsewhere in Campfire
+
+A few other things in Campfire are also called (or share a word with) "notes," but
+they are not part of this system — each solves a different job:
+
+- **A character's bio** (the **Notes** field on a character sheet) is free-text
+  story/background prose that lives on the character itself, like its stats or
+  portrait. It has one visibility (everyone who can see the character sees it) and
+  no author-vs-DM split — it is not a row in the notes/inbox list above.
+- **A session's DM secret** (and the `dmSecret` field on quests, NPCs, locations,
+  and factions) is DM-only prep text that lives on that entity, redacted for
+  everyone else. It is the same secrecy pattern used across canon entities, not a
+  personal note someone wrote.
+- **Comments** are a separate, always-shared discussion thread anchored to a quest,
+  NPC, location, session, character, or campaign — closer to play-by-post chat than
+  a private notebook. Every member who can see the entity sees every comment on it;
+  there's no per-comment visibility the way a note has private/shared/whisper.
+
 ## List capacity & pagination
 
 `GET /api/v1/campaigns/:id/notes` and `GET /api/v1/campaigns/:id/inbox` return a

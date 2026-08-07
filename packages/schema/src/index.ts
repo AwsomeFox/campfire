@@ -683,7 +683,7 @@ export const Character = z.object({
   resources: z.record(z.string().max(80), CharacterResource).default({}),
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
-  notes: z.string().max(20_000).default(''), // public character bio/story
+  notes: z.string().max(20_000).default(''), // public character bio/story — a field ON the sheet, NOT a row in the `notes` system (issue #1784)
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (a secret curse, hidden true identity…)
   ...timestamps,
 });
@@ -1294,7 +1294,7 @@ export const Session = z.object({
   title: z.string().max(200).default(''),
   playedAt: IsoDate.nullable().default(null),
   recap: z.string().max(100_000).default(''), // markdown
-  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (session prep notes)
+  dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (session prep notes; a field ON the session, NOT a row in the `notes` system — issue #1784)
   scheduledSessionId: Id.nullable().default(null),
   // Encounters linked to this session (issue #480) — present on GET reads only.
   linkedEncounters: z
@@ -2878,6 +2878,23 @@ export const FacilitatorSupportSummary = z.object({
 export type FacilitatorSupportSummary = z.infer<typeof FacilitatorSupportSummary>;
 
 // ---------- notes ----------
+// Issue #1784 re-examined whether "notes" is one overloaded concept across the app.
+// It isn't — `Character.notes` (public bio prose) and the `dmSecret` fields on canon
+// entities (a DM-only secret paired with the SAME entity, e.g. `Session.dmSecret` =
+// session-prep notes) are unrelated data; they just share a field name with the
+// system below. `Note`/`NoteKind`/`NoteVisibility` are the actual "notes" system: a
+// standalone row a member writes, with its own visibility. `comments` (see Comment
+// below) is a third, separate thing again — always-shared discussion anchored to an
+// entity, no per-comment visibility. See `design/notes-concept-decision.md` for the
+// full inventory, file:line citations, and why each stays as its own thing.
+//
+// Within THIS system, `kind` draws the one real remaining seam: `kind: 'note'` is a
+// member's own recall/sharing (any of the 4 visibilities); `kind: 'inbox'` is always a
+// fixed `dm_shared` triage submission awaiting DM resolution (`resolved`/`resolvedNote`,
+// meaningless on a `kind: 'note'` row). REST/MCP already surface the two as first-class,
+// separately-routed operations (`/notes` vs `/inbox`, `list_notes` vs `read_inbox` /
+// `submit_inbox_item`) — only storage shares one table, and the decision record is why.
+//
 // `whisper` is a per-player secret channel (issue #127): the note is visible ONLY to
 // its author, the single targeted recipient (recipientUserId), and any DM. This is the
 // player-vs-player asymmetry the other visibilities can't express — private is
