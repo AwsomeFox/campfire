@@ -7,7 +7,8 @@ import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateU
   // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
   // the turn tick, the same pure math the resolver uses so this service can never decide a
   // pool recharges differently than an apply/reject message described it.
-  parseRechargeRange } from '@campfire/schema';
+  parseRechargeRange,
+  effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -7464,9 +7465,13 @@ export class EncountersService {
             ? (this.actionResolver?.usesTrackedActions(startingRow, fresh.campaignId) ?? [])
                 .map((entry) => {
                   const range = parseRechargeRange(entry.uses.recharge);
-                  return range ? { key: entry.key, name: entry.name, min: range.min } : null;
+                  // `max` rides along so the undo delta can clamp its `spent + 1` revert to
+                  // the pool ceiling without re-resolving the action list at undo time.
+                  return range
+                    ? { key: entry.key, name: entry.name, min: range.min, max: effectiveActionUsesMax(entry.uses) }
+                    : null;
                 })
-                .filter((e): e is { key: string; name: string; min: number } => e !== null)
+                .filter((e): e is { key: string; name: string; min: number; max: number } => e !== null)
             : [];
           let actionUsesRecharged: ActionUsesRechargeDelta[] = [];
           let nextActionUses: ActionUsesMap | null = null;
