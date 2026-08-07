@@ -10117,3 +10117,266 @@ describe('encounters — turn timer (issue #1935, e2e)', () => {
     expect(playerGet.body.turnTimerSeconds).toBe(dmGet.body.turnTimerSeconds);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #1923 — DM-only manual initiative reorder. The documented answer to an
+// unresolved tie (initiative-tiebreak.ts's own doc comment) and the only mechanical
+// expression of Delay: a drag/reorder is what actually moves the combatant, unlike the
+// log-only delaying marker.
+// ---------------------------------------------------------------------------
+describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Issue 1923 Campaign' })).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  /**
+   * Wizard(20) > {Fighter, Rogue}(14, SAME initMod so the 5e tiebreak degenerates to
+   * plain sortOrder — Fighter was added first) > Cleric(6). Natural order: Wizard,
+   * Fighter, Rogue, Cleric.
+   */
+  async function seedFight(): Promise<{
+    encounterId: number;
+    wizardId: number;
+    fighterId: number;
+    rogueId: number;
+    clericId: number;
+    turnVersion: number;
+  }> {
+    const server = ctx.app.getHttpServer();
+    // Issue #744: only one running encounter is authoritative per campaign — end any
+    // still-running fight from a previous test before starting a fresh one.
+    const running = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).query({ status: 'running' }).set(dm);
+    for (const e of running.body as Array<{ id: number }>) {
+      await request(server).post(`/api/v1/encounters/${e.id}/end`).set(dm);
+    }
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Reorder Drill', hidden: false });
+    const encounterId = created.body.id as number;
+    const wizard = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Wizard', hpMax: 10, initMod: 3 });
+    const fighter = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Fighter', hpMax: 12, initMod: 1 });
+    const rogue = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Rogue', hpMax: 8, initMod: 1 });
+    const cleric = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Cleric', hpMax: 9, initMod: 0 });
+    const wizardId = wizard.body.id as number;
+    const fighterId = fighter.body.id as number;
+    const rogueId = rogue.body.id as number;
+    const clericId = cleric.body.id as number;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${wizardId}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${fighterId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${rogueId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${clericId}`).set(dm).send({ initiative: 6 });
+    const started = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(started.status).toBe(201);
+    const orderedIds = (started.body.combatants as Array<{ id: number }>).map((c) => c.id);
+    expect(orderedIds).toEqual([wizardId, fighterId, rogueId, clericId]);
+    return { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion: started.body.turnVersion as number };
+  }
+
+  it('reorders within a tie: only sortOrder changes, initiative values are unchanged, and order survives reload', async () => {
+    const { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const rogueBreakdownBefore = (before.body.combatants as Array<{ id: number; initiativeBreakdown: unknown }>).find((c) => c.id === rogueId)!.initiativeBreakdown;
+
+    // The table wants Rogue to act right after Wizard, ahead of Fighter.
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${rogueId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: wizardId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBe(rogueId);
+    expect(res.body.initiative).toBe(14);
+    // A same-value move leaves the breakdown exactly as it was — untouched, not cleared.
+    expect(res.body.initiativeBreakdown).toEqual(rogueBreakdownBefore);
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const afterCombatants = after.body.combatants as Array<{ id: number; initiative: number }>;
+    expect(afterCombatants.map((c) => c.id)).toEqual([wizardId, rogueId, fighterId, clericId]);
+    // Every OTHER combatant's initiative is untouched — only sortOrder moved.
+    expect(afterCombatants.find((c) => c.id === wizardId)!.initiative).toBe(20);
+    expect(afterCombatants.find((c) => c.id === fighterId)!.initiative).toBe(14);
+    expect(afterCombatants.find((c) => c.id === clericId)!.initiative).toBe(6);
+
+    // Order survives reload (a fresh GET re-derives from persisted sortOrder/initiative).
+    const reload = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((reload.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([wizardId, rogueId, fighterId, clericId]);
+
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    const reorderEvents = (events.body as Array<{ type: string; target: string; targetId: number; detail: string }>).filter(
+      (e) => e.type === 'override' && e.targetId === rogueId,
+    );
+    expect(reorderEvents).toHaveLength(1);
+    expect(reorderEvents[0].target).toBe('Rogue');
+    // #869: detail must never carry a combatant name.
+    expect(reorderEvents[0].detail).not.toContain('Rogue');
+    expect(reorderEvents[0].detail).not.toContain('Wizard');
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const auditRows = await db.select().from(auditLog).where(eq(auditLog.entityId, rogueId));
+    expect(auditRows.some((r) => r.action === 'encounter.combatant.reorder' && r.actor === 'dev:dm-1')).toBe(true);
+  });
+
+  it('a cross-value move sets initiative between the new neighbors and clears the stale breakdown', async () => {
+    const { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+
+    // Roll Cleric's initiative for real so it carries an actual breakdown to clear —
+    // then pin it to a known low value (a manual PATCH does not itself touch the
+    // breakdown, so the rolled breakdown survives up to the reorder that must clear it).
+    const rolled = await request(server).post(`/api/v1/encounters/${encounterId}/combatants/${clericId}/roll-initiative`).set(dm).send({ idempotencyKey: 'cleric-roll-1923', overwrite: true });
+    expect(rolled.status).toBe(201);
+    expect(rolled.body.combatant.initiativeBreakdown).not.toBeNull();
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${clericId}`).set(dm).send({ initiative: 6 });
+    const preCheck = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((preCheck.body.combatants as Array<{ id: number; initiativeBreakdown: unknown }>).find((c) => c.id === clericId)!.initiativeBreakdown).not.toBeNull();
+
+    // Move Cleric to sit right after Wizard(20) and ahead of Fighter(14) — a value
+    // strictly between neighbors, crossing Cleric's own original initiative (6).
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${clericId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: wizardId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+    expect(res.body.id).toBe(clericId);
+    expect(res.body.initiative).toBe(17); // floor((20 + 14) / 2)
+    expect(res.body.initiativeBreakdown).toBeNull();
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((after.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([wizardId, clericId, fighterId, rogueId]);
+
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    const reorderEvents = (events.body as Array<{ type: string; targetId: number; detail: string }>).filter(
+      (e) => e.type === 'override' && e.targetId === clericId,
+    );
+    expect(reorderEvents.at(-1)!.detail).toContain('17');
+  });
+
+  it('moving the current actor is refused with a clear message', async () => {
+    const { encounterId, wizardId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+
+    const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(before.body.currentCombatantId).toBe(wizardId); // Wizard(20) goes first
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${wizardId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: 'top', expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(403);
+    expect(res.body.message).toMatch(/current/i);
+  });
+
+  it('a stale expectedTurnVersion after a turn advance 409s; the client refetches and re-renders server order', async () => {
+    const { encounterId, fighterId, rogueId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+
+    const advanced = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(advanced.status).toBe(201);
+    expect(advanced.body.turnVersion).not.toBe(turnVersion);
+
+    const stale = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${rogueId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: fighterId, expectedTurnVersion: turnVersion });
+    expect(stale.status).toBe(409);
+
+    // The fresh turnVersion succeeds — confirming the CAS token, not roster state, was
+    // the only thing blocking the request.
+    const fresh = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${rogueId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: fighterId, expectedTurnVersion: advanced.body.turnVersion });
+    expect(fresh.status).toBe(201);
+  });
+
+  it('reordering a delaying combatant clears delaying and logs it', async () => {
+    const { encounterId, fighterId, rogueId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+
+    const delayed = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/turn-state`)
+      .set(dm)
+      .send({ delaying: true });
+    expect(delayed.status).toBe(201);
+    expect(delayed.body.turnState.delaying).toBe(true);
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: rogueId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+    expect(res.body.turnState.delaying).toBe(false);
+
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    const delayEvents = (events.body as Array<{ type: string; actor: string; detail: string }>).filter(
+      (e) => e.type === 'note' && e.detail === 'is no longer delaying',
+    );
+    expect(delayEvents).toHaveLength(1);
+    expect(delayEvents[0].actor).toBe('Fighter');
+  });
+
+  it('afterCombatantId referencing the moved combatant itself is rejected 400', async () => {
+    const { encounterId, fighterId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: fighterId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(400);
+  });
+
+  it('an unknown afterCombatantId is rejected 404', async () => {
+    const { encounterId, fighterId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: 9_999_999, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(404);
+  });
+
+  it('a player is refused with 403 and never reorders', async () => {
+    const { encounterId, wizardId, fighterId, rogueId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${rogueId}/reorder`)
+      .set(player)
+      .send({ afterCombatantId: wizardId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(403);
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((after.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual(
+      expect.arrayContaining([wizardId, fighterId, rogueId]),
+    );
+    expect((after.body.combatants as Array<{ id: number }>)[0].id).toBe(wizardId);
+  });
+
+  it('a viewer is refused with 403', async () => {
+    const { encounterId, wizardId, fighterId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
+      .set(viewer)
+      .send({ afterCombatantId: wizardId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(403);
+  });
+
+  it('an ended encounter refuses a reorder with 409', async () => {
+    const { encounterId, wizardId, fighterId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+    const ended = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
+    expect(ended.status).toBe(201);
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: wizardId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(409);
+  });
+});

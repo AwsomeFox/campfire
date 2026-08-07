@@ -46,6 +46,16 @@
       "presetSeconds": "{{seconds}} ثانية"
     },
     "initiativeChipLabel": "المبادرة: {{value}}",
+    "reorder": {
+      "menuLabel": "إعادة ترتيب {{name}} في المبادرة",
+      "moveUp": "نقل للأعلى",
+      "moveDown": "نقل للأسفل",
+      "moveAfterLabel": "نقل بعد…",
+      "top": "المقدمة",
+      "go": "نقل",
+      "delayingBadge": "مؤجَّل",
+      "announcement": "تم نقل {{name}} في ترتيب المبادرة."
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",

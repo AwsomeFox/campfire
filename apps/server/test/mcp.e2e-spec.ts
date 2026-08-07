@@ -5191,4 +5191,49 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(deleted.isError).toBeFalsy();
     });
   });
+
+  describe('issue #1923 — reorder_combatant MCP parity', () => {
+    it('DM reorders a tied combatant to the top; sortOrder flips, initiative stays tied; a player scope is refused', async () => {
+      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'MCP Reorder Drill', hidden: false });
+      expect(created.status).toBe(201);
+      const encounterId = created.body.id as number;
+      // Fighter and Rogue share the same DEX mod, so the 5e default tiebreak for their
+      // tied initiative total degenerates to plain sortOrder (add order: Fighter first) —
+      // the DM overrides that with a manual reorder, exactly the "the table wants the
+      // rogue first" scenario (#1923).
+      const fighter = await dmAgent.post(`/api/v1/encounters/${encounterId}/combatants`).send({ kind: 'monster', name: 'Fighter Stand-in', hpMax: 12, initMod: 1 });
+      const rogue = await dmAgent.post(`/api/v1/encounters/${encounterId}/combatants`).send({ kind: 'monster', name: 'Rogue Stand-in', hpMax: 10, initMod: 1 });
+      const fighterId = fighter.body.id as number;
+      const rogueId = rogue.body.id as number;
+      await dmAgent.patch(`/api/v1/encounters/${encounterId}/combatants/${fighterId}`).send({ initiative: 14 });
+      await dmAgent.patch(`/api/v1/encounters/${encounterId}/combatants/${rogueId}`).send({ initiative: 14 });
+      const started = await dmAgent.post(`/api/v1/encounters/${encounterId}/start`);
+      expect(started.status).toBe(201);
+      const beforeOrder = (started.body.combatants as Array<{ id: number }>).map((c) => c.id);
+      expect(beforeOrder.indexOf(fighterId)).toBeLessThan(beforeOrder.indexOf(rogueId));
+      const turnVersion = started.body.turnVersion as number;
+
+      const client = await mcpClient(dmToken);
+      const reordered = parseResult(
+        await client.callTool({
+          name: 'reorder_combatant',
+          arguments: { encounterId, combatantId: rogueId, afterCombatantId: 'top', expectedTurnVersion: turnVersion },
+        }),
+      ) as { id: number; initiative: number };
+      expect(reordered.id).toBe(rogueId);
+      expect(reordered.initiative).toBe(14); // same-tie move — initiative untouched
+
+      const rest = await dmAgent.get(`/api/v1/encounters/${encounterId}`);
+      const afterOrder = (rest.body.combatants as Array<{ id: number }>).map((c) => c.id);
+      expect(afterOrder.indexOf(rogueId)).toBeLessThan(afterOrder.indexOf(fighterId));
+
+      const playerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-1923-reorder-player', scope: 'player', writeScope: 'direct', campaignId });
+      const playerClient = await mcpClient(playerTokenRes.body.token);
+      const refused = await playerClient.callTool({
+        name: 'reorder_combatant',
+        arguments: { encounterId, combatantId: fighterId, afterCombatantId: 'top', expectedTurnVersion: turnVersion },
+      });
+      expect(refused.isError).toBe(true);
+    });
+  });
 });

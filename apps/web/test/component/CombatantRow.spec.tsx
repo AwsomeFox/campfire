@@ -303,3 +303,79 @@ describe('CombatantRow special-resource Award gate (issue #1944)', () => {
     expect(blocked.disabled).toBe(true);
   });
 });
+
+describe('CombatantRow reorder controls (issue #1923)', () => {
+  const noopDragHandleProps = { onPointerDown: vi.fn(), onPointerMove: vi.fn(), onPointerUp: vi.fn(), onPointerCancel: vi.fn() };
+
+  test('no drag handle or reorder menu renders when reorder is null (player/viewer, or DM-ineligible)', () => {
+    renderRow({ reorder: null });
+    expect(screen.queryByTestId('reorder-drag-handle-101')).toBeNull();
+    expect(screen.queryByTestId('reorder-menu-trigger-Goblin')).toBeNull();
+  });
+
+  test('a DM-eligible row renders both the drag handle and the menu trigger', () => {
+    renderRow({
+      reorder: {
+        canMoveUp: true,
+        canMoveDown: true,
+        onMoveUp: vi.fn(),
+        onMoveDown: vi.fn(),
+        menuTargets: [],
+        onMoveAfter: vi.fn(),
+        dragHandleProps: noopDragHandleProps,
+        isDragging: false,
+        isDropTarget: false,
+        busy: false,
+      },
+    });
+    expect(screen.getByTestId('reorder-drag-handle-101')).toBeTruthy();
+    expect(screen.getByTestId('reorder-menu-trigger-Goblin')).toBeTruthy();
+  });
+
+  test('the menu opens on click, disables Move up/down at the roster ends, and Move down fires onMoveDown', () => {
+    const onMoveUp = vi.fn();
+    const onMoveDown = vi.fn();
+    renderRow({
+      reorder: {
+        canMoveUp: false, // first in the roster
+        canMoveDown: true,
+        onMoveUp,
+        onMoveDown,
+        menuTargets: [{ id: 202, name: 'Fighter' }],
+        onMoveAfter: vi.fn(),
+        dragHandleProps: noopDragHandleProps,
+        isDragging: false,
+        isDropTarget: false,
+        busy: false,
+      },
+    });
+    fireEvent.click(screen.getByTestId('reorder-menu-trigger-Goblin'));
+    expect(screen.getByTestId('reorder-menu-panel-Goblin')).toBeTruthy();
+    const moveUpBtn = screen.getByTestId('reorder-move-up-Goblin') as HTMLButtonElement;
+    expect(moveUpBtn.disabled).toBe(true);
+    const moveDownBtn = screen.getByTestId('reorder-move-down-Goblin') as HTMLButtonElement;
+    expect(moveDownBtn.disabled).toBe(false);
+    fireEvent.click(moveDownBtn);
+    expect(onMoveDown).toHaveBeenCalledTimes(1);
+    expect(onMoveUp).not.toHaveBeenCalled();
+  });
+
+  test('busy disables the menu trigger', () => {
+    renderRow({
+      reorder: {
+        canMoveUp: true,
+        canMoveDown: true,
+        onMoveUp: vi.fn(),
+        onMoveDown: vi.fn(),
+        menuTargets: [],
+        onMoveAfter: vi.fn(),
+        dragHandleProps: noopDragHandleProps,
+        isDragging: false,
+        isDropTarget: false,
+        busy: true,
+      },
+    });
+    const trigger = screen.getByTestId('reorder-menu-trigger-Goblin') as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
+  });
+});

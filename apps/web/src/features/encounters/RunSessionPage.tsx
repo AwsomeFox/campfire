@@ -1,8 +1,10 @@
 import { CombatLog } from './CombatLog';
 import { ApplyDamageBar, BattleMap, type EncounterGridPatch } from './map/BattleMap';
 import { AddCombatantPanel } from './combat/AddCombatantPanel';
-import { CombatantRow, hpDisplay } from './combat/CombatantRow';
+import { CombatantRow, hpDisplay, type CombatantRowProps } from './combat/CombatantRow';
 import { combatantPatchUrl } from './combat/combatantPatchUrl';
+import { useCombatantDragReorder } from './combat/useCombatantDragReorder';
+import { afterCombatantIdForMoveDown, afterCombatantIdForMoveUp, reorderMenuTargets } from './combatantReorder';
 import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
@@ -440,6 +442,8 @@ const InitiativeStrip = memo(function InitiativeStrip({
   hpFeedbackByCombatant,
   colorVisionAssist = false,
   revealTick = 0,
+  canReorder = false,
+  onReorderDrop,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
@@ -450,6 +454,9 @@ const InitiativeStrip = memo(function InitiativeStrip({
   colorVisionAssist?: boolean;
   /** Issue #1934: reveal animation trigger tick when transitioning preparing->running. */
   revealTick?: number;
+  /** DM-only manual reorder (issue #1923) — drag a tile to a new slot. */
+  canReorder?: boolean;
+  onReorderDrop?: (combatantId: number, afterCombatantId: number | 'top') => void;
 }) {
   const { t } = useTranslation();
   const combatantRefs = useRef(new Map<number, HTMLDivElement>());
@@ -458,6 +465,15 @@ const InitiativeStrip = memo(function InitiativeStrip({
 
   const staggerTimersRef = useRef<NodeJS.Timeout[]>([]);
   const consumedRevealTickRef = useRef(0);
+
+  const orderedIds = useMemo(() => combatants.map((c) => c.id), [combatants]);
+  const dragReorder = useCombatantDragReorder({
+    axis: 'x',
+    orderedIds,
+    enabled: canReorder && !!onReorderDrop,
+    elementsRef: combatantRefs,
+    onDrop: useCallback((combatantId: number, afterCombatantId: number | 'top') => onReorderDrop?.(combatantId, afterCombatantId), [onReorderDrop]),
+  });
 
   // A callback ref runs again for unrelated renders, which repeatedly stole the
   // DM's horizontal scroll position. Restrict the scroll to an actual turn
@@ -569,16 +585,42 @@ const InitiativeStrip = memo(function InitiativeStrip({
         const initiativeValue = c.initiative != null ? String(c.initiative) : '—';
         const isChipVisible = staggeredVisibleIds == null || staggeredVisibleIds.has(c.id);
 
+        const isDragging = dragReorder.draggingId === c.id;
+        const isDropTarget = dragReorder.overId === c.id;
+
         return (
           <div
             key={c.id}
+            data-testid={`initiative-strip-tile-${c.id}`}
             className={`cf-hp-feedback-anchor flex flex-col items-center gap-1 flex-none${feedbackClass}`}
-            style={{ scrollSnapAlign: 'center' }}
+            style={{
+              scrollSnapAlign: 'center',
+              ...(canReorder
+                ? {
+                    cursor: 'grab',
+                    touchAction: 'none',
+                    opacity: isDragging ? 0.5 : 1,
+                    outline: isDropTarget ? '2px solid var(--color-accent)' : undefined,
+                    outlineOffset: 2,
+                  }
+                : {}),
+            }}
             ref={(el) => {
               if (el) combatantRefs.current.set(c.id, el);
               else combatantRefs.current.delete(c.id);
             }}
+            {...(canReorder ? dragReorder.handleProps(c.id) : {})}
           >
+            {c.turnState.delaying && (
+              <span
+                className="tag tag-neutral"
+                data-testid={`strip-delaying-${c.id}`}
+                title={t('encounters.reorder.delayingBadge', 'Delaying')}
+                style={{ fontSize: 9, lineHeight: 1, padding: '1px 4px' }}
+              >
+                {t('encounters.reorder.delayingBadge', 'Delaying')}
+              </span>
+            )}
             {colorVisionAssist && isCurrent && (
               <span
                 data-testid="strip-token-turn-chevron"
@@ -2229,6 +2271,33 @@ export default function RunSessionPage() {
     },
   });
 
+  /**
+   * Manual initiative reorder (issue #1923) — drag (InitiativeStrip + roster) and the
+   * accessible fallback menu both funnel through this one mutation. `expectedTurnVersion`
+   * is passed explicitly at call time (not resolved from an outer closure) so a caller
+   * that queued the request before a turn advance lands still sends the value IT last
+   * rendered — the server's own CAS is what turns that into a 409, not a client guess.
+   * A 409 (or any other failure) still refetches via `onSettled` below, so the roster
+   * always re-renders server-authoritative order — the "refetch" half of "409 → refetch +
+   * toast"; `reportError` below is the toast half.
+   */
+  const reorderCombatant = useMutation({
+    mutationFn: ({ combatantId, afterCombatantId, expectedTurnVersion }: { combatantId: number; afterCombatantId: number | 'top'; expectedTurnVersion: number }) =>
+      api.post<Combatant>(`${API}/encounters/${eid}/combatants/${combatantId}/reorder`, { afterCombatantId, expectedTurnVersion }),
+    onMutate: ({ combatantId }) => {
+      setActionError(null);
+      markCombatantPending(combatantId, true);
+    },
+    onSuccess: (updated) => {
+      announce(t('encounters.reorder.announcement', 'Moved {{name}} in the initiative order.', { name: updated.name }));
+    },
+    onError: reportError,
+    onSettled: (_data, _err, { combatantId }) => {
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
   // Issue #1900: the in-combat Spellbook's slot spend/restore. Optimistically flips the
   // affected pip in the SHARED /turn cache entry (the same `queryKeys.encounterTurn(eid)`
   // TurnWorkspace itself now reads, since the duplicate child query was removed) so a click
@@ -3483,6 +3552,7 @@ export default function RunSessionPage() {
     if (el) combatantRowRefs.current.set(combatantId, el);
     else combatantRowRefs.current.delete(combatantId);
   }, []);
+<<<<<<< HEAD
   // Issue #1917 stage 1: `CombatantRow` is now `React.memo`-wrapped, so a per-row `rowRef`
   // callback recreated inline in the roster `.map()` below (`(el) => setCombatantRowRef(c.id,
   // el)`) would be a fresh function identity every render and defeat the memo for that prop
@@ -3501,6 +3571,49 @@ export default function RunSessionPage() {
       return bound;
     },
     [setCombatantRowRef],
+=======
+
+  // Manual initiative reorder (issue #1923). `handleReorderDrop` is the single write
+  // path both InitiativeStrip's drag and the roster's drag-handle/menu funnel through —
+  // `encounter.turnVersion` is read HERE, at call time, not memoized into a stale
+  // closure, so the CAS token sent is always the one this render actually showed the DM.
+  const rosterOrderedIds = useMemo(() => encounter?.combatants.map((c) => c.id) ?? [], [encounter]);
+  const canReorderCombatants = canDmWrite && encounter != null && encounter.status !== 'ended';
+  const handleReorderDrop = useCallback(
+    (combatantId: number, afterCombatantId: number | 'top') => {
+      if (!encounter) return;
+      reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion });
+    },
+    [encounter, reorderCombatant],
+  );
+  const rosterDragReorder = useCombatantDragReorder({
+    axis: 'y',
+    orderedIds: rosterOrderedIds,
+    enabled: canReorderCombatants,
+    elementsRef: combatantRowRefs,
+    onDrop: handleReorderDrop,
+  });
+  const buildReorderControls = useCallback(
+    (combatant: Combatant): CombatantRowProps['reorder'] => {
+      if (!canReorderCombatants || !encounter) return null;
+      const ids = rosterOrderedIds;
+      const moveUpTarget = afterCombatantIdForMoveUp(ids, combatant.id);
+      const moveDownTarget = afterCombatantIdForMoveDown(ids, combatant.id);
+      return {
+        canMoveUp: moveUpTarget !== null,
+        canMoveDown: moveDownTarget !== null,
+        onMoveUp: () => { if (moveUpTarget !== null) handleReorderDrop(combatant.id, moveUpTarget); },
+        onMoveDown: () => { if (moveDownTarget !== null) handleReorderDrop(combatant.id, moveDownTarget); },
+        menuTargets: reorderMenuTargets(encounter.combatants, combatant.id).map((c) => ({ id: c.id, name: c.name })),
+        onMoveAfter: (afterCombatantId) => handleReorderDrop(combatant.id, afterCombatantId),
+        dragHandleProps: rosterDragReorder.handleProps(combatant.id),
+        isDragging: rosterDragReorder.draggingId === combatant.id,
+        isDropTarget: rosterDragReorder.overId === combatant.id,
+        busy: pendingCombatantIds.has(combatant.id) || reconcileBlocks,
+      };
+    },
+    [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks],
+>>>>>>> 0dfb00a3c (feat(encounters): DM-only manual initiative reorder (issue #1923))
   );
   const autoScrollSkipped = useRef(false);
   // `RunSessionPage` is reused across encounters; reset the first-load latch so
@@ -4616,6 +4729,8 @@ export default function RunSessionPage() {
               hpFeedbackByCombatant={hpFeedbackByCombatant}
               colorVisionAssist={me?.user.colorVisionAssist ?? false}
               revealTick={revealTick}
+              canReorder={canEditEncounter}
+              onReorderDrop={handleReorderDrop}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
@@ -4677,6 +4792,7 @@ export default function RunSessionPage() {
                   syncBlocked={combatantWriteBlocked(c)}
                   turnTopologyBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
+                  reorder={buildReorderControls(c)}
                   // Issue #1926: a non-DM viewer mounts the same compendium statblock viewer
                   // once the DM has revealed this combatant — the ruleEntryId link itself is
                   // not campaign-secret (unchanged by this issue; see /rules/entries/:id), so

@@ -46,6 +46,16 @@
       "presetSeconds": "{{seconds}}s"
     },
     "initiativeChipLabel": "Initiative: {{value}}",
+    "reorder": {
+      "menuLabel": "Reorder {{name}} in initiative",
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "moveAfterLabel": "Move after…",
+      "top": "the top",
+      "go": "Move",
+      "delayingBadge": "Delaying",
+      "announcement": "Moved {{name}} in the initiative order."
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",

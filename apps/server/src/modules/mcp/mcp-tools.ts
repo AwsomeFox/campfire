@@ -34,6 +34,7 @@ import {
   CharacterUpdate,
   CombatantCreate,
   CombatantRemoveRequest, CombatantRemoveUndo,
+  CombatantReorderRequest,
   CombatantResourceAdjust,
   CombatantStatblock,
   CombatantTurnStatePatch,
@@ -4995,6 +4996,27 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number, true);
         const role = await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
         return this.encounters.undoRemoveCombatant(encounterId as number, undoToken as string, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'reorder_combatant',
+      'DM only: manually reorder a combatant in initiative (issue #1923) — the documented answer to an unresolved tie ' +
+        'and the only mechanical expression of Delay/Ready. Moves the combatant to land immediately after ' +
+        'afterCombatantId (or the literal \'top\' to become first), matching get_encounter\'s own order. Within a tied ' +
+        'initiative value only sortOrder changes; a move that crosses initiative values also sets the moved ' +
+        'combatant\'s initiative between its new neighbors and clears the now-stale initiativeBreakdown. Clears ' +
+        'turnState.delaying on the moved combatant if it was set. expectedTurnVersion (from get_encounter/get_turn) is ' +
+        'a compare-and-set against the encounter\'s current turnVersion — 409s if the turn advanced since it was read. ' +
+        'Refused (403) if the moved combatant currently holds the turn.',
+      { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantReorderRequest.shape },
+      async ({ encounterId, combatantId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const validated = CombatantReorderRequest.parse(fields);
+        return this.encounters.reorderCombatant(encounterId as number, combatantId as number, validated, user, role);
       },
     );
 

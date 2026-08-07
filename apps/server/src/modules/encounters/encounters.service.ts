@@ -10,7 +10,7 @@ import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateU
   parseRechargeRange,
   effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -430,6 +430,8 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     escalationDieHistory: parseEscalationHistory(row.escalationDieHistory),
     turnIndex: row.turnIndex,
     currentCombatantId: row.currentCombatantId,
+    // Issue #1923: the reorder CAS token. Not a secret — every role reads the same value.
+    turnVersion: row.turnVersion,
     turnPhase: (row.turnPhase as EncounterTurnPhase) ?? 'combatant',
     lairResumeCombatantId: row.lairResumeCombatantId ?? null,
     locationId: row.locationId,
@@ -6906,6 +6908,189 @@ export class EncountersService {
       }
       throw err;
     }
+  }
+
+  /**
+   * DM-only manual reorder (issue #1923) — POST .../combatants/:cid/reorder. This is the
+   * documented answer to an unresolved initiative tie (initiative-tiebreak.ts's own doc
+   * comment: "the DM can manually reorder") and the only mechanical expression of
+   * Delay/Ready, which otherwise ship as log-only markers that clear themselves without
+   * ever moving the combatant.
+   *
+   * `afterCombatantId` names the combatant the moved one should land immediately after
+   * under `sortCombatants` (or the literal `'top'` to become first). The whole roster's
+   * `sortOrder` is rewritten to the requested display order in one pass — cheap (an
+   * encounter roster is at most a few dozen rows) and it guarantees the write reproduces
+   * exactly under `sortCombatants`'s own comparator, rather than trying to slot one value
+   * between two neighbors that might already be adjacent sortOrder integers.
+   *
+   * `initiative` is only ever touched while the encounter is `running` — `sortCombatants`
+   * ignores `initiative` entirely while `preparing` (plain sortOrder ascending), so a
+   * preparing-time reorder is establishing tie-break order for later, not overriding a
+   * rolled value. While running, a move that stays within the SAME initiative value (the
+   * moved combatant's own initiative already equals a new neighbor's, e.g. reordering a
+   * tied 14) only rewrites `sortOrder`. A move that crosses initiative values sets the
+   * moved combatant's `initiative` to a value between its NEW neighbors — so the manual
+   * placement survives a later resort — and clears the now-stale `initiativeBreakdown`
+   * (#1476: this must never fabricate a breakdown for a manually-assigned value).
+   *
+   * `expectedTurnVersion` CAS: 409s when it no longer matches the encounter's current
+   * `turnVersion` (bumped on every turn advance) — a drag issued against a roster the DM
+   * is no longer looking at must not silently reorder the new one. Moving the current
+   * actor (`currentCombatantId`) is refused outright — reordering the roster mid-turn
+   * around the acting combatant itself has no sensible meaning. A combatant that was
+   * delaying has that marker cleared and logged in the same transaction: the drag itself
+   * IS Delay's mechanical resolution ("the fighter acts after the wizard now").
+   */
+  async reorderCombatant(
+    encounterId: number,
+    combatantId: number,
+    input: CombatantReorderRequest,
+    user: RequestUser,
+    role: Role,
+  ): Promise<Combatant> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
+    // Adapter lookup reads outside the transaction (rollCombatantInitiative precedent) —
+    // it is deterministic from the campaign's ruleSystem/customMechanicsProfile, which a
+    // concurrent reorder cannot itself change.
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+
+    let committed!: Combatant;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertMutable(fresh);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      if (fresh.turnVersion !== input.expectedTurnVersion) {
+        throw new ConflictException({
+          code: 'TURN_VERSION_MISMATCH',
+          message: 'The turn has moved on since this order was loaded — refresh and try again.',
+        });
+      }
+      if (fresh.currentCombatantId === combatantId) {
+        throw new ForbiddenException('Cannot reorder the combatant whose turn it currently is.');
+      }
+
+      const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      const moved = rows.find((r) => r.id === combatantId);
+      if (!moved) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+      if (input.afterCombatantId === combatantId) {
+        throw new BadRequestException('A combatant cannot be reordered after itself.');
+      }
+      if (input.afterCombatantId !== 'top' && !rows.some((r) => r.id === input.afterCombatantId)) {
+        throw new NotFoundException(`Combatant ${input.afterCombatantId} not found in encounter ${encounterId}`);
+      }
+
+      const status = fresh.status as EncounterStatus;
+      const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), status, adapter);
+      const withoutMoved = sorted.filter((c) => c.id !== combatantId);
+      const insertAt = input.afterCombatantId === 'top'
+        ? 0
+        : withoutMoved.findIndex((c) => c.id === input.afterCombatantId) + 1;
+      const prev = insertAt > 0 ? withoutMoved[insertAt - 1] : null;
+      const next = insertAt < withoutMoved.length ? withoutMoved[insertAt] : null;
+
+      // Cross-value initiative reassignment is only meaningful once `sortCombatants`
+      // actually orders by initiative (status === 'running'); see the doc comment above.
+      let newInitiative = moved.initiative;
+      let sameValueMove = true;
+      if (status === 'running') {
+        const origInit = moved.initiative;
+        const prevInit = prev?.initiative ?? null;
+        const nextInit = next?.initiative ?? null;
+        if (origInit !== prevInit && origInit !== nextInit) {
+          sameValueMove = false;
+          if (prevInit != null && nextInit != null) {
+            newInitiative = prevInit === nextInit ? prevInit : Math.floor((prevInit + nextInit) / 2);
+          } else if (prevInit != null) {
+            newInitiative = prevInit - 1;
+          } else if (nextInit != null) {
+            newInitiative = nextInit + 1;
+          }
+          // else: neither neighbor has a rolled initiative to anchor to (both unrolled or
+          // absent) — leave `initiative` untouched; the roster still lands in a valid
+          // state (unrolled combatants always sort last, regardless of sortOrder).
+        }
+      }
+
+      const orderedIds = [
+        ...withoutMoved.slice(0, insertAt).map((c) => c.id),
+        combatantId,
+        ...withoutMoved.slice(insertAt).map((c) => c.id),
+      ];
+      orderedIds.forEach((id, index) => {
+        tx.update(combatants).set({ sortOrder: index }).where(eq(combatants.id, id)).run();
+      });
+      const initiativeChanged = newInitiative !== moved.initiative;
+      if (initiativeChanged) {
+        tx.update(combatants)
+          .set({ initiative: newInitiative, initiativeBreakdown: null })
+          .where(eq(combatants.id, combatantId))
+          .run();
+      }
+
+      const turnState = CombatantTurnState.parse(fromJsonText<unknown>(moved.turnState, null) ?? {});
+      const delayCleared = turnState.delaying === true;
+      if (delayCleared) {
+        turnState.delaying = false;
+        tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, combatantId)).run();
+      }
+
+      // Realign the positional turnIndex with the unchanged identity pointer (issue #49) —
+      // reordering the OTHER combatants around the current actor can shift its position
+      // even though the current actor itself can never be the one being moved (guarded
+      // above). Mirrors rollCombatantInitiative's own late-joiner realignment.
+      if (status === 'running') {
+        const resorted = this.sortCombatantsWithAdapter(
+          tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain),
+          'running',
+          adapter,
+        );
+        const turnIndex = turnIndexFor(resorted, fresh.currentCombatantId);
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
+        tx.update(encounters)
+          .set({
+            turnIndex,
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
+          })
+          .where(eq(encounters.id, encounterId))
+          .run();
+      }
+
+      // Name-free detail (issue #869 redaction rule) — actor/target ids carry identity;
+      // listing redacts a hidden NPC's name from `target` at read time.
+      this.appendEventInTransaction(tx, encounterId, fresh.round, 'override', {
+        target: moved.name,
+        targetId: combatantId,
+        detail: sameValueMove ? 'reordered in initiative' : `reordered in initiative (now ${newInitiative})`,
+      });
+      if (delayCleared) {
+        this.appendEventInTransaction(tx, encounterId, fresh.round, 'note', {
+          actor: moved.name,
+          actorId: combatantId,
+          detail: 'is no longer delaying',
+        });
+      }
+
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.combatant.reorder',
+        entityType: 'combatant',
+        entityId: combatantId,
+        campaignId: fresh.campaignId,
+        detail: moved.name,
+      });
+
+      const [updatedRow] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      committed = combatantToDomain(updatedRow);
+    });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    return committed;
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
