@@ -65,6 +65,21 @@ test.describe('usesBadge (issue #1921)', () => {
     }
   });
 
+  // Devin review on PR #2062, second half of the multi-use finding: a die condition and a
+  // per-day maximum are independent fields, so both can be set. The recharge branch printed
+  // the condition alone and dropped the count that the very same function is careful to show
+  // for a plain X/day pool. Every case here has `max > 1`, which the single-use cases above
+  // cannot distinguish.
+  test('a die condition on a multi-use pool keeps the remaining count', () => {
+    const partly: UsableActionUses = { max: 3, recharge: 'recharge-5-6', spent: 1, available: 2 };
+    expect(usesBadge(partly, t)).toBe('Recharge 5–6 · 2 left');
+    const empty: UsableActionUses = { max: 3, recharge: 'recharge-5-6', spent: 3, available: 0 };
+    expect(usesBadge(empty, t)).toBe('Recharge 5–6 · 0 left');
+    // A pool of one is unchanged — "spent" reads better there than "0 left".
+    const single: UsableActionUses = { max: 1, recharge: 'recharge-5-6', spent: 1, available: 0 };
+    expect(usesBadge(single, t)).toBe('Recharge 5–6 · spent');
+  });
+
   test('a rest cadence with no X/day pool does not render the raw cadence slug', () => {
     const uses: UsableActionUses = { max: 0, recharge: 'long-rest', spent: 0, available: 0 };
     expect(usesBadge(uses, t)).not.toContain('long-rest');

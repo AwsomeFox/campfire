@@ -25,17 +25,23 @@ export function usesBadge(uses: UsableActionUses, t: Translate): string {
   // cadences ('long-rest', 'dawn', …); branching on "non-empty" printed the raw slug and
   // swallowed the count, so a `{ max: 3, recharge: 'long-rest' }` pool rendered as
   // "long-rest" with no idea how many uses were left — even though it IS tracked on `max`.
+  const left = t('encounters.actions.uses.left', { count: uses.available, defaultValue: `${uses.available} left` });
   const range = uses.recharge ? parseRechargeRange(uses.recharge) : null;
   if (range) {
     const pool =
       range.min === range.max
         ? t('encounters.actions.uses.rechargeSingle', { min: range.min, defaultValue: `Recharge ${range.min}` })
         : t('encounters.actions.uses.recharge', { min: range.min, max: range.max, defaultValue: `Recharge ${range.min}–${range.max}` });
+    // `max` and `recharge` are independent, so a die condition can sit on top of a pool
+    // deeper than one use ({ max: 3, recharge: 'recharge-5-6' }). "spent"/nothing is only
+    // honest for a pool of one: with three uses and one spent, "Recharge 5–6" alone hides
+    // that two remain, and the server now hands back one use per successful roll rather
+    // than the whole pool, so the count moves independently of the condition.
+    if (uses.max > 1) return `${pool} · ${left}`;
     if (uses.available > 0) return pool;
     return `${pool} · ${t('encounters.actions.uses.spent', { defaultValue: 'spent' })}`;
   }
   const pool = t('encounters.actions.uses.perDay', { max: uses.max, defaultValue: `${uses.max}/day` });
-  const left = t('encounters.actions.uses.left', { count: uses.available, defaultValue: `${uses.available} left` });
   return `${pool} · ${left}`;
 }
 

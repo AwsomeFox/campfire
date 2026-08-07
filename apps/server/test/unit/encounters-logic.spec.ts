@@ -1236,6 +1236,18 @@ describe('rollRechargeAtTurnStart / undoActionUsesRecharge (issue #1921)', () =>
     expect(result.delta).toEqual([{ key: 'statblock:a', actionName: 'Breath Weapon', spentBefore: 1 }]);
   });
 
+  it('gives back exactly ONE use of a multi-use pool, not the whole pool', () => {
+    // `{ max: 3, recharge: 'recharge-5-6' }` is authorable (statblock editor, MCP
+    // `update_combatant`) and reaches this tick because `parseRechargeRange` matches. Two of
+    // the three uses are spent; one lucky die must return one of them, not both.
+    const uses = { 'statblock:abc': { spent: 2 } };
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5 }], () => 6);
+    expect(result.uses['statblock:abc']).toEqual({ spent: 1 });
+    // The undo delta still carries the PRE-roll count, so undoTurn restores both spends.
+    expect(result.delta).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', spentBefore: 2 }]);
+    expect(undoActionUsesRecharge(result.uses, result.delta).uses['statblock:abc']).toEqual({ spent: 2 });
+  });
+
   it('undoActionUsesRecharge restores spent state from the recorded delta', () => {
     const afterRecharge = { 'statblock:abc': { spent: 0 } };
     const { uses, restoredNames } = undoActionUsesRecharge(afterRecharge, [

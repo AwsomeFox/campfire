@@ -7620,23 +7620,31 @@ export class EncountersService {
     // both outcomes are logged (acceptance criterion), under the NEW round (the roll happens
     // at the start of the combatant's turn, not the end of the prior one).
     //
-    // The ability's NAME is deliberately NOT in `detail`. An earlier revision embedded it,
-    // reasoning by analogy with `resolution.actionName` elsewhere in this file — but that
-    // analogy breaks: an action USE is logged because the table just watched it happen. A
-    // recharge roll is invisible bookkeeping that fires every turn for an ability that may
-    // never have been used, on a monster whose statblock the DM may have deliberately left
-    // unrevealed (#1926) and whose action list 403s a non-DM. The combat log is readable by
-    // every campaign member and `redactEncounterEventsForViewer` masks only hidden-combatant
-    // identity, not action names, so naming the ability here would hand players a statblock
-    // the server otherwise withholds. Recovering the name for the DM needs a DM-only log
-    // channel, which does not exist yet — that is the follow-up, not a reason to leak now.
+    // The ability's NAME, the die result, and the THRESHOLD are all deliberately absent from
+    // `detail`. An earlier revision embedded the name, reasoning by analogy with
+    // `resolution.actionName` elsewhere in this file — but that analogy breaks: an action USE
+    // is logged because the table just watched it happen. A recharge roll is invisible
+    // bookkeeping that fires every turn for an ability that may never have been used, on a
+    // monster whose statblock the DM may have deliberately left unrevealed (#1926) and whose
+    // action list 403s a non-DM. The combat log is readable by every campaign member and
+    // `redactEncounterEventsForViewer` masks only hidden-combatant identity, not action
+    // names, so naming the ability here would hand players a statblock the server otherwise
+    // withholds.
+    //
+    // `needed N+` is the same category of secret and had to go with it: it IS the statblock's
+    // recharge condition, stated verbatim. Dropping the threshold alone would not have been
+    // enough either — `rolled 3` plus `stays spent` bounds the threshold from below, and two
+    // or three rounds of those lines converge on it exactly, so the roll goes too. What
+    // survives is the acceptance criterion itself: both outcomes are logged, once per roll.
+    //
+    // Recovering the name, roll, and threshold FOR THE DM needs a DM-only log channel, which
+    // does not exist yet (`metadata.dmText` is only scrubbed when the actor is a hidden NPC,
+    // so it is not one) — that is the follow-up, not a reason to leak now.
     for (const r of rechargeRolls) {
       await this.appendEvent(encounterId, newRound, 'resource_changed', {
         actor: r.combatantName,
         actorId: r.combatantId,
-        detail: r.recovered
-          ? `a limited-use ability recharges (rolled ${r.roll}, needed ${r.needs}+)`
-          : `a limited-use ability stays spent (rolled ${r.roll}, needed ${r.needs}+)`,
+        detail: r.recovered ? 'a limited-use ability recharges' : 'a limited-use ability stays spent',
       });
     }
     if (escalationLogDetail) {

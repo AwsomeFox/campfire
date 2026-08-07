@@ -791,7 +791,12 @@ export function rollRechargeAtTurnStart(
     const recovered = rollValue >= entry.min;
     rolls.push({ key: entry.key, actionName: entry.name, roll: rollValue, needs: entry.min, recovered });
     if (recovered) {
-      uses[entry.key] = { spent: 0 };
+      // ONE use back, not the whole pool. `max` and `recharge` are independent on `ActionUses`,
+      // so `{ max: 3, recharge: 'recharge-5-6' }` is a legitimate authored shape (statblock
+      // editor, MCP `update_combatant`) that reaches this tick — `spent: 0` handed all three
+      // uses back on one lucky die. The undo delta records `spentBefore`, so `undoTurn` was
+      // always correct; only the forward direction over-refunded.
+      uses[entry.key] = { spent: Math.max(0, spentBefore - 1) };
       delta.push({ key: entry.key, actionName: entry.name, spentBefore });
     }
   }

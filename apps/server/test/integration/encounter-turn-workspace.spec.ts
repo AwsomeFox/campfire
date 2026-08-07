@@ -2485,11 +2485,12 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
     expect(event.type).toBe('resource_changed');
     expect(event.actorId).toBe(drake);
     expect(event.detail).toContain('recharges');
-    // The ability's NAME must NOT reach this player-visible log line — it would expose the
-    // statblock of a monster the DM may not have revealed (#1926). See the secrecy note on
-    // the rechargeRolls append in encounters.service.ts.
+    // Neither the ability's NAME nor its recharge CONDITION may reach this player-visible log
+    // line — both are statblock content for a monster the DM may not have revealed (#1926),
+    // and the die result plus the outcome bounds the condition on its own. See the secrecy
+    // note on the rechargeRolls append in encounters.service.ts.
     expect(event.detail).not.toContain('Breath Weapon');
-    expect(event.detail).toContain('rolled 6');
+    expect(event.detail).not.toMatch(/\d/);
 
     // Usable again.
     spendBreathWeapon(actions, encounterId, drake);
@@ -2516,7 +2517,7 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
     expect(event.type).toBe('resource_changed');
     expect(event.detail).toContain('stays spent');
     expect(event.detail).not.toContain('Breath Weapon');
-    expect(event.detail).toContain('rolled 2');
+    expect(event.detail).not.toMatch(/\d/);
 
     // Still exhausted — a second apply attempt is refused.
     expect(() =>
