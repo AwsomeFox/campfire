@@ -6682,16 +6682,22 @@ export class EncountersService {
     const resolveReplay = async (prior: EncounterOpPrior): Promise<{ combatant: Combatant; roll: DiceRoll | null } | null> => {
       const parsed = replayResponse(prior.response);
       if (!parsed) return null;
-      if (prior.responseRole === role) return parsed;
-      // Re-derive for a changed role; tolerate a trashed encounter and treat any
-      // visibility failure as best-effort so the original rejection reason is preserved.
       try {
-        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, user.id, true);
         const found = snapshot.combatants.find((c) => c.id === combatantId);
-        if (!found) return null;
         const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
-        return { combatant: found, roll };
+        if (found) {
+          return { combatant: found, roll };
+        }
+        if (prior.responseRole === role) {
+          return { combatant: parsed.combatant, roll };
+        }
+        return null;
       } catch {
+        if (prior.responseRole === role) {
+          const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+          return { combatant: parsed.combatant, roll };
+        }
         return null;
       }
     };
@@ -9824,6 +9830,10 @@ export class EncountersService {
     // combatant row) — so re-deriving just that one projection against CURRENT fog/sibling
     // state is sufficient, not a narrowing of what the previous fix already covered.
     const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant> => {
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, user.id, true);
+      const found = snapshot.combatants.find((c) => c.id === combatantId);
+      if (found) return found;
+
       const body = prior.response as Combatant | null;
       if (body && prior.responseRole === role) {
         if (role === 'dm') return body;
@@ -9834,11 +9844,6 @@ export class EncountersService {
           (await this.attachmentsService.isFogProtectedEncounterMap(freshEncounterForReplay.mapAttachmentId, freshEncounterForReplay.campaignId));
         return redactForRole(body, freshEncounterForReplay.fog, freshSiblingProtects);
       }
-      // Role MISMATCH (or a missing body, which cannot happen for THIS implementation
-      // since the claim and its body are written in the same transaction, but handled the
-      // same defensive way as the sibling keyed mutations that guard on this): mirrors
-      // `rollCombatantInitiative`/`advanceCurrentTurn`/`undoTurn`'s own
-      // `prior.responseRole === role` guard — fall through to a FULL fresh, role-filtered
       // read (`getWithCombatantsOrThrow`), since a role change can affect more projections
       // than fog alone (e.g. a demoted co-DM). This never re-runs the effect a second time;
       // only the returned VIEW is re-derived. Unlike the same-role branch above, THIS path
@@ -9857,10 +9862,7 @@ export class EncountersService {
       // above and the early replay check do — a role-mismatched replay of an
       // already-committed outcome must survive the encounter having since been trashed
       // just as much as a same-role one does.
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
-      const found = snapshot.combatants.find((c) => c.id === combatantId);
-      if (!found) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
-      return found;
+      throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
     };
 
     // Issue #1909 review (Codex): a keyed retry must replay an already-committed outcome
