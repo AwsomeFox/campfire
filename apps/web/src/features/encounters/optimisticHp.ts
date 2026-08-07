@@ -48,7 +48,7 @@ export function applyOptimisticHpDelta(
     const hpCurrent = Math.min(c.hpMax, c.hpCurrent + delta);
     // A zero or capped heal leaves a downed combatant's server-owned lifecycle
     // state alone. Only a real recovery above 0 clears its death-save slate.
-    return hpCurrent > 0 ? withOptimisticHpLifecycle(c, hpCurrent, false, false, ruleSystem) : { ...c, hpCurrent };
+    return hpCurrent > 0 ? withOptimisticHpLifecycle(c, hpCurrent, false, false, ruleSystem, customMechanicsProfile) : { ...c, hpCurrent };
   }
   // Damage: temporary HP absorbs first, then real HP, floored at 0.
   const dmg = -delta;
@@ -67,6 +67,7 @@ export function applyOptimisticHpDelta(
     realDmg > 0,
     isInstantDeath,
     ruleSystem,
+    customMechanicsProfile,
   );
 }
 
@@ -80,11 +81,12 @@ export function replayOptimisticHpDeltas(
   encounter: Combatant[],
   operations: readonly OptimisticHpDelta[],
   ruleSystem?: string | RuleSystemAdapter | HpModel | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
 ): Combatant[] {
   return operations.reduce(
     (combatants, { combatantId, delta }) =>
       combatants.map((combatant) =>
-        combatant.id === combatantId ? applyOptimisticHpDelta(combatant, delta, ruleSystem) : combatant,
+        combatant.id === combatantId ? applyOptimisticHpDelta(combatant, delta, ruleSystem, customMechanicsProfile) : combatant,
       ),
     encounter,
   );

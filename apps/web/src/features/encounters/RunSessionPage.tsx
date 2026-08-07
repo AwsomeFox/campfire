@@ -747,7 +747,7 @@ export default function RunSessionPage() {
   // module scope with no argument — so a future non-5e adapter's condition vocabulary and
   // statblock mapping actually take effect. Default (5e) is unchanged.
   const ruleSystem = campaign?.ruleSystem ?? null;
-  const activeAdapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const activeAdapter = useMemo(() => ruleSystemAdapter(ruleSystem, campaign?.customMechanicsProfile), [ruleSystem, campaign?.customMechanicsProfile]);
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
   const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
@@ -1142,6 +1142,7 @@ export default function RunSessionPage() {
           .sort((a, b) => a.sequence - b.sequence)
           .map(({ combatantId, delta }) => ({ combatantId, delta })),
         ruleSystem,
+        campaign?.customMechanicsProfile,
       );
       const pendingTargetIds = new Set([...optimisticQueue.operations.values()].map(({ combatantId }) => combatantId));
       const suppressedTargetIds = new Set([
@@ -2253,9 +2254,10 @@ export default function RunSessionPage() {
           .sort((a, b) => a.sequence - b.sequence)
           .map(({ combatantId, delta }) => ({ combatantId, delta })),
         ruleSystem,
+        campaign?.customMechanicsProfile,
       ),
     });
-  }, [eid, queryClient, ruleSystem]);
+  }, [eid, queryClient, ruleSystem, campaign?.customMechanicsProfile]);
   const hpDelta = useKeyedMutation({
     mutationKey: HP_MUTATION_KEY,
     mutationFn: ({
@@ -2312,6 +2314,7 @@ export default function RunSessionPage() {
             .sort((a, b) => a.sequence - b.sequence)
             .map(({ combatantId: pendingCombatantId, delta: pendingDelta }) => ({ combatantId: pendingCombatantId, delta: pendingDelta })),
           ruleSystem,
+          campaign?.customMechanicsProfile,
         );
         const optimisticCombatant = optimisticCombatants.find((combatant) => combatant.id === combatantId);
         const feedbackBefore = hpFeedbackSnapshotRef.current?.encounterId === eid
@@ -2407,6 +2410,7 @@ export default function RunSessionPage() {
               queue.base.combatants,
               [...queue.operations.values()].sort((a, b) => a.sequence - b.sequence).map(({ combatantId, delta: pendingDelta }) => ({ combatantId, delta: pendingDelta })),
               ruleSystem,
+              campaign?.customMechanicsProfile,
             )
           : null;
         const queuedTargetIds = new Set([...queue.operations.values()].map(({ combatantId }) => combatantId));
@@ -2419,7 +2423,7 @@ export default function RunSessionPage() {
           ? [...hpFeedbackSnapshotRef.current.combatants.values()]
           : pendingBaseline;
         const optimisticCombatants = pendingBaseline.map((c) =>
-          targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem) : c,
+          targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem, campaign?.customMechanicsProfile) : c,
         );
         appendHpFeedbackEvents(diffHpFeedback(hpFeedbackSnapshot(feedbackBaseline), optimisticCombatants));
         const snapshot = hpFeedbackSnapshotRef.current;
@@ -3936,6 +3940,7 @@ export default function RunSessionPage() {
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
+          customMechanicsProfile={campaign?.customMechanicsProfile}
           targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { actorId: pendingActionUse.combatantId, legalIds: actionLegalTargetIds, selectedIds: actionTargetIds, declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: toggleActionTarget } : null}
           impactTargetIds={actionImpactTargetIds}
         />
@@ -4013,6 +4018,7 @@ export default function RunSessionPage() {
           turn={turnWorkspace}
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
+          customMechanicsProfile={campaign?.customMechanicsProfile}
           currentTurnState={currentCombatant?.turnState}
           actionsDisabled={riskyBlocked}
           deathSavePending={reconcileBlocks}
@@ -4326,6 +4332,7 @@ export default function RunSessionPage() {
               orderedCombatants.map((c) => (
                 <CombatantRow
                   key={c.id}
+                  customMechanicsProfile={campaign?.customMechanicsProfile}
                   rowRef={(el) => setCombatantRowRef(c.id, el)}
                   encounterId={eid}
                   combatant={c}
@@ -4349,7 +4356,7 @@ export default function RunSessionPage() {
                   // once the DM has revealed this combatant — the ruleEntryId link itself is
                   // not campaign-secret (unchanged by this issue; see /rules/entries/:id), so
                   // the server-enforced gate here is `statblockRevealed`, not `isDm`.
-                  statblock={(isDm || c.statblockRevealed) && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  statblock={(isDm || c.statblockRevealed) && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} customMechanicsProfile={campaign?.customMechanicsProfile} campaignId={cid} /> : undefined}
                   showKillPrompt={isDm && shouldShowKillPrompt(c, dismissedKillPromptIds)}
                   onDismissKillPrompt={() => setDismissedKillPromptIds((prev) => dismissKillPrompt(prev, c.id))}
                   canRemove={canDmWrite}
@@ -4464,6 +4471,7 @@ export default function RunSessionPage() {
               characters={characters}
               existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
               rulePack={campaign?.ruleSystem || ''}
+              customMechanicsProfile={campaign?.customMechanicsProfile}
               onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
             />
           )}
@@ -4477,7 +4485,7 @@ export default function RunSessionPage() {
 
           <SharedDiceLog campaignId={cid} />
 
-          <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} />
+          <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} customMechanicsProfile={campaign?.customMechanicsProfile} />
         </aside>
       </div>
 

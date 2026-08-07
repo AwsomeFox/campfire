@@ -53,8 +53,10 @@ import {
   OSR_RULE_SYSTEM_SLUGS,
   OSR_VARIANT_ADAPTERS,
   tryCreateHomebrewRuleSystemAdapter,
+  type CustomMechanicsProfile,
   type OsrMechanicsProfile,
 } from './osr-adapter';
+export type { CustomMechanicsProfile };
 import type { RestModel, RestOptionDef } from './rest';
 export { type RestOptionDef, DEFAULT_GENERIC_REST_OPTIONS, DEFAULT_STARFINDER_REST_OPTIONS, restOptionsForAdapter } from './rest';
 import { CharacterAction } from './character-action';
@@ -75,7 +77,6 @@ export * from './spell-slots';
 export * from './rest';
 export * from './character-action';
 export * from './combatant-statblock';
-import { HomebrewMechanicsProfile } from './osr-adapter';
 export * from './osr-adapter';
 export * from './character-creation';
 export * from './narration-language';

@@ -1758,7 +1758,7 @@ function RuleSystemCard({
   const targetProfile = packs ? rulesetCapabilitiesForSelection(selected, packs) : null;
   const targetMechanics = targetProfile?.mechanicsSummary ??
     (selected
-      ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected, campaign.customMechanicsProfile)} combat math.`
+      ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected, selected === currentSlug ? campaign.customMechanicsProfile : null)} combat math.`
       : 'No installed rules text. Combat math falls back to D&D 5e defaults; this does not select a 5e rules pack.');
 
   return (

@@ -249,8 +249,12 @@ export function parseMonsterStatblock(
 }
 
 /** True when `data` yields at least one renderable statblock field. */
-export function hasMonsterStatblock(data: unknown, ruleSystem?: string | null): boolean {
-  return parseMonsterStatblock(data, ruleSystem) !== null;
+export function hasMonsterStatblock(
+  data: unknown,
+  ruleSystem?: string | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
+): boolean {
+  return parseMonsterStatblock(data, ruleSystem, customMechanicsProfile) !== null;
 }
 
 /**
