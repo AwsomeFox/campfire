@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Combatant, Character } from '@campfire/schema';
+import { ruleSystemAdapter } from '@campfire/schema';
 import { HpBar, Card, Btn, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { TurnElapsedChip } from './TurnElapsedChip';
 import type { DeathSaveOutcome } from './combat/deathSaveOutcome';
+import { RulesHintPopover } from '../../components/RulesHintPopover';
+import { conditionHintKey, rulesHintCompendiumHref } from '../../lib/rulesHints';
 
 interface PlayerVitalsHeaderProps {
   combatants: Combatant[];
@@ -40,6 +43,14 @@ interface PlayerVitalsHeaderProps {
   syncBlocked?: boolean;
   /** This combatant's just-settled death-save outcome, or null once faded (issue #1919). */
   deathSaveOutcome?: { combatantId: number; outcome: DeathSaveOutcome } | null;
+  /** Issue #1939: resolves the condition-tag rules-hint popovers — the same slug the
+   *  encounter's combat surfaces already resolve `ruleSystemAdapter` from. */
+  ruleSystem?: string | null;
+  /** Issue #1939: campaign id for the condition-tag rules-hint popovers' "Full rule" link. */
+  campaignId?: number;
+  /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
+   *  entries — gates the "Full rule" link on condition-tag rules-hint popovers. */
+  rulesHintCompendiumAvailable?: boolean;
 }
 
 function deathSaveOutcomeText(
@@ -75,12 +86,13 @@ export function vitalsSpeedFor(combatant: Combatant, movementDefault: number | u
   return movementDefault ?? null;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, turnStartedAt = null, turnTimerSeconds = 0, onRollDeathSave, isDeathSaveBusy, syncBlocked = false, deathSaveOutcome }: PlayerVitalsHeaderProps) {
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, turnStartedAt = null, turnTimerSeconds = 0, onRollDeathSave, isDeathSaveBusy, syncBlocked = false, deathSaveOutcome, ruleSystem, campaignId, rulesHintCompendiumAvailable = false }: PlayerVitalsHeaderProps) {
   const { t } = useTranslation('encounters');
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
   const [editingMaxFor, setEditingMaxFor] = useState<number | null>(null);
   const [maxHpDraft, setMaxHpDraft] = useState('');
+  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
 
   if (combatants.length === 0) return null;
 
@@ -263,9 +275,29 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
             })()}
 
             <div className="flex items-center gap-1.5 flex-wrap flex-1 justify-end min-w-[100px]">
-              {c.conditions.map(cond => (
-                <span key={cond} className="tag tag-neutral text-xs px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-200 border border-neutral-700">{cond}</span>
-              ))}
+              {c.conditions.map(cond => {
+                // Issue #1939: undefined on any adapter without an authored hint (every
+                // non-5e system today) — no affordance renders, never 5e text on another system.
+                const hintKey = conditionHintKey(adapter.id, cond);
+                return (
+                  <span key={cond} className="inline-flex items-center gap-1">
+                    <span className="tag tag-neutral text-xs px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-200 border border-neutral-700">{cond}</span>
+                    {hintKey && (
+                      <RulesHintPopover
+                        termId={cond}
+                        termLabel={cond}
+                        hintKey={hintKey}
+                        align="end"
+                        compendiumHref={
+                          rulesHintCompendiumAvailable && campaignId != null
+                            ? rulesHintCompendiumHref(campaignId, cond)
+                            : undefined
+                        }
+                      />
+                    )}
+                  </span>
+                );
+              })}
               {c.turnState?.concentration && (
                 <span className="tag tag-accent text-xs px-2 py-0.5 rounded-full border border-accent/50">
                   <GameIcon slug="brain" size={14} className="inline mr-1" />

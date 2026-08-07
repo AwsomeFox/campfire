@@ -30,20 +30,26 @@ import { SpellbookPanel, hasSpellbookContent, type SpellItem, type SpellSlotMap,
 import { GameIcon } from '../../components/GameIcon';
 import { QuickRollButtons } from './QuickRollButtons';
 import { turnEndGateReason, turnEndStandingReason } from './turnEndGate';
+import { RulesHintPopover } from '../../components/RulesHintPopover';
+import { standardActionHintKey, rulesHintCompendiumHref } from '../../lib/rulesHints';
 
 /** Ties the End-turn button to its standing dmControlsTurns line for assistive tech. */
 const TURN_END_STANDING_ID = 'turn-end-standing-reason';
 
+// Issue #1939: each chip's plain-language explanation moved from a hover-only `desc` /
+// `title=` tooltip to an adapter-scoped, accessible RulesHintPopover (see rulesHints.ts) —
+// invisible on touch and to keyboard/screen-reader users, and this array's copy was 5e text
+// hardcoded regardless of the active rule system.
 const STANDARD_ACTIONS = [
-  { id: 'attack', label: 'Attack', icon: 'crossed-swords', desc: 'Attack a target' },
-  { id: 'dash', label: 'Dash', icon: 'running-shoe', desc: 'Move your speed again' },
-  { id: 'dodge', label: 'Dodge', icon: 'shield', desc: 'Focus on avoiding attacks' },
-  { id: 'disengage', label: 'Disengage', icon: 'evasion', desc: 'Move without provoking opportunity attacks' },
-  { id: 'help', label: 'Help', icon: 'help', desc: 'Grant advantage to an ally' },
-  { id: 'hide', label: 'Hide', icon: 'hood', desc: 'Attempt to hide from enemies' },
-  { id: 'ready', label: 'Ready', icon: 'stopwatch', desc: 'Prepare an action for a specific trigger' },
-  { id: 'search', label: 'Search', icon: 'magnifying-glass', desc: 'Devote your attention to finding something' },
-  { id: 'use', label: 'Use Object', icon: 'grab', desc: 'Interact with a complex object' }
+  { id: 'attack', label: 'Attack', icon: 'crossed-swords' },
+  { id: 'dash', label: 'Dash', icon: 'running-shoe' },
+  { id: 'dodge', label: 'Dodge', icon: 'shield' },
+  { id: 'disengage', label: 'Disengage', icon: 'evasion' },
+  { id: 'help', label: 'Help', icon: 'help' },
+  { id: 'hide', label: 'Hide', icon: 'hood' },
+  { id: 'ready', label: 'Ready', icon: 'stopwatch' },
+  { id: 'search', label: 'Search', icon: 'magnifying-glass' },
+  { id: 'use', label: 'Use Object', icon: 'grab' }
 ];
 
 interface TurnWorkspaceProps {
@@ -97,6 +103,11 @@ interface TurnWorkspaceProps {
    *  character, via the parent's POST :id/spell-slots mutation. Undefined when the viewer
    *  isn't authorized to cast for this actor right now (mirrors onUseSuggestedAction's gate). */
   onUpdateSpellSlot?: (level: number | undefined, delta: number, castContext?: SpellCastContext) => void;
+  /** Issue #1939: campaign id for the standard-action rules-hint popovers' "Full rule" link. */
+  campaignId?: number;
+  /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
+   *  entries — gates the "Full rule" link on standard-action rules-hint popovers. */
+  rulesHintCompendiumAvailable?: boolean;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -163,6 +174,8 @@ export function TurnWorkspace({
   gridUnit,
   gridScale,
   onUpdateSpellSlot,
+  campaignId,
+  rulesHintCompendiumAvailable = false,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -406,40 +419,57 @@ export function TurnWorkspace({
             })()}
           </div>
           <div className="flex gap-1.5 mt-3 overflow-x-auto py-1 max-w-full flex-wrap sm:flex-nowrap" data-testid="standard-actions-bar">
-            {STANDARD_ACTIONS.map((act) => (
-              <button
-                key={act.id}
-                type="button"
-                title={act.desc}
-                aria-label={act.label}
-                disabled={actionDisabled}
-                className="btn btn-ghost flex flex-col items-center justify-center gap-1 min-h-[44px] min-w-[44px] sm:min-w-[56px] p-2"
-                onClick={() => {
-                  const currentName = turn.current?.name ?? 'Combatant';
-                  if (act.id === 'attack') {
-                    announce(`${currentName} action: Attack`);
-                    const el = document.getElementById('turn-suggested-actions-search');
-                    if (el) {
-                      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                      el.focus();
-                    }
-                  } else if (act.id === 'ready') {
-                    announce(`${currentName} action: Ready`);
-                    const el = document.getElementById('turn-readied-input');
-                    if (el) {
-                      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                      el.focus();
-                    }
-                  } else {
-                    announce(`${currentName} action: ${act.label}`);
-                    turnState.mutate({ useSlot: 'action' });
-                  }
-                }}
-              >
-                <GameIcon slug={act.icon} size={20} />
-                <span className="text-[10px] hidden sm:block">{act.label}</span>
-              </button>
-            ))}
+            {STANDARD_ACTIONS.map((act) => {
+              // Issue #1939: undefined on any adapter without an authored hint (every
+              // non-5e system today) — no affordance renders, never 5e text on another system.
+              const hintKey = standardActionHintKey(adapter.id, act.id);
+              return (
+                <div key={act.id} className="flex flex-col items-center gap-0.5">
+                  <button
+                    type="button"
+                    aria-label={act.label}
+                    disabled={actionDisabled}
+                    className="btn btn-ghost flex flex-col items-center justify-center gap-1 min-h-[44px] min-w-[44px] sm:min-w-[56px] p-2"
+                    onClick={() => {
+                      const currentName = turn.current?.name ?? 'Combatant';
+                      if (act.id === 'attack') {
+                        announce(`${currentName} action: Attack`);
+                        const el = document.getElementById('turn-suggested-actions-search');
+                        if (el) {
+                          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          el.focus();
+                        }
+                      } else if (act.id === 'ready') {
+                        announce(`${currentName} action: Ready`);
+                        const el = document.getElementById('turn-readied-input');
+                        if (el) {
+                          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          el.focus();
+                        }
+                      } else {
+                        announce(`${currentName} action: ${act.label}`);
+                        turnState.mutate({ useSlot: 'action' });
+                      }
+                    }}
+                  >
+                    <GameIcon slug={act.icon} size={20} />
+                    <span className="text-[10px] hidden sm:block">{act.label}</span>
+                  </button>
+                  {hintKey && (
+                    <RulesHintPopover
+                      termId={act.id}
+                      termLabel={act.label}
+                      hintKey={hintKey}
+                      compendiumHref={
+                        rulesHintCompendiumAvailable && campaignId != null
+                          ? rulesHintCompendiumHref(campaignId, act.label)
+                          : undefined
+                      }
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
       )}

@@ -606,6 +606,78 @@ body {
   padding: 0;
 }
 
+/* Inline rules hints on standard actions and conditions (issue #1939) — same fixed-panel
+   disclosure pattern as .cf-term-help above (a narrow/overflow-hidden host like the
+   combatant list or the standard-actions bar's own horizontal scroller would otherwise
+   clip an absolutely-positioned panel), sized smaller since these mount once per chip/tag
+   rather than once per glossary term. */
+.cf-rules-hint {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.cf-rules-hint__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-divider);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent-200);
+  font-size: 11px;
+  font-weight: 800;
+  font-style: italic;
+  line-height: 1;
+}
+
+.cf-rules-hint__trigger:hover,
+.cf-rules-hint__trigger:focus-visible {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-divider));
+}
+
+.cf-rules-hint__panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: min(260px, calc(100vw - 24px));
+  max-height: calc(100dvh - 96px);
+  overflow: auto;
+  z-index: var(--cf-layer-dialog);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  text-align: start;
+  white-space: normal;
+}
+
+.cf-rules-hint__title {
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.cf-rules-hint__body {
+  color: var(--color-neutral-300);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cf-rules-hint__link {
+  align-self: flex-start;
+  color: var(--color-accent-200);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 
 /* Login information architecture (#862): one source order at every size —
    compact value statement, applicable authentication, then the full pitch. */

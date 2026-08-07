@@ -21,6 +21,8 @@ import { DEATH_STATE_LABEL, DeathSaveTracker } from './DeathSaves';
 import type { DeathSaveOutcome } from './deathSaveOutcome';
 import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, conditionDraftFromInstance, conditionSourceLabel, emptyConditionDraft, type ConditionDraft, type ConditionSourceOption, type ConditionTiming } from './conditionDraft';
 import { initialStatblockDraftState, statblockDraftReducer, statblockPatchForCommit } from './combatantStatblockDraft';
+import { RulesHintPopover } from '../../../components/RulesHintPopover';
+import { conditionHintKey, rulesHintCompendiumHref } from '../../../lib/rulesHints';
 
 const HP_BAND_LABEL: Record<string, string> = { healthy: 'Healthy', bloodied: 'Bloodied', critical: 'Critical', down: 'Down' };
 const HP_BAND_PCT: Record<string, number> = { healthy: 100, bloodied: 50, critical: 20, down: 0 };
@@ -177,6 +179,16 @@ export type CombatantRowProps = {
   onDismissKillPrompt?: () => void;
   isDm?: boolean;
   myUserId?: string | number;
+  /**
+   * Issue #1939: campaign id for condition-tag rules-hint popovers' "Full rule" link.
+   * Deliberately separate from `campaignId` above, which goes `undefined` whenever the
+   * viewer lacks edit permission or sheets are stale — the rules-hint popover is public
+   * rules text identical for DM and players (criterion 4) and must not depend on that.
+   */
+  rulesHintCampaignId?: number;
+  /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
+   *  entries — gates the "Full rule" link on condition-tag rules-hint popovers. */
+  rulesHintCompendiumAvailable?: boolean;
 };
 
 export function CombatantRow({
@@ -235,6 +247,8 @@ export function CombatantRow({
   onDismissKillPrompt,
   isDm = false,
   myUserId,
+  rulesHintCampaignId,
+  rulesHintCompendiumAvailable = false,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   const [showWhisper, setShowWhisper] = useState(false);
@@ -968,6 +982,24 @@ export function CombatantRow({
                       </span>
                     )}
                   </span>
+                  {(() => {
+                    // Issue #1939: undefined on any adapter without an authored hint
+                    // (every non-5e system today) — no affordance renders.
+                    const hintKey = conditionHintKey(adapter.id, inst.name);
+                    if (!hintKey) return null;
+                    return (
+                      <RulesHintPopover
+                        termId={inst.id || inst.name}
+                        termLabel={inst.name}
+                        hintKey={hintKey}
+                        compendiumHref={
+                          rulesHintCompendiumAvailable && rulesHintCampaignId != null
+                            ? rulesHintCompendiumHref(rulesHintCampaignId, inst.name)
+                            : undefined
+                        }
+                      />
+                    );
+                  })()}
                   {canEditPermission && (
                     <>
                       <button
@@ -1029,9 +1061,25 @@ export function CombatantRow({
           </div>
         ) : combatant.conditions.length > 0 ? (
           <div id={`combatant-${combatant.id}-conditions`} tabIndex={-1} style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
-            {combatant.conditions.map((cond) => (
+            {combatant.conditions.map((cond) => {
+              // Issue #1939: undefined on any adapter without an authored hint (every
+              // non-5e system today) — no affordance renders.
+              const hintKey = conditionHintKey(adapter.id, cond);
+              return (
               <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
                 {cond}
+                {hintKey && (
+                  <RulesHintPopover
+                    termId={cond}
+                    termLabel={cond}
+                    hintKey={hintKey}
+                    compendiumHref={
+                      rulesHintCompendiumAvailable && rulesHintCampaignId != null
+                        ? rulesHintCompendiumHref(rulesHintCampaignId, cond)
+                        : undefined
+                    }
+                  />
+                )}
                 {canEditPermission && (
                   <button
                     type="button"
@@ -1058,7 +1106,8 @@ export function CombatantRow({
                   </button>
                 )}
               </span>
-            ))}
+              );
+            })}
           </div>
         ) : null}
 
