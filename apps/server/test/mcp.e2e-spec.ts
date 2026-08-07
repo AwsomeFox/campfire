@@ -4221,6 +4221,128 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
   });
 
+  describe('issue #1993 — co-DM external-AI provenance is explicit on the MCP surface too', () => {
+    let consentCampaignId: number;
+
+    beforeAll(async () => {
+      const created = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Co-DM Consent #1993' });
+      expect(created.status).toBe(201);
+      consentCampaignId = created.body.id;
+
+      const flagRes = await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: true });
+      expect(flagRes.status).toBe(200);
+
+      const seatRes = await dmAgent
+        .put(`/api/v1/campaigns/${consentCampaignId}/ai-dm`)
+        .send({ enabled: true, tokenBudget: 1_000_000 });
+      expect(seatRes.status).toBe(200);
+
+      // A STORED provider config (mock providerType) drives the real `createAiProvider`
+      // branch — the one #1993's `externalSend` must report `true` for — as opposed to the
+      // injected AI_DM_PROVIDER seam the rest of this file's draft_content tests never
+      // configure past (#501's co-dm.e2e-spec.ts established this technique).
+      const providerRes = await dmAgent
+        .put(`/api/v1/campaigns/${consentCampaignId}/ai-provider`)
+        .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-test-key-1234' });
+      expect(providerRes.status).toBe(200);
+    });
+
+    afterAll(async () => {
+      // Restore the global flag so later tests in this file see the feature disabled,
+      // matching the convention the #261 seat-redaction test above already establishes.
+      const restoreRes = await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: false });
+      expect(restoreRes.status).toBe(200);
+    });
+
+    /**
+     * The factory-built mock provider echoes the last user message (co-dm.e2e-spec.ts,
+     * #501), so putting the draft JSON straight in the prompt drives the real configured
+     * path deterministically without a network call.
+     */
+    const draftNpc = (name: string) =>
+      mcpClient(dmToken).then((client) =>
+        client.callTool({
+          name: 'draft_content',
+          arguments: { campaignId: consentCampaignId, target: 'npc', prompt: JSON.stringify({ name }) },
+        }),
+      );
+
+    it('records consent.externalSend=true and the live campaignPolicy for a genuinely external draft', async () => {
+      const res = await draftNpc('MCP Consent Warden');
+      expect(res.isError).toBeFalsy();
+      const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+      const provenance = proposal.generationProvenance as {
+        consent?: {
+          campaignPolicy: string;
+          externalSend: boolean;
+          includedInboxCount: number;
+          excludedInboxByConsent: number;
+          excludedInboxPrivate: number;
+        };
+      };
+      expect(provenance.consent).toBeTruthy();
+      expect(provenance.consent!.campaignPolicy).toBe('member_consent'); // campaign default
+      expect(provenance.consent!.externalSend).toBe(true);
+      // Nothing member-authored is ever assembled on this path (issue #1993 finding) —
+      // the counts are structurally zero, not merely zero this run.
+      expect(provenance.consent!.includedInboxCount).toBe(0);
+      expect(provenance.consent!.excludedInboxByConsent).toBe(0);
+      expect(provenance.consent!.excludedInboxPrivate).toBe(0);
+    });
+
+    /**
+     * Review finding (post-#2041): co-DM's first fix set `externalSend = true` whenever a
+     * provider config resolved, ignoring `AI_PROVIDER_ENDPOINT_IS_LOCAL` — the operator's
+     * explicit declaration that the configured endpoint is on-box (e.g. an Ollama install),
+     * documented in `website/docs/getting-started/installation.md`. That misreported a
+     * purely local generation as external. Scribe/inbox-sweep already honored this flag;
+     * co-DM now shares the same `resolveAiProvenanceEgress` helper, so this must hold on the
+     * MCP surface too, not only REST.
+     */
+    it('records consent.externalSend=false when the operator has declared the endpoint local (AI_PROVIDER_ENDPOINT_IS_LOCAL)', async () => {
+      const priorLocalFlag = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+      process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'true';
+      try {
+        const res = await draftNpc('MCP On-Box Warden');
+        expect(res.isError).toBeFalsy();
+        const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+        const consent = (proposal.generationProvenance as { consent?: { externalSend: boolean } }).consent;
+        expect(consent).toBeTruthy();
+        // A provider IS configured (genuinely serving the draft) but the operator declared
+        // the endpoint local, so nothing left the deployment.
+        expect(consent!.externalSend).toBe(false);
+      } finally {
+        if (priorLocalFlag === undefined) delete process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+        else process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = priorLocalFlag;
+      }
+    });
+
+    it('reports campaignPolicy="disabled" truthfully — never fabricated as member_consent, never omitted', async () => {
+      const policyRes = await dmAgent
+        .patch(`/api/v1/campaigns/${consentCampaignId}`)
+        .send({ aiExternalContentPolicy: 'disabled' });
+      expect(policyRes.status).toBe(200);
+      expect(policyRes.body.aiExternalContentPolicy).toBe('disabled');
+
+      const res = await draftNpc('MCP Disabled-Policy Warden');
+      expect(res.isError).toBeFalsy();
+      const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+      const consent = (proposal.generationProvenance as { consent?: { campaignPolicy: string; externalSend: boolean } }).consent;
+      expect(consent).toBeTruthy();
+      expect(consent!.campaignPolicy).toBe('disabled');
+      // The disabled policy governs member-authored content this path never carries — the
+      // draft itself is not refused (see co-dm.service.ts's `buildGenerationProvenance` doc
+      // comment for the audited finding this reflects), only truthfully recorded.
+      expect(consent!.externalSend).toBe(true);
+
+      // Restore the default policy so it cannot leak into a later test on this campaign.
+      const restorePolicy = await dmAgent
+        .patch(`/api/v1/campaigns/${consentCampaignId}`)
+        .send({ aiExternalContentPolicy: 'member_consent' });
+      expect(restorePolicy.status).toBe(200);
+    });
+  });
+
   describe('issue #683 — MCP parity for invites, notifications, proposals, trash, reopen, spell slots, attachments', () => {
     it('invite lifecycle: create, list, preview, revoke', async () => {
       const client = await mcpClient(dmToken);

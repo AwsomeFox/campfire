@@ -21,6 +21,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import type { AiProviderConfig } from '../ai-dm/providers';
+import { resolveAiProvenanceEgress } from '../../common/ai-provenance-endpoint';
 import {
   INBOX_SWEEP_CLASSIFIER,
   InvalidInboxSweepClassificationError,
@@ -853,14 +854,13 @@ export class InboxSweepService implements OnModuleInit {
     if (!current) throw new StaleInboxSweepItemError();
   }
 
-  private operatorDeclaredLocalEndpoint(): boolean {
-    const raw = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL?.trim().toLowerCase();
-    return raw === '1' || raw === 'true';
-  }
-
+  /**
+   * The configured/operator-declared-local decision lives in `resolveAiProvenanceEgress`
+   * (`common/ai-provenance-endpoint.ts`), shared with `ScribeService` and `CoDmService` so
+   * the three cannot drift (#1993 review).
+   */
   private resolveEgress(config: AiProviderConfig | null): InboxSweepEgress {
-    if (!config) return 'local';
-    return this.operatorDeclaredLocalEndpoint() ? 'local' : 'external';
+    return resolveAiProvenanceEgress(config !== null);
   }
 
   private async aiContentPolicy(campaignId: number): Promise<AiExternalContentPolicy> {
