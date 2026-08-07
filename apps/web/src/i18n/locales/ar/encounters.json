@@ -5,7 +5,16 @@
     "actions": {
       "title": "الإجراءات",
       "use": "استخدام",
-      "useGroup": "تنفيذ للمجموعة"
+      "useGroup": "تنفيذ للمجموعة",
+      "uses": {
+        "rechargeSingle": "إعادة الشحن {{min}}",
+        "recharge": "إعادة الشحن {{min}}–{{max}}",
+        "spent": "مُستهلَك",
+        "perDay": "{{max}}/يوم",
+        "left": "بقي {{count}}",
+        "left_other": "بقي {{count}}",
+        "disabledReason": "لا توجد استخدامات متبقية ({{label}})"
+      }
     },
     "vitals": {
       "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",

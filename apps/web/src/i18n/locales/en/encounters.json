@@ -5,7 +5,16 @@
     "actions": {
       "title": "Actions",
       "use": "Use",
-      "useGroup": "Run for group"
+      "useGroup": "Run for group",
+      "uses": {
+        "rechargeSingle": "Recharge {{min}}",
+        "recharge": "Recharge {{min}}–{{max}}",
+        "spent": "spent",
+        "perDay": "{{max}}/day",
+        "left": "{{count}} left",
+        "left_other": "{{count}} left",
+        "disabledReason": "No uses remaining ({{label}})"
+      }
     },
     "vitals": {
       "editMaxHp": "Edit max HP",

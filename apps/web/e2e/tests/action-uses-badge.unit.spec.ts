@@ -3,6 +3,8 @@
  * component render or backend needed. Uses the same fallback shape react-i18next's `t`
  * falls back to when a key/locale isn't loaded (return `defaultValue` verbatim).
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { UsableActionUses } from '@campfire/schema';
 import { usesBadge, type Translate } from '../../src/features/encounters/CombatantActionsList';
@@ -43,6 +45,23 @@ test.describe('usesBadge (issue #1921)', () => {
     for (const recharge of ['short-rest', 'long-rest', 'dawn']) {
       const uses: UsableActionUses = { max: 3, recharge, spent: 1, available: 2 };
       expect(usesBadge(uses, t)).toBe('3/day · 2 left');
+    }
+  });
+
+  // Devin review on PR #2062: all six `encounters.actions.uses.*` keys were called with a
+  // defaultValue but existed in NO catalog, so every locale silently rendered the English
+  // fallback. `check:i18n` cannot see that — it compares `en` against `ar`, and a key absent
+  // from BOTH is invisible to parity. Pin the keys against the real catalog instead.
+  test('every uses.* key this module calls actually exists in the en and ar catalogs', () => {
+    const load = (lang: string) =>
+      JSON.parse(readFileSync(resolve(__dirname, `../../src/i18n/locales/${lang}/encounters.json`), 'utf8')) as {
+        encounters: { actions: { uses?: Record<string, string> } };
+      };
+    const used = ['rechargeSingle', 'recharge', 'spent', 'perDay', 'left', 'disabledReason'];
+    for (const lang of ['en', 'ar']) {
+      const uses = load(lang).encounters.actions.uses;
+      expect(uses, `${lang} catalog has no encounters.actions.uses block`).toBeTruthy();
+      for (const key of used) expect(Object.keys(uses ?? {}), `${lang} is missing ${key}`).toContain(key);
     }
   });
 
