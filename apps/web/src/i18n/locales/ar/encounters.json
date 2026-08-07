@@ -206,6 +206,7 @@
       },
       "ping": {
         "menuLabel": "نية الإشارة",
+        "keyboardHint": "يفتح Shift+Enter قائمة انظر أو خطر أو تحرك هنا.",
         "intents": {
           "look": "انظر",
           "danger": "خطر",

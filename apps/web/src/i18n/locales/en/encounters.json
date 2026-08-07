@@ -206,6 +206,7 @@
       },
       "ping": {
         "menuLabel": "Ping intent",
+        "keyboardHint": "Shift+Enter opens the Look, Danger, or Move here menu.",
         "intents": {
           "look": "Look",
           "danger": "Danger",
