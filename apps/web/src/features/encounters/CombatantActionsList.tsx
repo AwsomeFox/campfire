@@ -4,11 +4,37 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import type { ActionSpec, UsableAction } from '@campfire/schema';
+import { parseRechargeRange, type ActionSpec, type UsableAction, type UsableActionUses } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { queryKeys } from '../../lib/query';
 import { Btn } from '../../components/ui';
 import { QuickRollButtons } from './QuickRollButtons';
+
+/** Translate function shape, spelled without angle-bracket generics (issue #1940 JSX-text ratchet scans raw ">...<" spans, including TS type syntax, in this directory). */
+export type Translate = (key: string, opts?: { defaultValue?: string; min?: number; max?: number; count?: number; label?: string }) => string;
+
+/**
+ * Issue #1921: "Recharge 5–6 · spent" / "1/day · 0 left" — server-computed `uses` state
+ * turned into a display label. Never re-derives spend math client-side (see
+ * {@link UsableAction.uses}'s own doc comment); this only formats what the server sent.
+ * Exported for a pure unit test (apps/web/e2e/tests/*.unit.spec.ts) — no component render
+ * needed to check the formatting.
+ */
+export function usesBadge(uses: UsableActionUses, t: Translate): string {
+  if (uses.recharge) {
+    const range = parseRechargeRange(uses.recharge);
+    const pool = !range
+      ? uses.recharge
+      : range.min === range.max
+        ? t('encounters.actions.uses.rechargeSingle', { min: range.min, defaultValue: `Recharge ${range.min}` })
+        : t('encounters.actions.uses.recharge', { min: range.min, max: range.max, defaultValue: `Recharge ${range.min}–${range.max}` });
+    if (uses.available > 0) return pool;
+    return `${pool} · ${t('encounters.actions.uses.spent', { defaultValue: 'spent' })}`;
+  }
+  const pool = t('encounters.actions.uses.perDay', { max: uses.max, defaultValue: `${uses.max}/day` });
+  const left = t('encounters.actions.uses.left', { count: uses.available, defaultValue: `${uses.available} left` });
+  return `${pool} · ${left}`;
+}
 
 export function CombatantActionsList({
   encounterId,
@@ -42,7 +68,7 @@ export function CombatantActionsList({
   onUseGroupAction?: (actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => void;
 }) {
   const { t } = useTranslation();
-  
+
   const { data: actions = [] } = useQuery({
     queryKey: [...queryKeys.encounter(encounterId), 'actions', combatantId],
     queryFn: () => api.get<UsableAction[]>(`${API}/encounters/${encounterId}/combatants/${combatantId}/actions`),
@@ -60,21 +86,42 @@ export function CombatantActionsList({
           {disabledReason}
         </span>
       )}
-      {playable.map((a) => (
-        <div key={a.index} className="flex items-center justify-between gap-2 text-sm">
-          <div className="min-w-0 flex-1 flex flex-wrap items-center gap-2">
-            <span className="font-medium text-white">{a.name}</span>
-            <QuickRollButtons
-              encounterId={encounterId}
-              combatantId={combatantId}
-              actionName={a.name}
-              toHit={a.toHit}
-              damage={a.damage}
-              spec={a.spec}
-              disabled={!!disabledReason}
-            />
-            {a.notes && <span className="text-xs text-muted">({a.notes})</span>}
-          </div>
+      {playable.map((a) => {
+        // Issue #1921: exhausted (available === 0) disables Use for THIS action specifically,
+        // independent of (and composable with) the list-wide sync-block `disabledReason`.
+        const exhausted = !!a.uses && a.uses.available <= 0;
+        const exhaustedReasonId = `combatant-actions-${combatantId}-${a.index}-exhausted-reason`;
+        const useReason =
+          disabledReason ??
+          (exhausted
+            ? t('encounters.actions.uses.disabledReason', {
+                label: a.uses ? usesBadge(a.uses, t) : '',
+                defaultValue: `No uses remaining (${a.uses ? usesBadge(a.uses, t) : ''})`,
+              })
+            : undefined);
+        return (
+          <div key={a.index} className="flex items-center justify-between gap-2 text-sm">
+            <div className="min-w-0 flex-1 flex flex-wrap items-center gap-2">
+              <span className="font-medium text-white">{a.name}</span>
+              {a.uses && (
+                <span
+                  id={exhausted ? exhaustedReasonId : undefined}
+                  className={`text-xs rounded px-1.5 py-0.5 ${exhausted ? 'bg-amber-900/40 text-amber-300' : 'bg-white/10 text-muted'}`}
+                >
+                  {usesBadge(a.uses, t)}
+                </span>
+              )}
+              <QuickRollButtons
+                encounterId={encounterId}
+                combatantId={combatantId}
+                actionName={a.name}
+                toHit={a.toHit}
+                damage={a.damage}
+                spec={a.spec}
+                disabled={!!disabledReason}
+              />
+              {a.notes && <span className="text-xs text-muted">({a.notes})</span>}
+            </div>
           <div className="flex items-center gap-1 shrink-0">
             {onUseGroupAction && (
               <Btn
@@ -94,16 +141,17 @@ export function CombatantActionsList({
               type="button"
               ghost
               className="!min-h-8 text-xs"
-              disabled={!!disabledReason}
-              title={disabledReason}
-              aria-describedby={disabledReason ? blockedReasonId : undefined}
+              disabled={!!useReason}
+              title={useReason}
+              aria-describedby={disabledReason ? blockedReasonId : exhausted ? exhaustedReasonId : undefined}
               onClick={() => a.spec && onUseAction(a.index, a.name, a.spec)}
             >
               {t('encounters.actions.use', { defaultValue: 'Use' })}
             </Btn>
           </div>
         </div>
-      ))}
+      );
+    })}
     </div>
   );
 }

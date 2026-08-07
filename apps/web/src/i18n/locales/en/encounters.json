@@ -2,6 +2,16 @@
   "encounters": {
     "title": "Encounters",
     "combatLogHeading": "Combat log",
+    "actions": {
+      "uses": {
+        "recharge": "Recharge {{min}}–{{max}}",
+        "rechargeSingle": "Recharge {{min}}",
+        "perDay": "{{max}}/day",
+        "spent": "spent",
+        "left": "{{count}} left",
+        "disabledReason": "No uses remaining ({{label}})"
+      }
+    },
     "vitals": {
       "editMaxHp": "Edit max HP",
       "maxHp": "Max HP",

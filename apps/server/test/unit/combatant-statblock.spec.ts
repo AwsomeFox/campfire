@@ -1,6 +1,7 @@
 import {
   Dnd5eAdapter,
   defaultCombatantStatblock,
+  effectiveActionUsesMax,
   expandRawStatblockAction,
   expandStatblockActions,
   isResolvableSpec,
@@ -123,5 +124,64 @@ describe('combatant statblock expansion (issue #425)', () => {
     expect(actions[0].name).toBe('Arc Blade');
     expect(isResolvableSpec(actions[0].spec)).toBe(true);
     expect(isResolvableSpec(actions[1].spec)).toBe(true);
+  });
+
+  // Issue #1921: "Recharge 5-6" and "1/Day" statblock actions both expand with populated `uses`.
+  describe('limited-use / recharge parsing (issue #1921)', () => {
+    it('a structured "Recharge 5-6" usage object populates uses.recharge, with a pool of 1', () => {
+      const action = expandRawStatblockAction(
+        { name: 'Breath Weapon', desc: 'Fire.', attack_bonus: 9, usage: { type: 'recharge', min: 5, max: 6, label: 'Recharge 5-6' } },
+        'action',
+      );
+      expect(action.spec?.uses.recharge).toBe('recharge-5-6');
+      expect(action.spec?.uses.max).toBe(0);
+      expect(effectiveActionUsesMax(action.spec!.uses)).toBe(1);
+    });
+
+    it('a bare "Recharge 6" free-text label (no structured type) still parses via the regex fallback', () => {
+      const action = expandRawStatblockAction(
+        { name: 'Frost Ray', desc: 'Cold.', attack_bonus: 6, usage: { label: 'Recharge 6' } },
+        'action',
+      );
+      expect(action.spec?.uses.recharge).toBe('recharge-6-6');
+      expect(effectiveActionUsesMax(action.spec!.uses)).toBe(1);
+    });
+
+    it('a structured "1/Day" (PER_DAY) usage object populates uses.max, with no recharge condition', () => {
+      const action = expandRawStatblockAction(
+        { name: 'Charm Gaze', desc: 'A DC 14 Wisdom saving throw.', savingThrow: { dc: 14, ability: 'Wisdom' }, usage: { type: 'perDay', uses: 1, label: '1/Day' } },
+        'action',
+      );
+      expect(action.spec?.uses.max).toBe(1);
+      expect(action.spec?.uses.recharge).toBe('');
+      expect(effectiveActionUsesMax(action.spec!.uses)).toBe(1);
+    });
+
+    it('a "3/Day" per-day pool of more than one use populates uses.max accordingly', () => {
+      const action = expandRawStatblockAction(
+        { name: 'Minor Illusion', desc: 'A trick.', attack_bonus: 4, usage: { type: 'perDay', uses: 3, label: '3/Day' } },
+        'action',
+      );
+      expect(action.spec?.uses.max).toBe(3);
+      expect(effectiveActionUsesMax(action.spec!.uses)).toBe(3);
+    });
+
+    it('a bare "N/Day" free-text label (no structured type) parses via the regex fallback', () => {
+      const action = expandRawStatblockAction(
+        { name: 'Ray of Frost', desc: 'Cold.', attack_bonus: 5, usage: { label: '2/Day' } },
+        'action',
+      );
+      expect(action.spec?.uses.max).toBe(2);
+    });
+
+    it('an at-will action (no usage object at all) has an empty uses block — effectiveActionUsesMax is 0', () => {
+      const action = expandRawStatblockAction(
+        { name: 'Claw', desc: 'A basic attack.', attack_bonus: 5, damage: [{ expression: '1d6', type: 'slashing' }] },
+        'action',
+      );
+      expect(action.spec?.uses.max).toBe(0);
+      expect(action.spec?.uses.recharge).toBe('');
+      expect(effectiveActionUsesMax(action.spec!.uses)).toBe(0);
+    });
   });
 });

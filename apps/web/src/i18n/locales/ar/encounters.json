@@ -2,6 +2,16 @@
   "encounters": {
     "title": "المواجهات",
     "combatLogHeading": "سجل القتال",
+    "actions": {
+      "uses": {
+        "recharge": "إعادة شحن {{min}}–{{max}}",
+        "rechargeSingle": "إعادة شحن {{min}}",
+        "perDay": "{{max}}/يوم",
+        "spent": "مستهلك",
+        "left": "{{count}} متبقٍ",
+        "disabledReason": "لا استخدامات متبقية ({{label}})"
+      }
+    },
     "vitals": {
       "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
       "maxHp": "الحد الأقصى لنقاط الحياة",

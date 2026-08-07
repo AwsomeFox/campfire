@@ -1763,8 +1763,10 @@ export class McpToolsService {
         'so fall back to its freeform statblock (toHit/damage/notes) rather than inventing numbers. The freeform text is ' +
         'always returned. For a character, sheet actions come first, then any EQUIPPED inventory item\'s authored ' +
         'action appended after (issue #1326) — an equipped-item row\'s `source` reads "equipped: <item name>" (issue ' +
-        '#1901); a sheet action\'s `source` is empty. A player may list only their own character\'s actions; the DM ' +
-        'may list any combatant\'s. Feed the chosen action name/index into resolve_action.',
+        '#1901); a sheet action\'s `source` is empty. `uses` (issue #1921) is `{ max, recharge, spent, available }` ' +
+        'for a limited-use or "Recharge N-M" action, null for an at-will one — apply_action refuses a second use ' +
+        'once `available` hits 0, naming the recharge condition. A player may list only their own character\'s ' +
+        'actions; the DM may list any combatant\'s. Feed the chosen action name/index into resolve_action.',
       { encounterId: Id.describe('Encounter id — from list_encounters'), combatantId: Id.describe('Combatant id — from get_encounter') },
       async ({ encounterId, combatantId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -4786,7 +4788,10 @@ export class McpToolsService {
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
         'fields: initiative, the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat), and ' +
         'statblockRevealed (reveals/hides this monster or npc\'s statblock to players; a non-DM read genuinely omits ' +
-        'the statblock until this is true — logs a combat-log note event and an audit row). ' +
+        'the statblock until this is true — logs a combat-log note event and an audit row), and actionUses (issue ' +
+        '#1921 — force a limited-use/recharge action\'s spend to an exact value: { actionIndex or actionName, spent }, ' +
+        'identifying the action the same way list_usable_actions/resolve_action do; spent is clamped to [0, max] and ' +
+        'logs a combat-log resource_changed event and an audit row). ' +
         'Battle-map token position tokenX/tokenY (0–100 percent overlay, clamped) moves the combatant\'s token on the ' +
         'encounter map. DM may modify any combatant; a player may only touch hp/temp-hp/death-saves/conditions/token ' +
         'on a combatant linked to a character they own. When sending statblock, pass expectedStatblock (the statblock ' +

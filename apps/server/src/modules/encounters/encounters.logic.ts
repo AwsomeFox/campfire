@@ -756,6 +756,69 @@ export function resetLegendaryUsage(turnState: CombatantTurnState): CombatantTur
   return { ...turnState, used };
 }
 
+/** One spent recharge action's persisted spend map, as {@link EncountersService} reads/writes it. */
+export type ActionUsesMap = Record<string, { spent: number }>;
+
+/** A recharge roll's delta on one action, recorded so {@link undoActionUsesRecharge} can revert it. */
+export type ActionUsesRechargeDelta = { key: string; actionName: string; spentBefore: number };
+
+/** The observable result of one action's recharge roll — for the combat-log line. */
+export type ActionUsesRechargeRoll = { key: string; actionName: string; roll: number; needs: number; recovered: boolean };
+
+/**
+ * Roll recharge for each currently-SPENT recharge-tracked action of the combatant starting
+ * its turn (issue #1921) — 5e's "roll a d6 at the start of your turn; on a 5 or 6 it
+ * recharges" rule, generalized to any `recharge-N-M` threshold. Pure: the die is injected
+ * (`roll`, e.g. `() => rollDice('1d6').total`) so the outcome is deterministic under test.
+ * Only entries already spent (`spent > 0`) are rolled — an unspent recharge action has
+ * nothing to recharge, and rolling it anyway would manufacture combat-log noise no table
+ * asked for. X/day pools never reach this function at all: the caller only passes entries
+ * whose `min` came from a parsed `recharge-N-M` condition (see
+ * `ActionResolverService.usesTrackedActions` + `parseRechargeRange`).
+ */
+export function rollRechargeAtTurnStart(
+  currentUses: ActionUsesMap,
+  entries: ReadonlyArray<{ key: string; name: string; min: number }>,
+  roll: () => number,
+): { uses: ActionUsesMap; delta: ActionUsesRechargeDelta[]; rolls: ActionUsesRechargeRoll[] } {
+  const uses = { ...currentUses };
+  const delta: ActionUsesRechargeDelta[] = [];
+  const rolls: ActionUsesRechargeRoll[] = [];
+  for (const entry of entries) {
+    const spentBefore = currentUses[entry.key]?.spent ?? 0;
+    if (spentBefore <= 0) continue;
+    const rollValue = roll();
+    const recovered = rollValue >= entry.min;
+    rolls.push({ key: entry.key, actionName: entry.name, roll: rollValue, needs: entry.min, recovered });
+    if (recovered) {
+      uses[entry.key] = { spent: 0 };
+      delta.push({ key: entry.key, actionName: entry.name, spentBefore });
+    }
+  }
+  return { uses, delta, rolls };
+}
+
+/**
+ * Undo counterpart to {@link rollRechargeAtTurnStart} (issue #1921): restore each recharged
+ * action's `spent` count from the delta the roll recorded, so `undoTurn` puts a dragon's
+ * Breath Weapon back to "spent" when undoing the very turn-start tick that cleared it. An
+ * action that was already re-spent (via a later apply) since the roll is NOT reachable here
+ * — `undoTurn` only ever consumes the immediately-preceding turn-advance snapshot.
+ */
+export function undoActionUsesRecharge(
+  currentUses: ActionUsesMap,
+  delta: ReadonlyArray<ActionUsesRechargeDelta>,
+): { uses: ActionUsesMap; restoredNames: string[] } {
+  if (delta.length === 0) return { uses: currentUses, restoredNames: [] };
+  const uses = { ...currentUses };
+  const restoredNames: string[] = [];
+  for (const d of delta) {
+    uses[d.key] = { spent: d.spentBefore };
+    restoredNames.push(d.actionName);
+  }
+  return { uses, restoredNames };
+}
+
 /**
  * Advance the turn pointer by identity, not raw position (issue #49). Steps
  * from wherever `currentCombatantId` sits in `sorted` to the next combatant,

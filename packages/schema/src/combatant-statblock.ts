@@ -215,6 +215,27 @@ function rechargeFromUsage(raw: unknown): string {
   return '';
 }
 
+/**
+ * Issue #1921: parse a per-day usage limit ("1/Day", "2/Day") into {@link ActionUses.max}.
+ * The open5e importer already normalizes a structured `PER_DAY` usage limit into
+ * `{ type: 'perDay', uses: N, label: 'N/Day' }` (open5e-importer.ts's `usageFrom`); the
+ * `label` regex is the fallback for any other producer that only carries prose. Returns 0
+ * (no per-day pool) for anything else, including a `recharge`-typed usage object.
+ */
+function usesMaxFromUsage(raw: unknown): number {
+  const u = asRecord(raw);
+  if (!u) return 0;
+  const type = typeof u.type === 'string' ? u.type.toLowerCase() : '';
+  if (type === 'perday') {
+    const n = numberOrNull(u.uses ?? u.param);
+    if (n !== null && n > 0) return n;
+  }
+  const label = typeof u.label === 'string' ? u.label : '';
+  const m = label.match(/^\s*(\d+)\s*\/\s*Day\s*$/i);
+  if (m) return Number(m[1]);
+  return 0;
+}
+
 function savingThrowFrom(item: Record<string, unknown>, desc: string): { dc: number; ability: string } | null {
   // A dedicated, explicit opt-out signal (issue #1903 review, PR #1950 round 12 — replacing
   // round 10's overloading of `savingThrow: null`) means the caller has already determined
@@ -296,6 +317,13 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
   const damageParts = damagePartsFrom(item.damage);
   const save = savingThrowFrom(item, desc);
   const recharge = rechargeFromUsage(item.usage);
+  // Issue #1921: a per-day usage ("1/Day") and a recharge condition are mutually exclusive
+  // in practice (a statblock action carries at most one usage note), but nothing stops both
+  // parsers from matching the same raw `usage` object — `usesMaxFromUsage` only fires for
+  // `perDay`/`N/Day` shapes, `rechargeFromUsage` only for `recharge`/`Recharge N-M` shapes,
+  // so passing both through untouched below is safe either way.
+  const usesMax = usesMaxFromUsage(item.usage);
+  const usesSpec = recharge || usesMax > 0 ? { recharge, ...(usesMax > 0 ? { max: usesMax } : {}) } : {};
 
   let spec: ActionSpec | undefined;
   let toHit = '';
@@ -312,7 +340,7 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
       mode: 'attack',
       attack: { bonus: toHit },
       cost: { slot: costSlotForSource(source), count: 1 },
-      uses: recharge ? { recharge } : {},
+      uses: usesSpec,
       targets: { count: 1, allow: 'enemy' },
       outcomes,
       provenance: { ruleSystem, source: 'statblock' },
@@ -329,7 +357,7 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
       mode: 'save',
       save: { ability: save.ability, dc: { kind: 'fixed', dc: save.dc } },
       cost: { slot: costSlotForSource(source), count: 1 },
-      uses: recharge ? { recharge } : {},
+      uses: usesSpec,
       targets: { count: 0, allow: 'enemy' },
       outcomes,
       provenance: { ruleSystem, source: 'statblock' },
