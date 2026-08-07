@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -4030,6 +4030,8 @@ export class EncountersService {
    *  - kind='character' + characterId -> pull from the character row
    *  - kind='monster' + ruleEntryId -> try name + hit points from rule_entries.dataJson,
    *    falling back to whatever the caller explicitly provided
+   *  - libraryMonsterId -> hp only, from the saved statblock's template HP
+   *    (CombatantStatblock.hp), when that entry has one stored (issue #2080)
    *  - otherwise the caller must provide name + hpMax directly
    * Throws 400 if, after resolution, we still don't have a name or an hpMax.
    */
@@ -4295,6 +4297,24 @@ export class EncountersService {
       }
     }
 
+    // Issue #2080: a campaign-library monster's statblock carries its own template
+    // Max HP (CombatantStatblock.hp) once the DM has saved one. Fetch it BEFORE the
+    // "hpMax must be resolved" check below so an add-from-library caller (REST, MCP,
+    // or the web UI) that omits hpMax gets that saved value instead of tripping the
+    // generic "provide hpMax explicitly" error — this is the "seeds hpMax from it"
+    // half of the fix. An explicit caller-supplied hpMax always wins (e.g. re-statting
+    // one copy tougher). A library entry with no stored HP (statblock.hp === null —
+    // either it predates this field, or the DM never typed one) intentionally falls
+    // through to the SAME explicit-hpMax requirement every other unresolvable-HP path
+    // already enforces below: never silently invented, which was the literal #2080 bug.
+    let libraryMonster: CampaignLibraryMonster | null = null;
+    if (input.libraryMonsterId !== undefined) {
+      libraryMonster = await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId);
+      if (hpMax === undefined && libraryMonster.statblock.hp != null) {
+        hpMax = libraryMonster.statblock.hp;
+      }
+    }
+
     if (!name) {
       throw new BadRequestException('Unable to resolve a name for this combatant — provide "name" explicitly');
     }
@@ -4308,7 +4328,7 @@ export class EncountersService {
 
     // Issue #425: inline homebrew statblock or campaign-library snapshot.
     if (input.libraryMonsterId !== undefined) {
-      const lib = await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId);
+      const lib = libraryMonster ?? (await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId));
       statblockJson = toJsonText(lib.statblock);
     } else if (input.statblock !== undefined) {
       statblockJson = toJsonText(CombatantStatblock.parse(input.statblock));

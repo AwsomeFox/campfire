@@ -17,6 +17,7 @@ import { CharacterAction } from './character-action';
 /** Field-level help for the quick statblock editor and action controls. */
 export const COMBATANT_STATBLOCK_HELP = {
   ac: 'Armor Class — the target number an attack roll must meet or exceed.',
+  hp: 'Max HP for this statblock — the template value. Saving to the campaign library carries it along, and adding from the library seeds the new combatant’s Max HP from it. Leave blank if unknown.',
   abilityScores: 'Ability scores or modifiers used for attack/save math when an action does not carry an explicit bonus.',
   actions: 'Named attacks, spells, and features. Actions with enough structure show a Use button; others keep their full prose.',
   traits: 'Passive special abilities (keen senses, magic resistance, etc.).',
@@ -37,6 +38,18 @@ export const COMBATANT_STATBLOCK_HELP = {
 
 export const CombatantStatblock = z.object({
   ac: z.number().int().min(0).max(40).nullable().default(10),
+  // Max HP TEMPLATE for this statblock (issue #2080) — distinct from the running
+  // combatant row's `hpMax`, which is the live in-encounter total. Nullable, with
+  // NO numeric default: a statblock persisted before this field existed has no
+  // "hp" key at all, and `.default(null)` makes that parse identically to an
+  // explicit `null` rather than throwing — the only way an old campaign-library
+  // row survives this change. A statblock that genuinely has no known HP yet
+  // (a fresh manual monster the DM hasn't stated HP for, a hazard with no HP
+  // concept) stays representable as "unknown" instead of being forced to an
+  // invented number — inventing one here is exactly the `: 10` bug this field
+  // exists to remove; callers that need a concrete Max HP (adding a combatant)
+  // must resolve or ask for one explicitly, same as any other unresolvable HP.
+  hp: z.number().int().min(1).nullable().default(null),
   abilityScores: z.record(z.string(), z.number().int()).default(() => ({
     STR: 10,
     DEX: 10,

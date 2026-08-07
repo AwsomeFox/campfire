@@ -249,12 +249,23 @@ export function AddCombatantPanel({
     setSaving(true);
     setError(null);
     try {
-      const resolvedHp = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : 10;
+      // Issue #2080: this shared field has no visible input on the Library tab, so a
+      // value here can only be a deliberate override the DM typed on the Manual tab
+      // before switching over — it always wins. Otherwise no hpMax is sent at all: the
+      // server seeds it from the saved statblock's template HP (entry.statblock.hp),
+      // the same value the DM typed when they saved this entry. The old code guessed
+      // "10" right here whenever hpMax was blank — silently discarding whatever HP the
+      // entry actually carried (or claimed one it never had). A stored HP of `null`
+      // (this entry predates the field, or was saved without one) now surfaces as an
+      // explicit, translated error instead — the DM sets Max HP on the Manual tab and
+      // saves it to library, or overrides it in the field about to be POSTed, rather
+      // than the combatant silently arriving at the wrong HP.
+      const manualOverride = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : undefined;
       await api.post(`${API}/encounters/${encounterId}/combatants`, {
         kind: 'monster' as CombatantKind,
         name: entry.name,
         libraryMonsterId: entry.id,
-        hpMax: resolvedHp,
+        ...(manualOverride !== undefined ? { hpMax: manualOverride } : {}),
         count: parseCount(manualCount),
       });
       await onAdded();
@@ -273,9 +284,18 @@ export function AddCombatantPanel({
     setSaving(true);
     setError(null);
     try {
+      // Issue #2080: carry the HP the DM typed into the library entry's statblock
+      // template, instead of dropping it on the floor. `manualStatblock.hp` (set
+      // directly through the statblock editor's own Max HP field) wins when present;
+      // otherwise fall back to this tab's "HP" field — the value from the bug's
+      // reported repro steps — parsed the same way addManual validates it. Neither
+      // present: save `hp: null` explicitly (a real, representable "unknown"), never a
+      // guessed number.
+      const hpFromField = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : null;
+      const hpToSave = manualStatblock.hp ?? hpFromField;
       await api.post(`${API}/campaigns/${cid}/library/monsters`, {
         name: name.trim(),
-        statblock: manualStatblock,
+        statblock: { ...manualStatblock, hp: hpToSave },
       });
       const list = await api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${cid}/library/monsters`);
       setLibrary(list);
@@ -541,6 +561,10 @@ export function AddCombatantPanel({
                 <span className="font-medium">{entry.name}</span>
                 <span className="text-muted text-xs block">
                   {entry.statblock.actions.length} action{entry.statblock.actions.length === 1 ? '' : 's'}
+                  {/* Issue #2080: surface stored HP so a DM can see, before adding, which
+                      entries have none — rather than discovering it only from the error. */}
+                  {' · '}
+                  {entry.statblock.hp != null ? `${entry.statblock.hp} HP` : 'HP not set'}
                 </span>
               </Card>
             ))}
