@@ -24,7 +24,7 @@
     "check:version": "node scripts/check-version-sync.mjs",
     "check:mcp-catalog": "node scripts/check-mcp-catalog-sync.mjs",
     "generate:mcp-catalog": "node scripts/generate-mcp-catalog-surfaces.mjs",
-    "check:i18n": "node scripts/check-i18n-catalog.mjs",
+    "check:i18n": "node scripts/check-i18n-catalog.spec.mjs && node scripts/check-i18n-catalog.mjs",
     "check:e2e-spec-coverage": "node scripts/check-e2e-spec-coverage.mjs",
     "lint": "npm run lint --workspaces",
     "typecheck": "npm run build -w packages/schema && npm run typecheck --workspaces"
