@@ -7,6 +7,7 @@ import {
   evaluateTranslationRatchet,
   validateBaselineShape,
   findEmptyValues,
+  extractUseTranslationNamespaceArgs,
   NON_LATIN_SCRIPT_DETECTORS,
 } from './check-i18n-catalog.mjs';
 
@@ -289,5 +290,48 @@ const multipleEmptyErrors = findEmptyValues(
 assert.strictEqual(multipleEmptyErrors.length, 2);
 assert.ok(multipleEmptyErrors.some((e) => /a\.b/.test(e)));
 assert.ok(multipleEmptyErrors.some((e) => /^locales\/ar: key "c"/.test(e)));
+
+
+// --- extractUseTranslationNamespaceArgs (issue #2066) ---
+
+// No-arg call, the only shape the app supports today -> MUST NOT flag
+assert.deepStrictEqual(extractUseTranslationNamespaceArgs("const { t } = useTranslation();"), []);
+
+// Whitespace-only parens -> MUST NOT flag
+assert.deepStrictEqual(extractUseTranslationNamespaceArgs("const { t } = useTranslation(  );"), []);
+
+// A string namespace argument -> MUST flag, and the flagged text is exactly the argument
+assert.deepStrictEqual(
+  extractUseTranslationNamespaceArgs("const { t } = useTranslation('encounters');"),
+  ["'encounters'"],
+);
+
+// Double-quoted namespace argument -> MUST flag
+assert.deepStrictEqual(
+  extractUseTranslationNamespaceArgs('const { t } = useTranslation("encounters");'),
+  ['"encounters"'],
+);
+
+// An options-object argument (e.g. { keyPrefix: 'foo' }) is still an argument -> MUST flag,
+// since it is not the bare no-arg call the single-namespace app supports.
+assert.deepStrictEqual(
+  extractUseTranslationNamespaceArgs("useTranslation({ keyPrefix: 'foo' })"),
+  ["{ keyPrefix: 'foo' }"],
+);
+
+// Multiple calls in one file, only the namespaced ones are reported -> MUST flag exactly those
+const mixedFileFixture = `
+  function A() { const { t } = useTranslation(); return t('a'); }
+  function B() { const { t } = useTranslation('bogusNs'); return t('b'); }
+`;
+assert.deepStrictEqual(extractUseTranslationNamespaceArgs(mixedFileFixture), ["'bogusNs'"]);
+
+// A plain-English mention of "useTranslation()" inside a comment, with no call parens containing
+// an argument, must not be misread as a violation -> MUST NOT flag
+assert.deepStrictEqual(
+  extractUseTranslationNamespaceArgs('/** call useTranslation() and destructure t */'),
+  [],
+);
+
 
 console.log('check-i18n-catalog.spec: ok — all self-test fixtures passed');

@@ -1,6 +1,7 @@
 {
   "encounters": {
     "title": "المواجهات",
+    "combatLogHeading": "سجل القتال",
     "vitals": {
       "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
       "maxHp": "الحد الأقصى لنقاط الحياة",
