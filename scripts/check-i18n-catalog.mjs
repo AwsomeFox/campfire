@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * CI guard for issue #629, #1940, #2059, and #2069 — translation catalog completeness, i18n
- * surface checks, JSX text ratchet, and a per-file untranslated-value ratchet.
+ * CI guard for issue #629, #1940, #2059, #2069, and #2073 — translation catalog completeness,
+ * i18n surface checks, JSX text ratchet, and a per-file untranslated-value ratchet.
  *
  * 1. Every non-English catalog under `locales/<lng>/` mirrors the English keys.
  * 2. Target feature surfaces must not contain obvious hardcoded user-facing strings.
@@ -12,6 +12,11 @@
  *    `evaluateTranslationRatchet` and `validateBaselineShape`). Key parity (#1) only checks that a
  *    key exists in both catalogs, not that the non-English value differs from the English one —
  *    this closes that gap without demanding every existing gap be translated up front.
+ * 5. No leaf value in any catalog may be the empty string or whitespace-only (issue #2073). This
+ *    is a hard failure, not a ratchet: there is no catalog entry for which `""` is intended
+ *    content, and a real key deprecation removes the key rather than blanking it. Key parity (#1)
+ *    and the untranslated-value ratchet (#4) both compare two catalogs to each other, so neither
+ *    can see a value blanked identically on both sides of the comparison — see `checkEmptyValues`.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -107,6 +112,41 @@ function checkKeyParity() {
     }
   }
 
+  return errors;
+}
+
+/**
+ * Pure hard-failure rule (issue #2073): no leaf value in a catalog may be the empty string or
+ * whitespace-only. Reports the offending locale and dotted key path.
+ *
+ * Deliberately narrow: this is NOT a "value must be non-trivial" heuristic, not a minimum
+ * length, and not a "value differs between en and ar" rule — some keys legitimately match across
+ * locales (proper nouns, symbols), and that broader rule would be noise for no extra coverage
+ * over the empty-string case. Empty is unambiguous: real content is never `""`, and a real key
+ * deprecation removes the key rather than blanking it, so there is no ratchet/baseline here —
+ * every occurrence is a bug the moment it lands. Unlike key parity (#1) and the untranslated-value
+ * ratchet (#4), which both compare two catalogs to each other, this looks at one catalog in
+ * isolation, so it can see a value blanked identically on both sides of that comparison.
+ * @param {Record<string, unknown>} catalog
+ * @param {string} locale
+ * @returns {string[]}
+ */
+export function findEmptyValues(catalog, locale) {
+  const errors = [];
+  for (const [key, value] of flattenEntries(catalog)) {
+    if (typeof value === 'string' && value.trim() === '') {
+      errors.push(`locales/${locale}: key "${key}" is empty or whitespace-only (${JSON.stringify(value)})`);
+    }
+  }
+  return errors;
+}
+
+function checkEmptyValues() {
+  const errors = [];
+  for (const lang of ['en', ...listLocaleDirs()]) {
+    const catalog = loadMergedLocale(join(localesRoot, lang));
+    errors.push(...findEmptyValues(catalog, lang));
+  }
   return errors;
 }
 
@@ -311,13 +351,19 @@ export function evaluateTranslationRatchet(counts, baseline) {
       );
     }
   }
-  for (const [file, allowed] of Object.entries(baseline)) {
-    if (!(file in counts)) {
-      errors.push(
-        `${file}: recorded baseline allowance of ${allowed} for a file that is no longer scanned. ` +
-          `Remove this stale entry from scripts/i18n-translation-baseline.json in the same PR.`,
-      );
-    }
+  // A baseline entry for a file that is no longer scanned is the SAME banked-slack loophole
+  // wearing a different hat, and the equality rule above cannot see it: that loop walks `counts`,
+  // so a key present only in the baseline is never compared to anything. Delete or rename a
+  // locale file and its allowance survives forever; recreate that path later and untranslated
+  // values up to the old number pass unchallenged.
+  for (const file of Object.keys(baseline)) {
+    if (file in counts) continue;
+    errors.push(
+      `${file}: has a baseline entry of ${baseline[file]} but is no longer scanned ` +
+        `(the file was deleted or renamed, or its locale has no script detector). ` +
+        `Remove this line from scripts/i18n-translation-baseline.json — a stale allowance is ` +
+        `reusable headroom if that path ever comes back (issue #2069).`,
+    );
   }
   return errors;
 }
@@ -325,20 +371,11 @@ export function evaluateTranslationRatchet(counts, baseline) {
 /**
  * Validates that a parsed baseline is a plain object mapping file paths to non-negative integers
  * (issue #2069 part 2). `evaluateTranslationRatchet`'s `count > allowed` / `count < allowed`
- * comparisons are BOTH silently false when `allowed` is not a comparable number (`5 > {}` and
- * `5 < {}` are both `false`), which turns a single malformed hand-edit — the baseline file's
- * documented workflow — into "this file is no longer enforced" while the check still reports `ok`.
- *
- * Measured against the pre-guard code, the values that actually bypassed enforcement were a plain
- * object, a non-numeric string, and `NaN`. Of those, only the first two are reachable from the
- * baseline FILE: `JSON.parse` cannot produce `NaN`, so that case only arises if this function is
- * called with a programmatically built object. It is still rejected, and still covered, because
- * this is an exported pure function and its contract should not depend on its one current caller
- * happening to come from `JSON.parse`.
- *
- * The guard rejects every non-integer entry, not just the bypassing ones: `[]`, `"5"`, and `true`
- * are caught today only by numeric coercion the check never asked for and could lose to a
- * refactor, and no such entry is ever intentional.
+ * comparisons are silently false for every count when `allowed` is `NaN`, a numeric string, an
+ * object, an array, etc. (`5 > {}` and `5 < {}` are both `false`), which turns a single malformed
+ * hand-edit — the baseline file's documented workflow — into "this file is no longer enforced" while
+ * the check still reports `ok`. Reject that shape up front, naming the bad key, instead of letting
+ * a silently-false comparison swallow it.
  * @param {unknown} baseline
  * @returns {string[]} errors; empty when the shape is valid
  */
@@ -403,7 +440,14 @@ function main() {
   const surfaceErrors = checkHardcodedSurfaces();
   const ratchetErrors = checkJsxTextRatchet();
   const translationRatchetErrors = checkTranslationRatchet();
-  const errors = [...parityErrors, ...surfaceErrors, ...ratchetErrors, ...translationRatchetErrors];
+  const emptyValueErrors = checkEmptyValues();
+  const errors = [
+    ...parityErrors,
+    ...surfaceErrors,
+    ...ratchetErrors,
+    ...translationRatchetErrors,
+    ...emptyValueErrors,
+  ];
 
   if (errors.length > 0) {
     console.error('check-i18n-catalog: failures:\n- ' + errors.join('\n- '));

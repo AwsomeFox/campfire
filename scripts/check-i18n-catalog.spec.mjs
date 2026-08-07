@@ -6,6 +6,7 @@ import {
   countUntranslatedInCatalog,
   evaluateTranslationRatchet,
   validateBaselineShape,
+  findEmptyValues,
   NON_LATIN_SCRIPT_DETECTORS,
 } from './check-i18n-catalog.mjs';
 
@@ -132,6 +133,35 @@ assert.strictEqual(bankedSlackErrors.length, 1);
 assert.match(bankedSlackErrors[0], /nav\.json/);
 assert.match(bankedSlackErrors[0], /below the recorded baseline of 76/);
 
+// Baseline entry for a file no longer scanned -> MUST fail, telling the author to delete the line.
+// The equality rule above cannot catch this: its loop walks `counts`, so a baseline-only key is
+// never compared to anything and its allowance survives indefinitely (Devin review on PR #2076).
+const staleEntryErrors = evaluateTranslationRatchet(
+  { 'apps/web/src/i18n/locales/ar/nav.json': 76 },
+  { 'apps/web/src/i18n/locales/ar/nav.json': 76, 'apps/web/src/i18n/locales/ar/deleted.json': 40 },
+);
+assert.strictEqual(staleEntryErrors.length, 1);
+assert.match(staleEntryErrors[0], /deleted\.json/);
+assert.match(staleEntryErrors[0], /no longer scanned/);
+
+// A live file matching its baseline alongside it stays clean — the stale-entry rule must not
+// start flagging entries that ARE scanned.
+assert.deepStrictEqual(
+  evaluateTranslationRatchet(
+    { 'apps/web/src/i18n/locales/ar/nav.json': 76 },
+    { 'apps/web/src/i18n/locales/ar/nav.json': 76 },
+  ),
+  [],
+);
+
+// `validateBaselineShape` renders NaN as NaN, not as `null` (Copilot review on PR #2076):
+// `JSON.stringify(NaN)` is `"null"`, which would name a value the file cannot contain. NaN is
+// unreachable from the baseline FILE at all — JSON has no NaN literal — but this is an exported
+// pure function whose contract should not rest on its one caller being `JSON.parse`.
+const nanShapeErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': NaN });
+assert.strictEqual(nanShapeErrors.length, 1);
+assert.match(nanShapeErrors[0], /is NaN/);
+
 // A file with no recorded baseline entry defaults to an allowance of 0 (new file starts clean)
 assert.strictEqual(
   evaluateTranslationRatchet({ 'apps/web/src/i18n/locales/ar/newFile.json': 1 }, {}).length,
@@ -156,18 +186,6 @@ const step2RegressedBackToOldBaseline = evaluateTranslationRatchet(
 );
 assert.strictEqual(step2RegressedBackToOldBaseline.length, 1); // MUST be caught, not slide through
 
-// Baseline entry for a file that is no longer scanned -> MUST fail telling author to remove stale entry
-const staleBaselineErrors = evaluateTranslationRatchet(
-  { 'apps/web/src/i18n/locales/ar/nav.json': 10 },
-  {
-    'apps/web/src/i18n/locales/ar/nav.json': 10,
-    'apps/web/src/i18n/locales/ar/deleted.json': 5,
-  },
-);
-assert.strictEqual(staleBaselineErrors.length, 1);
-assert.match(staleBaselineErrors[0], /deleted\.json/);
-assert.match(staleBaselineErrors[0], /no longer scanned/);
-
 // --- validateBaselineShape (issue #2069 part 2) ---
 
 // A well-formed baseline -> MUST pass
@@ -188,10 +206,6 @@ assert.strictEqual(validateBaselineShape(5).length, 1);
 // Measured against the pre-fix code with `count: 999999`, the entries that actually SILENTLY
 // BYPASSED enforcement are exactly three: a plain object (`{}`), a non-numeric string (`"x"`),
 // and `NaN` — all cases where both `count > allowed` and `count < allowed` evaluate false.
-// Of those three, only the object and the string are reachable from the baseline FILE: JSON has
-// no NaN literal, so `JSON.parse` can never produce one. It is covered anyway because
-// `validateBaselineShape` is an exported pure function whose contract should not rest on its one
-// current caller happening to be `JSON.parse`.
 // `[]`, `"5"`, `true` coerce to comparable numbers and were caught; `null` and a missing key
 // are caught because `baseline[file] ?? 0` substitutes 0 before the comparison.
 //
@@ -232,5 +246,48 @@ const mixedErrors = validateBaselineShape({
 });
 assert.strictEqual(mixedErrors.length, 1);
 assert.match(mixedErrors[0], /common\.json/);
+
+// --- findEmptyValues (issue #2073) ---
+
+// A catalog with no empty values -> MUST NOT flag
+assert.deepStrictEqual(
+  findEmptyValues({ nav: { dashboard: 'Dashboard' }, shortcut: 'Shift+Enter' }, 'en'),
+  [],
+);
+
+// Reproduces the exact #2073 regression: a leaf value blanked to the empty string. This is the
+// case key parity (checkKeyParity) cannot see — the key exists on both sides, so parity holds,
+// and it hit both catalogs identically, which the untranslated-value ratchet (comparing en vs.
+// ar) also cannot see, since a blanked ar value equal to a blanked en value never "differs".
+// findEmptyValues looks at one catalog in isolation, so it catches it regardless.
+const blankedErrors = findEmptyValues(
+  { encounters: { whisper: { error: '' } } },
+  'en',
+);
+assert.strictEqual(blankedErrors.length, 1);
+assert.match(blankedErrors[0], /locales\/en/);
+assert.match(blankedErrors[0], /encounters\.whisper\.error/);
+
+// Whitespace-only value -> MUST flag, for a DIFFERENT reason than `""` and worth stating
+// precisely (Copilot review on PR #2077). `'   '` is TRUTHY in JavaScript, so a guard like
+// `{localError && <p>…}` does mount its paragraph — the element is there, rendering nothing
+// visible. So `""` fails by never mounting and `'   '` fails by mounting blank; both leave the
+// user with no message, which is what this rule is about, but only the empty case is falsy.
+const whitespaceErrors = findEmptyValues({ nav: { dashboard: '   ' } }, 'ar');
+assert.strictEqual(whitespaceErrors.length, 1);
+assert.match(whitespaceErrors[0], /locales\/ar/);
+assert.match(whitespaceErrors[0], /nav\.dashboard/);
+
+// Non-string leaf values (numbers, arrays) are not this rule's concern -> MUST NOT flag
+assert.deepStrictEqual(findEmptyValues({ count: 0, list: [] }, 'en'), []);
+
+// Multiple empty values across nested keys -> MUST report each, by locale and dotted path
+const multipleEmptyErrors = findEmptyValues(
+  { a: { b: '' }, c: '  ', d: 'fine' },
+  'ar',
+);
+assert.strictEqual(multipleEmptyErrors.length, 2);
+assert.ok(multipleEmptyErrors.some((e) => /a\.b/.test(e)));
+assert.ok(multipleEmptyErrors.some((e) => /^locales\/ar: key "c"/.test(e)));
 
 console.log('check-i18n-catalog.spec: ok — all self-test fixtures passed');
