@@ -819,6 +819,26 @@ export class MembersService {
         if (input.characterId !== undefined && row.member.characterId !== input.characterId) {
           this.syncCharacterOwnershipTx(tx, row.member.userId, row.member.characterId, input.characterId, ts);
         }
+
+        if (input.role === 'viewer') {
+          const campaignEncounterIds = tx
+            .select({ id: encounters.id })
+            .from(encounters)
+            .where(eq(encounters.campaignId, campaignId))
+            .all()
+            .map((e) => e.id);
+          if (campaignEncounterIds.length > 0) {
+            tx.update(combatants)
+              .set({ controllerUserId: null })
+              .where(
+                and(
+                  eq(combatants.controllerUserId, row.member.userId),
+                  inArray(combatants.encounterId, campaignEncounterIds),
+                ),
+              )
+              .run();
+          }
+        }
       });
     } catch (err) {
       if (isUniqueConstraintError(err) && input.characterId != null) {

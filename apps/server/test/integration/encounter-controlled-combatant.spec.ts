@@ -88,7 +88,7 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
 
     const [enc] = await db
       .insert(encounters)
-      .values({ campaignId, name: 'Summoned Wolf Fight', status: 'planning', createdAt: nowIso(), updatedAt: nowIso() })
+      .values({ campaignId, name: 'Summoned Wolf Fight', status: 'preparing', createdAt: nowIso(), updatedAt: nowIso() })
       .returning();
     encounterId = enc.id;
   });
@@ -276,6 +276,24 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
     const rows = await db.select().from(combatants);
     expect(rows[0].controllerUserId).toBeNull();
   });
+
+  it("clears controllerUserId when the controlling member is demoted to viewer role", async () => {
+    const combatant = await encountersService.addCombatant(
+      encounterId,
+      { kind: "monster", name: "Delegated Beast", hpMax: 20, controllerUserId: player1UserId },
+      dmActor,
+      "dm",
+    );
+    expect(combatant.controllerUserId).toBe(player1UserId);
+
+    const members = await membersService.listForCampaign(campaignId);
+    const p1Member = members.find((m) => m.userId === player1UserId)!;
+
+    await membersService.update(campaignId, p1Member.id, { role: "viewer" }, dmActor);
+
+    const rows = await db.select().from(combatants);
+    expect(rows[0].controllerUserId).toBeNull();
+  });
   it("rejects assigning a viewer-role member as controllerUserId", async () => {
     const viewerUser = await usersService.create({ username: "v1", displayName: "Viewer 1", password: "pw" });
     await membersService.create(campaignId, { userId: viewerUser.id, role: "viewer" }, dmActor);
@@ -298,7 +316,7 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
       "dm",
     );
     await encountersService.updateCombatant(encounterId, combatant.id, { initiative: 20 }, dmActor, "dm");
-    await encountersService.start(encounterId, dmActor, "dm");
+        await encountersService.start(encounterId, dmActor, "dm");
 
     // Controlling player can end turn for the active controlled combatant
     const res = await encountersService.endTurn(encounterId, {}, player1Actor, "player");

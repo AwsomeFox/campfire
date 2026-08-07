@@ -82,6 +82,7 @@ function baseCombatant(overrides: Partial<Combatant> = {}): Combatant {
     legendaryActions: null,
     statblock: null,
     statblockRevealed: false,
+    controllerUserId: null,
     ...overrides,
   };
 }
