@@ -171,10 +171,18 @@ assert.strictEqual(validateBaselineShape([1, 2, 3]).length, 1);
 assert.strictEqual(validateBaselineShape('not an object').length, 1);
 assert.strictEqual(validateBaselineShape(5).length, 1);
 
-// Per-file entry with the wrong type -> MUST fail naming that key. Each of these previously made
-// `count > allowed` (and now also `count < allowed`) false for every count, silently disabling
-// enforcement for that one file while the check still reported `ok` (verified against the
-// pre-fix code: object/array/string entries let a count of 999999 through with zero errors).
+// Per-file entry with the wrong type -> MUST fail naming that key.
+//
+// Measured against the pre-fix code with `count: 999999`, the entries that actually SILENTLY
+// BYPASSED enforcement are exactly three: a plain object (`{}`), a non-numeric string (`"x"`),
+// and `NaN` — all cases where both `count > allowed` and `count < allowed` evaluate false.
+// `[]`, `"5"`, `true` coerce to comparable numbers and were caught; `null` and a missing key
+// are caught because `baseline[file] ?? 0` substitutes 0 before the comparison.
+//
+// The guard rejects every non-integer entry regardless, not just the three that bypassed. A
+// baseline of `"5"` or `true` is caught today only by numeric coercion the check never asked
+// for and could lose to a refactor, and no such entry is ever intentional — the shape check is
+// the thing that should decide, not the coercion rules of `>`.
 const nullEntryErrors = validateBaselineShape({ 'apps/web/src/i18n/locales/ar/nav.json': null });
 assert.strictEqual(nullEntryErrors.length, 1);
 assert.match(nullEntryErrors[0], /nav\.json/);
