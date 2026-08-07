@@ -1606,6 +1606,11 @@ export class ExportService {
         path: 'campaign.json',
         note: 'Homebrew library monsters; machine copy in campaign.json.',
       },
+      statusTransitions: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        note: 'Lifecycle-status provenance (issue #846); machine copy in campaign.json.',
+      },
       attachments: { kind: 'markdown-file', path: 'attachments.md' },
       attachmentsNote: {
         kind: 'embedded',
