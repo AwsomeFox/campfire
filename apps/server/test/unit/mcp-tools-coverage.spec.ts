@@ -215,4 +215,69 @@ describe('McpToolsService coverage unit tests', () => {
       expect(description).not.toMatch(/reported difficulty is 5e-shaped/);
     },
   );
+
+  /**
+   * Issue #2058. `LimitArg(max, fallback)` renders its arg description from `fallback`,
+   * which is supposed to name the endpoint's REAL service default page size. Two shapes
+   * must both render honestly:
+   *
+   * - a genuine service default (get_notifications-style: the service applies `?? 50`
+   *   when `limit` is omitted) — the description must claim that real number as the
+   *   default, not the unrelated max.
+   * - no service default at all (list_check_requests / get_session_recaps / list_comments:
+   *   `applyPage` is a literal no-op when `limit`/`offset` are both omitted, so every
+   *   visible row comes back) — the description must say so, and must NOT claim the max
+   *   as a fake "default", which would tell a caller that omitting `limit` is safely
+   *   capped when it is actually unbounded.
+   */
+  it('list_check_requests limit description matches applyPage\'s unbounded-when-omitted behaviour', () => {
+    const service = createMcpToolsService();
+    const toolset = service.buildToolset(user);
+    const tool = toolset.tools.find((t) => t.name === 'list_check_requests');
+    expect(tool).toBeDefined();
+    const limitDescription = (
+      (tool!.inputSchema as { properties?: Record<string, { description?: string }> }).properties?.limit
+        ?.description ?? ''
+    );
+
+    // Must not claim a default page size — omitting `limit` returns every row.
+    expect(limitDescription).not.toMatch(/default\s+\d+/);
+    // Must say what actually happens when `limit` is omitted.
+    expect(limitDescription).toMatch(/omitted returns every row|no default page size/i);
+  });
+
+  it.each([
+    ['get_session_recaps', 'limit'],
+    ['list_comments', 'limit'],
+  ])('%s %s description matches applyPage\'s unbounded-when-omitted behaviour', (toolName, argName) => {
+    const service = createMcpToolsService();
+    const toolset = service.buildToolset(user);
+    const tool = toolset.tools.find((t) => t.name === toolName);
+    expect(tool).toBeDefined();
+    const description = (
+      (tool!.inputSchema as { properties?: Record<string, { description?: string }> }).properties?.[argName]
+        ?.description ?? ''
+    );
+    expect(description).not.toMatch(/default\s+\d+/);
+    expect(description).toMatch(/omitted returns every row|no default page size/i);
+  });
+
+  /**
+   * The mirror-image check: an endpoint that DOES have a real service default (here,
+   * list_notifications defaults to 50 server-side — notifications.service.ts's
+   * `Math.min(Math.max(opts.limit ?? 50, 1), 200)`) must keep advertising that default,
+   * not regress to the unbounded phrasing.
+   */
+  it('list_notifications limit description still advertises its real service default', () => {
+    const service = createMcpToolsService();
+    const toolset = service.buildToolset(user);
+    const tool = toolset.tools.find((t) => t.name === 'list_notifications');
+    expect(tool).toBeDefined();
+    const description = (
+      (tool!.inputSchema as { properties?: Record<string, { description?: string }> }).properties?.limit
+        ?.description ?? ''
+    );
+    expect(description).toMatch(/default 50/);
+    expect(description).not.toMatch(/omitted returns every row/i);
+  });
 });
