@@ -10548,5 +10548,3 @@ describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
     expect(res.status).toBe(409);
   });
 });
-=======
->>>>>>> 6e8b40840 (feat(encounters): player-controlled summons, companions, and mounts via controllerUserId (#1941))

@@ -195,7 +195,6 @@ export type CombatantRowProps = {
   isDm?: boolean;
   myUserId?: string | number;
   /**
-  /**
    * Issue #1939: campaign id for condition-tag rules-hint popovers' "Full rule" link.
    * Deliberately separate from `campaignId` above, which goes `undefined` whenever the
    * viewer lacks edit permission or sheets are stale — the rules-hint popover is public
@@ -205,6 +204,30 @@ export type CombatantRowProps = {
   /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
    *  entries — gates the "Full rule" link on condition-tag rules-hint popovers. */
   rulesHintCompendiumAvailable?: boolean;
+  /**
+   * Manual initiative reorder controls (issue #1923) — a drag handle plus the accessible
+   * "Move up / Move down / Move after…" fallback menu. `null` when the caller (DM only,
+   * encounter preparing/running) is not permitted to reorder right now — the whole
+   * control does not mount, matching every other DM-only affordance on this row so a
+   * player/viewer never sees a handle or menu at all.
+   */
+  reorder?: {
+    canMoveUp: boolean;
+    canMoveDown: boolean;
+    onMoveUp: () => void;
+    onMoveDown: () => void;
+    menuTargets: readonly { id: number; name: string }[];
+    onMoveAfter: (afterCombatantId: number | 'top') => void;
+    dragHandleProps: {
+      onPointerDown: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerMove: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerUp: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerCancel: (e: ReactPointerEvent<HTMLElement>) => void;
+    };
+    isDragging: boolean;
+    isDropTarget: boolean;
+    busy: boolean;
+  } | null;
   members?: readonly { userId: number; displayName?: string; username?: string }[];
   onSetControllerUserId?: (userId: number | null) => void;
 };
