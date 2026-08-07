@@ -2578,7 +2578,12 @@ export const BattleMap = memo(function BattleMap({
             tabIndex={0}
             aria-label={
               tool === 'ping'
-                ? `Ping the map center for everyone. ${t('encounters.map.ping.keyboardHint')} Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.`
+                ? // Issue #2047 review: the whole sentence resolves from one key rather than
+                  // interpolating a translated hint into an English template. That template
+                  // shape is the exact defect #2048 fixed one file over and #2053 tracks —
+                  // an Arabic screen-reader user would otherwise hear an English label with
+                  // a single Arabic sentence embedded in it.
+                  t('encounters.map.ping.surfaceAriaLabel', { hint: t('encounters.map.ping.keyboardHint') })
                 : 'Battle map viewport. +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
             }
             aria-describedby="map-keyboard-help"
@@ -3510,7 +3515,7 @@ export const BattleMap = memo(function BattleMap({
                   : tool === 'select'
                     ? 'Click a revealed region to select it, drag to move, Delete to remove. Escape deselects when a region is focused.'
                     : tool === 'ping'
-                  ? `Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone. ${t('encounters.map.ping.keyboardHint')}`
+                  ? t('encounters.map.ping.toolHelp', { hint: t('encounters.map.ping.keyboardHint') })
                   : viewportPan
                     ? 'Drag to pan the map. Pinch with two fingers to zoom on touch devices.'
                     : effectiveIsDm
