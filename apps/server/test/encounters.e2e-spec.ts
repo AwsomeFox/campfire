@@ -10258,6 +10258,51 @@ describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
     expect(reorderEvents.at(-1)!.detail).toContain('17');
   });
 
+  /**
+   * The one reachable case where "did the move cross an initiative value" and "was a new
+   * initiative actually written" disagree. Cleric(6) is dragged below two combatants that
+   * have not rolled yet, so it crosses their (null) value but neither can anchor a new
+   * number — the reassignment block falls through and nothing is written.
+   *
+   * The assertion that matters is `not.toContain('now')`, not the equality: the earlier
+   * revision keyed the log line off the crossing rather than off the write, and announced
+   * `reordered in initiative (now 6)` while the initiative was still 6 and no UPDATE ran.
+   * A test that only checked `initiative === 6` passes against that.
+   */
+  it('a cross-value move with no rolled neighbor to anchor to writes nothing, and says nothing about a new value', async () => {
+    const { encounterId, wizardId, clericId, turnVersion } = await seedFight();
+    const server = ctx.app.getHttpServer();
+
+    // Two late joiners with no initiative — they sort last, after every rolled combatant.
+    const ghoulA = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Ghoul A', hpMax: 6, initMod: 0 });
+    const ghoulB = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Ghoul B', hpMax: 6, initMod: 0 });
+    const ghoulAId = ghoulA.body.id as number;
+    const ghoulBId = ghoulB.body.id as number;
+    const seeded = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const seededRows = seeded.body.combatants as Array<{ id: number; initiative: number | null }>;
+    expect(seededRows.find((c) => c.id === ghoulAId)!.initiative).toBeNull();
+    expect(seededRows.find((c) => c.id === ghoulBId)!.initiative).toBeNull();
+
+    // Drop Cleric(6) between the two unrolled ghouls: prev and next are both null-initiative.
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${clericId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: ghoulAId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+    expect(res.body.initiative).toBe(6); // unchanged — no neighbor supplied a value
+
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    const reorderEvents = (events.body as Array<{ type: string; targetId: number; detail: string }>).filter(
+      (e) => e.type === 'override' && e.targetId === clericId,
+    );
+    expect(reorderEvents.at(-1)!.detail).toBe('reordered in initiative');
+    expect(reorderEvents.at(-1)!.detail).not.toContain('now');
+
+    // Sanity: the wizard is untouched by any of this.
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((after.body.combatants as Array<{ id: number; initiative: number }>).find((c) => c.id === wizardId)!.initiative).toBe(20);
+  });
+
   it('moving the current actor is refused with a clear message', async () => {
     const { encounterId, wizardId, turnVersion } = await seedFight();
     const server = ctx.app.getHttpServer();

@@ -6995,13 +6995,11 @@ export class EncountersService {
       // Cross-value initiative reassignment is only meaningful once `sortCombatants`
       // actually orders by initiative (status === 'running'); see the doc comment above.
       let newInitiative = moved.initiative;
-      let sameValueMove = true;
       if (status === 'running') {
         const origInit = moved.initiative;
         const prevInit = prev?.initiative ?? null;
         const nextInit = next?.initiative ?? null;
         if (origInit !== prevInit && origInit !== nextInit) {
-          sameValueMove = false;
           if (prevInit != null && nextInit != null) {
             newInitiative = prevInit === nextInit ? prevInit : Math.floor((prevInit + nextInit) / 2);
           } else if (prevInit != null) {
@@ -7065,7 +7063,14 @@ export class EncountersService {
       this.appendEventInTransaction(tx, encounterId, fresh.round, 'override', {
         target: moved.name,
         targetId: combatantId,
-        detail: sameValueMove ? 'reordered in initiative' : `reordered in initiative (now ${newInitiative})`,
+        // Driven by `initiativeChanged` — the flag that governs whether the write above
+        // actually happened — not by "did the move cross an initiative value". Those two
+        // disagree when the move crosses values but neither neighbour has a rolled
+        // initiative to anchor to: the anchoring block falls through its `else`,
+        // `newInitiative` stays put, nothing is written, and the "(now N)" wording would
+        // have announced a change that did not occur. Reachable by dragging a rolled
+        // combatant down among not-yet-rolled ones mid-fight.
+        detail: initiativeChanged ? `reordered in initiative (now ${newInitiative})` : 'reordered in initiative',
       });
       if (delayCleared) {
         this.appendEventInTransaction(tx, encounterId, fresh.round, 'note', {
