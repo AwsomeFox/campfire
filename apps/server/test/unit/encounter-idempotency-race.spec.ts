@@ -7,17 +7,22 @@
  * missing that catch on both of its `recordEncounterOp` call sites, so the marker escaped as
  * an unhandled 500 instead of the intended replay.
  *
- * A genuine two-writer race is not reproducible through the public HTTP/MCP surface in this
- * test harness: better-sqlite3 executes each `db.transaction()` callback fully synchronously
- * on the one Node event loop, so there is no point at which a second, truly concurrent
- * transaction can interleave between one transaction's own SELECT and INSERT — the same
- * reason no existing sibling test (`updateCombatant`, `removeCombatant`,
- * `encounter-idempotency.e2e-spec.ts`) exercises this path via a live race either. This spec
- * instead drives the SHARED primitive directly and deterministically: a first commit,
- * followed by a second `recordEncounterOp` call for the identical claim standing in for the
- * "loser" of a real race, proving both (a) the marker is actually thrown on a colliding
- * insert and (b) `readEncounterOpAfterRace` actually returns the winner's stored response —
- * exactly the two facts `adjustCombatantResource`'s catch blocks rely on.
+ * A genuine two-writer race is not reproducible on a SINGLE connection: better-sqlite3
+ * executes each `db.transaction()` callback fully synchronously on the one Node event loop, so
+ * there is no point at which a second, truly concurrent transaction on the SAME connection can
+ * interleave between one transaction's own SELECT and INSERT. This spec instead drives the
+ * SHARED primitive directly and deterministically on one connection: a first commit, followed
+ * by a second `recordEncounterOp` call for the identical claim standing in for the "loser" of a
+ * real race, proving both (a) the marker is actually thrown on a colliding insert and (b)
+ * `readEncounterOpAfterRace` actually returns the winner's stored response — exactly the two
+ * facts `adjustCombatantResource`'s catch blocks rely on.
+ *
+ * For a race driven through the full SERVICE methods (`updateCombatant`,
+ * `adjustCombatantResource`, `rollCombatantInitiative`, `rollDeathSave`) via two REAL,
+ * independent `better-sqlite3` connections against one database file — the harness issue #2032
+ * added once this narrower primitive-level proof turned out not to be enough to catch three
+ * real defects in the surviving-JS-state-after-rollback behavior — see
+ * `test/integration/encounter-op-race.spec.ts`.
  */
 import { openDatabase } from '../../src/db/db.module';
 import { campaigns, encounters } from '../../src/db/schema';
