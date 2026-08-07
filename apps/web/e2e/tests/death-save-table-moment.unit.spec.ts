@@ -47,7 +47,14 @@ test.describe('own-character dying state: PlayerVitalsHeader gets a working Roll
   test('RunSessionPage wires the same server-authoritative roll action and sync gate', () => {
     expect(runSessionSource).toContain('onRollDeathSave={(id) => rollDeathSave({ id })}');
     expect(runSessionSource).toContain('isDeathSaveBusy={(id) => pendingCombatantIds.has(id) || reconcileBlocks}');
-    expect(runSessionSource).toContain('syncBlocked={riskyBlocked}');
+    // Issue #1914: every combatant in PlayerVitalsHeader is the viewer's OWN (the mount
+    // condition is `!isDm && myCombatants.length > 0`), so its own death-save roll button —
+    // exactly one of the acceptance criteria's "own death save" writes — is now gated via
+    // `gateForWrite('own-combatant', …)` instead of the raw `riskyBlocked`, so a same-outage
+    // scoped player override can unblock it without touching any other combatant's row.
+    expect(runSessionSource).toContain(
+      "syncBlocked={gateForWrite('own-combatant', { isOwnCombatant: true }, encounterSync, effectiveEncounterSyncOverride)}",
+    );
   });
 });
 

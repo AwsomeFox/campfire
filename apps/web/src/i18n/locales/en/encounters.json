@@ -84,7 +84,13 @@
       "bannerOverrideOffline": "Offline — showing last-known encounter. Acting on possibly stale data until sync returns.",
       "bannerOverrideReconnecting": "Reconnecting — acting on possibly stale data until live again.",
       "bannerOverrideStale": "Live updates interrupted — acting on possibly stale data until resynced.",
-      "controlsPaused": "Paused — reconnecting to live updates."
+      "controlsPaused": "Paused — reconnecting to live updates.",
+      "ownOverridePrompt": "Live sync is down. You can still update your own combatant — the server will reject it if someone else changed it first.",
+      "ownOverrideConfirm": "Continue anyway",
+      "ownOverrideActive": "Your combatant only — acting on possibly stale data until sync returns. Other actions stay paused.",
+      "bannerOverrideOwnOffline": "Offline — showing last-known encounter. You can still update your own combatant until sync returns.",
+      "bannerOverrideOwnReconnecting": "Reconnecting — you can still update your own combatant until live again.",
+      "bannerOverrideOwnStale": "Live updates interrupted — you can still update your own combatant until resynced."
     },
     "feedback": {
       "down": "DOWN",

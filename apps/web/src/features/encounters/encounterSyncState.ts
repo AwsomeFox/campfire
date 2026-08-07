@@ -85,26 +85,50 @@ export function isConnectingGraceElapsed(connectingSince: number | null, now: nu
 }
 
 /**
- * Session-scoped "continue anyway" override (issue #1446). `active` unblocks
- * conflict-prone actions while the sync state is not `live`; it is granted only by
- * an explicit DM confirmation ({@link confirmEncounterOverride}) and consumed the
- * moment the stream is `live` again ({@link settleEncounterOverride}), so a later,
- * separate outage prompts again rather than silently sailing through.
+ * Session-scoped "continue anyway" override (issue #1446, scoped by issue #1914). `active`
+ * unblocks conflict-prone actions while the sync state is not `live`; it is granted only by
+ * an explicit confirmation ({@link confirmEncounterOverride}) and consumed the moment the
+ * stream is `live` again ({@link settleEncounterOverride}), so a later, separate outage
+ * prompts again rather than silently sailing through.
  *
- * The active variant carries the (campaignId, userId) it was granted FOR (final review
- * round): that tag is one of the five preconditions {@link encounterOverrideAuthorized}
- * checks directly, rather than relying solely on a separate reset effect to have already
- * cleared a cross-campaign or cross-identity override before anything reads `.active`.
+ * The active variant carries the (campaignId, userId) it was granted FOR (final #1446 review
+ * round): that tag is one of the preconditions {@link encounterOverrideAuthorized} checks
+ * directly, rather than relying solely on a separate reset effect to have already cleared a
+ * cross-campaign or cross-identity override before anything reads `.active`.
+ *
+ * `scope` (issue #1914) is the SAME kind of tag, one level finer:
+ * - `'dm'` is the original, table-wide override — once authorized it unblocks every
+ *   conflict-prone write ({@link encounterActionsBlocked} returns `false` outright).
+ * - `'own-combatant'` is a player's own acknowledgement — it authorizes ONLY writes to the
+ *   combatant THEY own (see {@link gateForWrite}); turn-topology writes (end/next/undo turn)
+ *   and any other combatant's state stay blocked exactly as if no override existed at all.
+ * A player has no path that constructs a `'dm'`-scoped override (see
+ * {@link encounterOverrideAuthorized}, which requires `canDmWrite` for that scope alone), and
+ * an `'own-combatant'` override held by anyone never widens past the one combatant it names
+ * implicitly via ownership at read time — it carries no combatant id of its own because
+ * {@link gateForWrite} always re-checks CURRENT ownership of the row being written, not a
+ * snapshot taken at confirm time.
  */
+export type EncounterOverrideScope = 'dm' | 'own-combatant';
+
 export type EncounterOverrideState =
   | { active: false }
-  | { active: true; campaignId: number; userId: number | null };
+  | { active: true; scope: EncounterOverrideScope; campaignId: number; userId: number | null };
 
 export const ENCOUNTER_OVERRIDE_INACTIVE: EncounterOverrideState = { active: false };
 
-/** Grant the override — call this from the "Continue anyway" confirmation. */
-export function confirmEncounterOverride(campaignId: number, userId: number | null): EncounterOverrideState {
-  return { active: true, campaignId, userId };
+/**
+ * Grant the override — call this from the "Continue anyway" confirmation. `scope` defaults
+ * to `'dm'` so every existing DM call site (source-compatible per issue #1914's sketch) keeps
+ * granting the original table-wide override without passing anything new; the player-facing
+ * "own combatant" confirm is the only caller that passes `'own-combatant'` explicitly.
+ */
+export function confirmEncounterOverride(
+  campaignId: number,
+  userId: number | null,
+  scope: EncounterOverrideScope = 'dm',
+): EncounterOverrideState {
+  return { active: true, scope, campaignId, userId };
 }
 
 /**
@@ -158,6 +182,13 @@ export function encounterOverrideOfferable(state: EncounterSyncState): boolean {
  * now (issue #1446, final review round — five prior rounds each found a different
  * transition that silently satisfied some of these and bypassed one):
  *   - `canDmWrite`    — DM write authority RIGHT NOW, not merely when confirmed (round 4).
+ *                       Required for `scope: 'dm'` only.
+ *   - `canPlayerWrite`— write authority for the signed-in campaign membership RIGHT NOW
+ *                       (issue #1914). Required for `scope: 'own-combatant'` only — this is
+ *                       deliberately NOT `canDmWrite`'s player-side sibling checked for both
+ *                       scopes; a `'dm'`-scoped override still requires `canDmWrite`
+ *                       specifically, so a demoted-to-player former DM cannot keep acting on
+ *                       an override that was only ever valid for the DM-grade scope.
  *   - `staleIdentity` — true while AuthProvider is showing a cached identity restored
  *                       after a failed `/me` (its documented contract: membership may be
  *                       obsolete). The override is neither offerable nor valid while this
@@ -169,6 +200,7 @@ export function encounterOverrideOfferable(state: EncounterSyncState): boolean {
  */
 export type EncounterOverrideAuthority = {
   canDmWrite: boolean;
+  canPlayerWrite: boolean;
   staleIdentity: boolean;
   campaignId: number;
   userId: number | null;
@@ -177,43 +209,92 @@ export type EncounterOverrideAuthority = {
 /**
  * THE single gate for whether an override authorizes anything: every precondition named
  * above, ANDed together in one place so a reader sees the full set at a glance and a
- * future change cannot add a sixth transition that bypasses just one of them. Evaluated
+ * future change cannot add a transition that bypasses just one of them. Evaluated
  * identically whether the override was JUST granted (its tag is set from this same
- * `authority` context, so 3 and 4 hold trivially) or has been active for a while (all
- * five re-checked on every render) — the round-4 finding (an override survived a
- * mid-outage demotion) was exactly two different moments where a stale answer went
- * unchecked, and this function is the fix for both at once.
+ * `authority` context, so the campaign/identity checks hold trivially) or has been active
+ * for a while (all preconditions re-checked on every render) — the round-4 (#1446) finding
+ * (an override survived a mid-outage demotion) was exactly two different moments where a
+ * stale answer went unchecked, and this function is the fix for both at once.
+ *
+ * Issue #1914: the scope-specific write-authority check (`canDmWrite` for `'dm'`,
+ * `canPlayerWrite` for `'own-combatant'`) is the ONLY place that differs by scope — every
+ * other precondition (identity freshness, campaign match, identity match) applies
+ * identically to both, so a player can never obtain the `'dm'` scope by any path that
+ * satisfies `canPlayerWrite` alone.
  */
 export function encounterOverrideAuthorized(
   override: EncounterOverrideState,
   authority: EncounterOverrideAuthority,
 ): boolean {
-  return (
-    override.active
-    && authority.canDmWrite
-    && !authority.staleIdentity
-    && override.campaignId === authority.campaignId
-    // Issue #1446 review fix: `override.userId === authority.userId` alone would
-    // authorize when BOTH are `null` (two absent identities "matching") — reachable
-    // only if canDmWrite were also somehow true for a signed-out viewer, which nothing
-    // in this codebase does today, but an authorization predicate should never default
-    // to true on an absent identity regardless of current reachability. Require a real,
-    // non-null match on both sides explicitly.
-    && override.userId != null
-    && authority.userId != null
-    && override.userId === authority.userId
-  );
+  if (!override.active || authority.staleIdentity) return false;
+  if (override.campaignId !== authority.campaignId) return false;
+  // Issue #1446 review fix: `override.userId === authority.userId` alone would authorize
+  // when BOTH are `null` (two absent identities "matching") — an authorization predicate
+  // should never default to true on an absent identity. Require a real, non-null match.
+  if (override.userId == null || authority.userId == null || override.userId !== authority.userId) return false;
+  return override.scope === 'dm' ? authority.canDmWrite : authority.canPlayerWrite;
 }
 
 /**
- * The actual action gate: conflict-prone mutations are blocked unless the stream is
- * live OR the DM has confirmed the override for this outage. `override` should already
- * reflect current authorization (see {@link encounterOverrideAuthorized}) —
- * this function does not itself take authority params so it stays a pure two-input
- * gate composable with the existing permission checks callers already run.
+ * THE DM-grade action gate: conflict-prone mutations are blocked unless the stream is live
+ * OR the DM has confirmed the table-wide override for this outage. `override` should
+ * already reflect current authorization (see {@link encounterOverrideAuthorized}) — this
+ * function does not itself take authority params so it stays a pure two-input gate
+ * composable with the existing permission checks callers already run.
+ *
+ * Issue #1914: deliberately scope-gated to `'dm'` — an active `'own-combatant'` override
+ * does NOT unblock here. This is the base every turn-topology / DM-only control still
+ * composes with unchanged (a DM's override behaves exactly as it did before this issue);
+ * {@link gateForWrite} is the only place a same-outage `'own-combatant'` override can
+ * additionally relax anything, and only for the one combatant it names by ownership.
+ * Splitting this check out (rather than adding an ownership guard to a shared "is anything
+ * overridden" flag) is what keeps a player's own-combatant confirmation from silently
+ * unblocking next-turn, AoE declaration, or any other combatant's row.
  */
 export function encounterActionsBlocked(state: EncounterSyncState, override: EncounterOverrideState): boolean {
-  return encounterRiskyActionsBlocked(state) && !override.active;
+  return encounterRiskyActionsBlocked(state) && !(override.active && override.scope === 'dm');
+}
+
+/**
+ * Issue #1914 — the two write shapes the "continue anyway" flow now distinguishes:
+ *   - `'turn-topology'`: end/next/undo turn. Only ever unblocked by the `'dm'` scope —
+ *     ownership is irrelevant, so passing `isOwnCombatant: true` here changes nothing.
+ *   - `'own-combatant'`: own HP/temp HP, own death saves, own conditions, own turn-state
+ *     declarations. Unblocked by the `'dm'` scope (unchanged) OR by a same-outage
+ *     `'own-combatant'` scope override, but ONLY when `ownership.isOwnCombatant` is true
+ *     for the specific row/write being gated.
+ */
+export type EncounterWriteClass = 'turn-topology' | 'own-combatant';
+
+export type EncounterWriteOwnership = {
+  /** True when the write targets the combatant the ACTING viewer owns right now. */
+  isOwnCombatant: boolean;
+};
+
+/**
+ * THE write-class gate (issue #1914): composes {@link encounterActionsBlocked} (the
+ * DM-grade base, unchanged) with the finer-grained `'own-combatant'` relaxation. Always at
+ * least as strict as `encounterActionsBlocked` — the only way this returns `false` where
+ * that returns `true` is `writeClass === 'own-combatant'`, `ownership.isOwnCombatant` is
+ * true, AND `override.scope === 'own-combatant'` is itself active, so an `'own-combatant'`
+ * override granted by one player can never read as unblocking `'turn-topology'` writes or
+ * any OTHER combatant's row, no matter how the call site is wired.
+ *
+ * `override` must already be authorization-checked (see {@link encounterOverrideAuthorized})
+ * exactly like `encounterActionsBlocked` requires — this stays a pure gate over its four
+ * inputs, composable with whatever mount/permission checks a caller already runs.
+ */
+export function gateForWrite(
+  writeClass: EncounterWriteClass,
+  ownership: EncounterWriteOwnership,
+  state: EncounterSyncState,
+  override: EncounterOverrideState,
+): boolean {
+  if (!encounterActionsBlocked(state, override)) return false;
+  if (writeClass === 'own-combatant' && ownership.isOwnCombatant) {
+    return !(override.active && override.scope === 'own-combatant');
+  }
+  return true;
 }
 
 export function encounterSyncChipClass(state: EncounterSyncState): string {
@@ -267,15 +348,24 @@ export function encounterSyncBannerMessage(state: EncounterSyncState): string | 
  * claiming anything is blocked. Returns null for `live` (no banner) and `connecting`
  * (unreachable while an override is active — {@link encounterOverrideOfferable} never
  * offers one during the initial connecting grace).
+ *
+ * `scope` (issue #1914, defaults to `'dm'` so every existing call site stays
+ * source-compatible) selects the `'own-combatant'` variant, whose copy must not claim
+ * combat at large is unblocked — only the owning player's own combatant is — the same
+ * "no false claim" requirement the base override banner exists for, one scope narrower.
  */
-export function encounterSyncOverrideBannerKey(state: EncounterSyncState): string | null {
+export function encounterSyncOverrideBannerKey(
+  state: EncounterSyncState,
+  scope: EncounterOverrideScope = 'dm',
+): string | null {
+  const own = scope === 'own-combatant';
   switch (state) {
     case 'offline':
-      return 'encounters.sync.bannerOverrideOffline';
+      return own ? 'encounters.sync.bannerOverrideOwnOffline' : 'encounters.sync.bannerOverrideOffline';
     case 'reconnecting':
-      return 'encounters.sync.bannerOverrideReconnecting';
+      return own ? 'encounters.sync.bannerOverrideOwnReconnecting' : 'encounters.sync.bannerOverrideReconnecting';
     case 'stale':
-      return 'encounters.sync.bannerOverrideStale';
+      return own ? 'encounters.sync.bannerOverrideOwnStale' : 'encounters.sync.bannerOverrideStale';
     case 'connecting':
     default:
       return null;

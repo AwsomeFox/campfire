@@ -57,8 +57,24 @@ interface TurnWorkspaceProps {
   customMechanicsProfile?: CustomMechanicsProfile | null;
   /** Current combatant turn state (delay / ready) from the encounter roster. */
   currentTurnState?: CombatantTurnState;
-  /** When true, conflict-prone turn controls stay disabled (issue #471). */
+  /**
+   * When true, conflict-prone OWN-COMBATANT turn controls stay disabled (issue #471,
+   * scoped by #1914): action-economy slots, the standard-action bar, spellbook, delay/ready,
+   * active-effect removal, and the in-workspace death-save roll. These are all
+   * server-redacted to the DM or the current combatant's OWNER, so whenever a non-DM viewer
+   * sees any of them it is already their own turn — the parent may relax this below the
+   * table-wide sync gate via a same-outage 'own-combatant' override without touching
+   * anything beyond that. Deliberately NOT used for End-turn — see {@link endTurnBlocked}.
+   */
   actionsDisabled?: boolean;
+  /**
+   * Issue #1914: the End-turn control's OWN gate — end/next/undo turn is a turn-topology
+   * write, unblockable only by the table-wide DM-grade override, never by the
+   * 'own-combatant' scope `actionsDisabled` above may be relaxed by. Falls back to
+   * `actionsDisabled` when omitted so an un-migrated caller keeps its prior (single-flag)
+   * behavior.
+   */
+  endTurnBlocked?: boolean;
   /** Keeps the death-save action single-flight while its authoritative request is in flight. */
   deathSavePending?: boolean;
   /** Resolves the in-flight state for the actor returned by the turn query. */
@@ -136,6 +152,7 @@ export function TurnWorkspace({
   customMechanicsProfile,
   currentTurnState,
   actionsDisabled = false,
+  endTurnBlocked = actionsDisabled,
   deathSavePending = false,
   isCombatantPending,
   onRollDeathSave,
@@ -669,12 +686,19 @@ export function TurnWorkspace({
           or the turn's owner) before layering on any reason, so a plain onlooker still
           gets nothing, hold or no hold — see that function's doc comment. */}
       {(() => {
+        // Issue #1914: End-turn is a turn-topology write — it uses `endTurnBlocked` (the
+        // unrelaxed DM-grade gate), NOT `actionsDisabled` (which a same-outage
+        // 'own-combatant' override may have already relaxed for the OTHER controls in this
+        // workspace). Reusing `actionsDisabled` here would have let a player's own-combatant
+        // confirmation silently unblock ending their own turn too — exactly the "guard
+        // applied to one branch but not its mirror" shape this issue calls out.
+        const endTurnControlsDisabled = busy || endTurnBlocked;
         const gateReasonKey = turnEndGateReason({
           canEndTurn: turn.canEndTurn,
           isYourTurn: turn.isYourTurn,
           dmControlsTurns: turn.dmControlsTurns,
           safetyHoldActive,
-          syncBlocked: actionsDisabled,
+          syncBlocked: endTurnBlocked,
         });
         // Suppressed while this player's own end-turn is in flight (issue #1933 review):
         // GatedControl strips the native `disabled` whenever a reason is present, so the
@@ -717,7 +741,7 @@ export function TurnWorkspace({
                   // only swallows the click while a `reason` is present, and the dedupe just
                   // above deliberately passes `undefined` when the standing line already says
                   // it — which takes GatedControl's passthrough branch and leaves the child
-                  // fully live. `controlsDisabled` is `busy || actionsDisabled` and knows
+                  // fully live. `endTurnControlsDisabled` is `busy || endTurnBlocked` and knows
                   // nothing about permission, so without this a player under `dmControlsTurns`
                   // could press End turn and get a bare server rejection (issue #1933 review).
                   //
@@ -725,7 +749,7 @@ export function TurnWorkspace({
                   // authorization. A control's own `disabled` has to be correct on its own.
                   // Scope it to this button only — the action-economy chips above are a
                   // different permission and must stay live for this same player.
-                  disabled={controlsDisabled || !turn.canEndTurn}
+                  disabled={endTurnControlsDisabled || !turn.canEndTurn}
                   onClick={() => onEndTurn?.(turn.current!.combatantId)}
                   aria-describedby={standingReason ? TURN_END_STANDING_ID : undefined}
                   data-testid="workspace-end-turn"
