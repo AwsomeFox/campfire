@@ -443,6 +443,18 @@ function InitiativeStrip({
   /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
   colorVisionAssist?: boolean;
 }) {
+  const combatantRefs = useRef(new Map<number, HTMLDivElement>());
+
+  // A callback ref runs again for unrelated renders, which repeatedly stole the
+  // DM's horizontal scroll position. Restrict the scroll to an actual turn
+  // transition while retaining the user's reduced-motion preference (#1956).
+  useLayoutEffect(() => {
+    if (currentCombatantId == null) return;
+    combatantRefs.current
+      .get(currentCombatantId)
+      ?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
+  }, [currentCombatantId]);
+
   return (
     <div
       className="flex gap-2 overflow-x-auto pb-4 pt-2 px-2"
@@ -471,9 +483,8 @@ function InitiativeStrip({
             className={`cf-hp-feedback-anchor flex flex-col items-center gap-1 flex-none${feedbackClass}`}
             style={{ scrollSnapAlign: 'center' }}
             ref={(el) => {
-              if (isCurrent && el) {
-                el.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
-              }
+              if (el) combatantRefs.current.set(c.id, el);
+              else combatantRefs.current.delete(c.id);
             }}
           >
             {colorVisionAssist && isCurrent && (
