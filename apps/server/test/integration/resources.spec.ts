@@ -744,8 +744,12 @@ describe('inline spell slots & character resources (issue #422)', () => {
       .all();
 
     const original = encountersService.getRowOrThrow.bind(encountersService);
-    const spy = jest.spyOn(encountersService, 'getRowOrThrow').mockImplementation(async (...args: unknown[]) => {
-      const result = await original(...(args as [number]));
+    // Typed against the real signature rather than cast to `[number]`. The spread already
+    // forwarded `includeDeleted` at runtime, so the old cast was a compile-time lie rather
+    // than a behavioral bug — but it read as though the flag were being dropped, which is
+    // exactly the ambiguity a deleted-row regression could hide behind.
+    const spy = jest.spyOn(encountersService, 'getRowOrThrow').mockImplementation(async (...args: Parameters<typeof original>) => {
+      const result = await original(...args);
       // Simulate a concurrent DM hiding the encounter in the window between the outer
       // visibility check (which already read this now-stale, non-hidden snapshot) and the
       // transaction below re-reading it fresh.
@@ -763,6 +767,64 @@ describe('inline spell slots & character resources (issue #422)', () => {
       expect(JSON.parse(cAfter.resources)['arcaneRecovery'].used).toBe(0);
       const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
       expect(events.some((e: any) => e.type === 'resource_changed')).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Issue #1990 review (Devin): `updateCombatant` grew the same outer `isVisibleTo` gate
+  // as `adjustCombatantResource` but did NOT re-check it against the transaction-local
+  // encounter row, so the identical mid-flight hide raced past it. That is exactly the
+  // shape the test above pins for the sibling — a guard applied to one of two symmetric
+  // paths with coverage only on the covered side. This test pins the other side.
+  it("a DM hiding the encounter mid-request still refuses the owning player's in-flight updateCombatant (Devin review)", async () => {
+    const owner = { id: '1', username: 'owner', displayName: 'Owner', serverRole: 'user' as const };
+    const ts = new Date().toISOString();
+    const [camp] = db
+      .insert(campaigns)
+      .values({ name: 'Concurrent Hide Update', ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [c] = db
+      .insert(characters)
+      .values({ campaignId: camp.id, name: 'Merisiel', ownerUserId: '1', hpCurrent: 20, hpMax: 20, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [enc] = db
+      .insert(encounters)
+      .values({ campaignId: camp.id, name: 'Concurrent Hide Update Fight', status: 'running', hidden: false, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [comb] = db
+      .insert(combatants)
+      .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Merisiel', hpCurrent: 20, hpMax: 20, sortOrder: 1 })
+      .returning()
+      .all();
+
+    const original = encountersService.getRowOrThrow.bind(encountersService);
+    // Typed against the real signature rather than cast to `[number]`. The spread already
+    // forwarded `includeDeleted` at runtime, so the old cast was a compile-time lie rather
+    // than a behavioral bug — but it read as though the flag were being dropped, which is
+    // exactly the ambiguity a deleted-row regression could hide behind.
+    const spy = jest.spyOn(encountersService, 'getRowOrThrow').mockImplementation(async (...args: Parameters<typeof original>) => {
+      const result = await original(...args);
+      db.update(encounters).set({ hidden: true }).where(eq(encounters.id, enc.id)).run();
+      return result;
+    });
+
+    try {
+      await expect(encountersService.updateCombatant(enc.id, comb.id, { hpDelta: -5 }, owner, 'player')).rejects.toThrow(
+        NotFoundException,
+      );
+
+      // Nothing was written — neither the combatant nor its character-sheet mirror moved,
+      // and no combat-log event was emitted for the now-invisible fight.
+      const combAfter = db.select().from(combatants).where(eq(combatants.id, comb.id)).all()[0];
+      expect(combAfter.hpCurrent).toBe(20);
+      const cAfter = await charactersService.getRowOrThrow(c.id);
+      expect(cAfter.hpCurrent).toBe(20);
+      const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
+      expect(events.length).toBe(0);
     } finally {
       spy.mockRestore();
     }
