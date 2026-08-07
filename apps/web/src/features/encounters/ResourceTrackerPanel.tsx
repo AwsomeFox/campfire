@@ -545,11 +545,11 @@ export function ResourceTrackerPanel({
                   return (
                     <div key={key} className="flex items-center justify-between gap-4 flex-wrap">
                       <div className="text-sm min-w-0 break-words">
-                        {/* Issue #2053 — `res.name` is whatever English name was stored when this
-                            pool was first created (see CharacterPage's AdapterResourceCard); the
-                            catalog lookup is keyed by the stable `key` instead so a known adapter
-                            resource still renders translated regardless of what was persisted. */}
-                        {adapterResourceLabel(t, { key, name: res.name || key })}
+                        {/* Issue #2053 / #2068 — `res.name` may be an explicit custom name, the raw
+                            `key` (when defaulted at creation), or undefined. `adapterResourceLabel`
+                            translates known keys when `res.name` is absent or matches the key or the
+                            catalog's English value, while preserving customized or differing names. */}
+                        {adapterResourceLabel(t, { key, name: res.name })}
                         {res.recharge && <span className="ml-2 text-xs opacity-70">({res.recharge})</span>}
                         {sourceText && <span className="ml-2 text-xs opacity-70">[{sourceText}]</span>}
                       </div>
