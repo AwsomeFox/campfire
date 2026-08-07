@@ -67,6 +67,7 @@ function dyingCombatant(overrides: Partial<Combatant> = {}): Combatant {
     characterId: 1,
     npcId: null,
     name: 'Ada',
+    controllerUserId: null,
     initiative: 12,
     initMod: 0,
     initiativeBreakdown: null,

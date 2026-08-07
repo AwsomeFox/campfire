@@ -38,6 +38,7 @@ function baseCombatant(overrides: Partial<Combatant> = {}): Combatant {
     characterId: 55,
     npcId: null,
     name: 'Vex',
+    controllerUserId: null,
     initiative: 12,
     initMod: 0,
     initiativeBreakdown: null,

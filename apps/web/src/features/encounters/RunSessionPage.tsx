@@ -2079,7 +2079,6 @@ export default function RunSessionPage() {
   function isOwnCombatant(c: Combatant): boolean {
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
   }
-  }
 
   /**
    * Issue #1914: the row-level sync gate for a combatant's OWN-COMBATANT writes (HP/temp

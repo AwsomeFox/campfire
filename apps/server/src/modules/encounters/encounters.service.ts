@@ -5658,8 +5658,6 @@ export class EncountersService {
         detail: isAssigned ? "'s controller was updated" : "'s controller was cleared",
       });
     }
-      });
-    }
 
     // Issue #620: attribute HP/death events to the attacker so the log reads "Ember hit
     // Goblin 3 for 8" rather than just "Goblin 3 took 8 damage". Resolution order:
