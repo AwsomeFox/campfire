@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, CombatantStatblock, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 export class QuickRollRequestDto extends createZodDto(QuickRollRequest.strict()) {}
@@ -30,7 +30,24 @@ export class EncounterEscalationUpdateDto extends createZodDto(EncounterEscalati
 // field is `hpSet`/`hpDelta`) previously validated fine (the pipe just stripped
 // the unrecognized key) and silently did nothing.
 export class CombatantCreateDto extends createZodDto(CombatantCreate.strict()) {}
-export class CombatantUpdateDto extends createZodDto(CombatantUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
+// expectedStatblock (issue #1992) is a SEPARATE, additive CAS field, for the `statblock`
+// field only — deliberately not a repurposing of expectedUpdatedAt, whose meaning (the
+// ENCOUNTER's own revision) is unchanged for every other caller. It rejects a `statblock`
+// write with 409 only when the row's CURRENTLY STORED statblock no longer content-equals
+// what the caller says it started from (encounters.service.ts's updateCombatant,
+// deepJsonEqual). An earlier round tried a per-combatant REVISION token
+// (`expectedCombatantUpdatedAt`, bumped on every write to the row) and found it still too
+// coarse: an hp/condition/position change to the SAME combatant advances a row-revision
+// token without touching the statblock, so it would falsely 409 an unrelated in-progress
+// edit. That field was removed entirely (never shipped a client, no reader anywhere) once
+// the content-based guard proved to be the field's only real consumer — see PR #2027's
+// history for the full trace.
+export class CombatantUpdateDto extends createZodDto(
+  CombatantUpdate.extend({
+    expectedUpdatedAt: ExpectedUpdatedAt,
+    expectedStatblock: CombatantStatblock.optional(),
+  }).strict(),
+) {}
 // Issue #1909: already `.strict()` + refined (exactly one of key|spellLevel) in the shared
 // schema itself — not re-applied here, matching ConditionLevelPatchDto's own pattern, since
 // `.strict()` is a ZodObject method that no longer exists once `.superRefine()` has wrapped

@@ -144,6 +144,22 @@ export class RevisionsService {
    * no longer matches the row's current `updatedAt` — someone else saved since the
    * caller loaded it — reject with 409 instead of overwriting. Omitted => no-op, so
    * every existing caller (and any client that doesn't opt in) is unaffected.
+   *
+   * Issue #1992 review (coordinator): a stricter, entity-specific reading of `''` — "a
+   * stored empty token can never satisfy any caller's expectation, even an honestly
+   * echoed `''`" — was tried HERE first (treating `undefined` and `''` differently) and
+   * reverted. That reading is only sound for `combatants.updated_at`, whose upgrade-path
+   * migration can leave it `''` (see schema.ts's doc comment) — every OTHER caller of
+   * this shared, entity-agnostic method has always stamped a real, non-empty
+   * `updatedAt` at creation, so `''` never legitimately appears in their stored rows.
+   * But `ExpectedUpdatedAt`'s zod type (`z.string().max(64).optional()`, no `.min(1)`)
+   * lets ANY caller of ANY entity using this guard send a literal `''`, and the old
+   * truthy check silently treated that as "no opinion" — changing that HERE would 409 a
+   * write that used to succeed unconditionally, on every entity this guards, for a risk
+   * that has nothing to do with issue #1992. Kept local instead: the combatant-specific
+   * `''`-is-never-satisfiable check lives directly in `updateCombatant`
+   * (encounters.service.ts), before this method is ever called, so this method's
+   * behavior and blast radius are exactly what they were before this issue existed.
    */
   assertNotStale(existing: { updatedAt: string }, expectedUpdatedAt: string | undefined): void {
     if (expectedUpdatedAt && existing.updatedAt !== expectedUpdatedAt) {
