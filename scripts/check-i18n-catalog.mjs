@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * CI guard for issue #629, #1940, #2059, and #2069 — translation catalog completeness, i18n
- * surface checks, JSX text ratchet, and a per-file untranslated-value ratchet.
+ * CI guard for issue #629, #1940, #2059, #2069, and #2073 — translation catalog completeness,
+ * i18n surface checks, JSX text ratchet, and a per-file untranslated-value ratchet.
  *
  * 1. Every non-English catalog under `locales/<lng>/` mirrors the English keys.
  * 2. Target feature surfaces must not contain obvious hardcoded user-facing strings.
@@ -12,6 +12,11 @@
  *    `evaluateTranslationRatchet` and `validateBaselineShape`). Key parity (#1) only checks that a
  *    key exists in both catalogs, not that the non-English value differs from the English one —
  *    this closes that gap without demanding every existing gap be translated up front.
+ * 5. No leaf value in any catalog may be the empty string or whitespace-only (issue #2073). This
+ *    is a hard failure, not a ratchet: there is no catalog entry for which `""` is intended
+ *    content, and a real key deprecation removes the key rather than blanking it. Key parity (#1)
+ *    and the untranslated-value ratchet (#4) both compare two catalogs to each other, so neither
+ *    can see a value blanked identically on both sides of the comparison — see `checkEmptyValues`.
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -107,6 +112,41 @@ function checkKeyParity() {
     }
   }
 
+  return errors;
+}
+
+/**
+ * Pure hard-failure rule (issue #2073): no leaf value in a catalog may be the empty string or
+ * whitespace-only. Reports the offending locale and dotted key path.
+ *
+ * Deliberately narrow: this is NOT a "value must be non-trivial" heuristic, not a minimum
+ * length, and not a "value differs between en and ar" rule — some keys legitimately match across
+ * locales (proper nouns, symbols), and that broader rule would be noise for no extra coverage
+ * over the empty-string case. Empty is unambiguous: real content is never `""`, and a real key
+ * deprecation removes the key rather than blanking it, so there is no ratchet/baseline here —
+ * every occurrence is a bug the moment it lands. Unlike key parity (#1) and the untranslated-value
+ * ratchet (#4), which both compare two catalogs to each other, this looks at one catalog in
+ * isolation, so it can see a value blanked identically on both sides of that comparison.
+ * @param {Record<string, unknown>} catalog
+ * @param {string} locale
+ * @returns {string[]}
+ */
+export function findEmptyValues(catalog, locale) {
+  const errors = [];
+  for (const [key, value] of flattenEntries(catalog)) {
+    if (typeof value === 'string' && value.trim() === '') {
+      errors.push(`locales/${locale}: key "${key}" is empty or whitespace-only (${JSON.stringify(value)})`);
+    }
+  }
+  return errors;
+}
+
+function checkEmptyValues() {
+  const errors = [];
+  for (const lang of ['en', ...listLocaleDirs()]) {
+    const catalog = loadMergedLocale(join(localesRoot, lang));
+    errors.push(...findEmptyValues(catalog, lang));
+  }
   return errors;
 }
 
@@ -383,7 +423,14 @@ function main() {
   const surfaceErrors = checkHardcodedSurfaces();
   const ratchetErrors = checkJsxTextRatchet();
   const translationRatchetErrors = checkTranslationRatchet();
-  const errors = [...parityErrors, ...surfaceErrors, ...ratchetErrors, ...translationRatchetErrors];
+  const emptyValueErrors = checkEmptyValues();
+  const errors = [
+    ...parityErrors,
+    ...surfaceErrors,
+    ...ratchetErrors,
+    ...translationRatchetErrors,
+    ...emptyValueErrors,
+  ];
 
   if (errors.length > 0) {
     console.error('check-i18n-catalog: failures:\n- ' + errors.join('\n- '));

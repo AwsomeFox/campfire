@@ -6,6 +6,7 @@ import {
   countUntranslatedInCatalog,
   evaluateTranslationRatchet,
   validateBaselineShape,
+  findEmptyValues,
   NON_LATIN_SCRIPT_DETECTORS,
 } from './check-i18n-catalog.mjs';
 
@@ -216,5 +217,45 @@ const mixedErrors = validateBaselineShape({
 });
 assert.strictEqual(mixedErrors.length, 1);
 assert.match(mixedErrors[0], /common\.json/);
+
+// --- findEmptyValues (issue #2073) ---
+
+// A catalog with no empty values -> MUST NOT flag
+assert.deepStrictEqual(
+  findEmptyValues({ nav: { dashboard: 'Dashboard' }, shortcut: 'Shift+Enter' }, 'en'),
+  [],
+);
+
+// Reproduces the exact #2073 regression: a leaf value blanked to the empty string. This is the
+// case key parity (checkKeyParity) cannot see — the key exists on both sides, so parity holds,
+// and it hit both catalogs identically, which the untranslated-value ratchet (comparing en vs.
+// ar) also cannot see, since a blanked ar value equal to a blanked en value never "differs".
+// findEmptyValues looks at one catalog in isolation, so it catches it regardless.
+const blankedErrors = findEmptyValues(
+  { encounters: { whisper: { error: '' } } },
+  'en',
+);
+assert.strictEqual(blankedErrors.length, 1);
+assert.match(blankedErrors[0], /locales\/en/);
+assert.match(blankedErrors[0], /encounters\.whisper\.error/);
+
+// Whitespace-only value -> MUST flag, same as a fully empty string (a screen reads a
+// whitespace-only string as falsy in `{localError && <p>...}` exactly like `""`)
+const whitespaceErrors = findEmptyValues({ nav: { dashboard: '   ' } }, 'ar');
+assert.strictEqual(whitespaceErrors.length, 1);
+assert.match(whitespaceErrors[0], /locales\/ar/);
+assert.match(whitespaceErrors[0], /nav\.dashboard/);
+
+// Non-string leaf values (numbers, arrays) are not this rule's concern -> MUST NOT flag
+assert.deepStrictEqual(findEmptyValues({ count: 0, list: [] }, 'en'), []);
+
+// Multiple empty values across nested keys -> MUST report each, by locale and dotted path
+const multipleEmptyErrors = findEmptyValues(
+  { a: { b: '' }, c: '  ', d: 'fine' },
+  'ar',
+);
+assert.strictEqual(multipleEmptyErrors.length, 2);
+assert.ok(multipleEmptyErrors.some((e) => /a\.b/.test(e)));
+assert.ok(multipleEmptyErrors.some((e) => /^locales\/ar: key "c"/.test(e)));
 
 console.log('check-i18n-catalog.spec: ok — all self-test fixtures passed');
