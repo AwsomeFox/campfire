@@ -275,7 +275,7 @@ describe('cepheus-importer — HTTP 429 retry (Retry-After honored)', () => {
       res.setHeader('content-type', 'text/markdown');
       res.end(`# Chapter ${key}\n\nOpen game content body for ${key}.`);
     });
-    await new Promise<void>((resolve) => server.listen(0, resolve));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const addr = server.address();
     if (!addr || typeof addr === 'string') throw new Error('failed to bind fake 429 server');
     baseUrl = `http://127.0.0.1:${addr.port}`;

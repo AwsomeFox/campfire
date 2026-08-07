@@ -7,6 +7,8 @@ import { GameIcon } from '../../../components/GameIcon';
 import { CharacterStatCard } from '../../../components/CharacterStatCard';
 import { Btn, HpBar, TextInput } from '../../../components/ui';
 import { GatedControl } from '../../../components/GatedControl';
+import { useAnnounce } from '../../../components/Announcer';
+import { api, API, translateApiError } from '../../../lib/api';
 import { isImeComposing } from '../../../lib/compositionSafeSubmit';
 import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../../lib/uiIcons';
 import { CombatantActionsList } from '../CombatantActionsList';
@@ -23,6 +25,8 @@ import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, 
 import { initialStatblockDraftState, statblockDraftReducer, statblockPatchForCommit } from './combatantStatblockDraft';
 import { RulesHintPopover } from '../../../components/RulesHintPopover';
 import { conditionHintKey, rulesHintCompendiumHref } from '../../../lib/rulesHints';
+import { canAdjustSpecialResource, findSpecialResource, specialResourceAdjustBody } from '../../characters/specialCharacterResource';
+import { adapterResourceLabel } from '../../../lib/adapterVocabularyLabel';
 
 const HP_BAND_LABEL: Record<string, string> = { healthy: 'Healthy', bloodied: 'Bloodied', critical: 'Critical', down: 'Down' };
 const HP_BAND_PCT: Record<string, number> = { healthy: 100, bloodied: 50, critical: 20, down: 0 };
@@ -69,6 +73,16 @@ export type CombatantRowProps = {
   turnTopologyBlocked?: boolean;
   canEditIdentity: boolean;
   canRemove: boolean;
+  /**
+   * Issue #1944 — DM-only mount gate for the adapter-declared special resource's
+   * "Award" control (5e inspiration / PF2e hero points). Mirrors `canRemove`'s
+   * shape: the caller passes `canDmWrite` directly. The control additionally
+   * requires a linked `character` and an adapter that actually declares one of
+   * `SPECIAL_RESOURCE_KEYS` (`findSpecialResource`) before it renders at all — a
+   * campaign whose adapter declares neither (OSR, Open Legend, Starforged, …)
+   * shows no affordance regardless of this flag.
+   */
+  canAwardSpecialResource?: boolean;
   canSetInitiative: boolean;
   /** Encounter is running — clearing initiative re-sorts the live turn order (issue #715). */
   running: boolean;
@@ -203,6 +217,7 @@ export function CombatantRow({
   canEditIdentity,
   statblock,
   canRemove,
+  canAwardSpecialResource = false,
   canSetInitiative,
   running,
   character,
@@ -288,6 +303,53 @@ export function CombatantRow({
   );
   const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
   const hasSfPools = isStarfinder || (combatant.spMax != null && combatant.spMax > 0) || (combatant.rpMax != null && combatant.rpMax > 0);
+
+  // Issue #1944: whichever of SPECIAL_RESOURCE_KEYS (inspiration/heroPoints) THIS campaign's
+  // adapter declares, or undefined for the majority of adapters that declare neither — the
+  // Award control below renders nothing at all in that case (never a hardcoded 5e-shaped
+  // widget). Same `findSpecialResource`/`canAdjustSpecialResource`/`specialResourceAdjustBody`
+  // trio CharacterPage's AdapterResourceCard uses, so the sheet and this row cannot fork on
+  // what "award" means.
+  const specialResourceDef = useMemo(() => findSpecialResource(adapter), [adapter]);
+  const [specialResourceBusy, setSpecialResourceBusy] = useState(false);
+  const announce = useAnnounce();
+
+  async function awardSpecialResource() {
+    if (!character || !specialResourceDef || specialResourceBusy) return;
+    // Issue #1944 review: consult the sync gate here too, matching `commitStatblock`
+    // above and every other write in this row — the button's `disabled` alone is not
+    // sufficient defense (see `syncBlocked`'s prop doc: "EVERY control that performs a
+    // write must consult both").
+    if (syncBlocked) return;
+    if (!canAdjustSpecialResource(specialResourceDef, character, 'award')) return;
+    setSpecialResourceBusy(true);
+    onRollError(null);
+    try {
+      await api.post(
+        `${API}/characters/${character.id}/resources`,
+        specialResourceAdjustBody(specialResourceDef, character, 'award'),
+      );
+      // The DM's own confirmation; the RECIPIENT's flourish + announcement fires
+      // separately in PlayerVitalsHeader once their client's `character.updated`
+      // refetch shows the increment (issue #1944 acceptance criterion 3).
+      const specialResourceLabel = adapterResourceLabel(t, specialResourceDef);
+      announce(
+        t('encounters.specialResource.awardedAnnounce', {
+          name: specialResourceLabel,
+          combatantName: combatant.name,
+          defaultValue: `${specialResourceLabel} awarded to ${combatant.name}`,
+        }),
+      );
+    } catch (err) {
+      // Same translated-error convention every other encounter-screen write uses
+      // (ResourceTrackerPanel's resourceMutation, etc.) rather than a raw `err.message` —
+      // this surfaces a genuine server 400 (e.g. an award racing past the adapter cap)
+      // as the visible error banner, never a silent no-op.
+      onRollError(translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.updateResourceError' }));
+    } finally {
+      setSpecialResourceBusy(false);
+    }
+  }
 
   function commitIdentity() {
     const trimmedName = nameDraft.trim();
@@ -1541,6 +1603,29 @@ export function CombatantRow({
               onApplyDamage={onApplyDamage}
               onUseAction={onUseAction}
             />
+          </div>
+        )}
+        {/* Issue #1944: DM one-tap Award for the adapter-declared special resource (5e
+            inspiration / PF2e hero points). Renders only for a PC row (kind === 'character'
+            with a resolvable character), a DM viewer, and an adapter that actually declares
+            one of SPECIAL_RESOURCE_KEYS — an OSR/Open Legend/Starforged table sees nothing
+            here. Disabled at the adapter cap (canAdjustSpecialResource), matching the sheet's
+            own Restore button. */}
+        {combatant.kind === 'character' && character && canAwardSpecialResource && specialResourceDef && (
+          <div className="mt-2" data-combatant-detail data-testid={`award-special-resource-${combatant.id}`}>
+            <button
+              type="button"
+              className="btn btn-secondary cf-target-44 text-xs"
+              disabled={specialResourceBusy || syncBlocked || !canAdjustSpecialResource(specialResourceDef, character, 'award')}
+              title={syncBlockedReason}
+              aria-describedby={syncBlockedDescribedBy}
+              onClick={() => void awardSpecialResource()}
+            >
+              {t('encounters.specialResource.award', {
+                name: adapterResourceLabel(t, specialResourceDef),
+                defaultValue: `Award ${specialResourceDef.name}`,
+              })}
+            </button>
           </div>
         )}
       </div>

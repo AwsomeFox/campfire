@@ -1,13 +1,22 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { Combatant, Character } from '@campfire/schema';
+import type { AdapterResourceDef, Combatant, Character, CustomMechanicsProfile } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
 import { HpBar, Card, Btn, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
+import { useAnnounce } from '../../components/Announcer';
+import { api, API, translateApiError } from '../../lib/api';
+import { adapterResourceLabel } from '../../lib/adapterVocabularyLabel';
 import { TurnElapsedChip } from './TurnElapsedChip';
 import type { DeathSaveOutcome } from './combat/deathSaveOutcome';
 import { RulesHintPopover } from '../../components/RulesHintPopover';
 import { conditionHintKey, rulesHintCompendiumHref } from '../../lib/rulesHints';
+import {
+  canAdjustSpecialResource,
+  findSpecialResource,
+  resourceAvailability,
+  specialResourceAdjustBody,
+} from '../characters/specialCharacterResource';
 
 interface PlayerVitalsHeaderProps {
   combatants: Combatant[];
@@ -39,7 +48,12 @@ interface PlayerVitalsHeaderProps {
   onRollDeathSave?: (combatantId: number) => void;
   /** Per-combatant in-flight state for the Roll button, same signal as `busy` elsewhere. */
   isDeathSaveBusy?: (combatantId: number) => boolean;
-  /** Issue #1746 sync gate — disables the Roll button without unmounting it. */
+  /**
+   * Issue #1746 sync gate — disables the Roll button without unmounting it. Also disables
+   * the Spend button on the special-resource pip (issue #1944 review) — see that prop's
+   * mirror doc on `CombatantRowProps.syncBlocked`: every control that performs a write
+   * must consult this for `disabled`, not just permission for mount.
+   */
   syncBlocked?: boolean;
   /** This combatant's just-settled death-save outcome, or null once faded (issue #1919). */
   deathSaveOutcome?: { combatantId: number; outcome: DeathSaveOutcome } | null;
@@ -51,6 +65,22 @@ interface PlayerVitalsHeaderProps {
   /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
    *  entries — gates the "Full rule" link on condition-tag rules-hint popovers. */
   rulesHintCompendiumAvailable?: boolean;
+  /**
+   * Issue #1944 review — the active campaign's homebrew mechanics override, threaded to
+   * `ruleSystemAdapter` the SAME way `CombatantRow` and `RunSessionPage`'s other adapter
+   * consumers already do (`campaign?.customMechanicsProfile`). Without this,
+   * `ruleSystemAdapter(ruleSystem)` silently falls back to the 5e adapter for any
+   * unregistered `ruleSystem` slug, so a homebrew table would see a 5e Inspiration pip
+   * that `CombatantRow` (which DOES receive this prop) correctly renders no Award control
+   * for.
+   */
+  customMechanicsProfile?: CustomMechanicsProfile | null;
+  /**
+   * Surfaces a Spend failure (e.g. the server's 400 rejecting an already-empty pool) as
+   * the page's visible error banner — same prop shape as the `onError` callbacks other
+   * encounter-screen components already take (e.g. BattleMap's).
+   */
+  onSpecialResourceError?: (msg: string) => void;
 }
 
 function deathSaveOutcomeText(
@@ -86,13 +116,17 @@ export function vitalsSpeedFor(combatant: Combatant, movementDefault: number | u
   return movementDefault ?? null;
 }
 
-export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, turnStartedAt = null, turnTimerSeconds = 0, onRollDeathSave, isDeathSaveBusy, syncBlocked = false, deathSaveOutcome, ruleSystem, campaignId, rulesHintCompendiumAvailable = false }: PlayerVitalsHeaderProps) {
-  const { t } = useTranslation('encounters');
+export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSetHpMax, turnPulse = false, currentCombatantId, movementDefault, colorVisionAssist = false, turnStartedAt = null, turnTimerSeconds = 0, onRollDeathSave, isDeathSaveBusy, syncBlocked = false, deathSaveOutcome, ruleSystem = null, campaignId, rulesHintCompendiumAvailable = false, customMechanicsProfile = null, onSpecialResourceError }: PlayerVitalsHeaderProps) {
+  const { t } = useTranslation();
   const [adjustHpFor, setAdjustHpFor] = useState<number | null>(null);
   const [hpDraft, setHpDraft] = useState('');
   const [editingMaxFor, setEditingMaxFor] = useState<number | null>(null);
   const [maxHpDraft, setMaxHpDraft] = useState('');
-  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem, customMechanicsProfile), [ruleSystem, customMechanicsProfile]);
+  const specialResourceDef = useMemo(
+    () => findSpecialResource(ruleSystemAdapter(ruleSystem, customMechanicsProfile)),
+    [ruleSystem, customMechanicsProfile],
+  );
 
   if (combatants.length === 0) return null;
 
@@ -229,6 +263,19 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
               )}
             </div>
 
+            {/* Issue #1944: the adapter-declared special resource (5e inspiration / PF2e
+                hero points) — renders only when the adapter actually declares one AND this
+                combatant's character resolved (character load in flight, or an unlinked
+                combatant, shows neither). */}
+            {char && specialResourceDef && (
+              <SpecialResourcePip
+                character={char}
+                def={specialResourceDef}
+                syncBlocked={syncBlocked}
+                onError={onSpecialResourceError}
+              />
+            )}
+
             {(c.hpCurrent === 0 || c.deathState === 'dying') && (() => {
               const dying = c.deathState === 'dying';
               const canRoll = dying && onRollDeathSave != null;
@@ -309,5 +356,111 @@ export function PlayerVitalsHeader({ combatants, charactersById, onHpDelta, onSe
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Issue #1944 — one player's own Spend affordance for the adapter-declared special
+ * resource, plus the "award moment" for the recipient: a DM Award (CombatantRow) lands
+ * here purely through the SAME `character.updated` SSE-driven refetch every other
+ * inline sheet value on this page already relies on (see RunSessionPage's
+ * `shouldInvalidateInlineCharacters` handling) — there is no separate push channel for
+ * this feature. The previous-`available` ref below (mirrors HpBar's damage/heal pulse
+ * at ui.tsx) detects that refetched increment and fires a small flourish + a screen
+ * reader announcement via the app-wide Announcer.
+ *
+ * A dedicated component (not inlined in the `combatants.map` callback above) so each
+ * combatant's previous-value ref and busy/flourish state are independent — the parent
+ * only ever holds ONE shared `useState` per interaction (adjustHpFor, editingMaxFor),
+ * which would collapse every combatant's award-detection into a single ref otherwise.
+ */
+function SpecialResourcePip({
+  character,
+  def,
+  syncBlocked = false,
+  onError,
+}: {
+  character: Character;
+  def: AdapterResourceDef;
+  /** Issue #1944 review — same sync gate the death-save Roll button already consults. */
+  syncBlocked?: boolean;
+  onError?: (msg: string) => void;
+}) {
+  const { t } = useTranslation();
+  const announce = useAnnounce();
+  const [busy, setBusy] = useState(false);
+  const { max, available } = resourceAvailability(def, character);
+  // Issue #1944 review: the adapter's `def.name` is a plain, locale-free English string
+  // (e.g. "Inspiration") baked into the shared domain contract — display through
+  // `adapterResourceLabel`, the SAME translated-name resolution `CharacterPage`'s
+  // `AdapterResourceCard` already uses, keyed on the resource's stable `key` rather than
+  // its English name. `def.name` itself still flows to the server via
+  // `specialResourceAdjustBody` unchanged — this is display only.
+  const resourceLabel = adapterResourceLabel(t, def);
+  const syncBlockedReason = syncBlocked
+    ? t('encounters.sync.controlsPaused', 'Paused — reconnecting to live updates.')
+    : undefined;
+
+  // Award-moment detection: `available` only ever goes UP from a DM award (a player's
+  // own Spend always takes the delta-DOWN path below) — including the untouched → first
+  // award transition (0 → defaultMax). Initialised to the CURRENT value so mounting
+  // this pip for the first time (e.g. opening the encounter after the award already
+  // landed) never fires a false flourish.
+  const prevAvailableRef = useRef(available);
+  const [flourish, setFlourish] = useState(false);
+  useEffect(() => {
+    if (available > prevAvailableRef.current) {
+      setFlourish(true);
+      announce(
+        t('encounters.specialResource.receivedAnnounce', {
+          name: resourceLabel,
+          defaultValue: `You received ${resourceLabel}!`,
+        }),
+      );
+    }
+    prevAvailableRef.current = available;
+  }, [available, announce, resourceLabel, t]);
+
+  async function spend() {
+    if (busy || syncBlocked || !canAdjustSpecialResource(def, character, 'spend')) return;
+    if (!window.confirm(t('encounters.specialResource.spendConfirm', { name: resourceLabel, defaultValue: `Spend ${resourceLabel}?` }))) return;
+    setBusy(true);
+    try {
+      await api.post(`${API}/characters/${character.id}/resources`, specialResourceAdjustBody(def, character, 'spend'));
+      // Advisory-only confirmation (issue #1944) — the real state change is the
+      // server-authoritative `character.updated` refetch, same as every other write
+      // on this page; this is just the player's own immediate feedback.
+      announce(t('encounters.specialResource.spentToast', { name: resourceLabel, defaultValue: `${resourceLabel} spent` }));
+    } catch (err) {
+      // Same translated-error convention every other encounter-screen write uses — this
+      // is what surfaces the server's 400 on an overspend attempt as a visible banner
+      // (the caller wires `onError` to RunSessionPage's `surfaceActionError`) instead of
+      // a silent no-op the pip's `disabled` gating alone cannot fully rule out (a second
+      // client's Spend racing between this pip's render and the request landing).
+      onError?.(translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.updateResourceError' }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span
+      className={`tag tag-accent text-xs px-2 py-1 rounded-full border border-accent/50 flex items-center gap-1.5 ${flourish ? 'cf-special-resource-award-flash' : ''}`}
+      data-testid={`special-resource-pip-${character.id}`}
+      onAnimationEnd={() => setFlourish(false)}
+    >
+      <span aria-label={t('encounters.specialResource.available', { available, max, name: resourceLabel, defaultValue: `${available} of ${max} ${resourceLabel} available` })}>
+        {resourceLabel} {available}/{max}
+      </span>
+      <button
+        type="button"
+        className="btn btn-ghost !px-1 text-[10px] cf-density-xs cf-target-44"
+        disabled={busy || syncBlocked || !canAdjustSpecialResource(def, character, 'spend')}
+        title={syncBlockedReason}
+        onClick={() => void spend()}
+      >
+        {t('encounters.specialResource.spend', { name: resourceLabel, defaultValue: `Spend ${resourceLabel}` })}
+      </button>
+    </span>
   );
 }

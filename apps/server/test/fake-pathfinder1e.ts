@@ -140,7 +140,7 @@ export async function startFakePathfinder1e(): Promise<FakePathfinder1e> {
   app.get('/api/v1/feats/', (_req, res) => res.json(page(FEATS)));
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Pathfinder 1e server');
@@ -179,7 +179,7 @@ export async function startFakePathfinder1eMultiSource(): Promise<FakePathfinder
   }
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Pathfinder 1e server');
@@ -216,7 +216,7 @@ export async function startFakePathfinder1eWithBadPagination(): Promise<FakePath
     res.json(page([{ key: 'evil', name: 'Should Never Be Imported', source: OGL_SOURCE }]));
   });
   const evilServer: Server = await new Promise((resolve) => {
-    const s = evilApp.listen(0, () => resolve(s));
+    const s = evilApp.listen(0, '127.0.0.1', () => resolve(s));
   });
   const evilAddress = evilServer.address();
   if (!evilAddress || typeof evilAddress === 'string') throw new Error('failed to bind evil fake PF1e server');
@@ -239,7 +239,7 @@ export async function startFakePathfinder1eWithBadPagination(): Promise<FakePath
   }
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake PF1e server');

@@ -108,7 +108,7 @@ export async function startFakeCepheus(): Promise<FakeCepheus> {
   });
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Cepheus server');

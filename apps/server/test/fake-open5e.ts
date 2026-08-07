@@ -217,7 +217,7 @@ export async function startFakeOpen5e(): Promise<FakeOpen5e> {
   app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');
@@ -277,7 +277,7 @@ export async function startFakeOpen5eFlaky(): Promise<FakeOpen5eFlaky> {
   app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');
@@ -330,7 +330,7 @@ export async function startFakeOpen5eMultiDoc(): Promise<FakeOpen5e> {
   app.get('/v2/feats/', (_req, res) => res.json(page([])));
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');
@@ -369,7 +369,7 @@ export async function startFakeOpen5eMixedLicense(): Promise<FakeOpen5e> {
   app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');
@@ -400,7 +400,7 @@ export async function startFakeOpen5eWithBadPagination(): Promise<FakeOpen5eWith
     res.json(page([{ key: 'evil_spell', name: 'Should Never Be Imported', desc: 'x', document: DOCUMENT }]));
   });
   const evilServer: Server = await new Promise((resolve) => {
-    const s = evilApp.listen(0, () => resolve(s));
+    const s = evilApp.listen(0, '127.0.0.1', () => resolve(s));
   });
   const evilAddress = evilServer.address();
   if (!evilAddress || typeof evilAddress === 'string') throw new Error('failed to bind evil fake Open5e server');
@@ -430,7 +430,7 @@ export async function startFakeOpen5eWithBadPagination(): Promise<FakeOpen5eWith
   app.get('/v2/feats/', (_req, res) => res.json(page([])));
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Open5e server');

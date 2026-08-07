@@ -460,6 +460,15 @@
           "unconscious": "Incapacitated, can't move or speak, and is unaware of its surroundings. Drops what it's holding and falls prone; attacks against it have advantage, and any hit from within 5 feet is a critical hit."
         }
       }
+    },
+    "specialResource": {
+      "award": "Award {{name}}",
+      "awardedAnnounce": "{{name}} awarded to {{combatantName}}",
+      "spend": "Spend {{name}}",
+      "spendConfirm": "Spend {{name}}?",
+      "spentToast": "{{name}} spent",
+      "available": "{{available}} of {{max}} {{name}} available",
+      "receivedAnnounce": "You received {{name}}!"
     }
   }
 }

@@ -9,7 +9,7 @@
  * clients that want that (the AI tools, primarily). This is the narrower, named surface
  * #1642 actually asks for.
  */
-import type { AdapterResourceDef, Character, RuleSystemAdapter } from '@campfire/schema';
+import type { AdapterResourceDef, Character, ResourcePatch, RuleSystemAdapter } from '@campfire/schema';
 
 /**
  * The two resources #1642 surfaces. A campaign's adapter declares at most one of these —
@@ -55,4 +55,57 @@ export function resourceAvailability(
   const max = stored.max;
   const used = stored.used ?? 0;
   return { max, used, available: Math.max(0, max - used) };
+}
+
+/**
+ * A `Spend` (delta: +1, consumes availability) or `Award`/`Restore` (delta: -1, replenishes
+ * availability) touch of the resource. Issue #1944: the encounter screen's DM-award and
+ * player-spend controls need the EXACT same semantics `CharacterPage`'s `AdapterResourceCard`
+ * already encodes, or the sheet and the encounter drift on what "spend" and "award" mean —
+ * see this module's own file header and the `AdapterResourceCard` doc comment in
+ * CharacterPage.tsx for why that drift is the dominant defect shape this repo sees.
+ */
+export type ResourceAdjustDirection = 'spend' | 'award';
+
+/** The exact `POST /characters/:id/resources` request body for one adjust touch. */
+export type ResourceAdjustBody =
+  | Required<Pick<ResourcePatch, 'key' | 'delta'>>
+  | Required<Pick<ResourcePatch, 'key' | 'max' | 'used' | 'name' | 'recharge'>>;
+
+/**
+ * Whether `direction` is currently a legal touch for this character/def — the same gating
+ * `AdapterResourceCard` applies to its Spend/Restore button `disabled` props: Spend needs
+ * `available > 0` (nothing to spend on an untouched or fully-used pool); Award needs
+ * `used > 0` (an untouched pool, per `resourceAvailability`, reports `used === max` — so it
+ * IS awardable — a fully-awarded pool has `used === 0` and is at the adapter's cap).
+ */
+export function canAdjustSpecialResource(
+  def: Pick<AdapterResourceDef, 'key' | 'defaultMax'>,
+  character: Pick<Character, 'resources'>,
+  direction: ResourceAdjustDirection,
+): boolean {
+  const { available, used } = resourceAvailability(def, character);
+  return direction === 'spend' ? available > 0 : used > 0;
+}
+
+/**
+ * The exact `POST /characters/:id/resources` body for `direction`, mirroring
+ * `AdapterResourceCard.adjust` byte-for-byte: first touch (nothing stored yet — only
+ * reachable via `award`, since `canAdjustSpecialResource` above never allows a `spend` on an
+ * untouched pool) posts `{ key, max: defaultMax, used: 0, name, recharge }`; every touch
+ * after that is a plain delta (`+1` spend, `-1` award). Callers should gate on
+ * {@link canAdjustSpecialResource} first — this function does not re-check legality, only
+ * shapes the request body for an already-permitted touch.
+ */
+export function specialResourceAdjustBody(
+  def: Pick<AdapterResourceDef, 'key' | 'defaultMax' | 'name' | 'recharge'>,
+  character: Pick<Character, 'resources'>,
+  direction: ResourceAdjustDirection,
+): ResourceAdjustBody {
+  const stored = character.resources[def.key];
+  if (!stored && direction === 'award') {
+    const max = def.defaultMax ?? 1;
+    return { key: def.key, max, used: max - 1, name: def.name, recharge: def.recharge };
+  }
+  return { key: def.key, delta: direction === 'spend' ? 1 : -1 };
 }
