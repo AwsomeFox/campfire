@@ -83,33 +83,53 @@ test.describe('resourceAvailability — pip math, DM-awarded economy (#1642)', (
 test.describe('specialResourceAdjustBody — exact POST /characters/:id/resources body (#1944)', () => {
   const inspirationDef = { key: 'inspiration', defaultMax: 1, name: 'Inspiration', recharge: 'special' as const };
   const heroPointsDef = { key: 'heroPoints', defaultMax: 3, name: 'Hero Points', recharge: 'special' as const };
+  const AT = '2026-01-01T00:00:00.000Z';
 
   test('award on a never-touched pool is the first-touch creation payload, not a delta', () => {
-    expect(specialResourceAdjustBody(inspirationDef, { resources: {} }, 'award')).toEqual({
+    expect(specialResourceAdjustBody(inspirationDef, { resources: {}, updatedAt: AT }, 'award')).toEqual({
       key: 'inspiration',
       max: 1,
       used: 0,
       name: 'Inspiration',
       recharge: 'special',
+      expectedUpdatedAt: AT,
     });
-    expect(specialResourceAdjustBody(heroPointsDef, { resources: {} }, 'award')).toEqual({
+    expect(specialResourceAdjustBody(heroPointsDef, { resources: {}, updatedAt: AT }, 'award')).toEqual({
       key: 'heroPoints',
       max: 3,
       used: 2,
       name: 'Hero Points',
       recharge: 'special',
+      expectedUpdatedAt: AT,
     });
+  });
+
+  // Devin review on PR #2052: the creation arm is the only ABSOLUTE `used` write here, and the
+  // absence of a stored record is what selects it — so a stale copy is self-perpetuating. A
+  // second Award pressed before the first round-trips still sees no record, posts the same body,
+  // and the server rewrites the same value while the caller reports success. The CAS token makes
+  // that a 409 rather than a silent no-op. Asserted separately from the shape above so a refactor
+  // that drops the field fails HERE, on a case whose name says why.
+  test('only the absolute creation arm carries the concurrency token — a relative delta neither needs nor sends one', () => {
+    const created = specialResourceAdjustBody(heroPointsDef, { resources: {}, updatedAt: AT }, 'award');
+    expect(created).toHaveProperty('expectedUpdatedAt', AT);
+    for (const body of [
+      specialResourceAdjustBody(heroPointsDef, { resources: { heroPoints: { max: 5, used: 2 } }, updatedAt: AT }, 'award'),
+      specialResourceAdjustBody(inspirationDef, { resources: { inspiration: { max: 1, used: 0 } }, updatedAt: AT }, 'spend'),
+    ]) {
+      expect(body).not.toHaveProperty('expectedUpdatedAt');
+    }
   });
 
   test('award on an already-touched pool is a plain delta: -1 — never re-sends max/name/recharge (would clobber a DM override)', () => {
     expect(
-      specialResourceAdjustBody(heroPointsDef, { resources: { heroPoints: { max: 5, used: 2 } } }, 'award'),
+      specialResourceAdjustBody(heroPointsDef, { resources: { heroPoints: { max: 5, used: 2 } }, updatedAt: AT }, 'award'),
     ).toEqual({ key: 'heroPoints', delta: -1 });
   });
 
   test('spend is always a plain delta: +1 — a spend is only ever legal once the pool has been touched', () => {
     expect(
-      specialResourceAdjustBody(inspirationDef, { resources: { inspiration: { max: 1, used: 0 } } }, 'spend'),
+      specialResourceAdjustBody(inspirationDef, { resources: { inspiration: { max: 1, used: 0 } }, updatedAt: AT }, 'spend'),
     ).toEqual({ key: 'inspiration', delta: 1 });
   });
 });

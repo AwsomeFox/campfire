@@ -67,10 +67,18 @@ export function resourceAvailability(
  */
 export type ResourceAdjustDirection = 'spend' | 'award';
 
-/** The exact `POST /characters/:id/resources` request body for one adjust touch. */
+/**
+ * The exact `POST /characters/:id/resources` request body for one adjust touch.
+ *
+ * The two arms are not interchangeable. `delta` is RELATIVE — the server adds it to whatever
+ * is stored, so a stale client copy cannot corrupt the result. The creation arm carries an
+ * absolute `used`, which the server writes verbatim, so it needs the same optimistic-
+ * concurrency guard `ResourceTrackerPanel` attaches to its own absolute `used` writes
+ * (`expectedUpdatedAt`, issue #1902 round 24) — hence the field on that arm and not the other.
+ */
 export type ResourceAdjustBody =
   | Required<Pick<ResourcePatch, 'key' | 'delta'>>
-  | Required<Pick<ResourcePatch, 'key' | 'max' | 'used' | 'name' | 'recharge'>>;
+  | Required<Pick<ResourcePatch, 'key' | 'max' | 'used' | 'name' | 'recharge' | 'expectedUpdatedAt'>>;
 
 /**
  * Whether `direction` is currently a legal touch for this character/def — the same gating
@@ -89,23 +97,45 @@ export function canAdjustSpecialResource(
 }
 
 /**
- * The exact `POST /characters/:id/resources` body for `direction`, mirroring
- * `AdapterResourceCard.adjust` byte-for-byte: first touch (nothing stored yet — only
- * reachable via `award`, since `canAdjustSpecialResource` above never allows a `spend` on an
- * untouched pool) posts `{ key, max: defaultMax, used: 0, name, recharge }`; every touch
+ * The exact `POST /characters/:id/resources` body for `direction`. Every touch grants or
+ * consumes exactly ONE point. The first touch (nothing stored yet — only reachable via
+ * `award`, since `canAdjustSpecialResource` never allows a `spend` on an untouched pool)
+ * has to materialize the sparse record as well, so it posts
+ * `{ key, max: defaultMax, used: max - 1, name, recharge, expectedUpdatedAt }`; every touch
  * after that is a plain delta (`+1` spend, `-1` award). Callers should gate on
  * {@link canAdjustSpecialResource} first — this function does not re-check legality, only
  * shapes the request body for an already-permitted touch.
+ *
+ * `used: max - 1` is a deliberate correction of the shape this was extracted from, not a
+ * faithful copy of it. `AdapterResourceCard.adjust` posted `used: 0` on the first touch,
+ * which was self-inconsistent: the first press of its button granted the WHOLE pool and
+ * every press after it granted one. For 5e inspiration (`defaultMax: 1`) the two are
+ * identical, so the inconsistency was invisible; PF2e declares `heroPoints` with
+ * `defaultMax: 3`, where one press handed out all three and then disabled itself.
  */
 export function specialResourceAdjustBody(
   def: Pick<AdapterResourceDef, 'key' | 'defaultMax' | 'name' | 'recharge'>,
-  character: Pick<Character, 'resources'>,
+  character: Pick<Character, 'resources' | 'updatedAt'>,
   direction: ResourceAdjustDirection,
 ): ResourceAdjustBody {
   const stored = character.resources[def.key];
   if (!stored && direction === 'award') {
     const max = def.defaultMax ?? 1;
-    return { key: def.key, max, used: max - 1, name: def.name, recharge: def.recharge };
+    return {
+      key: def.key,
+      max,
+      used: max - 1,
+      name: def.name,
+      recharge: def.recharge,
+      // This arm is the only ABSOLUTE write here, and the absence of a stored record is
+      // exactly what selects it — which makes a stale copy of `character` self-perpetuating:
+      // a second Award pressed before the write round-trips still sees no record, posts the
+      // identical absolute body, and the server writes the same value while the caller
+      // reports success. The recipient never gets the second point. `expectedUpdatedAt` turns
+      // that into a visible 409 instead of a silent no-op, and it equally stops this write
+      // clobbering a concurrent one from the sheet, a second DM tab, or MCP.
+      expectedUpdatedAt: character.updatedAt,
+    };
   }
   return { key: def.key, delta: direction === 'spend' ? 1 : -1 };
 }
