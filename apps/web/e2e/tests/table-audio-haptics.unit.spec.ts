@@ -484,3 +484,50 @@ test.describe('reduced-motion clatter window (issue #1920, Devin review on PR #2
     expect(src).toMatch(/reducedMotion \? DICE_ROLL_REDUCED_MOTION_TUMBLE_MS : undefined/);
   });
 });
+
+test.describe('recovery from a browser-suspended context (issue #1920, Devin review on PR #2050)', () => {
+  /** A fake whose context starts 'running', then gets suspended out from under us. */
+  function suspendableEngine() {
+    let resumeCalls = 0;
+    const ctx = {
+      state: 'running' as 'running' | 'suspended' | 'closed',
+      currentTime: 0,
+      destination: {} as MinimalAudioNode,
+      createOscillator: () => ({ type: 'sine', frequency: { setValueAtTime() {} }, connect() {}, start() {}, stop() {} }) as unknown as MinimalOscillatorNode,
+      createGain: () => ({ gain: { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} }) as unknown as MinimalGainNode,
+      resume: () => { resumeCalls += 1; return undefined; },
+      close: () => {},
+    } as unknown as MinimalAudioContext;
+    const engine = new TableAudioEngine(() => ctx);
+    engine.unlock();
+    return { engine, ctx: ctx as unknown as { state: string }, resumeCalls: () => resumeCalls };
+  }
+
+  test('a cue best-effort resumes the context after the browser suspended it', () => {
+    const { engine, ctx, resumeCalls } = suspendableEngine();
+    const afterUnlock = resumeCalls();
+
+    // The browser suspends it later in the page's life (iOS interruption, tab backgrounding).
+    // unlock() already ran and `unlocked` is latched, so nothing re-arms it — without a
+    // per-cue resume every later cue schedules against a frozen clock and is never heard.
+    ctx.state = 'suspended';
+    engine.playTurnChime('high');
+
+    expect(resumeCalls()).toBeGreaterThan(afterUnlock);
+  });
+
+  test('a cue on an already-running context does not call resume again', () => {
+    const { engine, resumeCalls } = suspendableEngine();
+    const afterUnlock = resumeCalls();
+    engine.playTurnChime('high');
+    expect(resumeCalls()).toBe(afterUnlock);
+  });
+
+  test("a cue while the preference is off still never touches the context", () => {
+    const { engine, ctx, resumeCalls } = suspendableEngine();
+    const afterUnlock = resumeCalls();
+    ctx.state = 'suspended';
+    engine.playTurnChime('off');
+    expect(resumeCalls()).toBe(afterUnlock);
+  });
+});

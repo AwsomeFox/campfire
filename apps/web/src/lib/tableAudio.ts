@@ -304,6 +304,29 @@ export class TableAudioEngine {
   }
 
   /**
+   * Best-effort re-resume before a cue (Devin review, #2050). `unlock()` resumes ONCE, at
+   * the first gesture, and latches `unlocked` true forever — the gesture listener in
+   * RollResultToastProvider short-circuits on that flag, so it never re-arms. But browsers
+   * suspend an AudioContext later in a page's life (iOS Safari on interruption, tab
+   * backgrounding). Without this, every subsequent cue would schedule oscillators against a
+   * frozen `currentTime`: inaudible for the rest of the visit, and liable to fire all at
+   * once if the context ever resumed on its own.
+   *
+   * This is NOT an autoplay hole: it only ever runs when `this.ctx` already exists, and the
+   * context is only ever constructed by `unlock()` from a real user gesture. Resuming an
+   * already-gestured context is not the same as creating one without a gesture.
+   */
+  private ensureRunning(): void {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state === 'running') return;
+    try {
+      void Promise.resolve(ctx.resume()).catch(() => undefined);
+    } catch {
+      /* advisory — a refused resume just leaves the cue inaudible, never throws at a caller */
+    }
+  }
+
+  /**
    * Every playX method below is a silent no-op when the preference is off OR
    * the context hasn't been unlocked yet — this is the "never autoplay" gate:
    * even if a caller forgot to check the preference first, these refuse to
@@ -313,18 +336,21 @@ export class TableAudioEngine {
   /** Dice-clatter taps spread across the tumble window. */
   playTumble(level: TableAudioLevel, rng?: () => number, windowMs?: number): void {
     if (level === 'off' || !this.ctx) return;
+    this.ensureRunning();
     for (const tap of tumbleTaps(level, rng, windowMs)) scheduleTap(this.ctx, tap);
   }
 
   /** Settle-time cue, routed by d20Flavor — null/plain rolls play nothing here. */
   playSettleCue(flavor: D20Flavor | null, level: TableAudioLevel): void {
     if (level === 'off' || !this.ctx) return;
+    this.ensureRunning();
     for (const tone of settleCueTones(flavor, level)) scheduleTone(this.ctx, tone);
   }
 
   /** Your-turn edge chime. */
   playTurnChime(level: TableAudioLevel): void {
     if (level === 'off' || !this.ctx) return;
+    this.ensureRunning();
     for (const tone of turnChimeTones(level)) scheduleTone(this.ctx, tone);
   }
 }
