@@ -305,7 +305,6 @@ function dnd5eTemplates(level: number): CharacterStarterTemplate[] {
   const rogueHp = dnd5eHpMax(level, rogueStats.CON);
   const barbarianHp = dnd5eHpMax(level, barbarianStats.CON);
   const fighterStrMod = Math.floor((fighterStats.STR - 10) / 2);
-  const fighterDexMod = Math.floor((fighterStats.DEX - 10) / 2);
   const rogueDexMod = Math.floor((rogueStats.DEX - 10) / 2);
   const wizardIntMod = Math.floor((wizardStats.INT - 10) / 2);
   const barbarianStrMod = Math.floor((barbarianStats.STR - 10) / 2);
