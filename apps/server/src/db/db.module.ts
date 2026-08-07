@@ -5312,7 +5312,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
   // Next free ordinal at the time this branch was written — renumber if another PR lands
   // 0172 first.
-  { name: '0172_action_uses_tracking_1921', run: migrateActionUsesTracking1921 },
+  { name: '0173_action_uses_tracking_1921', run: migrateActionUsesTracking1921 },
 ];
 
 /**
