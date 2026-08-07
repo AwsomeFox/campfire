@@ -82,7 +82,7 @@ import { type TargetDamageApplication } from './directDamage';
 import { resolveGridCalibration } from './mapRenderedBounds';
 import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMotion';
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
-import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
+import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, gateForWrite, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
 import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH, pingIdentityColor } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
@@ -1445,25 +1445,32 @@ export default function RunSessionPage() {
   // documented contract for a cached-identity restore is that membership may be obsolete,
   // so the override must be neither offerable nor valid while it is true, however long
   // the outage has lasted or who confirmed it.
+  // Issue #1914: `canPlayerWrite` is the scope-specific authority for an 'own-combatant'
+  // override, exactly parallel to `canDmWrite` for the 'dm' scope — see
+  // `encounterOverrideAuthorized`'s doc for why each scope checks its own authority rather
+  // than sharing one.
   const overrideAuthority: EncounterOverrideAuthority = {
     canDmWrite,
+    canPlayerWrite,
     staleIdentity,
     campaignId: cid,
     userId: me?.user.id ?? null,
   };
   // A confirmed override is scoped to ONE outage — consumed the moment the stream is live
   // again, so a later, separate outage prompts again rather than silently sailing through
-  // on a stale confirmation. ALSO revoked the instant it is no longer authorized (lost DM
-  // authority, or the identity went stale) — regaining authority requires a fresh
-  // confirmation rather than silently resuming the earlier one.
+  // on a stale confirmation. ALSO revoked the instant it is no longer authorized (lost the
+  // write authority its scope requires, or the identity went stale) — regaining authority
+  // requires a fresh confirmation rather than silently resuming the earlier one. Routed
+  // through `encounterOverrideAuthorized` itself (issue #1914) rather than a hand-rolled
+  // boolean here, so the revoke condition and the render-time authorization check (below)
+  // can never drift — the round-4 (#1446) failure mode this guarded against was exactly two
+  // different moments computing "authorized" two different ways.
   useEffect(() => {
-    setEncounterSyncOverride((prev) =>
-      revokeEncounterOverrideIfUnauthorized(
-        settleEncounterOverride(prev, encounterSync),
-        overrideAuthority.canDmWrite && !overrideAuthority.staleIdentity,
-      ),
-    );
-  }, [encounterSync, overrideAuthority.canDmWrite, overrideAuthority.staleIdentity]);
+    setEncounterSyncOverride((prev) => {
+      const settled = settleEncounterOverride(prev, encounterSync);
+      return revokeEncounterOverrideIfUnauthorized(settled, encounterOverrideAuthorized(settled, overrideAuthority));
+    });
+  }, [encounterSync, overrideAuthority.canDmWrite, overrideAuthority.canPlayerWrite, overrideAuthority.staleIdentity, overrideAuthority.campaignId, overrideAuthority.userId]);
   // Belt-and-braces alongside the effect above: `encounterOverrideAuthorized` is THE
   // single gate (every precondition, including the campaign/identity tag match),
   // re-evaluated synchronously at render time too — so there is no one-render gap between
@@ -1475,16 +1482,34 @@ export default function RunSessionPage() {
   )
     ? encounterSyncOverride
     : ENCOUNTER_OVERRIDE_INACTIVE;
+  // `riskyBlocked` stays the DM-grade gate exactly as before #1914 (`encounterActionsBlocked`
+  // is now itself scope-gated to `'dm'`, so an active 'own-combatant' override never
+  // satisfies it) — every existing consumer (next-turn, AoE declare, escalation die, apply
+  // damage bar, …) keeps its pre-#1914 behavior unchanged. `gateForWrite` (below, and at the
+  // per-combatant call sites) is the only place a same-outage 'own-combatant' override can
+  // additionally relax anything, and only for the combatant it names by ownership.
   const riskyBlocked = encounterActionsBlocked(encounterSync, effectiveEncounterSyncOverride);
-  // Issue #1446 fix: the "continue anyway" acknowledgement is a DM decision (per the
-  // issue text) — a player confirming it would re-enable their own owned-combatant HP /
-  // death-save / action mutations against possibly-stale data, and a stale-identity
-  // viewer confirming it would authorize mutations against a membership snapshot that may
-  // no longer be true (final review round). Neither has a path to ever set
-  // encounterSyncOverride.active; they stay blocked (with the informational banner) for
-  // the duration.
+  // Issue #1446 fix: the DM's "continue anyway" acknowledgement re-enables every
+  // conflict-prone control at once; a stale-identity viewer confirming it would authorize
+  // mutations against a membership snapshot that may no longer be true (final review
+  // round). Neither has a path to ever set a 'dm'-scoped `encounterSyncOverride.active`
+  // without `canDmWrite`; they stay blocked (with the informational banner) for the
+  // duration. This DM offer is distinct from `encounterSyncOwnOverrideOfferable` below
+  // (issue #1914) — a player's own-combatant confirm never grants this scope.
   const encounterSyncOverrideOfferable =
     overrideAuthority.canDmWrite
+    && !overrideAuthority.staleIdentity
+    && encounterOverrideOfferable(encounterSync)
+    && !(effectiveEncounterSyncOverride.active && effectiveEncounterSyncOverride.scope === 'dm');
+  // Issue #1914: the scoped, player-facing counterpart — offered only to a non-DM viewer
+  // with current player-write authority, gated by every other precondition
+  // `encounterOverrideAuthorized` will itself require once granted (fresh identity,
+  // past the connecting grace, nothing already active). `myCombatants.length > 0` is
+  // ANDed in at the render site below (that array isn't computed yet at this point in the
+  // component) — an offer with nothing owned to unblock would be a dead prompt.
+  const encounterSyncOwnOverrideOfferable =
+    overrideAuthority.canPlayerWrite
+    && !overrideAuthority.canDmWrite
     && !overrideAuthority.staleIdentity
     && encounterOverrideOfferable(encounterSync)
     && !effectiveEncounterSyncOverride.active;
@@ -1492,7 +1517,11 @@ export default function RunSessionPage() {
   // the base banner's "combat actions are paused" copy would be actively false (and
   // contradict the enabled controls for both screen-reader and sighted users). Swap to an
   // override-aware i18n variant that keeps the stale-data warning without that claim.
-  const overrideBannerKey = effectiveEncounterSyncOverride.active ? encounterSyncOverrideBannerKey(encounterSync) : null;
+  // Issue #1914: the variant is itself scope-aware — an 'own-combatant' override must not
+  // claim combat at large is unblocked, only the owning player's own combatant.
+  const overrideBannerKey = effectiveEncounterSyncOverride.active
+    ? encounterSyncOverrideBannerKey(encounterSync, effectiveEncounterSyncOverride.scope)
+    : null;
   const encounterSyncBanner = overrideBannerKey ? t(overrideBannerKey) : encounterSyncBannerMessage(encounterSync);
   const encounterSyncChip = encounterSyncChipLabel(encounterSync);
   const encounterSyncLastSyncTitle = useMemo(() => {
@@ -1911,6 +1940,22 @@ export default function RunSessionPage() {
   function canEditCombatant(c: Combatant): boolean {
     if (riskyBlocked) return false;
     return canEditCombatantPermission(c);
+  }
+
+  /** Issue #1914: the combatant the ACTING viewer owns (a player's own character link). */
+  function isOwnCombatant(c: Combatant): boolean {
+    return c.characterId != null && ownedCharacterIds.has(c.characterId);
+  }
+
+  /**
+   * Issue #1914: the row-level sync gate for a combatant's OWN-COMBATANT writes (HP/temp
+   * HP, death saves, conditions, turn-state) — every DM-only control on the row (identity
+   * edit, remove, initiative, duplicate) is mounted only for `canDmWrite` regardless of this
+   * value, so relaxing it for an owned row never exposes a DM-only control to a player; it
+   * only ever relaxes writes that were already permission-gated to this row's owner.
+   */
+  function combatantWriteBlocked(c: Combatant): boolean {
+    return gateForWrite('own-combatant', { isOwnCombatant: isOwnCombatant(c) }, encounterSync, effectiveEncounterSyncOverride);
   }
 
   // A character card rolled damage — surface the one-tap "apply to target" bar. A
@@ -3673,9 +3718,10 @@ export default function RunSessionPage() {
           a stuck stream (proxy buffering, a terminated long-lived connection, …) must not
           brick combat permanently. Granting the override does not touch the banner above,
           which stays visible for as long as the stream is unhealthy so the DM never loses
-          track of which mode they're in. DM-only (canDmWrite): the issue frames "continue
-          anyway" as a DM decision — a player has no path to grant it, so a player's own
-          combatant mutations stay blocked for the whole outage. */}
+          track of which mode they're in. DM-only (canDmWrite): this is the table-wide
+          override — unblocks every conflict-prone control. Issue #1914 adds a second,
+          player-facing prompt just below, scoped to the confirming player's own combatant
+          only; a player has no path to grant THIS one. */}
       {encounterSyncOverrideOfferable && (
         <div
           role="status"
@@ -3702,9 +3748,43 @@ export default function RunSessionPage() {
           </Btn>
         </div>
       )}
+      {/* Issue #1914: the scoped, player-facing "continue anyway" — visible only to a
+          non-DM viewer with at least one owned combatant in THIS encounter (an offer with
+          nothing to unblock would be a dead prompt). Grants `scope: 'own-combatant'`
+          explicitly; `gateForWrite` is what actually confines its effect to the confirming
+          player's own combatant rows, not this handler. */}
+      {encounterSyncOwnOverrideOfferable && myCombatants.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="encounter-sync-own-override-prompt"
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap"
+        >
+          <span>{t('encounters.sync.ownOverridePrompt')}</span>
+          <Btn
+            density="xs"
+            ghost
+            className="text-xs"
+            data-testid="encounter-sync-own-override-confirm"
+            onClick={() => {
+              // Defense in depth alongside the gate above — never let a DM/staff-only or a
+              // stale-identity viewer grant the scoped override even if this handler is
+              // somehow reachable, and never grant it with `scope: 'dm'`.
+              if (!overrideAuthority.canPlayerWrite || overrideAuthority.canDmWrite || overrideAuthority.staleIdentity) return;
+              setEncounterSyncOverride(
+                confirmEncounterOverride(overrideAuthority.campaignId, overrideAuthority.userId, 'own-combatant'),
+              );
+            }}
+          >
+            {t('encounters.sync.ownOverrideConfirm')}
+          </Btn>
+        </div>
+      )}
       {effectiveEncounterSyncOverride.active && encounterSync !== 'live' && (
         <span className="tag tag-accent" data-testid="encounter-sync-override-active" style={{ fontSize: 11 }}>
-          {t('encounters.sync.overrideActive')}
+          {effectiveEncounterSyncOverride.scope === 'own-combatant'
+            ? t('encounters.sync.ownOverrideActive')
+            : t('encounters.sync.overrideActive')}
         </span>
       )}
 
@@ -4030,7 +4110,10 @@ export default function RunSessionPage() {
           }}
           onRollDeathSave={(id) => rollDeathSave({ id })}
           isDeathSaveBusy={(id) => pendingCombatantIds.has(id) || reconcileBlocks}
-          syncBlocked={riskyBlocked}
+          // Issue #1914: every combatant here is, by construction, one `myCombatants`
+          // owns (the mount condition above) — so this is always an OWN-COMBATANT write,
+          // unblockable by the scoped player override without touching any other row.
+          syncBlocked={gateForWrite('own-combatant', { isOwnCombatant: true }, encounterSync, effectiveEncounterSyncOverride)}
           deathSaveOutcome={deathSaveOutcome}
         />
       )}
@@ -4082,7 +4165,15 @@ export default function RunSessionPage() {
           ruleSystem={campaign?.ruleSystem}
           customMechanicsProfile={campaign?.customMechanicsProfile}
           currentTurnState={currentCombatant?.turnState}
-          actionsDisabled={riskyBlocked}
+          // Issue #1914: `actionsDisabled` now gates the workspace's OWN-COMBATANT writes
+          // (action-economy slots, death-save roll, spellbook, delay/ready, movement — all
+          // server-redacted to the DM or the current combatant's OWNER, so whenever a
+          // player sees any of this it is already their own turn) and can be relaxed by a
+          // same-outage 'own-combatant' override. `endTurnBlocked` stays the unrelaxed
+          // DM-grade gate for the End-turn button specifically — turn-topology writes are
+          // never unblocked by that scope, per the issue's acceptance criteria.
+          actionsDisabled={gateForWrite('own-combatant', { isOwnCombatant: turnWorkspace?.isYourTurn === true }, encounterSync, effectiveEncounterSyncOverride)}
+          endTurnBlocked={riskyBlocked}
           deathSavePending={reconcileBlocks}
           isCombatantPending={(combatantId) => pendingCombatantIds.has(combatantId)}
           gridUnit={encounter.gridUnit}
@@ -4432,7 +4523,16 @@ export default function RunSessionPage() {
                   isDm={isDm}
                   myUserId={myUserId}
                   canEditPermission={canEditCombatantPermission(c)}
-                  syncBlocked={riskyBlocked}
+                  // Issue #1914: the DM-only controls on this row (identity edit, remove,
+                  // initiative, duplicate) are mounted only for `canDmWrite` regardless of
+                  // this value, so `combatantWriteBlocked` — which can relax below
+                  // `riskyBlocked` for a player's OWNED row via a same-outage
+                  // 'own-combatant' override — never exposes anything beyond that row's own
+                  // HP/temp HP, death saves, and conditions. Every other row (not owned)
+                  // and every DM row (unaffected — a 'dm' override already covers it) sees
+                  // exactly `riskyBlocked`, unchanged.
+                  syncBlocked={combatantWriteBlocked(c)}
+                  turnTopologyBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
                   // Issue #1926: a non-DM viewer mounts the same compendium statblock viewer
                   // once the DM has revealed this combatant — the ruleEntryId link itself is

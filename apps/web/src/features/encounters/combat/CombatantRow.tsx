@@ -63,6 +63,8 @@ export type CombatantRowProps = {
    * disabled — never `canEditPermission` alone.
    */
   syncBlocked: boolean;
+  /** Issue #1914: turn-topology writes stay gated by riskyBlocked, not own-combatant syncBlocked. */
+  turnTopologyBlocked?: boolean;
   canEditIdentity: boolean;
   canRemove: boolean;
   canSetInitiative: boolean;
@@ -185,6 +187,7 @@ export function CombatantRow({
   isCurrentTurn,
   canEditPermission,
   syncBlocked,
+  turnTopologyBlocked,
   canEditIdentity,
   statblock,
   canRemove,
@@ -240,6 +243,7 @@ export function CombatantRow({
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
   // tech via `aria-describedby` (below) rather than `title` alone, which screen readers
   // announce inconsistently and keyboard-only users cannot reach at all.
+  const effectiveTurnTopologyBlocked = turnTopologyBlocked ?? syncBlocked;
   const syncBlockedReason = syncBlocked ? t('run.gate.syncBlocked') : undefined;
   const syncBlockedReasonId = `combatant-${combatant.id}-sync-blocked-reason`;
   const syncBlockedDescribedBy = syncBlocked ? syncBlockedReasonId : undefined;
@@ -612,10 +616,10 @@ export function CombatantRow({
             <select
               className="input cf-target-44"
               aria-label={`Initiative group for ${combatant.name}`}
-              aria-describedby={syncBlocked ? syncBlockedReasonId : undefined}
+              aria-describedby={effectiveTurnTopologyBlocked ? syncBlockedReasonId : undefined}
               value={combatant.initiativeGroup ?? (combatant.kind === 'character' ? 'party' : 'monsters')}
               onChange={(e) => onPatchCombatant?.({ initiativeGroup: e.target.value }, encounterId)}
-              disabled={busy || syncBlocked || !canSetInitiative}
+              disabled={busy || effectiveTurnTopologyBlocked || !canSetInitiative}
               title="Initiative group"
               style={{ width: 'auto', marginLeft: 4 }}
             >
@@ -639,7 +643,7 @@ export function CombatantRow({
               aria-label={`Roll initiative for ${combatant.name}`}
               aria-describedby={syncBlocked ? syncBlockedReasonId : undefined}
               style={{ padding: '0 8px', height: 30, fontSize: 12, flex: 'none' }}
-              disabled={busy || syncBlocked}
+              disabled={busy || effectiveTurnTopologyBlocked}
               title="Roll initiative"
               onClick={onRollInitiative}
             >

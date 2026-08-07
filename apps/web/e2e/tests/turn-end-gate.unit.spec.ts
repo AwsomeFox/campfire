@@ -142,7 +142,11 @@ test.describe('turnEndStandingReason (issue #1933) — standing, not transient',
     const endTurnAnchor = code.indexOf('data-testid="workspace-end-turn"');
     expect(endTurnAnchor).toBeGreaterThan(-1);
     const endTurnBtn = code.slice(code.lastIndexOf('<Btn', endTurnAnchor), endTurnAnchor);
-    expect(endTurnBtn).toMatch(/disabled=\{controlsDisabled \|\| !turn\.canEndTurn\}/);
+    // Issue #1914: renamed from `controlsDisabled` to `endTurnControlsDisabled` (=
+    // `busy || endTurnBlocked`) — end/next/undo turn is a turn-topology write, unblockable
+    // only by the DM-grade override, never by the scoped player 'own-combatant' override
+    // that may now relax `actionsDisabled` for the OTHER controls in this workspace.
+    expect(endTurnBtn).toMatch(/disabled=\{endTurnControlsDisabled \|\| !turn\.canEndTurn\}/);
 
     // ...and the action-economy chips must NOT inherit it. `canEndTurn` is
     // `isDm || (isYourTurn && !dmControlsTurns)`, but nothing server-side gates a player's
@@ -156,5 +160,44 @@ test.describe('turnEndStandingReason (issue #1933) — standing, not transient',
     // prop explains why the permission is deliberately absent, so it names `canEndTurn` in
     // prose. A bare substring search would fail on the documentation of the very rule.
     expect(chip).not.toMatch(/disabled=\{[^}]*canEndTurn/);
+  });
+});
+
+/**
+ * Issue #1914 — the scoped player override for own-combatant writes must NOT also unblock
+ * End-turn (a turn-topology write). `TurnWorkspace` bundled every conflict-prone control
+ * (action economy, spellbook, delay/ready, the in-workspace death-save roll, AND End-turn)
+ * behind one `actionsDisabled` flag; relaxing that flag for a scoped override without
+ * splitting End-turn out would have silently let a player end their own turn during an
+ * outage the moment they confirmed the unrelated "update my own combatant" prompt — the
+ * exact "guard applied to one branch but not its mirror" shape this issue calls out.
+ */
+test.describe('TurnWorkspace endTurnBlocked split (issue #1914)', () => {
+  test('turnEndGateReason reads endTurnBlocked, NOT actionsDisabled, for its syncBlocked input', () => {
+    const code = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/TurnWorkspace.tsx'),
+      'utf8',
+    );
+    expect(code).toMatch(/syncBlocked: endTurnBlocked,/);
+    expect(code).not.toMatch(/syncBlocked: actionsDisabled,/);
+  });
+
+  test('endTurnBlocked defaults to actionsDisabled for an un-migrated caller, but RunSessionPage passes it explicitly and independently', () => {
+    const workspaceCode = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/TurnWorkspace.tsx'),
+      'utf8',
+    );
+    expect(workspaceCode).toMatch(/endTurnBlocked = actionsDisabled,/);
+
+    const runSessionCode = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'),
+      'utf8',
+    );
+    // The parent wires the two independently: `actionsDisabled` may be relaxed by ownership
+    // via `gateForWrite('own-combatant', …)`, while `endTurnBlocked` stays `riskyBlocked` —
+    // the unrelaxed, DM-grade-only gate — so ending a turn can never ride along on a
+    // same-outage own-combatant confirmation.
+    expect(runSessionCode).toMatch(/actionsDisabled=\{gateForWrite\('own-combatant', \{ isOwnCombatant: turnWorkspace\?\.isYourTurn === true \}, encounterSync, effectiveEncounterSyncOverride\)\}/);
+    expect(runSessionCode).toMatch(/endTurnBlocked=\{riskyBlocked\}/);
   });
 });
