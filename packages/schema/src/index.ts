@@ -6127,6 +6127,34 @@ export function isRegisteredRuleSystemSlug(ruleSystem: string): boolean {
 }
 
 /**
+ * Whether `ruleSystem` names an "importer-only" rule pack (issue #2081): a pack that is
+ * genuinely INSTALLED (`isInstalledPack` — the caller's own `rule_packs.slug` lookup; this
+ * module has no DB access, so it cannot determine that fact itself) but has no entry in
+ * {@link ADAPTERS}. Cepheus Engine (2D6 sci-fi) is the current example — it ships a full
+ * importer (`cepheus` install source, `cepheus-srd` pack slug) but no combat adapter, so
+ * without this guard a campaign that selects it silently inherits the unknown-slug 5e
+ * fallback (d20 initiative, 5e ability modifiers on 2D6 UPP scores, 5e conditions/action
+ * economy/death saves, `maxLevel: 20`, a 5e XP band) instead of failing loudly.
+ *
+ * Deliberately NOT `ruleSystem === 'cepheus-srd'` or any other string literal: the
+ * predicate is `isInstalledPack && !isRegisteredRuleSystemSlug(ruleSystem)`, so it is
+ * derived entirely from the same {@link ADAPTERS} registry `isRegisteredRuleSystemSlug`
+ * already reads. A future importer shipped without a matching `ADAPTERS` entry is caught
+ * the same way — by definition, not by editing this function — the moment someone installs
+ * it and a campaign tries to select it.
+ *
+ * An arbitrary/unknown/homebrew slug that names NO installed pack is unaffected
+ * (`isInstalledPack` is false) — that is the long-standing, deliberate "every existing
+ * campaign keeps 5e behavior" default {@link ruleSystemAdapter} documents, not a bug this
+ * issue is about. A homebrew slug backed by its own `customMechanicsProfile` never reaches
+ * this predicate at all — the server's `validateRuleSystem` short-circuits on a
+ * `customMechanicsProfile` before ever doing the installed-pack lookup this predicate needs.
+ */
+export function isImporterOnlyRuleSystemSlug(ruleSystem: string, isInstalledPack: boolean): boolean {
+  return isInstalledPack && !isRegisteredRuleSystemSlug(ruleSystem);
+}
+
+/**
  * Resolve statblock presentation labels for a campaign's `ruleSystem` (issue #763).
  *
  * Unlike {@link ruleSystemAdapter}, unknown / empty / homebrew slugs do **not** inherit
