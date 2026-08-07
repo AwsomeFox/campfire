@@ -6964,7 +6964,7 @@ export class EncountersService {
       if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
       this.assertMutable(fresh);
       this.assertCampaignWritableInTx(tx, fresh.campaignId);
-      if (fresh.turnVersion !== input.expectedTurnVersion) {
+      if (input.expectedTurnVersion !== undefined && fresh.turnVersion !== input.expectedTurnVersion) {
         throw new ConflictException({
           code: 'TURN_VERSION_MISMATCH',
           message: 'The turn has moved on since this order was loaded — refresh and try again.',

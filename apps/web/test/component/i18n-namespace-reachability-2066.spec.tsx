@@ -105,6 +105,7 @@ function dyingCombatant(overrides: Partial<Combatant> = {}): Combatant {
     legendaryActions: null,
     statblock: null,
     statblockRevealed: false,
+    manualOrder: null,
     ...overrides,
   };
 }

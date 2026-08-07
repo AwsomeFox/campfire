@@ -11016,7 +11016,7 @@ export type CombatantRollInitiativeRequest = z.infer<typeof CombatantRollInitiat
  */
 export const CombatantReorderRequest = z.object({
   afterCombatantId: z.union([Id, z.literal('top')]),
-  expectedTurnVersion: z.number().int().nonnegative(),
+  expectedTurnVersion: z.number().int().nonnegative().optional(),
 });
 export type CombatantReorderRequest = z.infer<typeof CombatantReorderRequest>;
 

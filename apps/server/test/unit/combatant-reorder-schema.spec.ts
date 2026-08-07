@@ -29,8 +29,8 @@ describe('CombatantReorderRequest (issue #1923)', () => {
     expect(CombatantReorderRequest.safeParse({ afterCombatantId: 1.5, expectedTurnVersion: 0 }).success).toBe(false);
   });
 
-  it('requires expectedTurnVersion', () => {
-    expect(CombatantReorderRequest.safeParse({ afterCombatantId: 'top' }).success).toBe(false);
+  it('accepts omitted expectedTurnVersion', () => {
+    expect(CombatantReorderRequest.safeParse({ afterCombatantId: 'top' }).success).toBe(true);
   });
 
   it('rejects a negative or non-integer expectedTurnVersion', () => {
