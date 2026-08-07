@@ -632,7 +632,32 @@ export const BattleMap = memo(function BattleMap({
   // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
   // as the DM drags. Every consumer below reads geometry through this (and its px form),
   // and — because it derives purely from encounter state — every viewport renders it the same.
-  const baseCalibration = useMemo(() => resolveGridCalibration(encounter), [encounter]);
+  // Keyed on the SIX grid fields `resolveGridCalibration` actually reads, not on `encounter`
+  // (issue #1917 stage 2, review round 2). React Query hands back a new encounter object on
+  // every refetch, SSE-driven invalidation and optimistic `setQueryData`, so an `[encounter]`
+  // dependency recomputed this on every HP tick — and since `calibration` → `calibrationPx` →
+  // `hexCells` all chain off it, two of `GridOverlay`'s props were reference-different every
+  // time. Its `memo()` comparator is shallow, so it re-rendered exactly as it had before being
+  // extracted: the containment this stage exists to deliver was not happening at all. These
+  // six are primitives, so the memo now holds while the grid geometry itself is unchanged.
+  const calGridSize = encounter.gridSize;
+  const calGridCellHeight = encounter.gridCellHeight;
+  const calGridOffsetX = encounter.gridOffsetX;
+  const calGridOffsetY = encounter.gridOffsetY;
+  const calGridRotation = encounter.gridRotation;
+  const calGridOpacity = encounter.gridOpacity;
+  const baseCalibration = useMemo(
+    () =>
+      resolveGridCalibration({
+        gridSize: calGridSize,
+        gridCellHeight: calGridCellHeight,
+        gridOffsetX: calGridOffsetX,
+        gridOffsetY: calGridOffsetY,
+        gridRotation: calGridRotation,
+        gridOpacity: calGridOpacity,
+      }),
+    [calGridSize, calGridCellHeight, calGridOffsetX, calGridOffsetY, calGridRotation, calGridOpacity],
+  );
   const calibration = useMemo<GridCalibration | null>(() => {
     if (!baseCalibration || !calibrateDrag || !mapRect) return baseCalibration;
     const w = mapRect.width;
