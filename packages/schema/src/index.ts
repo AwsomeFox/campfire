@@ -4532,6 +4532,14 @@ export interface RuleSystemAdapter {
    */
   readonly hasDeathSaves?: boolean;
   /**
+   * OPTIONAL — whether this system endorses "half or more of the party succeeds" as a group-check
+   * convention (issue #1943). The group-check board's X/N tally is universal, but the advisory
+   * verdict line built on top of it ("Group succeeds") is a per-system table convention, not a
+   * mechanical rule this engine enforces — 5e declares it explicitly; every other system omits
+   * it (treated as false) so PF2e/OSR/Open Legend tables see the tally with no verdict text.
+   */
+  readonly groupCheckMajorityAdvisory?: boolean;
+  /**
    * OPTIONAL — this system's HP/death model for the resolution layer (issue #1503): whether a
    * single hit past 0 HP by >= maxHP kills outright (5e massive damage) and whether 0 HP tracks
    * 5e 3-success/3-failure death saves. The structured HP engine (`applyCombatantHp`) used to
@@ -4723,6 +4731,10 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     supportsSpellSlotEditor: true,
   },
   hasDeathSaves: true,
+  // #1943 — 5e's group-check convention ("half or more of the party succeeds") is a documented
+  // table norm this adapter opts into explicitly; other systems omit it and get the tally with
+  // no verdict text.
+  groupCheckMajorityAdvisory: true,
   // #1503 — 5e's HP/death model is the one the engine implements (massive-damage instant death
   // + the 3-success/3-failure death-save tracker). Every other adapter omits hpModel and
   // hpModelForAdapter hands them NEUTRAL_HP_MODEL (0 HP is "down"), so a non-5e table never has
@@ -6140,6 +6152,16 @@ export function listRuleSystemAdapters(): RuleSystemAdapter[] {
 export function hasDeathSavesForAdapter(adapter?: Pick<RuleSystemAdapter, 'id' | 'hasDeathSaves'> | null): boolean {
   if (!adapter) return true;
   return adapter.hasDeathSaves ?? (adapter.id === DND5E_ADAPTER_ID || adapter.id === DND5E_PACK_SLUG);
+}
+
+/**
+ * Whether an adapter's system endorses the "half or more of the party succeeds" group-check
+ * convention (issue #1943). Defaults to false for any adapter that has not declared it — the
+ * group-check board always shows the X/N tally, but the advisory verdict text renders only when
+ * this is true (5e today).
+ */
+export function groupCheckMajorityAdvisoryForAdapter(adapter?: Pick<RuleSystemAdapter, 'groupCheckMajorityAdvisory'> | null): boolean {
+  return adapter?.groupCheckMajorityAdvisory ?? false;
 }
 
 /**
@@ -12036,9 +12058,18 @@ export type CheckRequestMode = z.infer<typeof CheckRequestMode>;
 export const CheckRequestStatus = z.enum(['pending', 'resolved']);
 export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
 
+/**
+ * The single source of truth for how many characters one group check-request send may target.
+ * Used both by `CheckRequestCreate.characterIds`'s `.max()` below (server-enforced) and by the
+ * web composer's "whole party" preset / manual-selection guard (`apps/web/src/features/
+ * encounters/checkRequestComposer.ts`) — importing this constant keeps the UI's cap from ever
+ * drifting out of sync with what the server actually accepts (issue #1943 review).
+ */
+export const CHECK_REQUEST_MAX_TARGETS = 20;
+
 /** DM input: request `checkId` from one or more target characters, with an optional DC + consequence. */
 export const CheckRequestCreate = z.object({
-  characterIds: z.array(Id).min(1).max(20).describe('Target character ids — one persisted request is created per character'),
+  characterIds: z.array(Id).min(1).max(CHECK_REQUEST_MAX_TARGETS).describe('Target character ids — one persisted request is created per character'),
   checkId: z.string().min(1).max(60).describe('Stable catalog id (e.g. "save:DEX", "skill:Perception") — must exist in each target\'s catalog'),
   mode: CheckRequestMode.default('normal').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
   dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side when the player rolls'),
@@ -12066,6 +12097,11 @@ export const CheckRequest = z.object({
   rollId: Id.nullable(),
   createdAt: IsoDate,
   resolvedAt: IsoDate.nullable(),
+  // Issue #1943: server-minted once per `requestChecks` call and stamped on every row it
+  // creates, so a group send targeting N characters shares one id across its N rows. Null for
+  // rows persisted before this field existed (back-compat) — never backfilled, since there is
+  // no way to reconstruct which pre-existing rows were originally one submit.
+  groupId: z.string().nullable(),
 });
 export type CheckRequest = z.infer<typeof CheckRequest>;
 

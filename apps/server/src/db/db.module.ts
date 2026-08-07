@@ -2168,6 +2168,25 @@ function migrateCheckRequestsTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before group checks (issue #1943): `check_requests.group_id`
+ * didn't exist. Plain nullable ADD COLUMN — no backfill: pre-existing rows have no recorded
+ * group (there is no way to know which historical single-target sends belonged together), and
+ * `groupId: null` is a valid, back-compat CheckRequest shape. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCheckRequestsTableForGroupId1943(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='check_requests'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(check_requests)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'group_id')) return;
+
+  sqlite.exec('ALTER TABLE check_requests ADD COLUMN group_id TEXT');
+}
+
+/**
  * Issue #789 — notification preferences. Four NEW tables (per-category delivery
  * mode, quiet hours, the deferred/digest queue, and the reminder/nudge dedup
  * ledger). All are plain CREATE TABLE / CREATE INDEX IF NOT EXISTS, so this is a
@@ -5253,13 +5272,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // compatibility is unaffected.
   { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
   { name: '0167_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
-  // Renumbered twice while that branch was open: #1942 took 0166, then #1899 took 0167
-  // on main. This migration has never run against a real database under either earlier
-  // name, so no installation can have recorded them and upgrade compatibility holds.
   { name: '0168_combatants_statblock_revealed_1926', run: migrateCombatantsTableForStatblockRevealed1926 },
-  // #1935's turn timer landed on main (e910bda0) taking 0170; 0169 is claimed by the
-  // in-flight #1943 (group checks). This branch takes 0171. (#1992 briefly reserved 0172
-  // and then removed its migration entirely, so 0172 is free again.)
+  { name: '0169_check_requests_group_id_1943', run: migrateCheckRequestsTableForGroupId1943 },
   { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
 ];

@@ -145,7 +145,7 @@ import { FactionsService } from '../factions/factions.service';
 import { LocationsService } from '../locations/locations.service';
 import { SessionsService, buildRecapDraft } from '../sessions/sessions.service';
 import { SessionSharesService } from '../sessions/session-shares.service';
-import { CharactersService, type RestPartyResult } from '../characters/characters.service';
+import { CharactersService, CHECK_REQUEST_LIST_MAX_LIMIT, type RestPartyResult } from '../characters/characters.service';
 import { NotesService } from '../notes/notes.service';
 import { MembersService } from '../membership/members.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
@@ -4457,16 +4457,20 @@ export class McpToolsService {
       server,
       'list_check_requests',
       'List DM-initiated check requests visible to you (issue #415). The DM sees every request in the campaign; a ' +
-        'player sees only requests targeting a character they own. Optional `status` filter (pending|resolved). Use a ' +
-        'returned request id with resolve_check_request to roll it.',
+        'player sees only requests targeting a character they own. Optional `status` filter (pending|resolved). Optional ' +
+        '`limit`/`offset` (issue #1943) bound the page — omitted, every visible row is returned. Use a returned request ' +
+        'id with resolve_check_request to roll it.',
       {
         campaignId: CampaignIdArg,
         status: z.enum(['pending', 'resolved']).optional().describe('Filter by request status'),
+        limit: LimitArg(CHECK_REQUEST_LIST_MAX_LIMIT, CHECK_REQUEST_LIST_MAX_LIMIT),
+        offset: OffsetArg,
       },
-      async ({ campaignId, status }) => {
+      async ({ campaignId, status, limit, offset }) => {
         const role = await this.access.requireMember(user, campaignId as number);
         return this.characters.listCheckRequests(campaignId as number, user, role, {
           status: status as 'pending' | 'resolved' | undefined,
+          page: { limit: limit as number | undefined, offset: offset as number | undefined },
         });
       },
     );

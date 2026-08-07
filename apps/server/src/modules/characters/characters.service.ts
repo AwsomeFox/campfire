@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { randomUUID, createHash } from 'node:crypto';
 import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
@@ -65,6 +65,7 @@ import type {
   DdbImportResult,
   ResourcePatch,
   HomebrewMechanicsProfile,
+  PageParams,
 } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
@@ -73,6 +74,7 @@ import { auditLog, campaigns, characters, checkRequests, combatants, encounters,
 import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
+import { applyPage } from '../../common/pagination';
 import { fromJsonText, toJsonText } from '../../common/json';
 import {
   conditionWriteSetFromNames,
@@ -84,6 +86,7 @@ import {
 } from '../../common/conditions';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { auditBestEffort } from '../audit/audit-best-effort';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 // Issue #1479: assertCharacterWritable resolves campaign membership itself, so both the
@@ -93,6 +96,9 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { parseDdbId, fetchDdbCharacter, mapDdbCharacter, summarizeDdbImport, computeDdbActionEntryCount, type DdbFetch } from './ddb-importer';
+
+/** Issue #1943 review: caps an explicit `?limit=`/`limit` arg on the check-requests list — see `listCheckRequests`. */
+export const CHECK_REQUEST_LIST_MAX_LIMIT = 200;
 
 type CharacterCreateInput = z.infer<typeof CharacterCreate>;
 type SyncDb = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
@@ -215,6 +221,10 @@ export interface PartyRecoveryApplyResult { batchId: number; kind: RestKind | 'c
 
 @Injectable()
 export class CharactersService {
+  // Issue #1943 review: requestChecks' post-commit per-row audit write needs a Logger to
+  // pass to auditBestEffort (its doc comment: log the failure loudly, never rethrow).
+  private readonly logger = new Logger(CharactersService.name);
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -501,6 +511,7 @@ export class CharactersService {
       rollId: row.rollId ?? null,
       createdAt: row.createdAt,
       resolvedAt: row.resolvedAt ?? null,
+      groupId: row.groupId ?? null,
     };
   }
 
@@ -509,12 +520,34 @@ export class CharactersService {
    * exists in EACH target's adapter-owned catalog (so a request can never name a check the sheet
    * can't roll), persists one row per character, and emits a thin `check.requested` tick per row
    * so each targeted player's client refetches and shows the prompt. Controller gates this to dm.
+   *
+   * Issue #1943: one `groupId` is minted PER CALL (not per row) and stamped on every row this
+   * call creates, so a DM's single "whole party" submit is recoverable as one group by the
+   * web/MCP group-check board — distinct submits (even targeting the same characters again)
+   * always get distinct ids. A single-target submit takes this same path and still gets a
+   * (size-1) groupId; nothing about the per-row behavior below changes.
+   *
+   * Issue #1943 review #7 (atomicity): this used to validate-then-insert INSIDE one loop, so a
+   * later target's 404/400 threw AFTER earlier targets' rows were already committed, audited,
+   * and emitted as `check.requested` — a DM whose group send failed would see an error and
+   * reasonably believe nothing happened, while part of the party already had a live prompt, all
+   * under the SAME `groupId` the board would then render as smaller than what was actually
+   * selected. Fixed in two phases: (1) validate EVERY target — existence, campaign membership,
+   * catalog membership — before writing anything, so a validation failure alone already leaves
+   * zero rows; (2) the inserts + their audit rows run inside ONE `db.transaction`, atomic with
+   * each other too, so a write-time failure (not just a validation failure) still can't leave a
+   * partial group — matching the existing `applyPartyRecovery`/`homebrew` transaction pattern in
+   * this codebase. SSE emission happens only AFTER the transaction commits, so a rolled-back
+   * group never ticks a client into refetching rows that don't exist.
    */
   async requestChecks(campaignId: number, input: CheckRequestCreate, user: RequestUser, role: Role): Promise<CheckRequest[]> {
     const adapter = await this.adapterForCampaign(campaignId);
     const mode = input.mode ?? 'flat';
     const ts = nowIso();
-    const created: CheckRequest[] = [];
+    const groupId = randomUUID();
+
+    // Phase 1: validate every target before any row is written.
+    const validated: Array<{ characterId: number; charRow: typeof characters.$inferSelect; label: string }> = [];
     for (const characterId of input.characterIds) {
       const charRow = await this.getRowOrThrow(characterId);
       if (charRow.campaignId !== campaignId) {
@@ -522,38 +555,78 @@ export class CharactersService {
       }
       const def = findCheckInCatalog(adapter, toDomain(charRow), input.checkId);
       if (!def) throw new NotFoundException(`No rollable check "${input.checkId}" for character ${characterId}`);
-      const [row] = await this.db
-        .insert(checkRequests)
-        .values({
+      validated.push({ characterId, charRow, label: def.label });
+    }
+
+    // Phase 2: every target is known-valid — insert all rows in one transaction, so a
+    // write-time failure partway through still cannot leave a partial group. Audit rows are
+    // deliberately NOT written in here (issue #1943 review, round 6): the atomicity this
+    // transaction exists for is between the check-request rows themselves — a later target's
+    // failure must not leave earlier ones committed — and that's fully achieved by the inserts
+    // alone. Folding `AuditService.logInTx` in here bought nothing toward that goal and added a
+    // new failure mode: an audit-subsystem hiccup would roll back a DM's entire valid send,
+    // which is exactly the trade `logInTx`'s own doc comment reserves for "no record of it is
+    // itself the incident" cases (consent, privacy-policy changes) — an ordinary check request
+    // is not one of those; see Phase 3 below for where the audit write now happens instead.
+    const inserted = this.db.transaction((tx) => {
+      const rows: Array<{ row: typeof checkRequests.$inferSelect; charRow: typeof characters.$inferSelect; label: string }> = [];
+      for (const { characterId, charRow, label } of validated) {
+        const row = tx
+          .insert(checkRequests)
+          .values({
+            campaignId,
+            characterId,
+            encounterId: input.encounterId ?? null,
+            checkId: input.checkId,
+            checkLabel: label,
+            mode,
+            dc: input.dc ?? null,
+            consequence: input.consequence ?? '',
+            status: 'pending',
+            requestedByUserId: user.id,
+            requestedByName: user.name ?? '',
+            rollId: null,
+            createdAt: ts,
+            resolvedAt: null,
+            groupId,
+          })
+          .returning()
+          .get();
+        rows.push({ row, charRow, label });
+      }
+      return rows;
+    });
+
+    // Phase 3: the group committed — safe to notify clients, audit the requests, and build
+    // the domain response. Each row's audit write uses `auditBestEffort` (issue #1581) rather
+    // than a bare `await this.audit.log(...)`: it never rethrows, so one row's audit failure
+    // can neither stop this loop (later rows still get their own SSE emit + audit attempt)
+    // nor make `requestChecks` throw and falsely report the whole send as failed after the
+    // rows already committed — the same "already happened, don't undo it over a logging hiccup"
+    // guarantee `log()`'s own doc comment describes, just via the helper that also logs the
+    // failure loudly instead of silently swallowing it. Matches this loop's PRE-EXISTING
+    // `this.events.emit(...)` call in failure posture: neither one throwing can prevent the
+    // other, for this row or any later one.
+    const created: CheckRequest[] = [];
+    for (const { row, charRow, label } of inserted) {
+      this.events.emit({ type: 'check.requested', campaignId, requestId: row.id, characterId: row.characterId, userId: user.id });
+      await auditBestEffort(
+        this.audit,
+        this.logger,
+        {
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'check.request',
+          entityType: 'character',
+          entityId: row.characterId,
           campaignId,
-          characterId,
-          encounterId: input.encounterId ?? null,
-          checkId: input.checkId,
-          checkLabel: def.label,
-          mode,
-          dc: input.dc ?? null,
-          consequence: input.consequence ?? '',
-          status: 'pending',
-          requestedByUserId: user.id,
-          requestedByName: user.name ?? '',
-          rollId: null,
-          createdAt: ts,
-          resolvedAt: null,
-        })
-        .returning();
-      await this.audit.log({
-        actor: auditActor(user),
-        actorRole: role,
-        action: 'check.request',
-        entityType: 'character',
-        entityId: characterId,
-        campaignId,
-        detail:
-          `Requested ${def.label}` +
-          (input.dc != null ? ` vs DC ${input.dc}` : '') +
-          (input.consequence ? ` — consequence: ${input.consequence}` : ''),
-      });
-      this.events.emit({ type: 'check.requested', campaignId, requestId: row.id, characterId, userId: user.id });
+          detail:
+            `Requested ${label}` +
+            (input.dc != null ? ` vs DC ${input.dc}` : '') +
+            (input.consequence ? ` — consequence: ${input.consequence}` : ''),
+        },
+        () => `check.request audit row failed to write for character ${row.characterId} (request ${row.id})`,
+      );
       created.push(this.toCheckRequestDomain(row, charRow.name));
     }
     return created;
@@ -563,12 +636,19 @@ export class CharactersService {
    * List check requests visible to the caller (issue #415). The DM sees every request in the
    * campaign; a non-DM sees only requests targeting a character they OWN (the targeted player).
    * Optional `status` filter ('pending' | 'resolved'). Newest first.
+   *
+   * Optional `page` (issue #1943 review): the web group-check board refetches this on every
+   * `check.requested`/`check.resolved` SSE invalidation for the life of the campaign, so an
+   * unbounded result set would grow without end and get chattier the longer a campaign runs —
+   * precisely the worst time for a bigger payload. Uses the shared `applyPage`/`PageParams`
+   * pagination convention (same as sessions/audit/notes): omitted, this is fully backward
+   * compatible with every existing caller — unbounded, exactly as before.
    */
   async listCheckRequests(
     campaignId: number,
     user: RequestUser,
     role: Role,
-    opts: { status?: CheckRequest['status'] } = {},
+    opts: { status?: CheckRequest['status']; page?: PageParams } = {},
   ): Promise<CheckRequest[]> {
     // Visibility is pushed into the WHERE clause rather than filtered in memory (issue #415):
     // the DM sees every request in the campaign; a non-DM sees only requests targeting a
@@ -576,12 +656,15 @@ export class CharactersService {
     const conditions = [eq(checkRequests.campaignId, campaignId)];
     if (opts.status) conditions.push(eq(checkRequests.status, opts.status));
     if (role !== 'dm') conditions.push(eq(characters.ownerUserId, user.id));
-    const rows = await this.db
+    let query = this.db
       .select({ req: checkRequests, characterName: characters.name })
       .from(checkRequests)
       .innerJoin(characters, eq(checkRequests.characterId, characters.id))
       .where(and(...conditions))
-      .orderBy(desc(checkRequests.id));
+      .orderBy(desc(checkRequests.id))
+      .$dynamic();
+    query = applyPage(query, opts.page);
+    const rows = await query;
     return rows.map((r) => this.toCheckRequestDomain(r.req, r.characterName));
   }
 

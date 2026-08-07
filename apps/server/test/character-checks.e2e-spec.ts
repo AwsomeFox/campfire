@@ -1,5 +1,7 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { AuditService } from '../src/modules/audit/audit.service';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 
 /**
  * Roll catalog (issue #415) — server-resolved checks. The adapter owns the roll catalog, the
@@ -397,5 +399,259 @@ describe('DM check requests (e2e)', () => {
     const rolled = await request(server).post(`/api/v1/check-requests/${requestId}/roll`).set(owner).send({});
     expect(rolled.status).toBe(201);
     expect(rolled.body.request.status).toBe('resolved');
+  });
+});
+
+/**
+ * Group checks (issue #1943): `requestChecks` mints one `groupId` per call and stamps it on
+ * every row the call creates, so a "whole party" submit is recoverable as one group. Single-
+ * target behavior is the same code path (a size-1 group) — these tests pin both directions.
+ */
+describe('Group check requests (issue #1943, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let charA: number;
+  let charB: number;
+  let charC: number;
+  const playerA = { 'x-dev-role': 'player', 'x-dev-user': 'group-owner-a' };
+  const playerB = { 'x-dev-role': 'player', 'x-dev-user': 'group-owner-b' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Group Checks Campaign' });
+    campaignId = camp.body.id;
+
+    // Three characters owned by two different players, so list-scoping across a group can be
+    // exercised with more than one non-DM owner in the same submit.
+    const a = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Party A', ownerUserId: 'dev:group-owner-a', level: 3, hpMax: 20, hpCurrent: 20, stats: { DEX: 14 } });
+    charA = a.body.id;
+    const b = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Party B', ownerUserId: 'dev:group-owner-b', level: 3, hpMax: 20, hpCurrent: 20, stats: { DEX: 12 } });
+    charB = b.body.id;
+    const c = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Party C', ownerUserId: 'dev:group-owner-a', level: 3, hpMax: 20, hpCurrent: 20, stats: { DEX: 10 } });
+    charC = c.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('one submit targeting several characters creates that many pending rows sharing one non-null groupId', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB, charC], checkId: 'save:DEX', dc: 12 });
+    expect(res.status).toBe(201);
+    expect(res.body).toHaveLength(3);
+
+    const groupIds = new Set(res.body.map((r: { groupId: string | null }) => r.groupId));
+    expect(groupIds.size).toBe(1);
+    const [groupId] = [...groupIds];
+    expect(groupId).toEqual(expect.any(String));
+    expect(groupId).not.toBeNull();
+  });
+
+  it('distinct submits (even targeting the exact same characters) get distinct groupIds', async () => {
+    const server = ctx.app.getHttpServer();
+    const first = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB], checkId: 'save:DEX' });
+    const second = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB], checkId: 'save:DEX' });
+
+    expect(first.body[0].groupId).toEqual(expect.any(String));
+    expect(second.body[0].groupId).toEqual(expect.any(String));
+    expect(first.body[0].groupId).not.toBe(second.body[0].groupId);
+  });
+
+  it('a single-target submit is the same code path — still one row with a non-null groupId, otherwise unchanged', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA], checkId: 'save:DEX', dc: 8, consequence: 'Solo save.' });
+    expect(res.status).toBe(201);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].characterId).toBe(charA);
+    expect(res.body[0].dc).toBe(8);
+    expect(res.body[0].consequence).toBe('Solo save.');
+    expect(res.body[0].groupId).toEqual(expect.any(String));
+  });
+
+  it('a group send targeting two different players\' characters: each player sees only their own row, never the other\'s (list-scoping, extended for #1943)', async () => {
+    const server = ctx.app.getHttpServer();
+    const sent = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB], checkId: 'save:DEX', dc: 10 });
+    expect(sent.status).toBe(201);
+    const groupId = sent.body[0].groupId;
+
+    const aList = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/check-requests?status=pending`)
+      .set(playerA);
+    expect(aList.status).toBe(200);
+    const aGroupRows = aList.body.filter((r: { groupId: string | null }) => r.groupId === groupId);
+    expect(aGroupRows).toHaveLength(1);
+    expect(aGroupRows[0].characterId).toBe(charA);
+
+    const bList = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/check-requests?status=pending`)
+      .set(playerB);
+    expect(bList.status).toBe(200);
+    const bGroupRows = bList.body.filter((r: { groupId: string | null }) => r.groupId === groupId);
+    expect(bGroupRows).toHaveLength(1);
+    expect(bGroupRows[0].characterId).toBe(charB);
+
+    // Neither player's list ever contains the OTHER's row from this same group.
+    expect(aList.body.some((r: { characterId: number }) => r.characterId === charB)).toBe(false);
+    expect(bList.body.some((r: { characterId: number }) => r.characterId === charA)).toBe(false);
+
+    // The DM sees both rows of the group.
+    const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+    const dmGroupRows = dmList.body.filter((r: { groupId: string | null }) => r.groupId === groupId);
+    expect(dmGroupRows).toHaveLength(2);
+  });
+
+  // Issue #1943 review: the group-check board refetches this list on every SSE invalidation for
+  // the life of the campaign — an unbounded page would grow without end. `?limit`/`?offset`
+  // bound it (shared pagination convention); omitted, behavior is exactly as before (unbounded).
+  it('optional ?limit bounds the page; omitted still returns every visible row (back-compat)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Three more sends on top of everything already created by earlier tests in this block —
+    // guarantees there are strictly more than 2 rows visible to the DM at this point.
+    for (let i = 0; i < 3; i++) {
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+        .set(dm)
+        .send({ characterIds: [charA], checkId: 'save:DEX' });
+    }
+
+    const unbounded = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+    expect(unbounded.status).toBe(200);
+    expect(unbounded.body.length).toBeGreaterThan(2);
+
+    const bounded = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests?limit=2`).set(dm);
+    expect(bounded.status).toBe(200);
+    expect(bounded.body).toHaveLength(2);
+    // Newest-first ordering is preserved under the limit — the bounded page is exactly the
+    // first 2 rows of the unbounded page, not an arbitrary 2.
+    expect(bounded.body.map((r: { id: number }) => r.id)).toEqual(unbounded.body.slice(0, 2).map((r: { id: number }) => r.id));
+  });
+
+  // Issue #1943 review finding #7: requestChecks used to validate-then-insert inside one loop,
+  // so a LATER target's 404 threw after EARLIER targets' rows were already committed — a DM
+  // whose group send failed would see an error and reasonably believe nothing happened, while
+  // part of the party already had a live prompt under the same groupId. A rejected group must
+  // leave zero rows behind, for ANY of its targets, not just the one that failed validation.
+  it('a group send with a later invalid target leaves ZERO rows for the whole group — atomicity (#1943 review)', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+    expect(before.status).toBe(200);
+    const idsBefore = new Set(before.body.map((r: { id: number }) => r.id));
+
+    // charA and charB are valid, EARLIER targets that a validate-then-insert loop would already
+    // have committed by the time it reaches the third, nonexistent target id.
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+      .set(dm)
+      .send({ characterIds: [charA, charB, 9_999_999], checkId: 'save:DEX' });
+    expect(res.status).toBe(404);
+
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+    expect(after.status).toBe(200);
+    const newRows = after.body.filter((r: { id: number }) => !idsBefore.has(r.id));
+    // The dramatic assertion: NO new rows at all from this rejected send — not even for charA
+    // or charB, which a validate-then-insert loop would have already committed.
+    expect(newRows).toHaveLength(0);
+    expect(newRows.some((r: { characterId: number }) => r.characterId === charA)).toBe(false);
+    expect(newRows.some((r: { characterId: number }) => r.characterId === charB)).toBe(false);
+  });
+
+  // Issue #1943 review, round 6: the atomicity fix above wrapped the check-request inserts in
+  // a transaction, and the per-row audit write went inside it as a consequence — folding it
+  // onto AuditService#logInTx's ALL-OR-NOTHING guarantee. That bought nothing for the atomicity
+  // this transaction actually needs (which is only between the check-request rows themselves),
+  // and added a new failure mode: an audit-subsystem hiccup would now roll back a DM's entire
+  // valid send. requestChecks moved the audit write to a post-commit, best-effort
+  // `auditBestEffort` call (matching `AuditService#log`'s documented "an audit-subsystem outage
+  // must not undo a user's work" guarantee) — this is the honest behavioural test for that: a
+  // forced audit failure must NOT cost the DM their check requests, or the SSE ticks that tell
+  // players to look.
+  it('a failed audit write does not cost the DM their check requests or the SSE events that notify players (#1943 review, round 6)', async () => {
+    const server = ctx.app.getHttpServer();
+    const audit = ctx.app.get(AuditService);
+    const events = ctx.app.get(CampaignEventsService);
+
+    // In-process subscription to the SAME Subject the real SSE endpoint streams from (the
+    // pattern already used elsewhere in this test family, e.g. encounters.e2e-spec.ts) — a
+    // direct, non-contrived observation of whether the notification actually fired.
+    const broadcasts: Array<{ type: string; requestId?: number; characterId?: number }> = [];
+    const subscription = events.streamFor(campaignId).subscribe((event) => broadcasts.push(event));
+
+    // Mocks BOTH audit write paths, not just the one this fix actually uses — a mutation back
+    // to the pre-fix `logInTx` call would never touch `.log()` at all (they're two independent
+    // methods; see AuditService's doc comments), so a test that only fails `.log()` would pass
+    // against the old code for the wrong reason (the old code's audit write would simply
+    // "succeed" against an unmocked `logInTx`). Failing both makes this test discriminate on
+    // the actual guarantee — "does an audit failure survive" — regardless of which method the
+    // implementation happens to call.
+    const spy = jest.spyOn(audit, 'log').mockRejectedValue(new Error('audit table is unavailable'));
+    const spyInTx = jest.spyOn(audit, 'logInTx').mockImplementation(() => {
+      throw new Error('audit table is unavailable');
+    });
+    try {
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/check-requests`)
+        .set(dm)
+        .send({ characterIds: [charA, charB], checkId: 'save:DEX' });
+
+      // Not a 500, and not a partial result either — the requests genuinely committed even
+      // though every one of their audit rows failed to write.
+      expect(res.status).toBe(201);
+      expect(res.body).toHaveLength(2);
+      const createdIds = new Set(res.body.map((r: { id: number }) => r.id));
+
+      // The rows are really persisted (not silently rolled back by the audit failure) —
+      // read them back from a completely separate request.
+      const list = await request(server).get(`/api/v1/campaigns/${campaignId}/check-requests`).set(dm);
+      expect(list.status).toBe(200);
+      const persisted = list.body.filter((r: { id: number }) => createdIds.has(r.id));
+      expect(persisted).toHaveLength(2);
+      expect(persisted.some((r: { characterId: number }) => r.characterId === charA)).toBe(true);
+      expect(persisted.some((r: { characterId: number }) => r.characterId === charB)).toBe(true);
+
+      // Both SSE ticks landed too — the audit failure suppressed neither this row's own
+      // notification nor a LATER row's (which a naive shared try/catch around the whole loop
+      // could have done).
+      const ticks = broadcasts.filter((e) => e.type === 'check.requested' && createdIds.has(e.requestId as number));
+      expect(ticks).toHaveLength(2);
+
+      // The audit call really was attempted (and really did fail) for both rows, via the
+      // post-commit `log()` path this fix uses — not `logInTx`, which would prove this test is
+      // exercising the OLD (transactional, all-or-nothing) shape instead.
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(spyInTx).not.toHaveBeenCalled();
+      for (const call of spy.mock.calls) {
+        expect(call[0]).toMatchObject({ action: 'check.request' });
+      }
+    } finally {
+      spy.mockRestore();
+      spyInTx.mockRestore();
+      subscription.unsubscribe();
+    }
   });
 });
