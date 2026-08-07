@@ -362,14 +362,14 @@ function migrateUsersTableForColorVisionAssist1942(sqlite: Database.Database): v
  * modeled on migrateUsersTableForColorVisionAssist1942 above.
  */
 function migrateUsersTableForTableAudio1920(sqlite: Database.Database): void {
-  const hasUsersTable = sqlite
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-    .get();
-  if (!hasUsersTable) return;
-
-  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
-  const hasTableAudio = columns.some((c) => c.name === 'table_audio');
-  if (hasTableAudio) return;
+  // `sqlite.pragma(...)` rather than `prepare('PRAGMA table_info(users)').all()`, and
+  // `.exec` for the existence probe rather than `prepare(...).get()`: both avoid leaving
+  // a better-sqlite3 `Statement` alive for the process to destruct at teardown. Most
+  // migrations in this file still use the `prepare` form; this one is deliberately the
+  // narrow variant while the Node 24 `Statement::~Statement()` abort on #2050 is open.
+  const columns = sqlite.pragma('table_info(users)') as Array<{ name: string }>;
+  if (columns.length === 0) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+  if (columns.some((c) => c.name === 'table_audio')) return;
 
   sqlite.exec("ALTER TABLE users ADD COLUMN table_audio TEXT NOT NULL DEFAULT 'off'");
 }
