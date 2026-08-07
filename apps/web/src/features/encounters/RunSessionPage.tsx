@@ -938,15 +938,17 @@ export default function RunSessionPage() {
     const key = ++pingSeq.current;
     // Issue #1937: a labeled ping (an intent chosen from the long-press/right-click
     // menu) announces the intent alongside the sender; a plain tap keeps the original
-    // wording unchanged. Issue #2048: both branches derive from the same i18n keys
-    // as the visible ping log in BattleMap so the sentence never mixes languages.
-    if (ping.senderName && ping.label) {
-      announce(t('encounters.map.ping.log.labeled', { name: ping.senderName, label: ping.label }));
-    } else if (ping.senderName) {
-      announce(t('encounters.map.ping.log.plain', { name: ping.senderName }));
-    } else {
-      announce('A map ping arrived');
-    }
+    // wording unchanged. Issue #2048: this composes exactly as BattleMap's visible ping
+    // log does — same two keys, same `unknownSender` fallback — so the announcement a
+    // screen-reader user hears is the sentence that is on screen, in one language.
+    // Composing the null-sender case separately is what previously left it as a bare
+    // English literal that also silently dropped the intent label.
+    const senderName = ping.senderName || t('encounters.map.ping.log.unknownSender');
+    announce(
+      ping.label
+        ? t('encounters.map.ping.log.labeled', { name: senderName, label: ping.label })
+        : t('encounters.map.ping.log.plain', { name: senderName }),
+    );
     setPings((prev) => {
       const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);

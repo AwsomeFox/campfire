@@ -40,6 +40,11 @@ const OLD_LABELED_TEMPLATE = /\$\{[\w.]+\.senderName\}\s*pings:\s*\$\{[\w.]+\.la
 const OLD_PLAIN_TEMPLATE_BARE = /:\s*'pinged'/;
 const OLD_PLAIN_TEMPLATE_MAP = /pinged the map`/;
 const OLD_SENDER_FALLBACK = /\|\|\s*'Someone'/;
+// The fourth literal, one line below the three the issue enumerates: the null-sender
+// announcement branch. It is the same defect (an untranslated English sentence read
+// out to a non-English screen-reader user) and it additionally dropped the intent
+// label, so a senderless labeled ping announced less than the visible log showed.
+const OLD_ANON_ANNOUNCEMENT = /announce\('A map ping arrived'\)/;
 
 function readSrc(path: string): string {
   return readFileSync(path, 'utf8');
@@ -80,6 +85,20 @@ test.describe('ping log + announcement localization (#2048)', () => {
     for (const src of sources) {
       expect(src).toContain('encounters.map.ping.log.labeled');
       expect(src).toContain('encounters.map.ping.log.plain');
+      // Every site — including the two announcement sites — must route the null-sender
+      // case through the same fallback key the visible log uses, rather than branching
+      // off to a sentence of its own. This is the check that keeps the announcement and
+      // the on-screen text from drifting apart again.
+      expect(src).toContain("t('encounters.map.ping.log.unknownSender')");
+    }
+  });
+
+  test('neither announcement site keeps a separate untranslated null-sender sentence', () => {
+    for (const path of [RUN_SESSION_PAGE, PLAYER_DISPLAY_PAGE]) {
+      const src = readSrc(path);
+      expect(src, `${path} must not announce a bare English sentence for a senderless ping`).not.toMatch(
+        OLD_ANON_ANNOUNCEMENT,
+      );
     }
   });
 

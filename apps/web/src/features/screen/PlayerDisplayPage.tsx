@@ -497,16 +497,16 @@ export default function PlayerDisplayPage() {
   const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null; label?: string | null }) => {
     const key = ++mapPingSeq.current;
     // Issue #1937: mirrors RunSessionPage's announcement — a labeled (intent) ping
-    // includes the intent, a plain tap keeps the original wording. Issue #2048:
-    // both branches derive from the same i18n keys as the visible ping log in
-    // BattleMap so the sentence never mixes languages.
-    if (ping.senderName && ping.label) {
-      announce(t('encounters.map.ping.log.labeled', { name: ping.senderName, label: ping.label }));
-    } else if (ping.senderName) {
-      announce(t('encounters.map.ping.log.plain', { name: ping.senderName }));
-    } else {
-      announce('A map ping arrived');
-    }
+    // includes the intent, a plain tap keeps the original wording. Issue #2048: this
+    // composes exactly as BattleMap's visible ping log does — same two keys, same
+    // `unknownSender` fallback — so the announcement a screen-reader user hears is the
+    // sentence that is on screen, in one language.
+    const senderName = ping.senderName || t('encounters.map.ping.log.unknownSender');
+    announce(
+      ping.label
+        ? t('encounters.map.ping.log.labeled', { name: senderName, label: ping.label })
+        : t('encounters.map.ping.log.plain', { name: senderName }),
+    );
     setMapPings((prev) => {
       const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);
