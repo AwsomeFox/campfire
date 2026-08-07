@@ -10282,11 +10282,16 @@ describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
     await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${fighterId}`).set(dm).send({ initiative: 14 });
     await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${rogueId}`).set(dm).send({ initiative: 14 });
 
-    // Still PREPARING — no expectedTurnVersion, because there is no turn order yet.
+    // Still PREPARING. `expectedTurnVersion` is required by CombatantReorderRequest in
+    // every state (see combatant-reorder-schema.spec.ts, which pins that), so read the
+    // preparing encounter's current turnVersion and send it rather than omitting the CAS.
+    const prep = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const prepTurnVersion = prep.body.turnVersion as number;
+    expect(typeof prepTurnVersion).toBe('number');
     const res = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
       .set(dm)
-      .send({ afterCombatantId: wizardId });
+      .send({ afterCombatantId: wizardId, expectedTurnVersion: prepTurnVersion });
     expect(res.status).toBe(201);
 
     // While preparing, sortCombatants orders by sortOrder alone, so this much passed even

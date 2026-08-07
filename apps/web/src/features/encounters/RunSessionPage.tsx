@@ -3612,9 +3612,19 @@ export default function RunSessionPage() {
   const handleReorderDrop = useCallback(
     (combatantId: number, afterCombatantId: number | 'top') => {
       if (!encounter) return;
+      // The sync/in-flight gate lives HERE rather than only on each entry point's
+      // enabled-ness (#2074 review finding 3). `buildReorderControls` below already
+      // withholds the roster row's drag handle and menu on exactly these conditions, but
+      // `InitiativeStrip` was handed `canReorder={canEditEncounter}` — the DM/not-ended
+      // check alone — and funnels into this same mutation, so during an SSE outage that
+      // disabled every other conflict-prone write on the page a strip drag still went to
+      // the server, and a second drag could start before the first was confirmed.
+      // Gating the two entry points separately is what let them drift; gating the single
+      // write path they share makes them agree by construction.
+      if (reconcileBlocks || riskyBlocked || pendingCombatantIds.has(combatantId)) return;
       reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion });
     },
-    [encounter, reorderCombatant],
+    [encounter, reorderCombatant, reconcileBlocks, riskyBlocked, pendingCombatantIds],
   );
   const rosterDragReorder = useCombatantDragReorder({
     axis: 'y',
@@ -4764,7 +4774,10 @@ export default function RunSessionPage() {
               hpFeedbackByCombatant={hpFeedbackByCombatant}
               colorVisionAssist={me?.user.colorVisionAssist ?? false}
               revealTick={revealTick}
-              canReorder={canEditEncounter}
+              // Mirrors the roster row's gate (see `buildReorderControls`): a drag is a
+              // write, so an outage or a blocking reconcile must withdraw the affordance,
+              // not just have the drop silently swallowed by `handleReorderDrop`'s guard.
+              canReorder={canEditEncounter && !reconcileBlocks && !riskyBlocked}
               onReorderDrop={handleReorderDrop}
             />
           )}

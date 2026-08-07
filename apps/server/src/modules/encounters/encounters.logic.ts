@@ -495,7 +495,26 @@ export function sortCombatants(
     // pre-existing adapter-tiebreak tests (#2074 review round 2).
     const aManual = a.manualOrder ?? null;
     const bManual = b.manualOrder ?? null;
-    if (aManual !== null && bManual !== null) return aManual - bManual;
+    // A stamped row always precedes an unstamped one, rather than the two being compared
+    // by the adapter (#2074 review round 3). Consulting manualOrder ONLY when both sides
+    // carry it is not merely a gap — it makes the comparator NON-TRANSITIVE as soon as a
+    // tie mixes stamped and unstamped rows, because different pairs in the same group get
+    // decided by different rules. At initiative 14 with the 5e adapter:
+    //
+    //   A(manualOrder 0, initMod 1), B(manualOrder 1, initMod 3), C(unstamped, initMod 2)
+    //   A < B by manualOrder, B < C by initMod, C < A by initMod  →  a cycle.
+    //
+    // `Array.prototype.sort` with a cyclic comparator returns an implementation-defined
+    // order, and `sortCombatants` also derives `turnIndex`, so the DM would see a tie
+    // group reshuffle between refreshes. Ordering stamped-before-unstamped makes the whole
+    // group compare on one key and restores a total order: a combatant added after a
+    // manual reorder joins the END of its tie group, deterministically, and the DM can
+    // drag it wherever they want (which stamps it, and every other row, immediately).
+    if (aManual !== null || bManual !== null) {
+      if (aManual === null) return 1;
+      if (bManual === null) return -1;
+      if (aManual !== bManual) return aManual - bManual;
+    }
     return breakTie(a, b);
   });
 }
