@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import i18next from 'i18next';
+import { Dnd5eAdapter, Pf2eAdapter } from '@campfire/schema';
 import encountersEn from '../../src/i18n/locales/en/encounters.json';
 import encountersAr from '../../src/i18n/locales/ar/encounters.json';
 import charactersEn from '../../src/i18n/locales/en/characters.json';
@@ -71,7 +72,7 @@ test.describe('adapter resource/condition name localization (#2053)', () => {
   test('ResourceTrackerPanel.tsx: the per-combatant resource list no longer renders the raw stored name', () => {
     const src = readSrc(RESOURCE_TRACKER_PANEL);
     expect(src, 'must not render res.name || key directly').not.toMatch(OLD_RESOURCE_TRACKER_RAW);
-    expect(src).toContain('adapterResourceLabel(t, { key, name: res.name || key })');
+    expect(src).toContain('adapterResourceLabel(t, { key, name: res.name })');
   });
 
   test('BattleMap.tsx: the token condition badge no longer interpolates the raw condition string', () => {
@@ -209,3 +210,98 @@ test.describe('adapter resource/condition name localization (#2053)', () => {
     }
   });
 });
+
+/**
+ * Same-key, different-name resource collision (issue #2068 — a regression #2053
+ * introduced). Two shipped adapters declare `key: 'hitDice'` with different display
+ * names: 5e's is "Hit Dice", PF2e's is "Hit Dice / Stamina". The single catalog entry
+ * `encounters.adapterResource.hitDice` holds 5e's English value, so a plain
+ * key-only lookup silently overwrites PF2e's declared name with 5e's — wrong even
+ * under `en`, before translation enters into it.
+ *
+ * The trap: a test that renders under `en` and asserts the string "Hit Dice" PASSES
+ * AGAINST THE BUG, because "Hit Dice" is exactly what the bug produces for a 5e
+ * resource — and, unfixed, also for the PF2e one. The assertions below instead pin
+ * that a PF2e-declared resource renders ITS OWN name, under both `en` and `ar`, and
+ * that the fix does not cost 5e's matching case its translation.
+ */
+test.describe('adapter resource same-key/different-name collision (#2068)', () => {
+  const dnd5eHitDice = Dnd5eAdapter.resources?.find((r) => r.key === 'hitDice');
+  const pf2eHitDice = Pf2eAdapter.resources?.find((r) => r.key === 'hitDice');
+
+  test('fixture sanity: the real schema still declares the colliding pair this issue is about', () => {
+    // If either adapter's declaration changes shape, the rest of this describe block
+    // is testing a fixture that no longer matches production — fail loudly here first.
+    expect(dnd5eHitDice).toEqual({ key: 'hitDice', name: 'Hit Dice', recharge: 'long-rest' });
+    expect(pf2eHitDice?.key).toBe('hitDice');
+    expect(pf2eHitDice?.name).toBe('Hit Dice / Stamina');
+    expect(pf2eHitDice?.name).not.toBe(dnd5eHitDice?.name);
+  });
+
+  async function makeTranslator(lng: 'en' | 'ar') {
+    const translator = i18next.createInstance();
+    await translator.init({
+      resources: { en: { translation: encountersEn }, ar: { translation: encountersAr } },
+      lng,
+      fallbackLng: 'en',
+    });
+    return translator.t.bind(translator);
+  }
+
+  test('a PF2e-declared resource under a colliding key renders its OWN name under en, never 5e\'s', async () => {
+    const t = await makeTranslator('en');
+    const label = adapterResourceLabel(t, pf2eHitDice!);
+    expect(label).toBe('Hit Dice / Stamina');
+    expect(label).not.toBe('Hit Dice');
+  });
+
+  test('a PF2e-declared resource under a colliding key renders its OWN name under ar, never 5e\'s translated value', async () => {
+    const t = await makeTranslator('ar');
+    const label = adapterResourceLabel(t, pf2eHitDice!);
+    // Honest degradation: PF2e's name has no catalog entry of its own (the one entry
+    // under this key belongs to 5e's English value), so it renders correctly but
+    // untranslated rather than translated-but-wrong (5e's Arabic "hitDice" value).
+    expect(label).toBe('Hit Dice / Stamina');
+    expect(label).not.toBe(encountersAr.encounters.adapterResource.hitDice);
+  });
+
+  test('a 5e-declared resource under the SAME key still translates under ar (the fix does not disable the matching case)', async () => {
+    const t = await makeTranslator('ar');
+    const label = adapterResourceLabel(t, dnd5eHitDice!);
+    expect(label).toBe(encountersAr.encounters.adapterResource.hitDice);
+    expect(label).toMatch(ARABIC);
+  });
+
+  test('a homebrew key with no catalog entry at all still falls back to its own declared name', async () => {
+    const t = await makeTranslator('ar');
+    const label = adapterResourceLabel(t, { key: 'homebrewSoulEmber', name: 'Soul Ember' });
+    expect(label).toBe('Soul Ember');
+  });
+
+  test('a stored resource record with a DM/AI-customized name whose key collides keeps the customized name', async () => {
+    // A stored `CharacterResource` under key `hitDice` but with a caller-supplied name
+    // that is neither adapter's — the customized-name case the issue calls out as
+    // fixed "for free" by the English-match rule, since it also fails the match.
+    const t = await makeTranslator('en');
+    const customized = { key: 'hitDice', name: 'Vigor Dice (homebrew variant)' };
+    expect(adapterResourceLabel(t, customized)).toBe('Vigor Dice (homebrew variant)');
+
+    const tAr = await makeTranslator('ar');
+    expect(adapterResourceLabel(tAr, customized)).toBe('Vigor Dice (homebrew variant)');
+  });
+
+  test('a stored resource record with no display name (or name equal to key) falls back to the catalog entry', async () => {
+    // Issue #2068 review finding: when a resource pool is saved without a custom display name,
+    // `res.name` is either undefined or defaulted to its key (e.g. 'actionSurge').
+    // The name-match rule must not prevent those records from translating.
+    const tEn = await makeTranslator('en');
+    expect(adapterResourceLabel(tEn, { key: 'actionSurge', name: 'actionSurge' })).toBe('Action Surge');
+    expect(adapterResourceLabel(tEn, { key: 'actionSurge' })).toBe('Action Surge');
+
+    const tAr = await makeTranslator('ar');
+    expect(adapterResourceLabel(tAr, { key: 'actionSurge', name: 'actionSurge' })).toBe(encountersAr.encounters.adapterResource.actionSurge);
+    expect(adapterResourceLabel(tAr, { key: 'actionSurge', name: 'actionSurge' })).toMatch(ARABIC);
+    expect(adapterResourceLabel(tAr, { key: 'actionSurge' })).toBe(encountersAr.encounters.adapterResource.actionSurge);
+  });
+});
+
