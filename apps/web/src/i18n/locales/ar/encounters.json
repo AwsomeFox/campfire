@@ -203,7 +203,13 @@
           "look": "انظر",
           "danger": "خطر",
           "move": "تحرك هنا"
-        }
+        },
+        "logLabeled": "{{name}} يُشير: {{label}}",
+        "logPlain": "أشار {{name}}",
+        "announceLabeled": "{{name}} يُشير: {{label}}",
+        "announcePlain": "أشار {{name}} إلى الخريطة",
+        "announceAnonymous": "وصلت إشارة إلى الخريطة",
+        "defaultSender": "شخص ما"
       },
       "dragDistance": {
         "budget": "استُخدم {{used}} من {{max}} {{unit}}",

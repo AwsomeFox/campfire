@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Player Display — the cast-to-TV / "present" mode (issue #60).
  *
@@ -221,6 +222,7 @@ async function castRequest<T>(token: string, path: string, init?: RequestInit & 
 }
 
 export default function PlayerDisplayPage() {
+  const { t } = useTranslation();
   const { campaignId, token: castToken } = useParams<{ campaignId: string; token?: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
@@ -497,11 +499,11 @@ export default function PlayerDisplayPage() {
     // Issue #1937: mirrors RunSessionPage's announcement — a labeled (intent) ping
     // includes the intent, a plain tap keeps the original wording.
     if (ping.senderName && ping.label) {
-      announce(`${ping.senderName} pings: ${ping.label}`);
+      announce(t('encounters.map.ping.announceLabeled', { name: ping.senderName, label: ping.label }));
     } else if (ping.senderName) {
-      announce(`${ping.senderName} pinged the map`);
+      announce(t('encounters.map.ping.announcePlain', { name: ping.senderName }));
     } else {
-      announce('A map ping arrived');
+      announce(t('encounters.map.ping.announceAnonymous'));
     }
     setMapPings((prev) => {
       const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
@@ -510,7 +512,7 @@ export default function PlayerDisplayPage() {
     window.setTimeout(() => {
       setMapPings((prev) => prev.filter((p) => p.key !== key));
     }, 10000);
-  }, [announce]);
+  }, [announce, t]);
 
   const dismissMapPing = useCallback((key: number) => {
     setMapPings((prev) => prev.filter((p) => p.key !== key));

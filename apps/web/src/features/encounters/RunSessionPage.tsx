@@ -844,18 +844,18 @@ export default function RunSessionPage() {
     // menu) announces the intent alongside the sender; a plain tap keeps the original
     // wording unchanged.
     if (ping.senderName && ping.label) {
-      announce(`${ping.senderName} pings: ${ping.label}`);
+      announce(t('encounters.map.ping.announceLabeled', { name: ping.senderName, label: ping.label }));
     } else if (ping.senderName) {
-      announce(`${ping.senderName} pinged the map`);
+      announce(t('encounters.map.ping.announcePlain', { name: ping.senderName }));
     } else {
-      announce('A map ping arrived');
+      announce(t('encounters.map.ping.announceAnonymous'));
     }
     setPings((prev) => {
       const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);
     });
     setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 10000);
-  }, [announce]);
+  }, [announce, t]);
   const dismissPing = useCallback((key: number) => {
     setPings((prev) => prev.filter((p) => p.key !== key));
   }, []);

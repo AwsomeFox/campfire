@@ -203,7 +203,13 @@
           "look": "Look",
           "danger": "Danger",
           "move": "Move here"
-        }
+        },
+        "logLabeled": "{{name}} pings: {{label}}",
+        "logPlain": "{{name}} pinged",
+        "announceLabeled": "{{name}} pings: {{label}}",
+        "announcePlain": "{{name}} pinged the map",
+        "announceAnonymous": "A map ping arrived",
+        "defaultSender": "Someone"
       },
       "dragDistance": {
         "budget": "used {{used}} of {{max}} {{unit}}",
