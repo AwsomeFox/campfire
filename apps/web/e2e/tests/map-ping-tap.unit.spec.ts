@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import {
   armMapPingTap,
   decideMapPingTapRelease,
+  isMapPingIntentMenuKeyboardActivation,
   isMapPingKeyboardActivation,
   mapPingTapExceededSlop,
   mapPingTapTimedOut,
@@ -91,5 +92,33 @@ test.describe('map ping tap completion (issue #809)', () => {
     expect(isMapPingKeyboardActivation({ key: ' ', repeat: true })).toBe(false);
     expect(isMapPingKeyboardActivation({ key: 'Spacebar', repeat: true })).toBe(false);
     expect(isMapPingKeyboardActivation({ key: 'Enter', repeat: false })).toBe(true);
+  });
+
+  // Issue #2047: Shift+Enter/Space is reserved for opening the intent menu (below), so
+  // the plain-ping activation must not also fire for it — otherwise every Shift+Enter
+  // would send BOTH a plain ping and open the menu.
+  test('a plain keyboard ping activation excludes the Shift modifier', () => {
+    expect(isMapPingKeyboardActivation({ key: 'Enter', shiftKey: true })).toBe(false);
+    expect(isMapPingKeyboardActivation({ key: ' ', shiftKey: true })).toBe(false);
+    expect(isMapPingKeyboardActivation({ key: 'Enter', shiftKey: false })).toBe(true);
+  });
+
+  test('intent-menu keyboard activation requires Shift with Enter or Space, and no other modifier', () => {
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Enter', shiftKey: true })).toBe(true);
+    expect(isMapPingIntentMenuKeyboardActivation({ key: ' ', shiftKey: true })).toBe(true);
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Spacebar', shiftKey: true })).toBe(true);
+    // No Shift at all — this is the plain-ping activation's territory, not the menu's.
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Enter', shiftKey: false })).toBe(false);
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Enter' })).toBe(false);
+    // An extra Ctrl/Alt/Meta chord alongside Shift is left alone for the browser/OS/AT.
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Enter', shiftKey: true, ctrlKey: true })).toBe(false);
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Enter', shiftKey: true, altKey: true })).toBe(false);
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Enter', shiftKey: true, metaKey: true })).toBe(false);
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'a', shiftKey: true })).toBe(false);
+  });
+
+  test('held-key auto-repeat never counts as an intent-menu keyboard activation', () => {
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Enter', shiftKey: true, repeat: true })).toBe(false);
+    expect(isMapPingIntentMenuKeyboardActivation({ key: 'Enter', shiftKey: true, repeat: false })).toBe(true);
   });
 });

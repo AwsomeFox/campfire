@@ -346,9 +346,14 @@ test.describe('battle-map ping tap completion', () => {
 
     await surface.focus();
     await expect(surface).toBeFocused();
+    // Issue #2047 widened this label to advertise the Shift+Enter intent-menu path, since a
+    // keyboard user has no other way to discover it. Kept as an exact-string assertion
+    // rather than relaxed to `toContain` — the whole point of asserting the label is that a
+    // screen-reader user hears a specific, complete sentence, and a substring check would
+    // stop noticing if the rest of it were dropped.
     await expect(surface).toHaveAttribute(
       'aria-label',
-      'Ping the map center for everyone. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.',
+      'Ping the map center for everyone. Shift+Enter opens the Look, Danger, or Move here menu. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.',
     );
     await page.keyboard.press('Enter');
     await expect.poll(() => pings.length).toBe(1);
