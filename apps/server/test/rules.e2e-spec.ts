@@ -1989,11 +1989,26 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       const weapons = await request(server).get('/api/v1/rules/search').query({ q: 'Weapons', type: 'section' }).set(dm);
       expect(searchItems(weapons.body).some((e: { name: string }) => e.name === 'Equipment: Weapons')).toBe(true);
 
-      // A campaign can select the installed Cepheus pack (validateRuleSystem requires it exist).
+      // Issue #2081: Cepheus is a full importer (reference text is fully usable, as proven
+      // above — search, license, attribution all work) but has no registered combat adapter,
+      // so a campaign must NOT be able to select it as its live `ruleSystem` — doing so would
+      // silently run a 2D6 campaign as D&D 5e (d20 initiative, 5e ability modifiers, 5e
+      // conditions/action economy/death saves, maxLevel 20, a concrete 5e XP suggestion).
       const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Cepheus Campaign' });
       const patchRes = await request(server).patch(`/api/v1/campaigns/${campRes.body.id}`).set(dm).send({ ruleSystem: 'cepheus-srd' });
-      expect(patchRes.status).toBe(200);
-      expect(patchRes.body.ruleSystem).toBe('cepheus-srd');
+      expect(patchRes.status).toBe(400);
+      expect(patchRes.body.message).toMatch(/importer-only/i);
+      // Still unset — the rejected write did not partially apply.
+      const afterReject = await request(server).get(`/api/v1/campaigns/${campRes.body.id}`).set(dm);
+      expect(afterReject.body.ruleSystem).toBe('');
+
+      // create() rejects it too, not just update() — both write paths run the same guard.
+      const createRejected = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: 'Cepheus Campaign 2', ruleSystem: 'cepheus-srd' });
+      expect(createRejected.status).toBe(400);
+      expect(createRejected.body.message).toMatch(/importer-only/i);
 
       // Cepheus has no per-statblock section vocabulary; a 5e section is rejected 400.
       const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'cepheus', url: fake.baseUrl, sections: ['spells'] });
