@@ -19,7 +19,7 @@ import {
   NEUTRAL_ACTION_ECONOMY,
   NEUTRAL_HP_MODEL,
   ruleSystemAdapter,
-  type RuleSystemAdapter,
+  RuleSystemAdapter,
 } from '@campfire/schema';
 
 /**

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { RuleEntry } from '@campfire/schema';
+import type { RuleEntry, CustomMechanicsProfile } from '@campfire/schema';
 import { api, API } from '../../../lib/api';
 import { Skeleton } from '../../../components/ui';
 import { StatBlock, hasMonsterStatblock } from '../../../components/StatBlock';
@@ -16,10 +16,11 @@ import { useDisclosure } from '../../../components/useDisclosure';
 export type Props = {
   ruleEntryId: number;
   ruleSystem: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   campaignId?: number;
 };
 
-export function CombatantStatblock({ ruleEntryId, ruleSystem, campaignId }: Props) {
+export function CombatantStatblock({ ruleEntryId, ruleSystem, customMechanicsProfile, campaignId }: Props) {
   useTranslation();
   const { open, setOpen, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
@@ -78,8 +79,8 @@ export function CombatantStatblock({ ruleEntryId, ruleSystem, campaignId }: Prop
             <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
               Couldn&apos;t load the statblock.
             </p>
-          ) : entry && hasMonsterStatblock(entry.dataJson, ruleSystem) ? (
-            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} />
+          ) : entry && hasMonsterStatblock(entry.dataJson, ruleSystem, customMechanicsProfile) ? (
+            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} customMechanicsProfile={customMechanicsProfile} />
           ) : (
             <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
               No statblock details for this entry.

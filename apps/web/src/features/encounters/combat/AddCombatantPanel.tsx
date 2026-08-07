@@ -1,7 +1,7 @@
 import type * as React from 'react';
 import { useEffect, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { CampaignLibraryMonster, Character, CombatantKind, CombatantStatblock as CombatantStatblockData, Npc, RuleEntry } from '@campfire/schema';
+import type { CampaignLibraryMonster, Character, CombatantKind, CombatantStatblock as CombatantStatblockData, CustomMechanicsProfile, Npc, RuleEntry } from '@campfire/schema';
 import { COMBATANT_STATBLOCK_HELP, defaultCombatantStatblock } from '@campfire/schema';
 import { api, API, translateApiError } from '../../../lib/api';
 import { useAnnounce } from '../../../components/Announcer';
@@ -33,6 +33,7 @@ export type Props = {
   characters: Character[];
   existingCombatantCharacterIds: Set<number>;
   rulePack: string;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   onAdded: () => Promise<void> | void;
 };
 
@@ -42,6 +43,7 @@ export function AddCombatantPanel({
   characters,
   existingCombatantCharacterIds,
   rulePack,
+  customMechanicsProfile,
   onAdded,
 }: Props) {
   const { t } = useTranslation();
@@ -512,7 +514,7 @@ export function AddCombatantPanel({
         <p className="text-[11px] text-muted m-0" title={COMBATANT_STATBLOCK_HELP.library}>
           {COMBATANT_STATBLOCK_HELP.library}
         </p>
-        <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} ruleSystem={rulePack} />
+        <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} ruleSystem={rulePack} customMechanicsProfile={customMechanicsProfile} />
       </div>
 
       <div

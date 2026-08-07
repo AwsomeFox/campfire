@@ -537,6 +537,7 @@ export const HomebrewMechanicsProfile = z
   })
   .strict();
 export type HomebrewMechanicsProfile = z.infer<typeof HomebrewMechanicsProfile>;
+export type CustomMechanicsProfile = HomebrewMechanicsProfile;
 
 /**
  * Non-throwing sibling for RESOLUTION (review). `ruleSystemAdapter` runs on hot read paths —

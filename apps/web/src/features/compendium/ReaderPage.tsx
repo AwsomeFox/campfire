@@ -38,7 +38,9 @@ export default function ReaderPage() {
   const navigate = useNavigate();
   // Resolve the statblock adapter from the active campaign's rule system (issue #234),
   // not the 5e default baked in at the call site.
-  const ruleSystem = useCampaign(Number.isFinite(id) ? id : undefined)?.ruleSystem ?? null;
+  const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
+  const ruleSystem = campaign?.ruleSystem ?? null;
+  const customMechanicsProfile = campaign?.customMechanicsProfile ?? null;
   // Only the DM (of this campaign) may set an entry's icon override (issue #305) — the
   // PATCH is server-side gated to admin/DM too; this just hides the control for players.
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
@@ -243,8 +245,8 @@ export default function ReaderPage() {
               already-installed packs render correctly without a reinstall. */}
           {entry.body.trim() ? (
             <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
-          ) : hasMonsterStatblock(entry.dataJson, ruleSystem) ? (
-            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} headingLevel={2} />
+          ) : hasMonsterStatblock(entry.dataJson, ruleSystem, customMechanicsProfile) ? (
+            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} customMechanicsProfile={customMechanicsProfile} headingLevel={2} />
           ) : (
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import type { RuleEntry, RulePack, RuleSearchPage } from '@campfire/schema';
+import type { RuleEntry, RulePack, RuleSearchPage, CustomMechanicsProfile } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 export interface RulesLookupPanelProps {
   campaignId: number;
   ruleSystem?: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
 }
 
 /** Filter homebrew entries by search query (name, summary, body). Returns empty array when query is blank. */
@@ -93,7 +94,7 @@ export function resolvePackSlug(packId: number | undefined, packSlugMap: Map<num
   return packSlugMap.get(packId) ?? null;
 }
 
-export function RulesLookupPanel({ campaignId, ruleSystem }: RulesLookupPanelProps) {
+export function RulesLookupPanel({ campaignId, ruleSystem, customMechanicsProfile }: RulesLookupPanelProps) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -293,8 +294,8 @@ export function RulesLookupPanel({ campaignId, ruleSystem }: RulesLookupPanelPro
                       <div className="pt-2 border-t border-subtle reading-supporting overflow-x-auto text-xs space-y-2">
                         {entry.body && entry.body.trim() ? (
                           <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
-                        ) : hasMonsterStatblock(entry.dataJson, statblockSystem) ? (
-                          <StatBlock data={entry.dataJson} ruleSystem={statblockSystem} headingLevel={3} />
+                        ) : hasMonsterStatblock(entry.dataJson, statblockSystem, customMechanicsProfile) ? (
+                          <StatBlock data={entry.dataJson} ruleSystem={statblockSystem} customMechanicsProfile={customMechanicsProfile} headingLevel={3} />
                         ) : entry.summary ? (
                           <p className="text-muted" style={{ margin: 0 }}>{entry.summary}</p>
                         ) : (

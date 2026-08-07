@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { ActionSpec, Character, Combatant, TokenSize } from '@campfire/schema';
+import type { ActionSpec, Character, Combatant, TokenSize, CustomMechanicsProfile } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
 import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
@@ -97,6 +97,7 @@ export type CombatantRowProps = {
   defaultConditionSourceCombatantId: number | null;
   /** Active campaign's rule system — selects the statblock adapter (issue #234). */
   ruleSystem: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   onHpDelta: (delta: number) => void;
   onSetTempHp: (value: number) => void;
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
@@ -173,6 +174,7 @@ export function CombatantRow({
   conditionSourceOptions,
   defaultConditionSourceCombatantId,
   ruleSystem,
+  customMechanicsProfile,
   onHpDelta,
   onSetTempHp,
   onSetDeathSaves,
@@ -231,7 +233,10 @@ export function CombatantRow({
     );
   }, [defaultConditionSourceCombatantId]);
 
-  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const adapter = useMemo(
+    () => ruleSystemAdapter(ruleSystem, customMechanicsProfile),
+    [ruleSystem, customMechanicsProfile],
+  );
   const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
   const hasSfPools = isStarfinder || (combatant.spMax != null && combatant.spMax > 0) || (combatant.rpMax != null && combatant.rpMax > 0);
 
@@ -1250,6 +1255,7 @@ export function CombatantRow({
               value={combatant.statblock}
               onChange={(next) => onPatchCombatant?.({ statblock: next })}
               ruleSystem={ruleSystem}
+              customMechanicsProfile={customMechanicsProfile}
             />
           </details>
         )}
@@ -1274,6 +1280,7 @@ export function CombatantRow({
             <CharacterStatCard
               character={character}
               ruleSystem={ruleSystem}
+              customMechanicsProfile={customMechanicsProfile}
               defaultOpen={openCardByDefault}
               openOnActiveTurn={openCardOnActiveTurn}
               /* Click-to-roll only from an active owned card, or any card for the DM. */
