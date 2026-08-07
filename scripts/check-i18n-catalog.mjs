@@ -1,13 +1,8 @@
 #!/usr/bin/env node
 /**
-<<<<<<< HEAD
- * CI guard for issue #629, #1940, #2059, #2069, and #2073 — translation catalog completeness,
- * i18n surface checks, JSX text ratchet, and a per-file untranslated-value ratchet.
-=======
- * CI guard for issue #629, #1940, #2059, and #2066 — translation catalog completeness, i18n
- * surface checks, JSX text ratchet, a per-file untranslated-value ratchet, and a namespace-
- * reachability check.
->>>>>>> ac46dbfb1 (fix(i18n): stop useTranslation('encounters') from silently disabling t() (#2066))
+ * CI guard for issue #629, #1940, #2059, #2069, #2073, and #2066 — translation catalog
+ * completeness, i18n surface checks, JSX text ratchet, a per-file untranslated-value ratchet,
+ * an empty-value hard failure, and a namespace-reachability check.
  *
  * 1. Every non-English catalog under `locales/<lng>/` mirrors the English keys.
  * 2. Target feature surfaces must not contain obvious hardcoded user-facing strings.
@@ -127,7 +122,6 @@ function checkKeyParity() {
 }
 
 /**
-<<<<<<< HEAD
  * Pure hard-failure rule (issue #2073): no leaf value in a catalog may be the empty string or
  * whitespace-only. Reports the offending locale and dotted key path.
  *
@@ -162,15 +156,12 @@ function checkEmptyValues() {
   return errors;
 }
 
-/** @param {string} dir */
-function walkSourceFiles(dir) {
-=======
+/**
  * @param {string} dir
  * @param {string[]} [extensions] file extensions to include (default `.tsx` only, the
  *   pre-#2066 behavior every existing caller relies on).
  */
 function walkSourceFiles(dir, extensions = ['.tsx']) {
->>>>>>> ac46dbfb1 (fix(i18n): stop useTranslation('encounters') from silently disabling t() (#2066))
   /** @type {string[]} */
   const out = [];
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
