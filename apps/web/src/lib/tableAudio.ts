@@ -277,9 +277,14 @@ export class TableAudioEngine {
     this.ctx = ctx;
     if (ctx.state === 'suspended') {
       try {
-        void ctx.resume();
+        // `Promise.resolve(...)` normalizes the `void | Promise<void>` return: the real DOM
+        // AudioContext.resume() returns a promise that REJECTS when the context is closed or
+        // the user agent refuses to start it, and a bare try/catch only intercepts the
+        // synchronous half — the rejection would escape as an unhandled rejection and fire a
+        // global error reporter on a feature designed to fail silently (Devin review, #2050).
+        void Promise.resolve(ctx.resume()).catch(() => undefined);
       } catch {
-        /* resume is advisory — a rejected/throwing resume still leaves a usable locked state */
+        /* resume is advisory — a synchronously throwing resume still leaves a usable locked state */
       }
     }
   }
