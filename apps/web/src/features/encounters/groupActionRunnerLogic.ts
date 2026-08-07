@@ -129,12 +129,23 @@ export interface GroupActionRunOutcome {
   stoppedEarly: boolean;
 }
 
-/** The server's code for "this actor's action-economy slot for this cost is already spent
- *  this turn" (`ActionResolverService`'s apply-time economy guard, action-resolver.service.ts).
- *  Distinguishing this from every other failure is what lets a spent slot be SKIPPED rather
- *  than treated as a loop-stopping error (issue #1922 acceptance). */
+/**
+ * Server codes meaning "this actor simply has nothing left to spend", as opposed to a real
+ * failure. Distinguishing these from every other error is what lets such an actor be SKIPPED
+ * rather than stop the loop (issue #1922 acceptance).
+ *
+ *  - `action_economy_exhausted` — the action/bonus/reaction slot for this cost is already
+ *    spent this turn (`ActionResolverService`'s apply-time economy guard).
+ *  - `action_uses_exhausted` — the limited-use/recharge pool is empty (issue #1921). The
+ *    "Run for group" button is gated on the SOURCE row's remaining uses, but every other
+ *    candidate carries its OWN `action_uses` entry, so the loop still meets exhausted ones.
+ *    Without this, a pack where one monster had already used the ability would abort the run
+ *    and leave the rest of the pack unrun.
+ */
+const SKIPPABLE_EXHAUSTION_CODES = new Set(['action_economy_exhausted', 'action_uses_exhausted']);
+
 export function isActionEconomyExhausted(err: unknown): boolean {
-  return err instanceof ApiError && err.code === 'action_economy_exhausted';
+  return err instanceof ApiError && err.code != null && SKIPPABLE_EXHAUSTION_CODES.has(err.code);
 }
 
 function errorMessageFrom(err: unknown): string {

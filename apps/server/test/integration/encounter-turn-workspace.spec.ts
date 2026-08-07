@@ -2484,7 +2484,11 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
     const event = latestEvent(orm, encounterId);
     expect(event.type).toBe('resource_changed');
     expect(event.actorId).toBe(drake);
-    expect(event.detail).toContain('Breath Weapon recharges');
+    expect(event.detail).toContain('recharges');
+    // The ability's NAME must NOT reach this player-visible log line — it would expose the
+    // statblock of a monster the DM may not have revealed (#1926). See the secrecy note on
+    // the rechargeRolls append in encounters.service.ts.
+    expect(event.detail).not.toContain('Breath Weapon');
     expect(event.detail).toContain('rolled 6');
 
     // Usable again.
@@ -2510,7 +2514,8 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
 
     const event = latestEvent(orm, encounterId);
     expect(event.type).toBe('resource_changed');
-    expect(event.detail).toContain('Breath Weapon stays spent');
+    expect(event.detail).toContain('stays spent');
+    expect(event.detail).not.toContain('Breath Weapon');
     expect(event.detail).toContain('rolled 2');
 
     // Still exhausted — a second apply attempt is refused.
@@ -2545,7 +2550,8 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
     const row = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
     expect(JSON.parse(row.actionUses ?? '{}')[usesKey].spent).toBe(1);
     const event = latestEvent(orm, encounterId);
-    expect(event.detail).toContain('Breath Weapon recharge undone');
+    expect(event.detail).toContain('recharge undone');
+    expect(event.detail).not.toContain('Breath Weapon');
   });
 
   it('an X/day pool never auto-recharges mid-encounter, even across several turn advances', async () => {
@@ -2694,7 +2700,8 @@ describe('recharge action turn tick (real SQLite, service layer, issue #1921)', 
 
     const event = latestEvent(orm, encounterId);
     expect(event.type).toBe('resource_changed');
-    expect(event.detail).toContain('Breath Weapon uses set by DM');
+    expect(event.detail).toContain('uses set by DM');
+    expect(event.detail).not.toContain('Breath Weapon');
   });
 
   it('a player may not force-toggle an action’s spend state, even on their OWN character combatant (403)', async () => {

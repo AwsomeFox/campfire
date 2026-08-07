@@ -385,7 +385,14 @@ export function parseRechargeRange(recharge: string): { min: number; max: number
  */
 export function effectiveActionUsesMax(uses: ActionUses): number {
   if (uses.max > 0) return uses.max;
-  return uses.recharge.trim() !== '' ? 1 : 0;
+  // Only a DIE-ROLL recharge condition implies an untyped pool of one. `recharge` also
+  // carries rest cadences ('short-rest', 'long-rest', 'dawn'), and those have no
+  // in-encounter refresh path: the turn-start tick filters candidates through
+  // `parseRechargeRange`, which returns null for them, and nothing resets
+  // `combatants.action_uses` on a rest yet. Treating a rest cadence as a one-use pool
+  // would therefore permanently exhaust an ability that used to be at-will, with no way
+  // to get it back inside the fight.
+  return parseRechargeRange(uses.recharge) ? 1 : 0;
 }
 
 /**

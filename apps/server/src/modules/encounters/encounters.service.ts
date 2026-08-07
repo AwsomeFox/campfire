@@ -5599,14 +5599,17 @@ export class EncountersService {
     }
 
     // Issue #1921: log the DM's manual override of an action's limited-use/recharge spend.
-    // The action's own name is freely embedded in `detail` (it is not combatant identity —
-    // see `resolution.actionName` usage elsewhere in this file); only the COMBATANT's name
-    // stays off `detail` (#869), same convention as the reveal toggle above.
+    // The ability's NAME is deliberately omitted for the same reason as the turn-start
+    // recharge log (see `rechargeRolls` in nextTurn): the combat log is readable by every
+    // campaign member, `redactEncounterEventsForViewer` masks only hidden-combatant
+    // identity rather than action names, and this fires for a monster whose statblock may
+    // be deliberately unrevealed (#1926). `actionUsesLabel` is still resolved — it gates
+    // whether the event is written at all — but only the COMBATANT lands on the event.
     if (actionUsesPatch && actionUsesLabel) {
       await this.appendEvent(encounterId, round, 'resource_changed', {
         target: targetName,
         targetId: combatantId,
-        detail: `${actionUsesLabel} uses set by DM`,
+        detail: 'limited-use ability uses set by DM',
       });
     }
 
@@ -7615,16 +7618,25 @@ export class EncountersService {
     }
     // Issue #1921: one combat-log line per recharge roll on the starting combatant's turn —
     // both outcomes are logged (acceptance criterion), under the NEW round (the roll happens
-    // at the start of the combatant's turn, not the end of the prior one). The action name is
-    // freely embedded in `detail` (unlike a combatant's own name — see `resolution.actionName`
-    // usage elsewhere in this file); only combatant identity is redaction-sensitive (#869).
+    // at the start of the combatant's turn, not the end of the prior one).
+    //
+    // The ability's NAME is deliberately NOT in `detail`. An earlier revision embedded it,
+    // reasoning by analogy with `resolution.actionName` elsewhere in this file — but that
+    // analogy breaks: an action USE is logged because the table just watched it happen. A
+    // recharge roll is invisible bookkeeping that fires every turn for an ability that may
+    // never have been used, on a monster whose statblock the DM may have deliberately left
+    // unrevealed (#1926) and whose action list 403s a non-DM. The combat log is readable by
+    // every campaign member and `redactEncounterEventsForViewer` masks only hidden-combatant
+    // identity, not action names, so naming the ability here would hand players a statblock
+    // the server otherwise withholds. Recovering the name for the DM needs a DM-only log
+    // channel, which does not exist yet — that is the follow-up, not a reason to leak now.
     for (const r of rechargeRolls) {
       await this.appendEvent(encounterId, newRound, 'resource_changed', {
         actor: r.combatantName,
         actorId: r.combatantId,
         detail: r.recovered
-          ? `${r.actionName} recharges (rolled ${r.roll}, needed ${r.needs}+)`
-          : `${r.actionName} stays spent (rolled ${r.roll}, needed ${r.needs}+)`,
+          ? `a limited-use ability recharges (rolled ${r.roll}, needed ${r.needs}+)`
+          : `a limited-use ability stays spent (rolled ${r.roll}, needed ${r.needs}+)`,
       });
     }
     if (escalationLogDetail) {
@@ -7970,11 +7982,13 @@ export class EncountersService {
         });
       }
       // Issue #1921: undoing a turn advance that recharged an action puts it back to spent.
-      for (const name of entry.actionUsesNames) {
+      // The ability's NAME stays out of `detail` for the same secrecy reason as the forward
+      // recharge log — this is player-visible and would expose an unrevealed statblock.
+      for (const _name of entry.actionUsesNames) {
         await this.appendEvent(encounterId, newRound, 'resource_changed', {
           actor: entry.combatantName,
           actorId: entry.combatantId,
-          detail: `${name} recharge undone`,
+          detail: 'limited-use ability recharge undone',
         });
       }
     }

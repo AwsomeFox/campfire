@@ -138,6 +138,18 @@ describe('combatant statblock expansion (issue #425)', () => {
       expect(effectiveActionUsesMax(action.spec!.uses)).toBe(1);
     });
 
+    // Devin review on PR #2062: `recharge` also carries REST cadences, and those have no
+    // in-encounter refresh path — the turn-start tick filters through `parseRechargeRange`,
+    // which rejects them, and nothing resets action_uses on a rest yet. Treating them as a
+    // pool of one would permanently exhaust an ability that used to be at-will.
+    it('a rest cadence is NOT an implied pool of one, because nothing can refresh it mid-encounter', () => {
+      for (const recharge of ['short-rest', 'long-rest', 'dawn']) {
+        expect(effectiveActionUsesMax({ max: 0, recharge, concentration: false, repeatSave: false, spellLevel: 0, resourceKey: '', resourceCost: 0 })).toBe(0);
+      }
+      // ...while an explicit X/day pool alongside a rest cadence is still tracked on its max.
+      expect(effectiveActionUsesMax({ max: 2, recharge: 'long-rest', concentration: false, repeatSave: false, spellLevel: 0, resourceKey: '', resourceCost: 0 })).toBe(2);
+    });
+
     it('a bare "Recharge 6" free-text label (no structured type) still parses via the regex fallback', () => {
       const action = expandRawStatblockAction(
         { name: 'Frost Ray', desc: 'Cold.', attack_bonus: 6, usage: { label: 'Recharge 6' } },
