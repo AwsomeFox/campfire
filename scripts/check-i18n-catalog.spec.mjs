@@ -5,9 +5,11 @@ import {
   looksUntranslated,
   countUntranslatedInCatalog,
   evaluateTranslationRatchet,
+  NON_LATIN_SCRIPT_DETECTORS,
 } from './check-i18n-catalog.mjs';
 
-const AR_SCRIPT_RE = /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/;
+// Use the real detector rather than a copy, so a change to it cannot silently pass these fixtures.
+const AR_SCRIPT_RE = NON_LATIN_SCRIPT_DETECTORS.ar;
 
 // Fixture 1: Plain hardcoded JSX text node -> MUST flag
 const hardcodedFixture = '<div><button>Save Changes</button></div>';
@@ -41,6 +43,16 @@ assert.strictEqual(looksUntranslated('لوحة القيادة', AR_SCRIPT_RE), f
 // Keyboard-shortcut-style token, legitimately identical across locales -> MUST NOT flag
 assert.strictEqual(looksUntranslated('Shift+Enter', AR_SCRIPT_RE), false);
 assert.strictEqual(looksUntranslated('Ctrl+K', AR_SCRIPT_RE), false);
+
+// Ordinary hyphenated English is prose, NOT a shortcut -> MUST flag. Only `+` joins a shortcut;
+// treating `-` as a separator too would exempt exactly the copy this ratchet exists to catch.
+assert.strictEqual(looksUntranslated('Read-only', AR_SCRIPT_RE), true);
+assert.strictEqual(looksUntranslated('Drag-and-drop', AR_SCRIPT_RE), true);
+assert.strictEqual(looksUntranslated('24-hour', AR_SCRIPT_RE), true);
+
+// A zero-width no-break space (U+FEFF) closes the Arabic Presentation Forms-B block but is not
+// Arabic text -> MUST still flag, otherwise a stray invisible character defeats the whole check.
+assert.strictEqual(looksUntranslated('Dashboard﻿', AR_SCRIPT_RE), true);
 
 // Placeholder-only value, nothing to translate -> MUST NOT flag
 assert.strictEqual(looksUntranslated('{{count}}', AR_SCRIPT_RE), false);

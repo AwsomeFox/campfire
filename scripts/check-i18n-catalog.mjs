@@ -13,7 +13,7 @@
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const localesRoot = join(root, 'apps/web/src/i18n/locales');
@@ -209,14 +209,18 @@ function checkJsxTextRatchet() {
  * Only locales listed here are checked by `checkTranslationRatchet`; a future Latin-script locale
  * would need a different detection strategy, which is out of scope for issue #2059.
  */
-const NON_LATIN_SCRIPT_DETECTORS = {
-  // Arabic, Arabic Supplement, Arabic Extended-A, Arabic Presentation Forms-A/B.
-  ar: /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/,
+export const NON_LATIN_SCRIPT_DETECTORS = {
+  // Arabic, Arabic Supplement, Arabic Extended-A, Arabic Presentation Forms-A/B. Forms-B stops at
+  // U+FEFC, the last assigned ligature — deliberately NOT U+FEFF, which ends the block but is
+  // ZWNBSP/BOM. A stray zero-width character is not evidence that a value was translated.
+  ar: /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-ﻼ]/,
 };
 
 // Keyboard-shortcut-style token, e.g. "Shift+Enter", "Ctrl+K", "Cmd+Shift+P" — legitimately
-// identical across locales, not prose that needs translating.
-const SHORTCUT_LIKE_RE = /^([A-Za-z0-9]+[+-])+[A-Za-z0-9]+$/;
+// identical across locales, not prose that needs translating. Only `+` joins a shortcut; allowing
+// `-` here would also exempt ordinary hyphenated English ("Read-only", "Drag-and-drop", "24-hour"),
+// which is exactly the prose this ratchet exists to catch.
+const SHORTCUT_LIKE_RE = /^([A-Za-z0-9]+\+)+[A-Za-z0-9]+$/;
 
 /**
  * Proxy for "this catalog value still reads as untranslated English" (issue #2059). A value
@@ -316,17 +320,26 @@ function checkTranslationRatchet() {
   return evaluateTranslationRatchet(counts, baseline);
 }
 
-const parityErrors = checkKeyParity();
-const surfaceErrors = checkHardcodedSurfaces();
-const ratchetErrors = checkJsxTextRatchet();
-const translationRatchetErrors = checkTranslationRatchet();
-const errors = [...parityErrors, ...surfaceErrors, ...ratchetErrors, ...translationRatchetErrors];
+function main() {
+  const parityErrors = checkKeyParity();
+  const surfaceErrors = checkHardcodedSurfaces();
+  const ratchetErrors = checkJsxTextRatchet();
+  const translationRatchetErrors = checkTranslationRatchet();
+  const errors = [...parityErrors, ...surfaceErrors, ...ratchetErrors, ...translationRatchetErrors];
 
-if (errors.length > 0) {
-  console.error('check-i18n-catalog: failures:\n- ' + errors.join('\n- '));
-  process.exit(1);
+  if (errors.length > 0) {
+    console.error('check-i18n-catalog: failures:\n- ' + errors.join('\n- '));
+    process.exit(1);
+  }
+
+  console.log(
+    `check-i18n-catalog: ok — ${listLocaleDirs().length} locale(s), ${flattenKeys(loadMergedLocale(enDir)).length} English keys`,
+  );
 }
 
-console.log(
-  `check-i18n-catalog: ok — ${listLocaleDirs().length} locale(s), ${flattenKeys(loadMergedLocale(enDir)).length} English keys`,
-);
+// Only scan the repository when run as a script. `check-i18n-catalog.spec.mjs` imports the pure
+// helpers above; without this guard that import also runs the full repository check, so a fixture
+// suite could not report on its own.
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main();
+}
