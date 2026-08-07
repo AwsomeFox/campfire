@@ -237,7 +237,12 @@
           "move": "Move here"
         },
         "surfaceAriaLabel": "Ping the map center for everyone. {{hint}} Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.",
-        "toolHelp": "Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone. {{hint}}"
+        "toolHelp": "Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone. {{hint}}",
+"log": {
+          "unknownSender": "Someone",
+          "labeled": "{{name}} pings: {{label}}",
+          "plain": "{{name}} pinged the map"
+        }
       },
       "dragDistance": {
         "budget": "used {{used}} of {{max}} {{unit}}",

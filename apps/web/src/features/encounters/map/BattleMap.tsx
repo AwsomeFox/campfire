@@ -3340,11 +3340,14 @@ export const BattleMap = memo(function BattleMap({
               <div className="absolute top-2 left-2 flex flex-col gap-1 z-20 pointer-events-none" style={{ maxWidth: 200 }}>
                 {pings.slice().reverse().map((p) => {
                   const intentIcon = pingIntentIconForLabel(p.label);
+                  const senderName = p.senderName || t('encounters.map.ping.log.unknownSender');
                   return (
                     <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
                       <span className="truncate mr-2 font-medium flex items-center gap-1">
                         {intentIcon && <GameIcon slug={intentIcon} size={UI_ICON_SIZE.xs} />}
-                        {p.senderName || 'Someone'} {p.label ? `pings: ${p.label}` : 'pinged'}
+                        {p.label
+                          ? t('encounters.map.ping.log.labeled', { name: senderName, label: p.label })
+                          : t('encounters.map.ping.log.plain', { name: senderName })}
                       </span>
                       <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
                         <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
