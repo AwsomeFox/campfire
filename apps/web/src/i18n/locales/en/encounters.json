@@ -3,14 +3,9 @@
     "title": "Encounters",
     "combatLogHeading": "Combat log",
     "actions": {
-      "uses": {
-        "recharge": "Recharge {{min}}–{{max}}",
-        "rechargeSingle": "Recharge {{min}}",
-        "perDay": "{{max}}/day",
-        "spent": "spent",
-        "left": "{{count}} left",
-        "disabledReason": "No uses remaining ({{label}})"
-      }
+      "title": "Actions",
+      "use": "Use",
+      "useGroup": "Run for group"
     },
     "vitals": {
       "editMaxHp": "Edit max HP",
@@ -282,11 +277,6 @@
       "noTargets": "No legal targets.",
       "systemMathNotice": "Resolved with math that hasn't been audited for your system — verify the result."
     },
-    "actions": {
-      "title": "Actions",
-      "use": "Use",
-      "useGroup": "Run for group"
-    },
     "groupAction": {
       "heading": "{{actorName}} · {{actionName}} · group",
       "regionLabel": "Run {{actionName}} for the group",
@@ -306,7 +296,8 @@
         "applied": "Applied",
         "skipped": "Skipped — no action left",
         "failed": "Failed",
-        "notRun": "Not run"
+        "notRun": "Not run",
+        "skippedNoUses": "Skipped — no uses left"
       },
       "undo": "Undo",
       "undone": "Undone",

@@ -3,14 +3,9 @@
     "title": "المواجهات",
     "combatLogHeading": "سجل القتال",
     "actions": {
-      "uses": {
-        "recharge": "إعادة شحن {{min}}–{{max}}",
-        "rechargeSingle": "إعادة شحن {{min}}",
-        "perDay": "{{max}}/يوم",
-        "spent": "مستهلك",
-        "left": "{{count}} متبقٍ",
-        "disabledReason": "لا استخدامات متبقية ({{label}})"
-      }
+      "title": "الإجراءات",
+      "use": "استخدام",
+      "useGroup": "تنفيذ للمجموعة"
     },
     "vitals": {
       "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
@@ -311,11 +306,6 @@
       "noTargets": "No legal targets.",
       "systemMathNotice": "تمت التسوية بحسابات لم تُدقَّق لنظام قواعدك — تحقّق من النتيجة."
     },
-    "actions": {
-      "title": "الإجراءات",
-      "use": "استخدام",
-      "useGroup": "تنفيذ للمجموعة"
-    },
     "groupAction": {
       "heading": "{{actorName}} · {{actionName}} · المجموعة",
       "regionLabel": "تنفيذ {{actionName}} للمجموعة",
@@ -335,7 +325,8 @@
         "applied": "تم التنفيذ",
         "skipped": "تم التخطي — لا يوجد إجراء متبقٍ",
         "failed": "فشل",
-        "notRun": "لم يُنفَّذ"
+        "notRun": "لم يُنفَّذ",
+        "skippedNoUses": "تم التخطي — لا توجد استخدامات متبقية"
       },
       "undo": "تراجع",
       "undone": "تم التراجع",

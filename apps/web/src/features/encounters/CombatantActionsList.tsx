@@ -21,11 +21,14 @@ export type Translate = (key: string, opts?: { defaultValue?: string; min?: numb
  * needed to check the formatting.
  */
 export function usesBadge(uses: UsableActionUses, t: Translate): string {
-  if (uses.recharge) {
-    const range = parseRechargeRange(uses.recharge);
-    const pool = !range
-      ? uses.recharge
-      : range.min === range.max
+  // Only a DIE-ROLL condition takes the recharge branch. `recharge` also carries rest
+  // cadences ('long-rest', 'dawn', …); branching on "non-empty" printed the raw slug and
+  // swallowed the count, so a `{ max: 3, recharge: 'long-rest' }` pool rendered as
+  // "long-rest" with no idea how many uses were left — even though it IS tracked on `max`.
+  const range = uses.recharge ? parseRechargeRange(uses.recharge) : null;
+  if (range) {
+    const pool =
+      range.min === range.max
         ? t('encounters.actions.uses.rechargeSingle', { min: range.min, defaultValue: `Recharge ${range.min}` })
         : t('encounters.actions.uses.recharge', { min: range.min, max: range.max, defaultValue: `Recharge ${range.min}–${range.max}` });
     if (uses.available > 0) return pool;

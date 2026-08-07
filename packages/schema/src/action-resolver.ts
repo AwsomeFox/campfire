@@ -406,10 +406,11 @@ export function effectiveActionUsesMax(uses: ActionUses): number {
  * implementations of one format, not a shared one.
  */
 export function describeActionUses(uses: ActionUses): string {
-  const recharge = uses.recharge.trim();
-  if (recharge !== '') {
-    const range = parseRechargeRange(recharge);
-    if (!range) return recharge;
+  // Only a DIE-ROLL condition describes as a recharge. A rest cadence ('long-rest', 'dawn')
+  // used to be returned raw, which then read as `"X" has no uses remaining (long-rest).` in
+  // the apply-time rejection — naming the cadence instead of the pool the caller overran.
+  const range = parseRechargeRange(uses.recharge);
+  if (range) {
     return range.min === range.max ? `Recharge ${range.min}` : `Recharge ${range.min}–${range.max}`;
   }
   return uses.max > 0 ? `${uses.max}/Day` : '';

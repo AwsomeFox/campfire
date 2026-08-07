@@ -34,4 +34,20 @@ test.describe('usesBadge (issue #1921)', () => {
     const uses: UsableActionUses = { max: 3, recharge: '', spent: 1, available: 2 };
     expect(usesBadge(uses, t)).toBe('3/day · 2 left');
   });
+
+  // Devin review on PR #2062: `recharge` carries EITHER a die condition OR a rest cadence.
+  // Branching on "non-empty" instead of "parses as a die roll" printed the raw slug and
+  // swallowed the count, so a pool that IS tracked on `max` rendered with no idea how many
+  // uses were left. A test asserting only the die-condition cases passes against that bug.
+  test('a rest cadence alongside an X/day pool still shows the remaining count, not the cadence', () => {
+    for (const recharge of ['short-rest', 'long-rest', 'dawn']) {
+      const uses: UsableActionUses = { max: 3, recharge, spent: 1, available: 2 };
+      expect(usesBadge(uses, t)).toBe('3/day · 2 left');
+    }
+  });
+
+  test('a rest cadence with no X/day pool does not render the raw cadence slug', () => {
+    const uses: UsableActionUses = { max: 0, recharge: 'long-rest', spent: 0, available: 0 };
+    expect(usesBadge(uses, t)).not.toContain('long-rest');
+  });
 });

@@ -237,7 +237,9 @@ test.describe('runGroupActionSequence (issue #1922 — the sequential loop)', ()
     });
     expect(outcome.stoppedEarly).toBe(false);
     expect(outcome.results.map((r) => r.status)).toEqual(['applied', 'skipped', 'applied']);
-    expect(outcome.results[1].reason).toBe('noAction');
+    // A DISTINCT reason from a spent action slot: this combatant still HAS its action,
+    // the ability is what ran out. The summary card renders a different sentence for each.
+    expect(outcome.results[1].reason).toBe('noUses');
   });
 
   test('a mid-loop non-economy failure stops the loop and reports applied vs not-run', async () => {

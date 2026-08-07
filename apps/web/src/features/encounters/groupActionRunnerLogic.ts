@@ -148,6 +148,16 @@ export function isActionEconomyExhausted(err: unknown): boolean {
   return err instanceof ApiError && err.code != null && SKIPPABLE_EXHAUSTION_CODES.has(err.code);
 }
 
+/**
+ * Which KIND of "nothing left to spend" this was, so the summary card can say the true thing.
+ * `noAction` and `noUses` are genuinely different to a DM at the table: the first means the
+ * combatant has already acted this turn, the second means it still has its action but the
+ * ability itself is spent. Reporting both as "no action left" would misdescribe half of them.
+ */
+export function exhaustionSkipReason(err: unknown): 'noAction' | 'noUses' {
+  return err instanceof ApiError && err.code === 'action_uses_exhausted' ? 'noUses' : 'noAction';
+}
+
 function errorMessageFrom(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
@@ -191,7 +201,7 @@ export async function runGroupActionSequence(
           combatantId: candidate.combatantId,
           combatantName: candidate.combatantName,
           status: 'skipped',
-          reason: 'noAction',
+          reason: exhaustionSkipReason(err),
         });
         continue;
       }
