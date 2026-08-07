@@ -2769,4 +2769,43 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       sqlite.close();
     }
   });
+
+  it("0172 adds users.table_audio and defaults existing rows to 'off' (#1920)", () => {
+    expect(MIGRATION_NAMES).toContain('0172_users_table_audio_1920');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'users')).toContain('table_audio');
+      const user = sqlite.prepare('SELECT table_audio FROM users WHERE id = 1').get() as {
+        table_audio: string;
+      };
+      // NOT NULL DEFAULT 'off' backfills the pre-existing legacy row — table audio
+      // and haptics stay silent for everyone until they opt in via PATCH /me/preferences.
+      expect(user.table_audio).toBe('off');
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('re-running openDatabase on an already-migrated DB is idempotent for users.table_audio (#1920)', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const first = openDatabase(dataDir);
+    first.sqlite.close();
+
+    // Boot is not once-only (DbHolder re-runs it on every restore) — a second
+    // openDatabase call against the now-migrated file must not throw a
+    // "duplicate column" error from re-running the ADD COLUMN.
+    const second = openDatabase(dataDir);
+    try {
+      expect(columnNames(second.sqlite, 'users')).toContain('table_audio');
+    } finally {
+      second.sqlite.close();
+    }
+  });
 });
+

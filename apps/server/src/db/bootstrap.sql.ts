@@ -923,6 +923,7 @@ CREATE TABLE IF NOT EXISTS users (
   animate_others_rolls INTEGER NOT NULL DEFAULT 1,
   can_create_campaigns INTEGER NOT NULL DEFAULT 0,
   color_vision_assist INTEGER NOT NULL DEFAULT 0,
+  table_audio TEXT NOT NULL DEFAULT 'off',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
