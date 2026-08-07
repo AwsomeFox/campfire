@@ -2269,7 +2269,11 @@ function AdapterResourceCard({
         });
       }
       onChange();
-      announce(`${resourceLabel} ${delta > 0 ? 'spent' : 'restored'}`);
+      announce(
+        delta > 0
+          ? t('characters.resources.announceSpent', { name: resourceLabel })
+          : t('characters.resources.announceRestored', { name: resourceLabel }),
+      );
     } catch (err) {
       onError(err instanceof ApiError ? err.message : t('characters.resources.updateError', { name: resourceLabel }));
     } finally {
@@ -2419,7 +2423,11 @@ function ConditionLevelRow({
     try {
       await api.post(`${API}/characters/${character.id}/conditions/level`, { name: track.name, delta });
       onChange();
-      announce(`${conditionLabel} ${delta > 0 ? 'raised' : 'lowered'} to level ${level + delta}`);
+      announce(
+        delta > 0
+          ? t('characters.conditionLevel.announceRaised', { name: conditionLabel, level: level + delta })
+          : t('characters.conditionLevel.announceLowered', { name: conditionLabel, level: level + delta }),
+      );
     } catch (err) {
       onError(err instanceof ApiError ? err.message : t('characters.conditionLevel.updateError', { name: conditionLabel }));
     } finally {

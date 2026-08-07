@@ -169,4 +169,41 @@ test.describe('adapter resource/condition name localization (#2053)', () => {
     const conditionLevelSentence = ct('characters.conditionLevel.level', { level: 2, max: 6, name: arExhaustion });
     expect(conditionLevelSentence, `expected no residual Latin letters: ${conditionLevelSentence}`).not.toMatch(LATIN_LETTERS);
   });
+
+  test('the screen-reader announcements are translated frames, not English frames around a translated noun', async () => {
+    // Translating the noun alone would have RE-CREATED this issue's own defect at these two
+    // sites: `announce(\`${label} spent\`)` renders "الإلهام spent" under ar — a translated
+    // word inside a hardcoded English sentence, which is precisely the shape #2048 fixed and
+    // this issue extends. The frames have to be catalog keys too.
+    const src = readSrc(CHARACTER_PAGE);
+    expect(src, 'the resource announcement must not build an English frame in a template literal').not.toMatch(
+      /announce\(`\$\{resourceLabel\}/,
+    );
+    expect(src, 'the condition announcement must not build an English frame in a template literal').not.toMatch(
+      /announce\(`\$\{conditionLabel\}/,
+    );
+    expect(src).toContain('characters.resources.announceSpent');
+    expect(src).toContain('characters.conditionLevel.announceRaised');
+
+    const charTranslator = i18next.createInstance();
+    await charTranslator.init({
+      resources: { en: { translation: charactersEn }, ar: { translation: charactersAr } },
+      lng: 'ar',
+      fallbackLng: 'en',
+    });
+    const ct = charTranslator.t.bind(charTranslator);
+    const arInspiration = 'الإلهام';
+    const arExhaustion = 'الإنهاك';
+
+    for (const key of ['characters.resources.announceSpent', 'characters.resources.announceRestored']) {
+      const sentence = ct(key, { name: arInspiration });
+      expect(sentence, `expected no residual Latin letters for ${key}: ${sentence}`).not.toMatch(LATIN_LETTERS);
+      expect(sentence).toMatch(ARABIC);
+    }
+    for (const key of ['characters.conditionLevel.announceRaised', 'characters.conditionLevel.announceLowered']) {
+      const sentence = ct(key, { name: arExhaustion, level: 3 });
+      expect(sentence, `expected no residual Latin letters for ${key}: ${sentence}`).not.toMatch(LATIN_LETTERS);
+      expect(sentence).toMatch(ARABIC);
+    }
+  });
 });
