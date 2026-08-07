@@ -1858,6 +1858,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
       const recordSpy = jest
         .spyOn(encounterIdempotency, 'recordEncounterOp')
         .mockImplementation(() => {
+          db.delete(combatants).where(eq(combatants.id, comb.id)).run();
           throw new encounterIdempotency.EncounterOpRaceMarker(claim);
         });
       const raceSpy = jest
