@@ -152,9 +152,9 @@ test.describe('ping log + announcement localization (#2048)', () => {
 
     await translator.changeLanguage('ar');
     // The intent label itself ("Danger") is caller-supplied and already resolved through
-    // `encounters.map.ping.intents.*` upstream (issue #1937) — the sentence *around* it is
-    // what #2048 is about, so it must be fully Arabic even though the interpolated label
-    // in this isolated test is still the Latin word "Danger".
+    // The intent label itself is caller-supplied and already resolved through
+    // encounters.map.ping.intents.*. In this test both the name and label are passed in
+    // Arabic script ('زارا', 'خطر'), so the whole resulting sentence is verified Arabic.
     const arLabeled = translator.t('encounters.map.ping.log.labeled', { name: 'زارا', label: 'خطر' });
     expect(arLabeled).toMatch(ARABIC);
     expect(arLabeled).not.toMatch(/pings/i);
