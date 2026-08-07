@@ -55,9 +55,12 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
     const derivatives = new AttachmentDerivativesService(db);
     const attachments = new AttachmentsService(db, audit, fsDeletion, derivatives);
     const library = new CampaignLibraryService(db, audit, events);
-    const notifyMock = { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any;
+    const notifyMock: Pick<NotificationsService, "notifyCampaign" | "notifyUser"> = {
+      notifyCampaign: jest.fn().mockResolvedValue(undefined),
+      notifyUser: jest.fn().mockResolvedValue(undefined),
+    };
 
-    encountersService = new EncountersService(db, audit, events, rolls, revisions, attachments, library, notifyMock);
+    encountersService = new EncountersService(db, audit, events, rolls, revisions, attachments, library, notifyMock as unknown as NotificationsService);
     membersService = new MembersService(db, audit, notifications, events);
     usersService = new UsersService(db, audit);
 
@@ -272,5 +275,33 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
     // Verify combatant's controllerUserId was reset to null
     const rows = await db.select().from(combatants);
     expect(rows[0].controllerUserId).toBeNull();
+  });
+  it("rejects assigning a viewer-role member as controllerUserId", async () => {
+    const viewerUser = await usersService.create({ username: "v1", displayName: "Viewer 1", password: "pw" });
+    await membersService.create(campaignId, { userId: viewerUser.id, role: "viewer" }, dmActor);
+
+    await expect(
+      encountersService.addCombatant(
+        encounterId,
+        { kind: "monster", name: "Mount", hpMax: 30, controllerUserId: viewerUser.id },
+        dmActor,
+        "dm",
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it("allows delegated controller player to end turn when it is their combatants turn", async () => {
+    const combatant = await encountersService.addCombatant(
+      encounterId,
+      { kind: "monster", name: "Summoned Imp", hpMax: 15, controllerUserId: player1UserId },
+      dmActor,
+      "dm",
+    );
+    await encountersService.updateCombatant(encounterId, combatant.id, { initiative: 20 }, dmActor, "dm");
+    await encountersService.start(encounterId, dmActor, "dm");
+
+    // Controlling player can end turn for the active controlled combatant
+    const res = await encountersService.endTurn(encounterId, {}, player1Actor, "player");
+    expect(res).toBeDefined();
   });
 });

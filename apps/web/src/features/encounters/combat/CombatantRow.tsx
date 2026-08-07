@@ -274,6 +274,15 @@ export const CombatantRow = memo(function CombatantRow({
 }: CombatantRowProps) {
   const { t } = useTranslation();
   const [showWhisper, setShowWhisper] = useState(false);
+  const controllerMember = useMemo(
+    () => (combatant.controllerUserId != null ? members?.find((m) => m.userId === combatant.controllerUserId) : null),
+    [combatant.controllerUserId, members],
+  );
+  const controllerLabel = useMemo(() => {
+    if (combatant.controllerUserId == null) return null;
+    const name = controllerMember?.displayName || controllerMember?.username || `User #${combatant.controllerUserId}`;
+    return t("encounters.controller.controlledBy", { name });
+  }, [combatant.controllerUserId, controllerMember, t]);
   // Issue #1746: one shared reason string for every write control this row disables while
   // the sync gate blocks — kept as a single computed value so every site stays in agreement
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
@@ -850,21 +859,13 @@ export const CombatantRow = memo(function CombatantRow({
                 ▸
               </span>
             )}
-            {combatant.controllerUserId != null && (
+            {controllerLabel != null && (
               <span
                 className="tag tag-neutral"
                 data-testid={`controlled-tag-${combatant.id}`}
-                title={t('encounters.controller.controlledBy', {
-                  name: members?.find((m) => m.userId === combatant.controllerUserId)?.displayName ||
-                    members?.find((m) => m.userId === combatant.controllerUserId)?.username ||
-                    `User #${combatant.controllerUserId}`,
-                })}
+                title={controllerLabel}
               >
-                🎮 {t('encounters.controller.controlledBy', {
-                  name: members?.find((m) => m.userId === combatant.controllerUserId)?.displayName ||
-                    members?.find((m) => m.userId === combatant.controllerUserId)?.username ||
-                    `User #${combatant.controllerUserId}`,
-                })}
+                🎮 {controllerLabel}
               </span>
             )}
             <span style={down ? { textDecoration: 'line-through' } : undefined}>

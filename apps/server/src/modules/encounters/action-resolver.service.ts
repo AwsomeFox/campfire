@@ -701,7 +701,7 @@ export class ActionResolverService {
     const encounter = this.encounterRowOrThrow(encounterId);
     const combatant = this.combatantRowOrThrow(encounterId, combatantId);
     const isDm = role === 'dm';
-    if (!isDm && !this.isCombatantControlledBy(combatant, user)) {
+    if (!isDm && !this.isCombatantControlledBy(combatant, user, role)) {
       throw new ForbiddenException('You may only list actions for your own or controlled combatant.');
     }
     const character = this.linkedCharacter(combatant);
@@ -769,7 +769,7 @@ export class ActionResolverService {
 
     // Authorization: monster/NPC actions are DM-only; a player may act only with their own PC or controlled combatant.
     if (!isDm) {
-      if (!this.isCombatantControlledBy(actor, user)) {
+      if (!this.isCombatantControlledBy(actor, user, role)) {
         throw new ForbiddenException('Only the DM or controlling player may resolve an action for this combatant.');
       }
       this.assertPlayerActiveTurn(encounter, actor, role);
@@ -1585,7 +1585,7 @@ export class ActionResolverService {
             this.auditRejectedApply(encounter, req.chainId, user, role, 'not_original_applier');
             throw new ForbiddenException('Only the original applier or a DM may replay an action resolution.');
           }
-          if (!this.isCombatantControlledBy(actor, user)) {
+          if (!this.isCombatantControlledBy(actor, user, role)) {
             this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
             throw new ForbiddenException('Only the DM or controlling player may apply an action.');
           }
@@ -1628,7 +1628,7 @@ export class ActionResolverService {
     const actor = this.combatantRowOrThrow(encounterId, pending.actorCombatantId);
     const isDm = role === 'dm';
     if (!isDm) {
-      if (!this.isCombatantControlledBy(actor, user)) {
+      if (!this.isCombatantControlledBy(actor, user, role)) {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
         throw new ForbiddenException('Only the DM or controlling player may apply an action.');
       }
@@ -2391,7 +2391,7 @@ export class ActionResolverService {
         this.auditRejectedUndo(encounter, token, user, role, 'viewer_role');
         throw new ForbiddenException('Viewers may not undo combat actions.');
       }
-      if (!this.isCombatantControlledBy(actor, user)) {
+      if (!this.isCombatantControlledBy(actor, user, role)) {
         this.auditRejectedUndo(encounter, token, user, role, 'not_actor_owner');
         throw new ForbiddenException('Only the DM or controlling player may undo an action.');
       }

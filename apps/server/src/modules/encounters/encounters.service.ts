@@ -777,6 +777,14 @@ export function redactMonsterHp(
 
   if (c.kind !== 'monster' && c.kind !== 'npc') return c;
   const isController = userId != null && c.controllerUserId != null && String(c.controllerUserId) === String(userId);
+  // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
+  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43),
+  // UNLESS the DM has explicitly revealed this combatant's statblock (issue #1926) —
+  // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
+  // never carries the field until the DM turns it on. HP banding itself is entirely
+  // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
+  // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
+  // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
   const redacted: Combatant = {
     ...c,
     statblock: c.statblockRevealed ? c.statblock : null,
@@ -874,12 +882,15 @@ export class EncountersService {
 
   private async assertControllerIsCampaignMember(campaignId: number, controllerUserId: number): Promise<void> {
     const [member] = await this.db
-      .select({ id: campaignMembers.id })
+      .select({ id: campaignMembers.id, role: campaignMembers.role })
       .from(campaignMembers)
       .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, controllerUserId)))
       .limit(1);
     if (!member) {
       throw new BadRequestException(`User ${controllerUserId} is not a member of campaign ${campaignId}`);
+    }
+    if (member.role === 'viewer') {
+      throw new BadRequestException(`User ${controllerUserId} is a viewer and cannot be assigned combatant control`);
     }
   }
 
@@ -7448,12 +7459,15 @@ export class EncountersService {
       // (2) + (3) ownership + current-turn validation: the player must own the character
       // linked to the CURRENT combatant.
       const current = await this.getCombatantRowOrThrow(encounterId, currentId);
-      if (current.kind !== 'character' || current.characterId === null) {
-        throw new ForbiddenException('Only the DM may end a monster or NPC turn.');
-      }
-      const [character] = await this.db.select().from(characters).where(eq(characters.id, current.characterId)).limit(1);
-      if (!character || character.ownerUserId !== user.id) {
-        throw new ForbiddenException('You may only end the turn of your own active character.');
+      const isControlled = current.controllerUserId !== null && String(current.controllerUserId) === String(user.id);
+      if (!isControlled) {
+        if (current.kind !== 'character' || current.characterId === null) {
+          throw new ForbiddenException('Only the DM may end a monster or NPC turn.');
+        }
+        const [character] = await this.db.select().from(characters).where(eq(characters.id, current.characterId)).limit(1);
+        if (!character || character.ownerUserId !== user.id) {
+          throw new ForbiddenException('You may only end the turn of your own active character.');
+        }
       }
       // (4) configurable DM confirmation: stage the request for the DM (players cannot
       // self-confirm). The client shows a "waiting for DM" state; the DM then advances the

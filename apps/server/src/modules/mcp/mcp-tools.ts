@@ -4762,7 +4762,7 @@ export class McpToolsService {
         ...CombatantCreate.shape,
         // Same constraints as CombatantCreate (Id, optional) but described for tools/list.
         characterId: Id.optional().describe('Character id — links a party member and pulls name/hp/initMod from their sheet when omitted'),
-        controllerUserId: Id.optional().describe('User id of player to grant delegated control of this combatant (summons, mounts, companions)'),
+        controllerUserId: Id.nullable().optional().describe('User id of player to grant delegated control of this combatant (summons, mounts, companions)'),
         npcId: Id.optional().describe('NPC id (kind="npc") — links a campaign NPC as the combatant identity; its name is used when name is omitted'),
         ruleEntryId: Id.optional().describe('Monster statblock rule entry id — from lookup_rule/get_rule_entry'),
         count: z.number().int().min(1).max(50).optional().describe('Add this many copies at once (monsters), names auto-suffixed 1..N so duplicates are distinguishable'),

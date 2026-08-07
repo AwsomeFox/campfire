@@ -3630,7 +3630,6 @@ function migrateStarfinderCombatState(sqlite: Database.Database): void {
     if (!has('rp_max')) sqlite.exec('ALTER TABLE combatants ADD COLUMN rp_max INTEGER NOT NULL DEFAULT 0');
     if (!has('eac')) sqlite.exec('ALTER TABLE combatants ADD COLUMN eac INTEGER');
     if (!has('kac')) sqlite.exec('ALTER TABLE combatants ADD COLUMN kac INTEGER');
-    if (!has('controller_user_id')) sqlite.exec('ALTER TABLE combatants ADD COLUMN controller_user_id INTEGER');
   }
 }
 
@@ -5003,6 +5002,18 @@ function migrateCombatantRemovalRevision1469(sqlite: Database.Database): void {
   `);
 }
 
+function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare("PRAGMA table_info(combatants)").all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "controller_user_id")) {
+      sqlite.exec("ALTER TABLE combatants ADD COLUMN controller_user_id INTEGER");
+    }
+  }
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -5349,7 +5360,6 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0169_check_requests_group_id_1943', run: migrateCheckRequestsTableForGroupId1943 },
   { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
-  // #1925 landed on main taking 0171; this branch takes 0172 as the centrally claimed ordinal.
   { name: '0172_users_table_audio_1920', run: migrateUsersTableForTableAudio1920 },
   { name: '0173_action_uses_tracking_1921', run: migrateActionUsesTracking1921 },
   // 0172/0173 are CENTRALLY CLAIMED by other in-flight branches (#2050 table audio/haptics
@@ -5357,6 +5367,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // renumber the action-uses migration to 0173" commit). Confirmed free across every
   // claude/codex/work/port/feat/fix remote branch at the time this was taken.
   { name: '0174_combatants_manual_order_1923', run: migrateCombatantsTableForManualOrder1923 },
+  { name: '0175_combatants_controller_user_id_1941', run: migrateCombatantsTableForControllerUserId },
 ];
 
 /**

@@ -1000,23 +1000,18 @@ export class MembersService {
       for (const owned of ownedRows) {
         tx.update(characters).set({ ownerUserId: null, updatedAt: nextUpdatedAt(owned.updatedAt) }).where(eq(characters.id, owned.id)).run();
       }
-      const campaignEncounterIds = tx
-        .select({ id: encounters.id })
-        .from(encounters)
-        .where(eq(encounters.campaignId, campaignId))
-        .all()
-        .map((e) => e.id);
-      if (campaignEncounterIds.length > 0) {
-        tx.update(combatants)
-          .set({ controllerUserId: null })
-          .where(
-            and(
-              eq(combatants.controllerUserId, row.member.userId),
-              inArray(combatants.encounterId, campaignEncounterIds),
+      tx.update(combatants)
+        .set({ controllerUserId: null })
+        .where(
+          and(
+            eq(combatants.controllerUserId, row.member.userId),
+            inArray(
+              combatants.encounterId,
+              tx.select({ id: encounters.id }).from(encounters).where(eq(encounters.campaignId, campaignId)),
             ),
-          )
-          .run();
-      }
+          ),
+        )
+        .run();
       return row.member;
     });
 
