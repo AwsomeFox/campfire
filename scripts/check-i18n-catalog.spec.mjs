@@ -63,7 +63,10 @@ assert.deepStrictEqual(extractJsxTextNodes(encounterMutationFnFixture), []);
 // flag, covering the issue title's general `=> fn<T>(` shape, not just dotted member calls.
 assert.deepStrictEqual(extractJsxTextNodes('onSave: (patch) => save<Payload>(patch),'), []);
 
-// A `=>` return-type annotation using a generic, e.g. `(): => Promise<void>` -> MUST NOT flag.
+// A function-TYPE annotation whose return type is generic — the arrow here is the type's
+// params-to-return-type separator, not a value-level concise arrow, but it is the same `=>`
+// token followed by a bare generic identifier, so it produces the identical false-positive
+// shape: `(patch: Record<string, number | null>) => Promise<void>` -> MUST NOT flag.
 assert.deepStrictEqual(
   extractJsxTextNodes('onSave: (patch: Record<string, number | null>) => Promise<void>;'),
   [],

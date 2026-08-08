@@ -255,7 +255,10 @@ export function extractJsxTextNodes(src) {
     // immediately preceded by a bare `=` in valid TSX, since an attribute needs `="value"` or
     // `={expr}` before it, never a dangling `=`) AND the captured text is nothing but such a
     // chain (no spaces, punctuation, or anything else prose would contain). This does not make
-    // the scanner JSX-aware in general — it only rejects this one reported shape.
+    // the scanner JSX-aware in general — it only rejects this one reported shape. It also cannot
+    // swallow a genuine untranslated UI string: real display text ("Save changes", "Unknown")
+    // is never a bare identifier/member-access chain with no spaces or punctuation, so it fails
+    // `IDENTIFIER_CHAIN_RE` and stays counted regardless of what precedes it.
     if (src[match.index - 1] === '=' && IDENTIFIER_CHAIN_RE.test(text)) continue;
     matches.push(text);
   }
