@@ -582,6 +582,51 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(renamed.body.equippedAction.name).toBe('Named By Hand');
   });
 
+  it('an accepted snapshot with no weapon data derives nothing, even if the live entry has some', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+
+    // The item's ACCEPTED snapshot loses its weapon data (as a non-weapon revision would),
+    // while the live entry keeps some. Falling through to the live row here would derive from
+    // a revision this campaign never accepted — the hole the snapshot-precedence rule closes.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const snapshot = JSON.parse(
+      db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s!,
+    );
+    snapshot.dataJson = null;
+    db.update(inventoryItems).set({ compendiumSnapshot: JSON.stringify(snapshot) }).where(eq(inventoryItems.id, itemId)).run();
+
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'nodata-slot' });
+    expect(equipped.status).toBe(200);
+    expect(equipped.body.equippedAction).toBeNull();
+    expect(equipped.body.equippedActionSource).toBeNull();
+  });
+
+  it('equipping never activates an action built from a revision the item no longer holds', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'fence-slot' });
+    // Unequipped, the item RETAINS its derived action — and a refresh does not regenerate an
+    // unequipped item, so this is the state the fence has to survive.
+    const unequipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+    expect(unequipped.body.equippedAction).not.toBeNull();
+
+    // Its accepted revision moves on beneath it.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const snapshot = JSON.parse(
+      db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s!,
+    );
+    snapshot.dataJson = JSON.stringify({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    db.update(inventoryItems).set({ compendiumSnapshot: JSON.stringify(snapshot) }).where(eq(inventoryItems.id, itemId)).run();
+
+    // Re-equipping must never leave the OLD revision's mechanics armed against the new
+    // snapshot: it derives from the current one.
+    const reEquipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'fence-slot' });
+    expect(reEquipped.status).toBe(200);
+    expect(reEquipped.body.equipped).toBe(true);
+    expect(reEquipped.body.equippedAction?.damage ?? '').not.toContain('1d8');
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

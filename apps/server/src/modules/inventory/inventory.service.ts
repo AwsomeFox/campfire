@@ -311,12 +311,18 @@ export class InventoryService {
       // an item into an attack derived from a revision nobody accepted — while its name and
       // play-safe snapshot still showed the old one. The live entry is the fallback for an
       // item that has no snapshot at all.
+      // An accepted snapshot is AUTHORITATIVE, including when it carries no usable data.
+      // Review (chatgpt-codex-connector P2): falling through to the live entry on a null or
+      // malformed `dataJson` reopened the very hole the snapshot-precedence fix closed — a
+      // later unaccepted revision that ADDS structured weapon data would be read and derived
+      // from, while the item's own snapshot and content hash still describe the old one. A
+      // snapshot that says nothing about weapons means this item grants nothing; the live
+      // entry is consulted only when there is no accepted snapshot at all.
       let data: unknown = null;
       if (existing.compendiumSnapshot) {
         const snapshot = sanitizeCompendiumSnapshot(safeJson(existing.compendiumSnapshot));
         if (snapshot?.dataJson) data = safeJson(snapshot.dataJson);
-      }
-      if (data == null && existing.ruleEntryId != null) {
+      } else if (existing.ruleEntryId != null) {
         const entry = await this.db
           .select({ dataJson: ruleEntries.dataJson })
           .from(ruleEntries)
@@ -1009,14 +1015,7 @@ export class InventoryService {
           update.equippedActionSource = input.equippedAction ? EquippedActionSource.enum.manual : null;
         } else if (
           shouldDeriveOnEquip &&
-          (moved || !fresh.equippedAction || fresh.equippedActionSource === EquippedActionSource.enum.derived) &&
-          // Review (chatgpt-codex-connector P2): …and the row must still hold the revision the
-          // derivation actually read. `refreshCompendium` can accept a newer one while this
-          // request awaits — and when the item is unequipped at that moment, refresh performs
-          // no regeneration of its own, so the fresh row still looks actionless-and-derived
-          // and every other check here passes. Without this, revision-A mechanics land on a
-          // revision-B snapshot. Same fence, same reasoning, as the refresh path's.
-          fresh.compendiumSnapshot === derivedFromSnapshot
+          (moved || !fresh.equippedAction || fresh.equippedActionSource === EquippedActionSource.enum.derived)
         ) {
           // Review (chatgpt-codex-connector P2) — time-of-check/time-of-use, the same class of
           // race this transaction already re-validates authorization against. `derivedOnEquip`
@@ -1030,11 +1029,25 @@ export class InventoryService {
           // `moved` is exempt because the ownership-change rule discards the old owner's
           // action in this very write regardless of who authored it, so there is nothing left
           // to protect — see CLEARED_EQUIP_STATE.
-          // A null derivation clears both fields — see `shouldDeriveOnEquip`. Only a `derived`
-          // (or about-to-be-discarded `moved`) action ever reaches here, so this can never
-          // erase a human's work.
-          update.equippedAction = derivedOnEquip ? JSON.stringify(derivedOnEquip) : null;
-          update.equippedActionSource = derivedOnEquip ? EquippedActionSource.enum.derived : null;
+          // The row must still hold the revision the derivation actually read.
+          // `refreshCompendium` can accept a newer one while this request awaits — and when
+          // the item is unequipped at that moment, refresh performs no regeneration of its
+          // own, so the fresh row still looks actionless-and-derived and every other check
+          // here passes. Same fence, same reasoning, as the refresh path's.
+          const revisionUnchanged = fresh.compendiumSnapshot === derivedFromSnapshot;
+          // Review (chatgpt-codex-connector P2): a fence MISS clears rather than skips. The
+          // earlier version returned without touching the action while the transaction went
+          // on to set `equipped = true` — arming revision-A mechanics against a revision-B
+          // snapshot, which is the exact outcome the fence exists to prevent, just reached by
+          // doing nothing instead of by writing. Clearing leaves the item equipped and
+          // granting nothing, which the next equip (or a refresh) regenerates correctly.
+          //
+          // A null derivation clears for the same reason — see `shouldDeriveOnEquip`. Only a
+          // `derived` action, or one `moved` is discarding anyway, ever reaches this branch,
+          // so neither path can erase a human's work.
+          const nextDerived = revisionUnchanged ? derivedOnEquip : null;
+          update.equippedAction = nextDerived ? JSON.stringify(nextDerived) : null;
+          update.equippedActionSource = nextDerived ? EquippedActionSource.enum.derived : null;
         } else if (moved) {
           // Issue #1326 review (coordinator): THE ownership-change clearing rule —
           // equipped, equipSlot, and equippedAction reset together, atomically, unless
