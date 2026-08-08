@@ -34,7 +34,7 @@ export function CombatantStatblockEditor({
   ruleSystem?: string | null;
   customMechanicsProfile?: CustomMechanicsProfile | null;
 }) {
-  useTranslation();
+  const { t } = useTranslation();
   const statblock = useMemo(() => value ?? defaultCombatantStatblock(), [value]);
   const presentation = useMemo(() => statblockPresentation(ruleSystem), [ruleSystem]);
   const adapter = useMemo(
@@ -49,6 +49,10 @@ export function CombatantStatblockEditor({
   const patch = (partial: Partial<CombatantStatblock>) => onChange({ ...statblock, ...partial });
 
   const [acDraft, setAcDraft] = useState<string>(() => String(statblock.ac ?? 10));
+  // Issue #2080: statblock.hp is nullable (a genuinely unknown template HP), so an
+  // empty draft is a valid, distinct state from "invalid input" — unlike acDraft,
+  // clearing this field commits `hp: null` rather than reverting to the prior value.
+  const [hpDraft, setHpDraft] = useState<string>(() => (statblock.hp == null ? '' : String(statblock.hp)));
   const [abilityDrafts, setAbilityDrafts] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const field of abilityFields) {
@@ -59,6 +63,7 @@ export function CombatantStatblockEditor({
 
   useEffect(() => {
     setAcDraft(String(statblock.ac ?? 10));
+    setHpDraft(statblock.hp == null ? '' : String(statblock.hp));
     setAbilityDrafts(() => {
       const next: Record<string, string> = {};
       for (const field of abilityFields) {
@@ -66,7 +71,7 @@ export function CombatantStatblockEditor({
       }
       return next;
     });
-  }, [statblock.ac, statblock.abilityScores, abilityFields]);
+  }, [statblock.ac, statblock.hp, statblock.abilityScores, abilityFields]);
 
   const patchAction = (index: number, partial: Partial<CharacterAction>) => {
     const actions = [...statblock.actions];
@@ -79,31 +84,67 @@ export function CombatantStatblockEditor({
 
   return (
     <div className="flex flex-col gap-3" data-testid="combatant-statblock-editor">
-      <label className="flex flex-col gap-1 text-sm">
-        <span title={COMBATANT_STATBLOCK_HELP.ac}>{presentation.defense.full}</span>
-        <input
-          type="number"
-          className="input"
-          min={0}
-          max={40}
-          disabled={disabled}
-          value={acDraft}
-          onChange={(e) => {
-            const raw = e.target.value;
-            setAcDraft(raw);
-            const parsed = parseLocalizedInteger(raw);
-            if (parsed.ok) patch({ ac: parsed.value });
-          }}
-          onBlur={() => {
-            const parsed = parseLocalizedInteger(acDraft);
-            if (!parsed.ok) setAcDraft(String(statblock.ac ?? 10));
-          }}
-          aria-describedby="statblock-ac-help"
-        />
-        <span id="statblock-ac-help" className="text-[11px] text-muted m-0">
-          {COMBATANT_STATBLOCK_HELP.ac}
-        </span>
-      </label>
+      <div className="flex gap-2 flex-wrap">
+        <label className="flex flex-col gap-1 text-sm flex-1" style={{ minWidth: 100 }}>
+          <span title={COMBATANT_STATBLOCK_HELP.ac}>{presentation.defense.full}</span>
+          <input
+            type="number"
+            className="input"
+            min={0}
+            max={40}
+            disabled={disabled}
+            value={acDraft}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setAcDraft(raw);
+              const parsed = parseLocalizedInteger(raw);
+              if (parsed.ok) patch({ ac: parsed.value });
+            }}
+            onBlur={() => {
+              const parsed = parseLocalizedInteger(acDraft);
+              if (!parsed.ok) setAcDraft(String(statblock.ac ?? 10));
+            }}
+            aria-describedby="statblock-ac-help"
+          />
+          <span id="statblock-ac-help" className="text-[11px] text-muted m-0">
+            {COMBATANT_STATBLOCK_HELP.ac}
+          </span>
+        </label>
+
+        <label className="flex flex-col gap-1 text-sm flex-1" style={{ minWidth: 100 }}>
+          <span title={COMBATANT_STATBLOCK_HELP.hp}>{t('encounters.statblock.maxHp', { defaultValue: 'Max HP' })}</span>
+          <input
+            type="number"
+            className="input"
+            min={1}
+            disabled={disabled}
+            placeholder={t('encounters.statblock.hpUnknown', { defaultValue: 'Unknown' })}
+            value={hpDraft}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setHpDraft(raw);
+              if (raw.trim() === '') {
+                // Issue #2080: an explicitly-cleared field commits `hp: null` (genuinely
+                // unknown), not a reverted-to-previous no-op — the field's whole point is
+                // to let "unknown" be typed, not just tolerated as a leftover default.
+                patch({ hp: null });
+                return;
+              }
+              const parsed = parseLocalizedInteger(raw);
+              if (parsed.ok && parsed.value >= 1) patch({ hp: parsed.value });
+            }}
+            onBlur={() => {
+              if (hpDraft.trim() === '') return;
+              const parsed = parseLocalizedInteger(hpDraft);
+              if (!parsed.ok || parsed.value < 1) setHpDraft(statblock.hp == null ? '' : String(statblock.hp));
+            }}
+            aria-describedby="statblock-hp-help"
+          />
+          <span id="statblock-hp-help" className="text-[11px] text-muted m-0">
+            {COMBATANT_STATBLOCK_HELP.hp}
+          </span>
+        </label>
+      </div>
 
       <fieldset className="border border-neutral-700 rounded-md p-2 m-0">
         <legend className="text-sm px-1" title={COMBATANT_STATBLOCK_HELP.abilityScores}>

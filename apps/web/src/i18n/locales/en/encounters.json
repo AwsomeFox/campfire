@@ -298,7 +298,14 @@
         "pending": "Reopening encounter…"
       },
       "addCombatant": "Add combatant",
-      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
+      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here.",
+      "library": {
+        "hpNotSet": "HP not set",
+        "hpValue": "{{hp}} HP",
+        "hpOverrideLabel": "Set HP to add",
+        "hpOverridePlaceholder": "HP",
+        "addWithHp": "Add"
+      }
     },
     "actionFlow": {
       "noTargets": "No legal targets.",
@@ -439,7 +446,9 @@
       "revealedSummary": "Statblock (revealed to players)",
       "killPrompt": "{{name}} dropped to 0 HP — reveal its statblock to players?",
       "dismiss": "Dismiss",
-      "dismissKillPrompt": "Dismiss the statblock reveal prompt"
+      "dismissKillPrompt": "Dismiss the statblock reveal prompt",
+      "maxHp": "Max HP",
+      "hpUnknown": "Unknown"
     },
     "whisper": {
       "button": "Whisper",
