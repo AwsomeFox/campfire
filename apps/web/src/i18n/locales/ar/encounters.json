@@ -266,7 +266,14 @@
         "pending": "Reopening encounter…"
       },
       "addCombatant": "Add combatant",
-      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
+      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here.",
+      "library": {
+        "hpNotSet": "لم يتم تحديد نقاط الحياة",
+        "hpValue": "{{hp}} نقطة حياة",
+        "hpOverrideLabel": "تحديد نقاط الحياة قبل الإضافة",
+        "hpOverridePlaceholder": "نقاط الحياة",
+        "addWithHp": "إضافة"
+      }
     },
     "checks": {
       "requestCheck": "Request a check",
@@ -412,7 +419,8 @@
       "killPrompt": "وصل {{name}} إلى 0 نقطة حياة — هل تريد كشف بطاقة إحصائياته للاعبين؟",
       "dismiss": "تجاهل",
       "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات",
-      "maxHp": "الحد الأقصى لنقاط الحياة"
+      "maxHp": "الحد الأقصى لنقاط الحياة",
+      "hpUnknown": "غير معروف"
     },
     "whisper": {
       "button": "همس",

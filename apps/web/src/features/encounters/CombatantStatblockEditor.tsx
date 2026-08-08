@@ -118,7 +118,7 @@ export function CombatantStatblockEditor({
             className="input"
             min={1}
             disabled={disabled}
-            placeholder="Unknown"
+            placeholder={t('encounters.statblock.hpUnknown', { defaultValue: 'Unknown' })}
             value={hpDraft}
             onChange={(e) => {
               const raw = e.target.value;

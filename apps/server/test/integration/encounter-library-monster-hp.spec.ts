@@ -11,6 +11,7 @@ import { AttachmentsService } from '../../src/modules/attachments/attachments.se
 import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
+import type { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import { BadRequestException } from '@nestjs/common';
 import type { RequestUser } from '../../src/common/user.types';
@@ -46,7 +47,24 @@ describe('encounter library monster HP (issue #2080, service layer)', () => {
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit, events);
-    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any);
+    // Copilot review on PR #2086: type the double against the methods this service
+    // actually calls (Pick<...>, checked as an annotation, not a bare assertion — see
+    // AGENTS.md's "double-side only" convention), then cast only at the constructor
+    // boundary, instead of a blind `as any` that skips shape-checking entirely.
+    const notifications: Pick<NotificationsService, 'notifyCampaign' | 'notifyUser'> = {
+      notifyCampaign: jest.fn().mockResolvedValue(undefined),
+      notifyUser: jest.fn().mockResolvedValue(undefined),
+    };
+    const encountersService = new EncountersService(
+      orm,
+      audit,
+      events,
+      rolls,
+      revisions,
+      attachments,
+      campaignLibrary,
+      notifications as unknown as NotificationsService,
+    );
     return { orm, encountersService, campaignLibrary };
   }
 
