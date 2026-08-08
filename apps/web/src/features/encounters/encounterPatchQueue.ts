@@ -53,6 +53,20 @@ export function reconcileEncounterPatchResponse<T extends object>(
 }
 
 /**
+ * A keyed turn mutation may replay the original committed response after another
+ * client has already advanced the cached encounter again. `turnVersion` is the
+ * server-owned monotonic turn revision, so never replace a later cached turn with
+ * an older replay while the settled refetch is still in flight.
+ */
+export function preferNewerEncounterTurn<T extends { id: number; turnVersion: number }>(
+  current: T | undefined,
+  updated: T,
+): T {
+  if (current?.id === updated.id && current.turnVersion > updated.turnVersion) return current;
+  return updated;
+}
+
+/**
  * When an encounter patch mutation fails, remove its optimistic patch from the query cache.
  * Any key modified by the failed patch is restored to its previous value unless another
  * remaining queued patch also modifies that key.

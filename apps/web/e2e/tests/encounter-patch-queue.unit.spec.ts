@@ -5,6 +5,7 @@ import { expect, test } from '@playwright/test';
 import {
   isAdjacentDuplicateEncounterPatch,
   observedEncounterPatchRevision,
+  preferNewerEncounterTurn,
   reconcileEncounterPatchResponse,
   rollbackEncounterPatchError,
   type QueuedEncounterPatch,
@@ -34,6 +35,16 @@ test.describe('encounterPatchQueue unit tests — rollbackEncounterPatchError', 
     ];
     const reconciled = reconcileEncounterPatchResponse(updated, pending, 'q1', 1);
     expect(reconciled).toEqual({ id: 1, gridScale: 5, name: 'Boss Fight' });
+  });
+
+  test('preferNewerEncounterTurn rejects an older keyed replay without blocking a current response', () => {
+    const cached = { id: 1, turnVersion: 12, currentCombatantId: 7 };
+    const replay = { id: 1, turnVersion: 11, currentCombatantId: 6 };
+    const current = { id: 1, turnVersion: 12, currentCombatantId: 8 };
+
+    expect(preferNewerEncounterTurn(cached, replay)).toBe(cached);
+    expect(preferNewerEncounterTurn(cached, current)).toBe(current);
+    expect(preferNewerEncounterTurn(undefined, replay)).toBe(replay);
   });
 
   test('rollbackEncounterPatchError restores previous values when failed patch has no overriding pending patch', () => {

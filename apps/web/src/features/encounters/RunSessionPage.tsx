@@ -39,14 +39,14 @@ import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
 import { FloatingNumbers } from './FloatingNumbers';
 import { diffHpFeedback, hpFeedbackSnapshot, sameHpFeedbackSnapshot, withOptimisticHpFeedbackTargets, type HpFeedbackEvent, type HpFeedbackSnapshot } from './hpFeedback';
 import { hasRestoredTrashedEncounter, isCurrentCombatantUndoEncounter, REMOVE_COMBATANT_CONFIRM_BODY } from './combatantLifecycle';
-import { isAdjacentDuplicateEncounterPatch, observedEncounterPatchRevision, reconcileEncounterPatchResponse, rollbackEncounterPatchError, type QueuedEncounterPatch } from './encounterPatchQueue';
+import { isAdjacentDuplicateEncounterPatch, observedEncounterPatchRevision, preferNewerEncounterTurn, reconcileEncounterPatchResponse, rollbackEncounterPatchError, type QueuedEncounterPatch } from './encounterPatchQueue';
 import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
 import { TurnElapsedChip } from './TurnElapsedChip';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
-import { detectSseTurnBeat, type TurnBeatSnapshot } from './turnBeat';
+import { detectSseTurnBeat, shouldConsumeTurnBeatResync, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -1388,17 +1388,19 @@ export default function RunSessionPage() {
   const [characterOwnershipRefreshPending, setCharacterOwnershipRefreshPending] = useState(false);
   const turnBeatSequence = useRef(0);
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
-  // One-shot gate for (re)deriving `previousTurnBeatRef` from the REST-fetched
-  // `encounter` row (issue #2092). Starts true so the first load of an encounter
+  // Freshness watermark for (re)deriving `previousTurnBeatRef` from the REST-fetched
+  // `encounter` row (issue #2092). Starts at zero so the first successful load
   // establishes a silent baseline; the reconnect/stream-recovery handlers below
-  // flip it true again to catch up on frames the stream may have missed while
-  // down. It must NOT stay true across an ordinary `encounter.updated`-triggered
+  // capture the last successful query timestamp before requesting a catch-up read.
+  // The baseline only consumes a completed read newer than that timestamp, including
+  // when TanStack Query structurally shares the same encounter object. It must NOT
+  // remain armed across an ordinary `encounter.updated`-triggered
   // refetch: that refetch is paired with (and always precedes) the very
   // `encounter.turn_changed` frame that updates this same ref directly, and racing
   // the two — whichever settles first wins — let the REST resync silently
   // "catch up" to the new turn before its own SSE handler ran, making the edge
   // look like a no-op and dropping the takeover/ticker beat.
-  const awaitingTurnBeatResyncRef = useRef(true);
+  const awaitingTurnBeatResyncRef = useRef<number | null>(0);
   const turnPulseTimerRef = useRef<number | null>(null);
   const ownedTurnFeedbackRef = useRef<number | null>(null);
   // A character.updated frame invalidates the ownership map, but React Query
@@ -1457,14 +1459,14 @@ export default function RunSessionPage() {
 
   useEffect(() => {
     previousTurnBeatRef.current = null;
-    awaitingTurnBeatResyncRef.current = true;
+    awaitingTurnBeatResyncRef.current = queryClient.getQueryState(queryKeys.encounter(eid))?.dataUpdatedAt ?? 0;
     ownedTurnFeedbackRef.current = null;
     setTurnOwnerFromEvent(null);
     setTurnOwnerPendingCombatantId(null);
     setTurnBeat(null);
     setTurnPulse(false);
     if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
-  }, [eid]);
+  }, [eid, queryClient]);
 
   // A loaded encounter is a silent baseline. This prevents opening an already
   // running encounter from replaying a turn-start beat, and (via
@@ -1475,8 +1477,13 @@ export default function RunSessionPage() {
   // (issue #2092).
   useEffect(() => {
     if (!encounter || encounter.id !== eid) return;
-    if (!awaitingTurnBeatResyncRef.current) return;
-    awaitingTurnBeatResyncRef.current = false;
+    if (!shouldConsumeTurnBeatResync(
+      awaitingTurnBeatResyncRef.current,
+      encounterQuery.dataUpdatedAt,
+      encounterQuery.isFetching,
+      encounterQuery.isSuccess,
+    )) return;
+    awaitingTurnBeatResyncRef.current = null;
     const current = encounter.currentCombatantId == null
       ? undefined
       : encounter.combatants.find((combatant) => combatant.id === encounter.currentCombatantId);
@@ -1488,7 +1495,7 @@ export default function RunSessionPage() {
       round: encounter.status === 'running' ? encounter.round : null,
       isYourTurn,
     };
-  }, [eid, encounter, characters, me?.user.id]);
+  }, [eid, encounter, characters, me?.user.id, encounterQuery.dataUpdatedAt, encounterQuery.isFetching, encounterQuery.isSuccess]);
   useEffect(() => () => {
     if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
   }, []);
@@ -1868,6 +1875,7 @@ export default function RunSessionPage() {
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
       setResyncPending(true);
+      awaitingTurnBeatResyncRef.current = encounterQuery.dataUpdatedAt;
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
@@ -1885,18 +1893,17 @@ export default function RunSessionPage() {
       // frame outright — re-arm the REST turn-beat baseline resync (see
       // `awaitingTurnBeatResyncRef`'s own comment) so the catch-up encounter read above
       // re-derives it.
-      awaitingTurnBeatResyncRef.current = true;
-    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
+    }, [queryClient, eid, cid, encounterQuery.dataUpdatedAt, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
       setResyncPending(true);
+      awaitingTurnBeatResyncRef.current = encounterQuery.dataUpdatedAt;
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
       invalidateTableSafety(queryClient, cid);
-      awaitingTurnBeatResyncRef.current = true; // issue #2092 — see onReconnect above.
-    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
+    }, [queryClient, eid, cid, encounterQuery.dataUpdatedAt, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
@@ -2443,8 +2450,10 @@ export default function RunSessionPage() {
     onSuccess: (data) => {
       queryClient.setQueryData(
         queryKeys.encounter(eid),
-        (current: EncounterWithCombatants | undefined) =>
-          reconcileEncounterPatchResponse(data, pendingEncounterPatches.current.values(), '', eid) ?? current,
+        (current: EncounterWithCombatants | undefined) => preferNewerEncounterTurn(
+          current,
+          reconcileEncounterPatchResponse(data, pendingEncounterPatches.current.values(), '', eid),
+        ),
       );
     },
     onError: (err) => {

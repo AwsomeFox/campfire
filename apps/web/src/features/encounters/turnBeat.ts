@@ -12,6 +12,23 @@ export type TurnBeatSnapshot = {
 
 export type TurnBeatKind = 'your-turn' | 'turn' | 'round-wrap';
 
+/**
+ * A reconnect/load baseline must come from a completed encounter read newer than
+ * the cache state that armed it. `dataUpdatedAt` changes after every successful
+ * TanStack Query fetch even when structural sharing retains the same data object.
+ */
+export function shouldConsumeTurnBeatResync(
+  armedAfterDataUpdatedAt: number | null,
+  dataUpdatedAt: number,
+  isFetching: boolean,
+  isSuccess: boolean,
+): boolean {
+  return armedAfterDataUpdatedAt != null
+    && isSuccess
+    && !isFetching
+    && dataUpdatedAt > armedAfterDataUpdatedAt;
+}
+
 export function turnBeatKey(snapshot: TurnBeatSnapshot): string | null {
   if (snapshot.combatantId == null || snapshot.round == null) return null;
   return `${snapshot.encounterId}:${snapshot.combatantId}:${snapshot.round}`;

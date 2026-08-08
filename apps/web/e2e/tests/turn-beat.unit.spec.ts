@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { formatDocumentTitle, setDocumentTitlePrefix } from '../../src/app/routeFocus';
 import { isCampaignEvent } from '../../src/lib/useCampaignEvents';
-import { detectSseTurnBeat, detectTurnBeat, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
+import { detectSseTurnBeat, detectTurnBeat, shouldConsumeTurnBeatResync, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
 
 const initial: TurnBeatSnapshot = {
   encounterId: 8,
@@ -26,10 +26,18 @@ test.describe('turn-change beat (issue #1906)', () => {
 
   test('clears a previous encounter baseline on encounter switch, and only resyncs it from a REST refetch on load or reconnect (issue #2092)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = true;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = queryClient\.getQueryState\(queryKeys\.encounter\(eid\)\)\?\.dataUpdatedAt \?\? 0;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
     expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
-    expect(source).toMatch(/if \(!encounter \|\| encounter\.id !== eid\) return;\s*if \(!awaitingTurnBeatResyncRef\.current\) return;\s*awaitingTurnBeatResyncRef\.current = false;[\s\S]*previousTurnBeatRef\.current = \{/);
+    expect(source).toMatch(/if \(!encounter \|\| encounter\.id !== eid\) return;\s*if \(!shouldConsumeTurnBeatResync\([\s\S]*?encounterQuery\.dataUpdatedAt,[\s\S]*?encounterQuery\.isFetching,[\s\S]*?encounterQuery\.isSuccess,[\s\S]*?\)\) return;\s*awaitingTurnBeatResyncRef\.current = null;[\s\S]*previousTurnBeatRef\.current = \{/);
     expect(source).not.toContain('previousTurnBeatRef.current?.encounterId === eid ||');
+  });
+
+  test('consumes a resync only after a newer successful encounter fetch, including structurally shared data', () => {
+    expect(shouldConsumeTurnBeatResync(null, 20, false, true)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(20, 20, false, true)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(20, 21, true, true)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(20, 21, false, false)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(20, 21, false, true)).toBe(true);
   });
 
   // Issue #2092: this REST-driven baseline resync used to re-run on EVERY `encounter`
@@ -43,13 +51,13 @@ test.describe('turn-change beat (issue #1906)', () => {
   // the baseline at all.
   test('only re-arms the REST turn-beat baseline resync after a reconnect or stream recovery', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/const awaitingTurnBeatResyncRef = useRef\(true\);/);
+    expect(source).toMatch(/const awaitingTurnBeatResyncRef = useRef<number \| null>\(0\);/);
     const reconnectStart = source.indexOf('onReconnect: useCallback');
     const reconnectBranch = source.slice(reconnectStart, source.indexOf('onStreamRecovery: useCallback', reconnectStart));
-    expect(reconnectBranch).toContain('awaitingTurnBeatResyncRef.current = true;');
+    expect(reconnectBranch).toContain('awaitingTurnBeatResyncRef.current = encounterQuery.dataUpdatedAt;');
     const recoveryStart = source.indexOf('onStreamRecovery: useCallback');
     const recoveryBranch = source.slice(recoveryStart, source.indexOf('onStatusChange: useCallback', recoveryStart));
-    expect(recoveryBranch).toContain('awaitingTurnBeatResyncRef.current = true;');
+    expect(recoveryBranch).toContain('awaitingTurnBeatResyncRef.current = encounterQuery.dataUpdatedAt;');
   });
 
   // Issue #2092: the Next Turn button re-enables (`headerBusy` tracks only
@@ -66,7 +74,7 @@ test.describe('turn-change beat (issue #1906)', () => {
     const nextTurnMutStart = source.indexOf('const nextTurnMut = useKeyedMutation({');
     const nextTurnMutBody = source.slice(nextTurnMutStart, source.indexOf('const undoTurnMut', nextTurnMutStart));
     expect(nextTurnMutBody).toMatch(/api\.post<EncounterWithCombatants>\(`\$\{API\}\/encounters\/\$\{eid\}\/next-turn`/);
-    expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*queryClient\.setQueryData\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) =>\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\) \?\? current,\s*\);\s*\},/);
+    expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*queryClient\.setQueryData\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) => preferNewerEncounterTurn\(\s*current,\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\),\s*\),\s*\);\s*\},/);
   });
 
   test('emits an undo edge after a silent refetch baseline advances past a missed frame', () => {
