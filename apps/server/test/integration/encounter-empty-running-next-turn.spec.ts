@@ -116,13 +116,20 @@ describe('encounter next-turn/end-turn on an empty RUNNING roster (issue #2091, 
     expect(before.status).toBe('running');
     expect(before.round).toBe(2);
 
-    await expect(ctx.encountersService.nextTurn(ctx.encounterId, {}, dmUser, 'dm')).rejects.toBeInstanceOf(BadRequestException);
+    // Single invocation (Copilot review on #2104): calling nextTurn twice — once for
+    // `.rejects.toBeInstanceOf` and again to inspect the message — did unnecessary
+    // duplicate work and would silently mask a future pre-throw side effect (e.g.
+    // audit/idempotency bookkeeping) running twice. Capture the one thrown error and
+    // assert both its type and message from it.
+    let caught: unknown;
     try {
       await ctx.encountersService.nextTurn(ctx.encounterId, {}, dmUser, 'dm');
     } catch (err) {
-      const body = (err as BadRequestException).getResponse() as { message?: string };
-      expect(String(body.message)).toMatch(/no combatants/i);
+      caught = err;
     }
+    expect(caught).toBeInstanceOf(BadRequestException);
+    const body = (caught as BadRequestException).getResponse() as { message?: string };
+    expect(String(body.message)).toMatch(/no combatants/i);
 
     // The round must NOT have advanced — the exact issue #2091 symptom ("next-turn
     // keeps returning 201... round=2" over and over) must now be a hard failure, not
