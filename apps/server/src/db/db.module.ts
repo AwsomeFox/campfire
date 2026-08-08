@@ -1851,6 +1851,24 @@ function migrateInventoryItemsEquip1326(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration 0177 (issue #2097): provenance for an item's `equipped_action`. A single
+ * additive TEXT column, NULL on every existing row — and NULL is the safe value, because
+ * the derivation path only ever writes an action into an EMPTY `equipped_action`. An
+ * upgraded row that already carries a hand-authored action therefore keeps it untouched
+ * whatever this column says, and a row with no action has nothing to protect. No backfill:
+ * guessing 'manual' for existing rows would be a claim about who wrote them that the
+ * database cannot support, and guessing 'derived' would invite overwriting a human's work.
+ */
+function migrateInventoryItemsEquippedActionSource2097(sqlite: Database.Database): void {
+  const table = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'").get();
+  if (!table) return; // fresh DB — BOOTSTRAP_SQL creates the column directly.
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'equipped_action_source')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN equipped_action_source TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before the AI-DM operating mode (issue #311): the
  * `ai_dm_seats.mode` column didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN —
  * no table rebuild needed, same shape as the icon_slug migrations above. Existing
@@ -5428,6 +5446,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // 0176 confirmed free on main and every claude/codex/work/port/feat/fix remote branch
   // at the time this was taken (see the same caveat on 0174 above).
   { name: '0176_combatants_clear_legacy_manual_order_2095', run: migrateCombatantsTableClearLegacyManualOrder2095 },
+  // #2097 equipped-action provenance — renumbered to 0177 when #2095 landed 0176 on main
+  // first. This ordinal never shipped on any real database as 0176.
+  { name: '0177_inventory_equipped_action_source_2097', run: migrateInventoryItemsEquippedActionSource2097 },
 ];
 
 /**

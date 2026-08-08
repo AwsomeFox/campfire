@@ -61,6 +61,7 @@ import type { RestModel, RestOptionDef } from './rest';
 export { type RestOptionDef, DEFAULT_GENERIC_REST_OPTIONS, DEFAULT_STARFINDER_REST_OPTIONS, restOptionsForAdapter } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
+import { EquippedActionSource } from './equipped-item-action';
 import { NarrationLanguage } from './narration-language';
 import {
   MAX_SERIES_OCCURRENCES,
@@ -77,6 +78,7 @@ export * from './spell-slots';
 export * from './rest';
 export * from './character-action';
 export * from './combatant-statblock';
+export * from './equipped-item-action';
 export * from './osr-adapter';
 export * from './character-creation';
 export * from './narration-language';
@@ -11567,6 +11569,15 @@ export const InventoryItem = z.object({
    * Inert while unequipped.
    */
   equippedAction: CharacterAction.nullable().default(null),
+  /**
+   * Where `equippedAction` came from (issue #2097). `derived` means the server generated it
+   * from the item's compendium data on equip; `manual` means a human authored or edited it,
+   * after which derivation never touches the row again. Null when there is no action.
+   * Server-owned — a caller sets this indirectly by writing `equippedAction` (which always
+   * marks the row `manual`), never directly, so "a human wrote this" cannot be forged into
+   * "the server generated this" or vice versa.
+   */
+  equippedActionSource: EquippedActionSource.nullable().default(null),
   ...timestamps,
   // Soft-delete tombstone (issue #551). NULL on live items; ISO timestamp + actor
   // id when the item is in the campaign trash. Not user-writable via create/update.
@@ -11588,6 +11599,7 @@ export const InventoryItemCreate = InventoryItem.omit({
   equipped: true,
   equipSlot: true,
   equippedAction: true,
+  equippedActionSource: true,
 }).partial().required({ name: true });
 
 /** Acquire a play-safe snapshot of an installed compendium item. */

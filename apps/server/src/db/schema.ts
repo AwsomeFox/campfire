@@ -1848,6 +1848,11 @@ export const inventoryItems = sqliteTable('inventory_items', {
   equipped: integer('equipped', { mode: 'boolean' }).notNull().default(false),
   equipSlot: text('equip_slot'),
   equippedAction: text('equipped_action'),
+  // Provenance for equippedAction (issue #2097): 'derived' when this module generated it
+  // from the item's compendium data and it may be regenerated, 'manual' once a human
+  // authored or edited it, after which derivation never touches it again. NULL on rows
+  // predating the column and on items with no action.
+  equippedActionSource: text('equipped_action_source'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   // Soft-delete tombstone (issue #551): NULL == live; ISO timestamp == trashed.

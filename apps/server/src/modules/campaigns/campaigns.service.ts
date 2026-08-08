@@ -2002,6 +2002,11 @@ export class CampaignsService {
               equipped: resolvedOwner === 'character' && item.equipped,
               equipSlot: resolvedOwner === 'character' ? item.equipSlot : null,
               equippedAction: resolvedOwner === 'character' ? item.equippedAction : null,
+              // Issue #2097: same rule as the action itself — a clone that keeps the action
+              // keeps its provenance, and the party-stash fallback that drops the action
+              // drops the provenance with it. A surviving 'manual' on an action-less row
+              // would permanently block the item from ever deriving one in the new campaign.
+              equippedActionSource: resolvedOwner === 'character' ? item.equippedActionSource : null,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -3129,7 +3134,13 @@ export class CampaignsService {
             compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
             equipped: grantEquip,
             equipSlot: grantEquip ? trimmedSlot : null,
+            // Issue #2097: an imported action is treated as 'manual'. The export carries no
+            // trustworthy provenance (and an older export carries none at all), so the safe
+            // reading is "a human wrote this" — that only ever protects the row from being
+            // regenerated. Assuming 'derived' would invite overwriting authored work on the
+            // first equip in the importing campaign.
             equippedAction: importedActionParse?.success ? JSON.stringify(importedActionParse.data) : null,
+            equippedActionSource: importedActionParse?.success ? 'manual' : null,
             createdAt: ts,
             updatedAt: ts,
           })
