@@ -4500,7 +4500,7 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     expect(res.status).toBe(400);
   });
 
-  it('keeps hidden death saves out of the shared feed and hides their existence from non-DMs', async () => {
+  it('hides a hidden encounter\'s death save from a non-DM (404) — the player-side restriction', async () => {
     const server = ctx.app.getHttpServer();
     await setDying();
     const beforeRolls = await deathSaveRolls();
@@ -4509,12 +4509,25 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
       .set(viewer)
       .send({ idempotencyKey: 'hidden-death-save-viewer' });
-    const dmAttempt = await request(server)
-      .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
-      .set(dm)
-      .send({ idempotencyKey: 'hidden-death-save-dm' });
+    // The 404 (not a 403, and not a leaked 400/200) is the secrecy boundary: a hidden
+    // encounter is wholesale nonexistent to a non-DM, mirroring every other
+    // hidden-encounter write. Asserting the exact status matters — a test that only
+    // checked "the player is rejected" would pass whether the answer were this 404 or the
+    // DM-only 403 that issue #2090 removes below.
+    //
+    // Be precise about WHICH gate this pins, because it is not the one #2090 touches. Over
+    // REST it is the controller's own `isVisibleTo` precheck on this route (#1909, added so
+    // a hidden encounter 404s instead of 403ing and leaking id existence). Verified by
+    // mutation: deleting `rollDeathSave`'s method-entry `isVisibleTo`, or the
+    // in-transaction one, or both, leaves this test passing — the controller answers first.
+    // Those two service-level gates are not redundant, they just are not what this test
+    // exercises: the method-entry one is the gate for MCP callers, which never reach the
+    // controller, and the in-transaction one closes the visible-at-entry/hidden-at-commit
+    // window. Deleting the controller precheck is what would fail this assertion.
     expect(viewerAttempt.status).toBe(404);
-    expect(dmAttempt.status).toBe(403);
+    // Query as the DM (who sees everything) so an unchanged count proves the viewer's
+    // rejected attempt had NO side effect — not merely that the viewer can't see it, which
+    // redaction alone would also satisfy even if a write had gone through.
     expect(
       (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
     ).toHaveLength(beforeRolls.length);
@@ -4591,6 +4604,47 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     } finally {
       auditSpy.mockRestore();
     }
+  });
+
+  it('lets the DM roll a death save while the encounter is hidden (issue #2090)', async () => {
+    // Encounters default to hidden, and the Quick Fight flow leaves them that way through
+    // setup — so this is the common path, not an edge case. Before the #2090 fix this 403'd
+    // the DM mid-combat: an unconditional `if (freshEncounter.hidden) throw
+    // ForbiddenException(...)` sat below the `isVisibleTo` 404 in `beforeWriteInTransaction`,
+    // and since `isVisibleTo` is `role === 'dm' || !hidden`, the throw was reachable only by
+    // the DM — a non-DM had already 404'd above it. This test commits a real death-save roll,
+    // so it deliberately runs after the two rollback specs above (dice-storage-failure,
+    // audit-failure) that assert an ABSOLUTE zero "Nyx · death save" rolls in the campaign
+    // feed; the specs that follow compute their own relative before/after baselines, so a
+    // committed roll here does not disturb them.
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: true })).status).toBe(200);
+    // Baseline as the DM — the same actor the post-roll assertion below queries as. Using
+    // `deathSaveRolls()` (queries as `player`) here would compare counts fetched under two
+    // different roles; that undercounts silently if a death-save roll is ever visible to the
+    // DM and not the player, failing for a reason unrelated to what this test is pinning.
+    const beforeRolls = (
+      await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)
+    ).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save');
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    try {
+      const dmAttempt = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+        .set(dm)
+        .send({ idempotencyKey: 'hidden-death-save-dm-succeeds' });
+      expect(dmAttempt.status).toBe(201);
+      expect(dmAttempt.body.roll.total).toBe(10);
+      // Committed, not merely accepted-and-discarded: the DM's own feed shows the new roll.
+      expect(
+        (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
+      ).toHaveLength(beforeRolls.length + 1);
+    } finally {
+      rollSpy.mockRestore();
+    }
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false })).status).toBe(200);
+    await setConscious();
   });
 
   it('rolls back every death-save event with its keyed outcome, then writes one death and roll event on retry', async () => {

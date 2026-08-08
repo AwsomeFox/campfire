@@ -4592,9 +4592,27 @@ export class EncountersService {
             if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
               throw new NotFoundException(`Encounter ${encounterId} not found`);
             }
-            if (freshEncounter.hidden) {
-              throw new ForbiddenException('Death saves cannot be rolled while an encounter is hidden');
-            }
+            // #1759 added an unconditional `if (freshEncounter.hidden) throw
+            // ForbiddenException(...)` here to keep death saves out of a hidden encounter.
+            // Removed in #2090: it was reachable ONLY by the DM, and since encounters
+            // default to hidden it made death saves impossible for the DM in the common
+            // case — the first PC to drop in a fresh fight could not roll at all.
+            //
+            // Why DM-only: `isVisibleTo` is `role === 'dm' || !hidden`, so on a hidden
+            // encounter every non-DM is already turned away with a 404 before reaching
+            // this line. There are THREE such gates on this path, and it is worth being
+            // precise about which does what, because the obvious reading is wrong:
+            //   1. the REST controller's own `isVisibleTo` precheck on this route — the
+            //      one that actually answers a non-DM's HTTP request (added by #1909
+            //      specifically so a hidden encounter 404s rather than 403ing, which
+            //      would have been an id-enumeration oracle);
+            //   2. `rollDeathSave`'s method-entry `isVisibleTo` — the gate for callers
+            //      that never touch the controller, i.e. the MCP surface;
+            //   3. this in-transaction re-check against the FRESH row, which closes the
+            //      window where an encounter is visible at entry and hidden by commit.
+            // Removed rather than re-gated on `role !== 'dm'`: that condition can never
+            // be true here, so it would read as a working player-side guard while being
+            // unreachable dead code.
             if (role !== 'dm') {
               const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, fresh.characterId!)).limit(1).all();
               if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
