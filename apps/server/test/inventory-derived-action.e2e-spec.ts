@@ -700,6 +700,68 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(reEquipped.body.equippedAction?.name ?? 'Renamed Mid-Derivation').toBe('Renamed Mid-Derivation');
   });
 
+  it("changing the campaign's rule system clears derived actions but not manual ones", async () => {
+    const server = ctx.app.getHttpServer();
+    // Its own campaign: this test changes campaign-level mechanics, which would disturb the
+    // shared fixture every later spec depends on.
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'System Switch' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Switcher', level: 5, stats: { STR: 16, DEX: 12 } });
+
+    const derivedItem = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+    await request(server).patch(`/api/v1/inventory/${derivedItem.body.id}`).set(dm).send({ equipped: true, equipSlot: 'switch-main' });
+
+    const manualItem = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory`)
+      .set(dm)
+      .send({ name: 'Hand-Written Blade', ownerType: 'character', characterId: char.body.id });
+    await request(server).patch(`/api/v1/inventory/${manualItem.body.id}`).set(dm).send({ equipped: true, equipSlot: 'switch-off' });
+    await request(server)
+      .patch(`/api/v1/inventory/${manualItem.body.id}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Mine', kind: 'melee', toHit: '+4', damage: '1d6+2 slashing', targetAc: '', notes: '' } });
+
+    // A derived action encodes the system it was derived under; `ActionResolverService`
+    // resolves whatever is stored against the campaign's CURRENT adapter, so 5e numbers would
+    // otherwise keep being rolled under the new mechanics.
+    const profile = {
+      slug: 'e2e-switch-hack',
+      label: 'E2E Switch Hack',
+      mechanicsSummary: 'A homebrew hack used to change a campaign mid-flight, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const switched = await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(switched.status).toBe(200);
+
+    const afterDerived = await request(server).get(`/api/v1/inventory/${derivedItem.body.id}`).set(dm);
+    expect(afterDerived.body.equippedAction).toBeNull();
+    expect(afterDerived.body.equippedActionSource).toBeNull();
+    // The item is still worn — it just grants nothing until re-equipped.
+    expect(afterDerived.body.equipped).toBe(true);
+
+    // A human's action is their call, not the system switch's.
+    const afterManual = await request(server).get(`/api/v1/inventory/${manualItem.body.id}`).set(dm);
+    expect(afterManual.body.equippedActionSource).toBe('manual');
+    expect(afterManual.body.equippedAction.name).toBe('Mine');
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

@@ -1235,6 +1235,22 @@ export class CampaignsService {
         .returning();
     }
 
+    // Issue #2097 review (chatgpt-codex-connector P1): a DERIVED equipped action is
+    // system-specific — a 5e derivation persists `+6` and `1d8+3` — and `ActionResolverService`
+    // resolves whatever is stored against the campaign's CURRENT adapter. Switching the
+    // campaign's mechanics therefore left 5e numbers being rolled under PF2e (or a homebrew
+    // profile) until somebody happened to re-equip the item.
+    //
+    // Cleared rather than regenerated, deliberately: regenerating would need every wielder's
+    // stats under the new system, and for a system with no attack math it would produce
+    // text-only rows anyway. This module's rule throughout is that stale numbers are worse
+    // than none — an empty action is visibly unfinished, a wrong one is not. `manual` actions
+    // are untouched: a human wrote those and it is their call whether they still apply.
+    const mechanicsChanged =
+      (campaignInput.ruleSystem !== undefined && campaignInput.ruleSystem !== existing.ruleSystem) ||
+      customMechanicsProfileInput !== undefined;
+    if (mechanicsChanged) await this.clearDerivedEquippedActions(id, user);
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
@@ -1258,6 +1274,44 @@ export class CampaignsService {
       return toDomain(fresh ?? updatedRow);
     }
     return toDomain(updatedRow);
+  }
+
+  /**
+   * Drop every server-DERIVED equipped action in a campaign, and tell the affected
+   * characters' live screens (issue #2097 review). Called when the campaign's mechanics
+   * change, because a derived action encodes the rule system it was derived under.
+   *
+   * Only `derived` rows are touched — a `manual` action is a human's, and clearing it would
+   * throw away work the system change does not necessarily invalidate. The equip state itself
+   * is left alone: the sword is still worn, it just grants nothing until re-equipped.
+   */
+  private async clearDerivedEquippedActions(campaignId: number, user: RequestUser): Promise<void> {
+    const affected = await this.db
+      .select({ characterId: inventoryItems.characterId })
+      .from(inventoryItems)
+      .where(
+        and(
+          eq(inventoryItems.campaignId, campaignId),
+          eq(inventoryItems.equippedActionSource, 'derived'),
+          isNull(inventoryItems.deletedAt),
+        ),
+      );
+    if (affected.length === 0) return;
+
+    await this.db
+      .update(inventoryItems)
+      .set({ equippedAction: null, equippedActionSource: null, updatedAt: nowIso() })
+      .where(
+        and(
+          eq(inventoryItems.campaignId, campaignId),
+          eq(inventoryItems.equippedActionSource, 'derived'),
+          isNull(inventoryItems.deletedAt),
+        ),
+      );
+
+    for (const characterId of new Set(affected.map((row) => row.characterId).filter((cid): cid is number => cid != null))) {
+      this.events.emit({ type: 'character.updated', campaignId, characterId, userId: user.id });
+    }
   }
 
   /**
