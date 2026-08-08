@@ -4784,7 +4784,7 @@ export class McpToolsService {
       },
       async ({ campaignId, idempotencyKey, ...fields }) => {
         const request = AiPortraitGenerationRequest.parse(fields);
-        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
         return this.aiPortrait.createJob(campaignId as number, request, user, role, {
           idempotencyKey: idempotencyKey as string | undefined,
           caller: 'co-dm',
@@ -4802,7 +4802,7 @@ export class McpToolsService {
         jobId: z.string().min(1).max(80).describe('AI portrait job id from generate_ai_portrait'),
       },
       async ({ campaignId, jobId }) => {
-        await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
+        await this.access.requireRole(user, campaignId as number, 'player');
         return this.aiPortrait.getJob(jobId as string, campaignId as number);
       },
     );
@@ -4821,7 +4821,7 @@ export class McpToolsService {
       },
       async ({ campaignId, jobId, ...fields }) => {
         const refine = AiPortraitRefineRequest.parse(fields);
-        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
         return this.aiPortrait.refine(campaignId as number, jobId as string, refine, user, role);
       },
     );
@@ -4843,7 +4843,7 @@ export class McpToolsService {
       },
       async ({ campaignId, jobId, ...fields }) => {
         const body = AttachGeneratedPortraitRequest.parse(fields);
-        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
         return this.aiPortrait.attach(campaignId as number, jobId as string, body, user, role);
       },
     );

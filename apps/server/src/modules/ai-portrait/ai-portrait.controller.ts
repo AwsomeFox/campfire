@@ -48,7 +48,7 @@ export class AiPortraitController {
     @Body() body: AiPortraitGenerationDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireMemberOnWritableCampaign(user, campaignId);
+    await this.access.requireRole(user, campaignId, 'player');
     return this.aiPortrait.readiness(campaignId, body);
   }
 
@@ -67,7 +67,7 @@ export class AiPortraitController {
     @CurrentUser() user: RequestUser,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
+    const role = await this.access.requireRole(user, campaignId, 'player');
     return this.aiPortrait.createJob(campaignId, body, user, role, { idempotencyKey, caller: 'dm' });
   }
 
@@ -81,7 +81,7 @@ export class AiPortraitController {
     @Param('jobId') jobId: string,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireMemberOnWritableCampaign(user, campaignId);
+    await this.access.requireRole(user, campaignId, 'player');
     return this.aiPortrait.getJob(jobId, campaignId);
   }
 
@@ -94,7 +94,7 @@ export class AiPortraitController {
     @Param('jobId') jobId: string,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
+    const role = await this.access.requireRole(user, campaignId, 'player');
     return this.aiPortrait.cancelJob(jobId, campaignId, user, role);
   }
 
@@ -109,7 +109,7 @@ export class AiPortraitController {
     @CurrentUser() user: RequestUser,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
+    const role = await this.access.requireRole(user, campaignId, 'player');
     return this.aiPortrait.refine(campaignId, jobId, body, user, role, { idempotencyKey });
   }
 
@@ -128,7 +128,7 @@ export class AiPortraitController {
     @Body() body: AttachGeneratedPortraitDto,
     @CurrentUser() user: RequestUser,
   ) {
-    const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
+    const role = await this.access.requireRole(user, campaignId, 'player');
     return this.aiPortrait.attach(campaignId, jobId, body, user, role);
   }
 }

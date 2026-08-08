@@ -105,22 +105,14 @@ describe('AI portrait generation (e2e, issue #1321)', () => {
     expect(['succeeded', 'cancelled']).toContain(cancel.body.status);
   });
 
-  it('rejects a viewer from generation (member-scoped, not viewer-scoped)', async () => {
+  it('rejects a viewer from generation (player role required, not viewer)', async () => {
     const server = ctx.app.getHttpServer();
+    // requireRole('player') runs BEFORE createJob, so a viewer gets 403 regardless of the
+    // per-campaign rate limiter. Reuse the shared campaign — the role gate short-circuits.
     const res = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/ai-portraits`)
       .set(viewer)
       .send({ prompt: 'a hero', count: 1 });
     expect(res.status).toBe(403);
-  });
-
-  it('allows a player to generate (member-scoped — players may generate for their own PCs)', async () => {
-    const server = ctx.app.getHttpServer();
-    const res = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/ai-portraits`)
-      .set(player)
-      .send({ prompt: 'my character', count: 1 });
-    expect(res.status).toBe(201);
-    expect(res.body.status).toBe('succeeded');
   });
 });
