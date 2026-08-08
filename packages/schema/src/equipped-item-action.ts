@@ -110,6 +110,25 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v.trim() : '';
 }
 
+/**
+ * A damage type as either a bare string or a list of them. PF2e items publish
+ * `damageType: ['Slashing']` (Archives of Nethys models it as a list), where Open5e and
+ * Starfinder publish a plain string — so reading only strings silently lost the type for a
+ * whole rule system, leaving an untyped damage line. The first entry is taken: a weapon with
+ * several listed types has no single canonical one to derive from, and this module's rule is
+ * to prefer a plain, checkable answer over a composed guess.
+ */
+function damageTypeOf(v: unknown): string {
+  if (Array.isArray(v)) {
+    for (const entry of v) {
+      const first = str(entry);
+      if (first) return first;
+    }
+    return '';
+  }
+  return str(v);
+}
+
 /** Read an ability score tolerantly (uppercase-folded, default 10) — mirrors index.ts's own reader. */
 function abilityScore(stats: Record<string, number>, ability: string): number {
   const raw = stats[ability.toUpperCase()] ?? stats[ability] ?? stats[ability.toLowerCase()];
@@ -144,7 +163,7 @@ function weaponProfileFrom(data: unknown): WeaponProfile | null {
   if (str(d.itemKind).toLowerCase() === 'weapon') {
     return {
       damageDice: str(d.damageDice),
-      damageType: str(d.damageType),
+      damageType: damageTypeOf(d.damageType),
       // Ranged means "attacks with DEX", which is NOT the same as "reports a range": a thrown
       // Dagger carries a real 20/60 and is still a melee weapon whose attack uses STR (or DEX
       // via Finesse). Ammunition is the property that actually marks a bow/crossbow/sling.
@@ -155,7 +174,7 @@ function weaponProfileFrom(data: unknown): WeaponProfile | null {
 
   // Starfinder items (starfinder-importer.ts) and homebrew entries using the same flat keys.
   const damageDice = str(d.damageDice) || str(d.damage);
-  const damageType = str(d.damageType);
+  const damageType = damageTypeOf(d.damageType);
   if (!damageDice) return null;
   const range = typeof d.range === 'number' ? d.range : null;
   return {

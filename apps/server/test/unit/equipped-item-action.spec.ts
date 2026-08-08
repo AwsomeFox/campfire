@@ -306,6 +306,29 @@ describe('deriveEquippedItemAction (#2097)', () => {
       expect(action!.damage).toContain('fire');
     });
 
+    it('reads a damage type published as a list, the way PF2e items carry it', () => {
+      // Archives of Nethys models damage type as a list (`['Slashing']`); Open5e and
+      // Starfinder publish a plain string. Reading only strings lost the type for a whole
+      // rule system, leaving an untyped damage line — which the resolver treats as bypassing
+      // every resistance and immunity.
+      const action = deriveEquippedItemAction({
+        itemName: 'PF2e Longsword',
+        data: { itemKind: 'weapon', damageDice: '1d8', damageType: ['Slashing'], properties: [] },
+        character: fighter,
+        adapter: dnd5e,
+      });
+      expect(isResolvableSpec(action!.spec)).toBe(true);
+      expect(action!.damage).toContain('slashing');
+      // An empty list is no type at all, not an untyped resolvable action.
+      const empty = deriveEquippedItemAction({
+        itemName: 'Typeless',
+        data: { itemKind: 'weapon', damageDice: '1d8', damageType: [], properties: [] },
+        character: fighter,
+        adapter: dnd5e,
+      });
+      expect(isResolvableSpec(empty!.spec)).toBe(false);
+    });
+
     it("degrades a foreign system's damage type under a vocabulary that lacks it", () => {
       // Starfinder's `electricity` has no 5e equivalent, and 5e defenses are matched by exact
       // type — so deriving a resolvable spec here would produce damage no 5e resistance or
