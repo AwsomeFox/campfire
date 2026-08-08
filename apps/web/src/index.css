@@ -3314,6 +3314,18 @@ html.cf-vtt-locked body {
   flex-direction: column;
   gap: var(--space-3);
 }
+/* Each tab is its own always-mounted panel; the unselected ones are hidden, never
+   unmounted, so no component loses in-flight state to a tab click. */
+.cf-vtt-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.cf-vtt-panel-section[hidden],
+.cf-vtt-tray[hidden] {
+  display: none;
+}
 /* Panel content is the run page's existing cards; inside a 356px rail they read
    better edge-to-edge than as nested rounded boxes with their own shadow. */
 .cf-vtt-panel-body .card {
@@ -3419,7 +3431,11 @@ html.cf-vtt-locked body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 0 0 0 var(--cf-vtt-rail-width);
+  /* `!important`: BattleMap's Card sets `padding: 0` inline, and without outranking it
+     the reserved gutter silently does nothing — the tool rail then sits ON TOP of the
+     map chrome instead of beside it, which is how a phone-width viewport toolbar ended
+     up unclickable underneath the rail. */
+  padding: 0 0 0 var(--cf-vtt-rail-width) !important;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -3545,7 +3561,31 @@ html.cf-vtt-locked body {
 @media (max-width: 900px) {
   .cf-vtt { --cf-vtt-rail-width: 50px; }
   .cf-vtt-body { flex-direction: column; }
-  .cf-vtt-main { flex: 1 1 45%; min-height: 180px; }
+  /* Nothing overlays the board at phone width: the canvas and the turn bar stack, so a
+     drag that starts at the middle of the map reaches the map and not the strip. */
+  .cf-vtt-main {
+    flex: 1 1 45%;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
+  }
+  .cf-vtt-map {
+    position: relative;
+    inset: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .cf-vtt-strip {
+    position: static;
+    flex: none;
+    padding-left: var(--space-3);
+    background: none;
+  }
+  .cf-vtt-strip-toggle {
+    position: static;
+    align-self: flex-start;
+    margin-bottom: var(--space-1);
+  }
   .cf-vtt-panel {
     width: auto;
     flex: 1 1 55%;
@@ -3566,9 +3606,34 @@ html.cf-vtt-locked body {
   }
   .cf-vtt-fab { bottom: 96px; }
   .cf-vtt-tray { bottom: 150px; }
+  /* Phone-width canvases are too small to float chrome over: a 340px aside on a
+     ~325px canvas blankets the map, so the surface is not even hoverable. Below this
+     width the map column goes back to scrolling, with the secondary chrome in flow
+     under the board rather than on top of it. */
+  .cf-vtt-map { overflow-y: auto; }
   .cf-vtt-map .cf-vtt-map-aside,
-  .cf-vtt-map .cf-vtt-map-tray { max-height: calc(100% - 90px); top: var(--space-2); }
-  .cf-vtt-map .cf-vtt-map-tray { top: 52px; }
+  .cf-vtt-map .cf-vtt-map-tray,
+  .cf-vtt-map [data-testid='map-viewport-toolbar'] {
+    position: static;
+    width: auto;
+    max-height: none;
+    overflow: visible;
+    backdrop-filter: none;
+  }
+  .cf-vtt-map [data-testid='map-viewport-toolbar'] {
+    margin: var(--space-2) var(--space-2) 0 !important;
+  }
+  .cf-vtt-map .cf-vtt-map-aside,
+  .cf-vtt-map .cf-vtt-map-tray {
+    padding: 0 var(--space-2) var(--space-2);
+  }
+  /* The board keeps a usable minimum instead of being squeezed by the chrome below it.
+     `!important` because BattleMap sets `flex`/`min-height` inline for the fill layout
+     the wide cockpit wants, and a stylesheet rule cannot outrank a style attribute. */
+  .cf-vtt-map [data-testid='battle-map-surface'] {
+    flex: 0 0 auto !important;
+    min-height: 220px !important;
+  }
 }
 
 /* --- print ---------------------------------------------------------------- */

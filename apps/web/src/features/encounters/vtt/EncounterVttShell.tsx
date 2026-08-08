@@ -21,6 +21,13 @@ export type VttTab = {
   label: string;
   /** Optional count/dot rendered after the label (e.g. unread log entries). */
   badge?: ReactNode;
+  /**
+   * This tab's panel stays in the document while another tab is showing (hidden, not
+   * unmounted) because something inside it owns state that must outlive a tab click.
+   * Mirrors `VttPanelSection`'s own `keepMounted` — the shell needs it here so a tab
+   * only advertises `aria-controls` for a panel that is actually present.
+   */
+  keepMounted?: boolean;
 };
 
 type Props = {
@@ -154,13 +161,12 @@ export function EncounterVttShell({
                   className="cf-vtt-tab"
                   data-testid={`encounter-vtt-tab-${tab.id}`}
                   aria-selected={tab.id === activeTabId}
-                  // Only the selected tab's panel is in the DOM — the panel holds the run
-                  // page's heavy sections (roster, log, table-wide setup) and mounting all
-                  // four would quadruple their queries and live subscriptions. So
-                  // `aria-controls` is set only on the selected tab: an omitted reference is
-                  // allowed by the tabs pattern, whereas one pointing at an id that does not
-                  // exist actively misleads assistive tech.
-                  aria-controls={tab.id === activeTabId ? `cf-vtt-tabpanel-${tab.id}` : undefined}
+                  // Only advertise a panel that is really in the document: a reference to
+                  // a missing id is worse for assistive tech than none at all. Panels are
+                  // present when selected, and `keepMounted` ones are present always.
+                  aria-controls={
+                    tab.id === activeTabId || tab.keepMounted ? `cf-vtt-tabpanel-${tab.id}` : undefined
+                  }
                   tabIndex={tab.id === activeTabId ? 0 : -1}
                   onClick={() => onSelectTab(tab.id)}
                   onKeyDown={(event) => {
@@ -192,19 +198,58 @@ export function EncounterVttShell({
                 <span aria-hidden>›</span>
               </button>
             </div>
-            <div
-              className="cf-vtt-panel-body"
-              role="tabpanel"
-              id={`cf-vtt-tabpanel-${activeTabId}`}
-              aria-labelledby={`cf-vtt-tab-${activeTabId}`}
-              tabIndex={0}
-            >
-              {panelSlot}
-            </div>
+            {/* Scroll container only — each `VttPanelSection` inside is its own tabpanel. */}
+            <div className="cf-vtt-panel-body">{panelSlot}</div>
           </aside>
         )}
       </div>
 
+      {children}
+    </div>
+  );
+}
+
+/**
+ * One tab's panel.
+ *
+ * `keepMounted` is the important knob. A panel that only renders things is fine to
+ * unmount when you switch away — and unmounting keeps the DOM honest, since a hidden
+ * copy of the roster still matches a `getByText(...)` and still costs its queries.
+ *
+ * But a panel whose contents own state that must OUTLIVE a tab click has to stay. The
+ * Table tab is the case in point: `ResourceTrackerPanel` carries the ambiguous-write
+ * guard from issue #1902 — `pendingKeys`, `stuckKeysRef` and a 5s recovery interval
+ * whose whole job is to stop a resource being spent twice when a write's response was
+ * lost. Unmounting it mid-flight dropped the guard and came back with empty state and
+ * the control re-enabled, i.e. a double spend. Same reasoning keeps the shared dice log
+ * mounted behind the Roll tray: it owns the app's only live roll-event subscriber.
+ *
+ * So: add `keepMounted` when you put something with in-flight or reconciliation state
+ * into a tab. It is not a performance dial.
+ */
+export function VttPanelSection({
+  id,
+  activeTabId,
+  keepMounted = false,
+  children,
+}: {
+  id: string;
+  activeTabId: string;
+  keepMounted?: boolean;
+  children: ReactNode;
+}) {
+  const active = id === activeTabId;
+  if (!active && !keepMounted) return null;
+  return (
+    <div
+      className="cf-vtt-panel-section"
+      role="tabpanel"
+      id={`cf-vtt-tabpanel-${id}`}
+      aria-labelledby={`cf-vtt-tab-${id}`}
+      data-testid={`encounter-vtt-tabpanel-${id}`}
+      hidden={!active}
+      tabIndex={active ? 0 : -1}
+    >
       {children}
     </div>
   );

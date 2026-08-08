@@ -59,7 +59,7 @@ import { shouldRevealInitiative } from './initiativeReveal';
 import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
 import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
 import { ActionUsePanel, legalTargets } from './ActionUseFlow';
-import { EncounterVttShell } from './vtt/EncounterVttShell';
+import { EncounterVttShell, VttPanelSection } from './vtt/EncounterVttShell';
 import { GroupActionRunner } from './GroupActionRunner.tsx';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { type MapReplaceAlignment } from '../../components/MapReplaceDialog';
@@ -4182,11 +4182,20 @@ export default function RunSessionPage() {
       }
       fabSlot={
         <>
-          {diceTrayOpen && (
-            <div className="cf-vtt-tray" id="encounter-vtt-dice-tray" data-testid="encounter-vtt-dice-tray">
-              <SharedDiceLog campaignId={cid} compact />
-            </div>
-          )}
+          {/* Hidden, never unmounted: SharedDiceLog owns the app's only live roll-event
+              subscriber, so tearing it down with the tray would mean another player's roll
+              produced no live feedback here — and reopening replays nothing, because the
+              tray's initial load deliberately establishes a silent baseline.
+              (Deliberately not naming the SSE type: death-save-table-moment.unit.spec.ts
+              guards that this file never grows its own subscription to it.) */}
+          <div
+            className="cf-vtt-tray"
+            id="encounter-vtt-dice-tray"
+            data-testid="encounter-vtt-dice-tray"
+            hidden={!diceTrayOpen}
+          >
+            <SharedDiceLog campaignId={cid} compact />
+          </div>
           <button
             type="button"
             className="cf-vtt-fab"
@@ -4205,7 +4214,7 @@ export default function RunSessionPage() {
         { id: 'turn', label: t('encounters.vtt.tabTurn') },
         { id: 'party', label: t('encounters.vtt.tabParty'), badge: orderedCombatants.length > 0 ? orderedCombatants.length : undefined },
         { id: 'log', label: t('encounters.vtt.tabLog') },
-        { id: 'table', label: t('encounters.vtt.tabTable') },
+        { id: 'table', label: t('encounters.vtt.tabTable'), keepMounted: true },
       ]}
       activeTabId={panelTab}
       onSelectTab={(id) => setPanelTabChoice(id as PanelTab)}
@@ -4358,8 +4367,7 @@ export default function RunSessionPage() {
               onDismiss={() => setPendingGroupActionUse(null)}
             />
           )}
-          {panelTab === 'turn' && (
-            <>
+          <VttPanelSection id="turn" activeTabId={panelTab}>
               {/* Sticky Player Vitals Header */}
               {!isDm && myCombatants.length > 0 && (
                 <PlayerVitalsHeader
@@ -4571,10 +4579,8 @@ export default function RunSessionPage() {
                   </Card>
                 );
               })()}
-            </>
-          )}
-          {panelTab === 'party' && (
-            <>
+          </VttPanelSection>
+          <VttPanelSection id="party" activeTabId={panelTab}>
               <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
                 {sheetsStatusLabel && (
                   <p
@@ -4773,16 +4779,14 @@ export default function RunSessionPage() {
                   onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
                 />
               )}
-            </>
-          )}
-          {panelTab === 'log' && (
-            <>
+          </VttPanelSection>
+          <VttPanelSection id="log" activeTabId={panelTab}>
               <CombatLog events={events} />
               <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} customMechanicsProfile={campaign?.customMechanicsProfile} />
-            </>
-          )}
-          {panelTab === 'table' && (
-            <>
+          </VttPanelSection>
+          {/* keepMounted: ResourceTrackerPanel below owns the #1902 ambiguous-write guard,
+              which must survive a tab change or a resource can be spent twice. */}
+          <VttPanelSection id="table" activeTabId={panelTab} keepMounted>
               {/* Player display / Cast controls (issue #547). In the cockpit these live
                   with the other table-wide setup rather than in the 54px header, which the
                   design reserves for identity, round state and the turn controls. */}
@@ -5040,8 +5044,7 @@ export default function RunSessionPage() {
             )}
             {canDmWrite && <GroupCheckBoard campaignId={cid} />}
             <EntityDiscussion campaignId={cid} entityType="encounter" entityId={encounter.id} />
-            </>
-          )}
+          </VttPanelSection>
         </>
       }
     >

@@ -85,31 +85,32 @@ test.describe('encounter cockpit layout', () => {
       // The canvas gets the height left over under the header, not a 16:9 reservation.
       expect(desktop.canvasHeight).toBeGreaterThan(400);
 
-      // The panel's tabs are the page's sections; only the selected one is mounted.
+      // The panel's tabs are the page's sections. A presentational panel unmounts when you
+      // switch away; the Table panel stays mounted-but-hidden because it owns state that
+      // must survive a tab click (see VttPanelSection).
       await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true');
-      await expect(page.getByRole('log', { name: 'Combat log' })).toHaveCount(0);
+      await expect(page.getByTestId('encounter-vtt-tabpanel-log')).toHaveCount(0);
+      await expect(page.getByTestId('encounter-vtt-tabpanel-table')).toHaveCount(1);
+      await expect(page.getByTestId('encounter-vtt-tabpanel-table')).not.toBeVisible();
       await page.getByTestId('encounter-vtt-tab-log').click();
       await expect(page.getByRole('log', { name: 'Combat log' })).toBeVisible();
 
-      // Because only the selected panel is mounted, only the selected tab may carry
-      // `aria-controls` — an unselected tab pointing at an id that is not in the
-      // document is worse for assistive tech than omitting the reference.
+      // A tab advertises `aria-controls` only for a panel that is really in the document —
+      // a reference to a missing id is worse for assistive tech than none at all.
       const tabWiring = await page
         .locator('.cf-vtt-panel-tabs [role="tab"]')
         .evaluateAll((tabs) =>
-          tabs.map((tab) => ({
-            selected: tab.getAttribute('aria-selected') === 'true',
-            controls: tab.getAttribute('aria-controls'),
-            targetExists: Boolean(
-              tab.getAttribute('aria-controls')
-              && document.getElementById(tab.getAttribute('aria-controls')!),
-            ),
-          })),
+          tabs.map((tab) => {
+            const controls = tab.getAttribute('aria-controls');
+            return {
+              controls,
+              targetExists: Boolean(controls && document.getElementById(controls)),
+            };
+          }),
         );
       expect(tabWiring.length).toBeGreaterThan(1);
       for (const tab of tabWiring) {
-        if (tab.selected) expect(tab.targetExists).toBe(true);
-        else expect(tab.controls).toBeNull();
+        if (tab.controls != null) expect(tab.targetExists).toBe(true);
       }
 
       // Collapsing the panel hands the whole canvas to the map, and the reopen tab returns it.
