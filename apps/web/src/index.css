@@ -3102,6 +3102,12 @@ html.cf-vtt-locked body {
 
   position: fixed;
   inset: 0;
+  /* Published by `useImmersiveChromeInset` while this shell is mounted: Layout's
+     campaign-wide interrupts (the safety hold bar, a player's check-request prompts)
+     sit above the routed page in normal flow, and an opaque full-viewport overlay
+     would make them invisible AND unclickable. Starting below them keeps them on
+     screen with their single mount and their own hit-testing. */
+  top: var(--cf-immersive-chrome-inset, 0px);
   z-index: var(--cf-layer-immersive);
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);

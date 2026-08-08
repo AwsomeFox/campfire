@@ -14,6 +14,7 @@
  */
 import { useEffect, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useImmersiveChromeInset } from './useImmersiveChromeInset';
 
 export type VttTab = {
   id: string;
@@ -84,6 +85,11 @@ export function EncounterVttShell({
   const { t } = useTranslation();
   const panelLabel = t('encounters.vtt.panelLabel');
 
+  // Layout mounts the safety hold and check-request prompts outside the routed page so
+  // they reach every campaign route. This shell would paint over both, so it publishes
+  // how far down they reach and insets its own top by it — see the hook's doc.
+  useImmersiveChromeInset();
+
   // The shell is `position: fixed` and owns the viewport, so a scrollable body
   // behind it only produces rubber-banding on touch. Restored on unmount so
   // navigating away from the encounter leaves the rest of the app scrollable.
@@ -114,7 +120,10 @@ export function EncounterVttShell({
       </div>
 
       <div className="cf-vtt-body">
-        <main className="cf-vtt-main" data-testid="encounter-vtt-canvas">
+        {/* A plain div, not <main>: this shell renders inside Layout's own
+            `<main id={MAIN_CONTENT_ID}>`, so a second one would nest and duplicate the
+            document's main landmark on every encounter route. */}
+        <div className="cf-vtt-main" data-testid="encounter-vtt-canvas">
           {mapSlot}
           {mapOverlaySlot}
           {fabSlot}
@@ -131,7 +140,7 @@ export function EncounterVttShell({
               <span aria-hidden>‹</span>
             </button>
           )}
-        </main>
+        </div>
 
         {panelOpen && (
           <aside className="cf-vtt-panel" aria-label={panelLabel} data-testid="encounter-vtt-panel">

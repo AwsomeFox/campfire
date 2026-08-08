@@ -58,10 +58,14 @@ test.describe('encounter cockpit layout', () => {
         const shellRect = node.getBoundingClientRect();
         return {
           position: getComputedStyle(node).position,
-          // The shell owns the viewport and the page itself never scrolls.
+          // The shell owns everything below Layout's campaign-wide chrome (the safety
+          // hold bar, and a player's check-request prompts when they have any) — see
+          // encounter-cockpit-campaign-chrome.spec.ts for why it starts below rather
+          // than on top of it — and the page itself never scrolls.
           fillsViewport:
             Math.round(shellRect.width) === window.innerWidth
-            && Math.round(shellRect.height) === window.innerHeight,
+            && Math.round(shellRect.bottom) === window.innerHeight,
+          startsBelowChrome: Math.round(shellRect.top) >= 0,
           documentScrolls: document.documentElement.scrollHeight > window.innerHeight + 1,
           // Canvas and panel sit side by side, with the panel on the trailing edge.
           sideBySide:
@@ -72,6 +76,7 @@ test.describe('encounter cockpit layout', () => {
       });
       expect(desktop.position).toBe('fixed');
       expect(desktop.fillsViewport).toBe(true);
+      expect(desktop.startsBelowChrome).toBe(true);
       expect(desktop.documentScrolls).toBe(false);
       expect(desktop.sideBySide).toBe(true);
       // Starts at the template's 356px and grows with the viewport (clamped at 460).
