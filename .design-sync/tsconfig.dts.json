@@ -1,0 +1,26 @@
+{
+  // Emits a real .d.ts tree for the design-sync entry barrel.
+  //
+  // apps/web sets `noEmit` + `declaration: false`, so the converter had no type
+  // information and every emitted <Name>.d.ts degraded to
+  // `interface <Name>Props { [key: string]: unknown }` — no API contract for the
+  // design agent. This config emits declarations only (allowed alongside
+  // `allowImportingTsExtensions`), which lib/dts.mjs then reads via the
+  // apps/web/index.d.ts shim.
+  //
+  // Run from the repo root:
+  //   npx tsc -p .design-sync/tsconfig.dts.json
+  "extends": "../apps/web/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "skipLibCheck": true,
+    // No rootDir: the barrel also pulls in .design-sync/preview-surface.tsx,
+    // so the inferred common root is the repo root and the emitted tree is
+    // .ds-types/apps/web/... beside .ds-types/.design-sync/...
+    "outDir": "../apps/web/.ds-types"
+  },
+  "include": [],
+  "files": ["../apps/web/.ds-entry.tsx", "../apps/web/src/vite-env.d.ts"]
+}
