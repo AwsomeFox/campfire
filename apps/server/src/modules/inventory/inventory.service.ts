@@ -491,6 +491,25 @@ export class InventoryService {
     throw new ForbiddenException('Only dm or the owning player may manage this character\'s items');
   }
 
+  /**
+   * Non-throwing sibling of {@link assertCanWriteOwner}, for re-checking authorization AFTER
+   * an already-authorized write has been applied (issue #2097 review). Same rule, asked as a
+   * question instead of asserted: a DM may write anyone's items, a player only their own
+   * character's.
+   */
+  private async canWriteOwner(
+    ownerType: 'party' | 'character',
+    characterId: number | null,
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<boolean> {
+    if (ownerType === 'party') return characterId == null;
+    if (role === 'dm') return true;
+    const character = await this.validateOwner(ownerType, characterId, campaignId);
+    return !!character && character.ownerUserId === user.id;
+  }
+
   async create(campaignId: number, input: InventoryItemCreateInput, user: RequestUser, role: Role): Promise<InventoryItem> {
     const ownerType = input.ownerType ?? 'party';
     const characterId = input.characterId ?? null;
@@ -612,11 +631,25 @@ export class InventoryService {
     // to happen to unequip and re-equip. Regenerate from the freshly-accepted snapshot; a
     // derivation that now yields nothing CLEARS the action, for the same reason it does on
     // the equip path. `manual` is untouched here as everywhere else.
+    //
+    // Review (chatgpt-codex-connector P2, authorization): the caller was authorized against
+    // the owner this request READ. The entry and pack lookups above await, so a DM can move
+    // and equip the item onto a different player in that window — and every other check here
+    // would then happily regenerate THAT player's private action on this caller's behalf.
+    // Re-authorized against the owner as the row now stands. A caller with no business
+    // writing it simply skips the regeneration rather than getting a 403: the snapshot
+    // refresh they did ask for has already been applied, so failing here would report failure
+    // for work that succeeded, and the new owner's own next equip or refresh regenerates it.
+    const regenerationOwnerId = row.ownerType === 'character' ? row.characterId : null;
+    const mayRegenerate =
+      regenerationOwnerId != null &&
+      (await this.canWriteOwner('character', regenerationOwnerId, row.campaignId, user, role));
     if (
       row.equipped &&
       row.ownerType === 'character' &&
       row.characterId != null &&
-      row.equippedActionSource === EquippedActionSource.enum.derived
+      row.equippedActionSource === EquippedActionSource.enum.derived &&
+      mayRegenerate
     ) {
       const ownerId = row.characterId;
       // The exact revision this derivation reads. Review (chatgpt-codex-connector P2): the
@@ -657,8 +690,9 @@ export class InventoryService {
             derivedFromSnapshot === null
               ? isNull(inventoryItems.compendiumSnapshot)
               : eq(inventoryItems.compendiumSnapshot, derivedFromSnapshot),
-            // …and the same name the action was titled with, so a concurrent rename's own
-            // regeneration is not overwritten by one carrying the old name.
+            // …and the same name the action was titled with. This path never renames, so a
+            // plain equality is right here: the derivation read `row.name`, and any other
+            // value means a rename landed and its own regeneration should win.
             eq(inventoryItems.name, row.name),
             // …and the wielder must still be the one the math was computed from. Expressed as
             // a subquery so it is evaluated by the UPDATE itself rather than in a separate
@@ -909,17 +943,16 @@ export class InventoryService {
     // ONE fingerprint covering everything `deriveActionForEquip` reads, computed by the same
     // function at capture time and at fence time. The character revision is folded in here
     // too, rather than carried beside the record: two fences meant two lists to keep in step,
-    // and the field this round's review found missing — `name` — was missing because the list
-    // was hand-picked field by field. Anything the derivation consumes belongs in this
-    // object; that is the whole contract, and it lives next to nothing else.
+    // and the field one review round found missing — `name` — was missing because the list was
+    // hand-picked field by field. Anything the derivation consumes belongs in this object;
+    // that is the whole contract. `name` is the one exception, checked just below: it is the
+    // only input this request may ITSELF be changing, so a plain equality is wrong in both
+    // directions (see `derivedActionName`).
     const derivationInputs = (
-      row: Pick<typeof inventoryItems.$inferSelect, 'name' | 'characterId' | 'compendiumSnapshot' | 'ruleEntryId'>,
+      row: Pick<typeof inventoryItems.$inferSelect, 'characterId' | 'compendiumSnapshot' | 'ruleEntryId'>,
       characterRevision: string | null,
     ) =>
       JSON.stringify({
-        // Read as the action's title (issue #2097 review): a concurrent rename must not leave
-        // an action named A on an item named B.
-        name: row.name,
         characterId: row.characterId,
         compendiumSnapshot: row.compendiumSnapshot,
         ruleEntryId: row.ruleEntryId,
@@ -939,6 +972,21 @@ export class InventoryService {
     // made by OTHER writers while this one awaited, and never mistakes this request's own
     // rename or move for interference.
     const derivedFromInputs = derivationInputs(existing, derivation?.characterRevision ?? null);
+    /**
+     * The name the derivation titled its action with. Review (chatgpt-codex-connector P2):
+     * `name` cannot be a plain fingerprint field like the others, because it is the one input
+     * THIS request may itself be changing — so equality against either side is wrong alone:
+     *
+     *  - against `existing.name`, an identical concurrent rename (both requests read A, both
+     *    derive B, the first commits) makes the second declare its own perfectly valid
+     *    derivation stale and CLEAR the first's action;
+     *  - against the derived name, this request's own rename A→B looks stale, because `fresh`
+     *    is read before its update lands and still says A.
+     *
+     * The honest predicate is "the row's name is one this request accounts for": untouched,
+     * or already equal to what we are about to write.
+     */
+    const derivedActionName = input.name ?? existing.name;
 
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
@@ -1090,7 +1138,9 @@ export class InventoryService {
           // not for `fresh.characterId` — on a move those differ, because `fresh` is read
           // before this request's own update lands, and comparing them would flag every
           // legitimate handoff as interference.
-          derivationInputsUnchanged: derivationInputs(fresh, freshCharacterRevision) === derivedFromInputs,
+          derivationInputsUnchanged:
+            derivationInputs(fresh, freshCharacterRevision) === derivedFromInputs &&
+            (fresh.name === existing.name || fresh.name === derivedActionName),
           derivationProducedAction: derivedOnEquip != null,
         });
 

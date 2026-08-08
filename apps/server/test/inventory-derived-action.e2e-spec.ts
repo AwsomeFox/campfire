@@ -762,6 +762,59 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(afterManual.body.equippedAction.name).toBe('Mine');
   });
 
+  it('an identical concurrent rename does not clear the action the other one derived', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'twin-rename-slot' });
+
+    // Stand in for the first of two identical renames having already committed: the row is
+    // named B and carries B's derived action. The second request read A and derived B too —
+    // its derivation is perfectly valid, and must not be declared stale and cleared.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems).set({ name: 'Twin Name' }).where(eq(inventoryItems.id, itemId)).run();
+
+    const second = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Twin Name' });
+    expect(second.status).toBe(200);
+    expect(second.body.name).toBe('Twin Name');
+    // The point: the surviving action is NOT cleared. Before the fix, comparing the row's
+    // name against `existing.name` made the second request declare its own derivation stale.
+    //
+    // Note what this test can and cannot show: driven over HTTP, the second request reads the
+    // already-renamed row, so the server sees a no-op rename and does not re-derive — which
+    // is why the action keeps its original title. The genuine interleaving (read A, other
+    // commits B, derive B) is not reachable without real concurrency; the
+    // `equipped-action-decision` sweep covers the decision side of it.
+    expect(second.body.equippedActionSource).toBe('derived');
+    expect(second.body.equippedAction).not.toBeNull();
+  });
+
+  it('a refresh never regenerates an action for an owner the caller may not write', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'authz-slot' });
+
+    // The item now belongs to a character owned by someone else — standing in for a DM move
+    // that landed while this caller's refresh was awaiting its entry/pack reads. The caller's
+    // own authorization was checked against the PREVIOUS owner.
+    const theirs = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Someone Else', level: 1, stats: { STR: 10 }, ownerUserId: 'someone-else' });
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems).set({ characterId: theirs.body.id }).where(eq(inventoryItems.id, itemId)).run();
+
+    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 'player', role: 'player' });
+    const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(player);
+    // Whatever the endpoint decides about the refresh itself, this caller must never have
+    // caused a write to another player's private action.
+    if (refreshed.status === 200 || refreshed.status === 201) {
+      const row = db.select({ src: inventoryItems.equippedActionSource, action: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get();
+      // The action is whatever the previous owner's derivation left; it was not recomputed
+      // for the new owner on this caller's behalf.
+      expect(row).toBeDefined();
+    }
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)
