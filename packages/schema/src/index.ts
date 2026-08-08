@@ -221,11 +221,19 @@ export type AiExternalContentPolicy = z.infer<typeof AiExternalContentPolicy>;
 export const MapAlignment = z.enum(['preserve', 'reset']);
 export type MapAlignment = z.infer<typeof MapAlignment>;
 
+/**
+ * Lifecycle status of a campaign (issue #16). `active` is editable; `paused` and
+ * `completed` are read-only ("archived"). Named so the status-transition record
+ * (#846) and the web status control share one canonical enum.
+ */
+export const CampaignStatus = z.enum(['active', 'paused', 'completed']);
+export type CampaignStatus = z.infer<typeof CampaignStatus>;
+
 export const Campaign = z.object({
   id: Id,
   name: z.string().min(1).max(120),
   description: z.string().max(10_000).default(''),
-  status: z.enum(['active', 'paused', 'completed']).default('active'),
+  status: CampaignStatus.default('active'),
   currentLocationId: Id.nullable().default(null),
   dangerLevel: DangerLevel.default('low').describe(
     "Campaign-wide narrative tone/challenge backdrop the DM sets (low/moderate/high/deadly). " +
@@ -294,11 +302,39 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
+
+/**
+ * One durable lifecycle-status transition for a campaign (issue #846): who changed
+ * the status, when, the from/to pair, and an optional DM-only reason. The table is
+ * append-only, so reactivating (back to active) and re-archiving keeps the full
+ * history; the latest row is the current provenance shown in the archived banner/settings.
+ *
+ * `actorUserId` is the durable install-local id; `actorName` is a display-name
+ * snapshot captured at transition time (a later rename does not rewrite history).
+ * `reason` is DM operational text and must NOT be shown to players; the banner uses
+ * only actor + status + time for the player-visible line.
+ */
+export const CampaignStatusTransition = z.object({
+  id: Id,
+  campaignId: Id,
+  actorUserId: z.string().max(120),
+  actorName: z.string().max(200),
+  fromStatus: CampaignStatus,
+  toStatus: CampaignStatus,
+  reason: z.string().max(500).default(''),
+  createdAt: IsoDate,
+});
+export type CampaignStatusTransition = z.infer<typeof CampaignStatusTransition>;
+
 export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true, customMechanicsProfile: true });
 export const CampaignUpdate = CampaignCreate.partial().extend({
   // Map replacement lifecycle (issue #870). 'reset' clears location pin coordinates
   // in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.
   mapAlignment: MapAlignment.optional(),
+  // Issue #846: optional DM-only reason recorded with a status transition. Not a
+  // stored column; the service consumes it to stamp the provenance row, then strips
+  // it before the row update. Ignored when `status` is absent or unchanged.
+  statusChangeReason: z.string().max(500).optional(),
 });
 
 /**
@@ -464,6 +500,9 @@ export const CampaignImport = z
     compendiumDependencies: z.array(ImportedEntity).optional(),
     /** When refs cannot resolve: block (default) or import with detached snapshots. */
     onUnresolvedCompendium: z.enum(['block', 'detach']).optional(),
+    // Issue #846: durable lifecycle-status provenance (actor/time/from->to/reason),
+    // re-inserted with fresh ids. Loose; the importer is defensive (see importCampaign).
+    statusTransitions: z.array(ImportedEntity).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;

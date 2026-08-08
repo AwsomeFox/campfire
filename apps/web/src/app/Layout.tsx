@@ -21,6 +21,7 @@ import { rememberCampaignRoute } from '../lib/campaignSwitcherRoute';
 import { confirmDiscardUnsavedWork } from '../lib/unsavedWork';
 
 import { useFormattingLocale, useTimeFormat, formatDateTime, timeAgo } from '../lib/format';
+import type { CampaignStatusTransition } from '@campfire/schema';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, Dialog } from '../components/ui';
@@ -355,6 +356,40 @@ function ConnectionSyncBanner({
       {message}
       {when ? <span className="text-muted">{t('nav.offlineSyncedAt', { when: when.ago })}</span> : null}
     </div>
+  );
+}
+
+/**
+ * Issue #846: shows who archived the campaign and when, in the read-only banner.
+ * Fetches the single newest transition (the server returns them newest-first).
+ * Player-visible line only — the DM-only `reason` is omitted here on purpose
+ * (members see actor + status + time; the reason stays in Settings).
+ */
+function ArchivedProvenance({ campaignId, status }: { campaignId: number; status: string }) {
+  const { t } = useTranslation();
+  const [latest, setLatest] = useState<CampaignStatusTransition | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .get<CampaignStatusTransition[]>(`${API}/campaigns/${campaignId}/status-transitions`)
+      .then((list) => {
+        if (!cancelled) setLatest(list.length > 0 ? list[0] : null);
+      })
+      .catch(() => {
+        if (!cancelled) setLatest(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, status]);
+  if (!latest) return null;
+  return (
+    <span style={{ opacity: 0.85 }}>
+      {t('nav.archivedBy', {
+        actor: latest.actorName || t('nav.archivedBySomeone'),
+        date: formatDateTime(latest.createdAt, { dateStyle: 'medium' }),
+      })}
+    </span>
   );
 }
 
@@ -1066,6 +1101,7 @@ function LayoutContent() {
             role="status"
           >
             {t('nav.archivedBanner', { status: campaign.status })}
+            {campaignId !== undefined && <ArchivedProvenance campaignId={campaignId} status={campaign.status} />}
             {isDm && (
               <>
                 {' '}

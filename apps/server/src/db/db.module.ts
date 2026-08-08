@@ -1473,6 +1473,31 @@ function migrateEncountersTableForMonsterHpDisplay1925(sqlite: Database.Database
   sqlite.exec("ALTER TABLE encounters ADD COLUMN monster_hp_display TEXT NOT NULL DEFAULT 'band'");
 }
 
+/**
+ * Issue #846: create the append-only `campaign_status_transitions` provenance table.
+ * CREATE TABLE / INDEX IF NOT EXISTS, so it is a no-op on a fresh DB (BOOTSTRAP_SQL
+ * already declares it) and idempotent on upgraded DBs. Column/index names mirror the
+ * drizzle schema and BOOTSTRAP_SQL exactly so the fresh-DB and upgraded-DB shapes
+ * cannot drift.
+ */
+function migrateCampaignStatusTransitions846(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_status_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      actor_user_id TEXT NOT NULL,
+      actor_name TEXT NOT NULL,
+      from_status TEXT NOT NULL,
+      to_status TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec(
+    'CREATE INDEX IF NOT EXISTS idx_campaign_status_transitions_campaign ON campaign_status_transitions(campaign_id, created_at)',
+  );
+}
+
 /** Boss-fight turn scheduling — lair slot at initiative 20 (issue #618). */
 function migrateEncountersTableForBossTurnPhase(sqlite: Database.Database): void {
   const hasEncountersTable = sqlite
@@ -5356,6 +5381,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // renumber the action-uses migration to 0173" commit). Confirmed free across every
   // claude/codex/work/port/feat/fix remote branch at the time this was taken.
   { name: '0174_combatants_manual_order_1923', run: migrateCombatantsTableForManualOrder1923 },
+  // #846 campaign status provenance — renumbered to 0175 (0172-0174 taken on main by #2050/#1921/#1923).
+  { name: '0175_campaign_status_transitions_846', run: migrateCampaignStatusTransitions846 },
 ];
 
 /**
