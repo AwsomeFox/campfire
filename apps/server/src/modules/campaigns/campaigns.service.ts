@@ -1305,30 +1305,26 @@ export class CampaignsService {
    * Only `derived` rows are touched — a `manual` action is a human's, and clearing it would
    * throw away work the system change does not necessarily invalidate. The equip state itself
    * is left alone: the sword is still worn, it just grants nothing until re-equipped.
+   * Soft-deleted rows are included; see the comment on the query.
    */
   private async clearDerivedEquippedActions(campaignId: number, user: RequestUser): Promise<void> {
+    // TOMBSTONED rows are included deliberately. Review (chatgpt-codex-connector P2): a
+    // bulk-archived equipped item keeps its action and provenance on purpose, so that
+    // `CampaignLibraryService.undoBulk()` can restore the exact pre-archive equip state — and
+    // that restore writes the saved action back verbatim, with no regeneration. Skipping the
+    // trash here therefore left a loaded gun: undo the archive after a system switch and the
+    // previous mechanics' spec is live again immediately. Nothing else about the tombstone
+    // changes; only the action a restore would resurrect.
     const affected = await this.db
       .select({ characterId: inventoryItems.characterId })
       .from(inventoryItems)
-      .where(
-        and(
-          eq(inventoryItems.campaignId, campaignId),
-          eq(inventoryItems.equippedActionSource, 'derived'),
-          isNull(inventoryItems.deletedAt),
-        ),
-      );
+      .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')));
     if (affected.length === 0) return;
 
     await this.db
       .update(inventoryItems)
       .set({ equippedAction: null, equippedActionSource: null, updatedAt: nowIso() })
-      .where(
-        and(
-          eq(inventoryItems.campaignId, campaignId),
-          eq(inventoryItems.equippedActionSource, 'derived'),
-          isNull(inventoryItems.deletedAt),
-        ),
-      );
+      .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')));
 
     for (const characterId of new Set(affected.map((row) => row.characterId).filter((cid): cid is number => cid != null))) {
       this.events.emit({ type: 'character.updated', campaignId, characterId, userId: user.id });

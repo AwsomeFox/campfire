@@ -320,12 +320,19 @@ export class InventoryService {
     finalName: string,
   ): Promise<DerivedActionResult> {
     try {
+      // Resolved FIRST, before any early return. Review (chatgpt-codex-connector P2): the
+      // refresh path's conditional UPDATE fences on this revision, so returning null for it
+      // made that predicate require the campaign's own revision to be NULL — which it never
+      // is. A derivation that legitimately produced nothing (an accepted snapshot with no
+      // weapon data) could therefore never CLEAR the stale action it was meant to replace.
+      // Every result this function returns must carry a revision the fence can match.
+      const { adapter, mechanicsRevision } = await this.adapterForCampaign(existing.campaignId);
       const character = await this.db
         .select({ stats: characters.stats, level: characters.level, updatedAt: characters.updatedAt })
         .from(characters)
         .where(eq(characters.id, characterId))
         .get();
-      if (!character) return { action: null, characterRevision: null, mechanicsRevision: null };
+      if (!character) return { action: null, characterRevision: null, mechanicsRevision };
 
       // Review (chatgpt-codex-connector P2): the SNAPSHOT wins, not the live rule entry.
       // The snapshot is the revision this campaign actually accepted at acquire time; when
@@ -354,9 +361,7 @@ export class InventoryService {
           .get();
         if (entry?.dataJson) data = safeJson(entry.dataJson);
       }
-      if (data == null) return { action: null, characterRevision: character.updatedAt, mechanicsRevision: null };
-
-      const { adapter, mechanicsRevision } = await this.adapterForCampaign(existing.campaignId);
+      if (data == null) return { action: null, characterRevision: character.updatedAt, mechanicsRevision };
 
       return {
         mechanicsRevision,

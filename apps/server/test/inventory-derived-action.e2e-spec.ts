@@ -762,6 +762,60 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(afterManual.body.equippedAction.name).toBe('Mine');
   });
 
+  it('a system switch also disarms a trashed item, so undoing its archive cannot resurrect old mechanics', async () => {
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Archive Then Switch' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Archivist', level: 5, stats: { STR: 16 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'archive-slot' });
+
+    // Bulk-archiving an equipped item deliberately KEEPS its action so undo can restore the
+    // exact pre-archive state — which means a tombstone holds a live spec that `undoBulk`
+    // writes back verbatim, with no regeneration.
+    const bulk = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'archive', targets: [{ entityType: 'inventory_item', entityId: item.body.id }] });
+    expect(bulk.status).toBe(201);
+
+    const profile = {
+      slug: 'e2e-archive-hack',
+      label: 'E2E Archive Hack',
+      mechanicsSummary: 'A homebrew hack for the archive-then-switch case, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const switched = await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(switched.status).toBe(200);
+
+    // The tombstone was disarmed too, so restoring it cannot bring 5e mechanics back to life.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const tombstone = db
+      .select({ action: inventoryItems.equippedAction, src: inventoryItems.equippedActionSource })
+      .from(inventoryItems)
+      .where(eq(inventoryItems.id, item.body.id))
+      .get()!;
+    expect(tombstone.action).toBeNull();
+    expect(tombstone.src).toBeNull();
+  });
+
   it('a no-op campaign PATCH that resends the same mechanics keeps derived actions', async () => {
     const server = ctx.app.getHttpServer();
     // A full-object REST/MCP client resends every field on every update. Treating the mere
@@ -910,6 +964,26 @@ describe('derived equipped-item actions (issue #2097)', () => {
       // private action.
       expect(after).toBe(before);
       expect(after ?? '').not.toContain('3d12');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
+  it('a refresh whose new revision has no weapon data clears the stale action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'nodata-refresh-slot' });
+    expect(equipped.body.equippedAction).not.toBeNull();
+
+    // The upstream entry stops describing a weapon. The regeneration legitimately produces
+    // nothing — and must CLEAR, not silently leave the old mechanics in place because the
+    // fence had no revision to match on.
+    setLongswordEntryData({ category: 'Wondrous Item', rarity: 'Uncommon' });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+      expect(refreshed.body.equippedAction).toBeNull();
+      expect(refreshed.body.equippedActionSource).toBeNull();
     } finally {
       restoreLongswordEntry();
     }
