@@ -3888,6 +3888,11 @@ export const RulePackInstallSection = z.enum([
   'classes',
   'races',
   'feats',
+  // Open5e mundane gear (issue #2096). `items` maps to Open5e's /magicitems/ path and so
+  // never contained a Longsword or Chain Mail; these two carry the SRD's ordinary weapons
+  // and armour, which is what a character sheet actually equips.
+  'weapons',
+  'armor',
   // Starfinder
   'equipment',
   'starships',

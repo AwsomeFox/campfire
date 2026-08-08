@@ -14,7 +14,7 @@ import {
   type FakeOpen5eWithBadPagination,
   type FakeOpen5eFlaky,
 } from './fake-open5e';
-import { OPEN5E_PACK_VERSION } from '../src/modules/rules/open5e-importer';
+import { ALL_OPEN5E_SECTIONS, OPEN5E_PACK_VERSION } from '../src/modules/rules/open5e-importer';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' }; // dev-header users always carry serverRole 'admin'
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -108,12 +108,12 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(job.status).toBe('completed');
     expect(job.outcome).toBe('created');
     expect(job.pack.slug).toBe('open5e-srd');
-    expect(job.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1); // spells + creatures + magicitems + conditions + classes + species + feats from the fake server
+    expect(job.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2); // spells + creatures + magicitems + conditions + classes + species + feats + weapons + armor from the fake server
     expect(job.pack.license).toContain('Creative Commons');
     // per-section progress was reported (issue #20): one row per section, all done.
-    expect(job.progress.length).toBe(7);
+    expect(job.progress.length).toBe(9);
     expect(job.progress.every((p: { status: string }) => p.status === 'done')).toBe(true);
-    expect(job.completedSections).toBe(7);
+    expect(job.completedSections).toBe(9);
     const packId = job.pack.id;
 
     const listRes = await request(server).get('/api/v1/rules/packs').set(dm);
@@ -152,7 +152,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(reJob.status).toBe('completed');
     expect(reJob.outcome).toBe('updated');
     expect(reJob.added).toBe(0);
-    expect(reJob.skippedExisting).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1);
+    expect(reJob.skippedExisting).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2);
     expect(reJob.changed).toBe(1);
     expect(reJob.removed).toBe(0);
     expect(reJob.pack.version).toBe(OPEN5E_PACK_VERSION);
@@ -160,10 +160,10 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       added: 0,
       changed: 1,
       removed: 0,
-      unchanged: (2 + 2 + 1 + 4 + 2 + 2 + 1) - 1,
+      unchanged: (2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2) - 1,
     });
     expect(reJob.preview.sourceHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(reJob.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1); // unchanged
+    expect(reJob.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2); // unchanged
 
     // search: free text finds the fireball spell
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
@@ -178,7 +178,10 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(searchFacets(facetRes.body)).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'spell', label: 'Spells', count: 2 }),
       expect.objectContaining({ type: 'monster', label: 'Monsters', count: 2 }),
-      expect.objectContaining({ type: 'item', label: 'Items', count: 1 }),
+      // 1 magic item + 4 weapons + 2 armor — the weapons/armor sections (issue #2096) are
+      // ruleEntry.type 'item' too, so they land in the SAME facet as magic items rather
+      // than adding facets of their own.
+      expect.objectContaining({ type: 'item', label: 'Items', count: 1 + 4 + 2 }),
     ]));
     expect(searchFacets(facetRes.body).some((f: { type: string }) => f.type === 'section' || f.type === 'other')).toBe(false);
     // The chip row must add up to the list it labels: with no type filter, the facet
@@ -376,17 +379,18 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
   // Authorising removal off that length would wipe every other section out of the pack.
   it('a repeated-section install never removes the sections it did not fetch (issue #500)', async () => {
     const server = ctx.app.getHttpServer();
-    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1;
+    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2;
 
     const full = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(full.status).toBe('completed');
     expect(full.pack.entryCount).toBe(total);
 
-    // Seven copies of one section: same length as ALL_OPEN5E_SECTIONS, one section covered.
+    // One section repeated ALL_OPEN5E_SECTIONS.length times: same array length as the full
+    // section list, one section actually covered.
     const repeated = await installOpen5e(server, dm, {
       source: 'open5e',
       url: fake.baseUrl,
-      sections: ['conditions', 'conditions', 'conditions', 'conditions', 'conditions', 'conditions', 'conditions'],
+      sections: ALL_OPEN5E_SECTIONS.map(() => 'conditions'),
     });
     expect(repeated.status).toBe('completed');
     expect(repeated.outcome).toBe('updated');
@@ -410,7 +414,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
   it('a complete upstream manifest removes entries upstream no longer has (issue #500)', async () => {
     const server = ctx.app.getHttpServer();
     const db = ctx.app.get<DrizzleDb>(DB);
-    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1;
+    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2;
 
     const first = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(first.status).toBe('completed');
@@ -519,6 +523,57 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // sections not requested weren't imported.
     const spellSearch = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
     expect(searchItems(spellSearch.body)).toEqual([]);
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+  });
+
+  // Issue #2096: before this, `items` was the ONLY gear section and it maps to Open5e's
+  // /magicitems/ path — so a Longsword could not be acquired from the compendium at all,
+  // and the equipped-weapon action loop (#1326/#1901) had no 5e data to build on.
+  it('installs mundane weapons and armor as item entries carrying their combat stats (issue #2096)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const job = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl, sections: ['weapons', 'armor'] });
+    expect(job.status).toBe('completed');
+    expect(job.pack.entryCount).toBe(4 + 2); // weapons + armor from the fake server
+
+    const weaponSearch = await request(server).get('/api/v1/rules/search').query({ q: 'longsword', type: 'item' }).set(dm);
+    expect(weaponSearch.status).toBe(200);
+    const longsword = searchItems(weaponSearch.body).find((e: { name: string }) => e.name === 'Longsword');
+    expect(longsword).toBeDefined();
+    expect(longsword.type).toBe('item');
+    const longswordData = JSON.parse(longsword.dataJson);
+    expect(longswordData).toMatchObject({ itemKind: 'weapon', damageDice: '1d8', damageType: 'Slashing', isSimple: false });
+    // The stat a consumer building an attack actually needs, and the one most easily lost:
+    // Versatile's two-handed die lives in the property's `detail`.
+    expect(longswordData.properties).toContainEqual({ name: 'Versatile', type: null, detail: '1d10' });
+
+    // A magic item and a mundane weapon are both `item` entries, so a reader has to be able
+    // to tell them apart from the data alone.
+    const magicJob = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl, sections: ['items'] });
+    expect(magicJob.status).toBe('completed');
+    const bagSearch = await request(server).get('/api/v1/rules/search').query({ q: 'bag of holding', type: 'item' }).set(dm);
+    const bag = searchItems(bagSearch.body).find((e: { name: string }) => e.name === 'Bag of Holding');
+    expect(bag).toBeDefined();
+    expect(JSON.parse(bag.dataJson).itemKind).toBeUndefined();
+
+    const armorSearch = await request(server).get('/api/v1/rules/search').query({ q: 'chain mail', type: 'item' }).set(dm);
+    const chainMail = searchItems(armorSearch.body).find((e: { name: string }) => e.name === 'Chain Mail');
+    expect(chainMail).toBeDefined();
+    expect(JSON.parse(chainMail.dataJson)).toMatchObject({
+      itemKind: 'armor',
+      acBase: 16,
+      grantsStealthDisadvantage: true,
+      strengthScoreRequired: 13,
+    });
+
+    // The Net's damage_dice is the string '0' upstream — not a dice expression. It must
+    // still import rather than being silently dropped for failing a validation this layer
+    // deliberately does not perform.
+    const netSearch = await request(server).get('/api/v1/rules/search').query({ q: 'net', type: 'item' }).set(dm);
+    const net = searchItems(netSearch.body).find((e: { name: string }) => e.name === 'Net');
+    expect(net).toBeDefined();
+    expect(JSON.parse(net.dataJson).damageDice).toBe('0');
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
   });
@@ -2544,7 +2599,7 @@ describe('rules / rule packs — identical re-import short-circuit (#1518)', () 
   });
 
   const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'sc-1518-dm' };
-  const TOTAL = 2 + 2 + 1 + 4 + 2 + 2 + 1; // spells + creatures + magicitems + conditions + classes + species + feats
+  const TOTAL = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2; // spells + creatures + magicitems + conditions + classes + species + feats + weapons + armor
 
   it('stamps the manifest hash on install and short-circuits a byte-identical re-import to a no-op', async () => {
     const server = ctx.app.getHttpServer();
