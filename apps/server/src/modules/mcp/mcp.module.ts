@@ -17,6 +17,7 @@ import { EncountersModule } from '../encounters/encounters.module';
 import { CampaignLibraryModule } from '../campaign-library/campaign-library.module';
 import { MapsModule } from '../maps/maps.module';
 import { AiMapModule } from '../ai-map/ai-map.module';
+import { AiPortraitModule } from '../ai-portrait/ai-portrait.module';
 import { AuditModule } from '../audit/audit.module';
 import { ExportModule } from '../export/export.module';
 import { AiDmModule } from '../ai-dm/ai-dm.module';
@@ -55,6 +56,7 @@ import { McpController } from './mcp.controller';
     CampaignLibraryModule,
     MapsModule,
     AiMapModule,
+    AiPortraitModule,
     AuditModule,
     ExportModule,
     AiDmModule,

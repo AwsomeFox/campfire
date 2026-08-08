@@ -30,6 +30,7 @@ import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
+import { AiPortraitButton } from '../ai-portrait/AiPortraitWizard';
 import {
   DmPrivacyGroup,
   LabeledField,
@@ -382,15 +383,18 @@ export default function NpcPage() {
         <>
           <div className="flex items-start gap-3 flex-wrap">
             {canDmWrite ? (
-              <ImageUpload
-                campaignId={cid}
-                kind="portrait"
-                shape="circle"
-                previewUrl={npc.portraitUrl ?? undefined}
-                label="Portrait"
-                onUploaded={savePortrait}
-                onError={setActionError}
-              />
+              <div className="flex flex-col items-center gap-1.5">
+                <ImageUpload
+                  campaignId={cid}
+                  kind="portrait"
+                  shape="circle"
+                  previewUrl={npc.portraitUrl ?? undefined}
+                  label="Portrait"
+                  onUploaded={savePortrait}
+                  onError={setActionError}
+                />
+                <AiPortraitButton campaignId={cid} target={{ type: 'npc', id: npc.id }} onAttached={load} />
+              </div>
             ) : npc.portraitUrl ? (
               <img
                 src={npc.portraitUrl}

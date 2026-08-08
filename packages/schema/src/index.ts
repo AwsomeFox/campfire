@@ -9699,6 +9699,165 @@ export const AttachGeneratedMapRequest = z.object({
 });
 export type AttachGeneratedMapRequest = z.infer<typeof AttachGeneratedMapRequest>;
 
+// ---------- AI portrait generation (issue #1321) ----------
+// Mirrors the ai-map (#410) job model, portrait-flavored: a DM or owning player composes a
+// brief from character/NPC fields, the configured image provider renders square portrait
+// candidates (or, with no capable provider, returns concrete external steps), and a chosen
+// candidate is persisted as a `kind='portrait'` attachment whose resolved URL becomes the
+// entity `portraitUrl`. Previews live only in memory until the explicit attach step.
+
+/**
+ * How a portrait candidate was actually produced (issue #1321). `image-provider` means a
+ * real text-to-image provider rendered it; `external-instructions` means no capable provider
+ * was configured so Campfire returned steps for a client-side generator rather than a fake.
+ * Unlike maps there is NO procedural fallback — Campfire has no first-party portrait renderer.
+ */
+export const AiPortraitGenerationMethod = z.enum(['image-provider', 'external-instructions']);
+export type AiPortraitGenerationMethod = z.infer<typeof AiPortraitGenerationMethod>;
+
+/** Reuses the ai-map job-status lifecycle (issue #410). */
+export const AiPortraitJobStatus = AiMapJobStatus;
+export type AiPortraitJobStatus = AiMapJobStatus;
+
+/** Style presets the UI offers so a brief is composable rather than a blank box. */
+export const AiPortraitStyle = z.enum(['realistic', 'painterly', 'illustration']);
+export type AiPortraitStyle = z.infer<typeof AiPortraitStyle>;
+
+/** Pixel dimensions for a portrait render (bounded; square by default). */
+export const AiPortraitDimensions = z.object({
+  width: z.number().int().min(256).max(4096),
+  height: z.number().int().min(256).max(4096),
+});
+export type AiPortraitDimensions = z.infer<typeof AiPortraitDimensions>;
+
+/** The kind of entity a portrait will be attached to (issue #1321). */
+export const AiPortraitEntityType = z.enum(['character', 'npc']);
+export type AiPortraitEntityType = z.infer<typeof AiPortraitEntityType>;
+
+/**
+ * The request to generate portrait candidates (issue #1321). `count` bounds the number of
+ * previews (1–4, default 2). `entityType`/`entityId` are informational only at generate time —
+ * they prefill the attach target but attach re-validates ownership — and are stamped into the
+ * audit trail. Square dimensions are the default because portrait avatars are circular.
+ */
+export const AiPortraitGenerationRequest = z.object({
+  prompt: z.string().min(1).max(2000),
+  count: z.number().int().min(1).max(4).default(2),
+  dimensions: AiPortraitDimensions.optional(),
+  style: AiPortraitStyle.optional(),
+  seed: z.string().min(1).max(64).optional(),
+  /** Override the image model for this request (else the provider's configured default). */
+  imageModel: z.string().min(1).max(120).optional(),
+  /** Informational: the entity the caller intends to attach to (re-validated on attach). */
+  entityType: AiPortraitEntityType.optional(),
+  entityId: Id.optional(),
+});
+export type AiPortraitGenerationRequest = z.infer<typeof AiPortraitGenerationRequest>;
+
+/** Deterministic content-moderation gate run on the portrait prompt before spending. */
+export const AiPortraitModeration = z.object({
+  flagged: z.boolean(),
+  categories: z.array(z.string().max(40)).default([]),
+  note: z.string().max(400).nullable().default(null),
+});
+export type AiPortraitModeration = z.infer<typeof AiPortraitModeration>;
+
+/** Honest provenance recorded for every candidate + persisted with the attachment audit. */
+export const AiPortraitProvenance = z.object({
+  method: AiPortraitGenerationMethod,
+  providerType: z.string().nullable(),
+  model: z.string().nullable(),
+  label: z.string().max(300),
+  seed: z.string().nullable().default(null),
+});
+export type AiPortraitProvenance = z.infer<typeof AiPortraitProvenance>;
+
+/** Rough cost/usage surfaced BEFORE and after generation so the caller can decide to spend. */
+export const AiPortraitCost = z.object({
+  imageCount: z.number().int().nonnegative(),
+  tokensUsed: z.number().int().nonnegative().default(0),
+  estimatedUsd: z.number().nonnegative().nullable().default(null),
+});
+export type AiPortraitCost = z.infer<typeof AiPortraitCost>;
+
+/** A single generated portrait candidate the caller can select / refine / attach. */
+export const AiPortraitPreview = z.object({
+  id: z.string(),
+  method: AiPortraitGenerationMethod,
+  /** Base64-encoded raster bytes (image-provider renders). */
+  imageBase64: z.string().nullable().default(null),
+  mime: z.string().max(60),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  seed: z.string(),
+  provenance: AiPortraitProvenance,
+  warnings: z.array(z.string().max(200)).default([]),
+});
+export type AiPortraitPreview = z.infer<typeof AiPortraitPreview>;
+
+/**
+ * Readiness hints shown BEFORE generating (issue #1321): the method that would be used, cost,
+ * moderation, and warnings. With no image-capable provider, the UI shows the external-steps
+ * fallback so the caller still has a concrete next step.
+ */
+export const AiPortraitReadiness = z.object({
+  method: AiPortraitGenerationMethod,
+  warnings: z.array(z.string().max(200)).default([]),
+  cost: AiPortraitCost,
+  moderation: AiPortraitModeration,
+  capabilities: AiProviderCapabilities.nullable().default(null),
+});
+export type AiPortraitReadiness = z.infer<typeof AiPortraitReadiness>;
+
+/**
+ * The full job view returned by create/status/refine (issue #1321). Previews are in-memory
+ * only until attached; `externalInstructions` is populated for the external-instructions
+ * fallback so a caller without a capable provider still has a concrete next step.
+ */
+export const AiPortraitGenerationJob = z.object({
+  id: z.string(),
+  campaignId: Id,
+  status: AiPortraitJobStatus,
+  progress: z.number().int().min(0).max(100),
+  method: AiPortraitGenerationMethod,
+  prompt: z.string(),
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  dimensions: AiPortraitDimensions.nullable().default(null),
+  moderation: AiPortraitModeration,
+  cost: AiPortraitCost,
+  previews: z.array(AiPortraitPreview).default([]),
+  externalInstructions: z.array(z.string().max(400)).default([]),
+  warnings: z.array(z.string().max(200)).default([]),
+  error: z.string().max(400).nullable().default(null),
+  createdBy: z.string(),
+  ...timestamps,
+});
+export type AiPortraitGenerationJob = z.infer<typeof AiPortraitGenerationJob>;
+
+/** Refine an existing job: tweak the prompt/count and regenerate (issue #1321). */
+export const AiPortraitRefineRequest = z.object({
+  prompt: z.string().min(1).max(2000).optional(),
+  count: z.number().int().min(1).max(4).optional(),
+  /** Reuse this preview's seed as the base for the refined render (keeps continuity). */
+  fromPreviewId: z.string().optional(),
+});
+export type AiPortraitRefineRequest = z.infer<typeof AiPortraitRefineRequest>;
+
+/**
+ * Attach a chosen candidate as a real `kind='portrait'` attachment (issue #1321) and set it as
+ * the target entity's `portraitUrl`. `entityType` + `entityId` name the target; the attach
+ * service re-validates write authority through the domain service (dm-or-owner for a character,
+ * dm-only for an NPC), so a player can only attach to a character they own.
+ */
+export const AttachGeneratedPortraitRequest = z.object({
+  previewId: z.string().min(1),
+  entityType: AiPortraitEntityType,
+  entityId: Id,
+  filename: z.string().max(160).optional(),
+});
+export type AttachGeneratedPortraitRequest = z.infer<typeof AttachGeneratedPortraitRequest>;
+
 // Encounter difficulty schemas + 5e math live in ./encounter-difficulty (issues #58 + #429).
 
 // ---------- encounter generator (issue #304) ----------

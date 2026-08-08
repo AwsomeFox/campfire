@@ -107,6 +107,9 @@ import {
   AiMapGenerationRequest,
   AiMapRefineRequest,
   AttachGeneratedMapRequest,
+  AiPortraitGenerationRequest,
+  AiPortraitRefineRequest,
+  AttachGeneratedPortraitRequest,
   CoDmDraftTarget,
   NarrationLanguage,
   CampaignDmRepair,
@@ -152,6 +155,7 @@ import { CampaignLibraryService } from '../campaign-library/campaign-library.ser
 import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MapsService } from '../maps/maps.service';
 import { AiMapService } from '../ai-map/ai-map.service';
+import { AiPortraitService } from '../ai-portrait/ai-portrait.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
@@ -423,6 +427,7 @@ export class McpToolsService {
     private readonly campaignLibrary: CampaignLibraryService,
     private readonly maps: MapsService,
     private readonly aiMap: AiMapService,
+    private readonly aiPortrait: AiPortraitService,
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
     private readonly aiDm: AiDmService,
@@ -2147,9 +2152,17 @@ export class McpToolsService {
       user,
       'create_campaign',
       'Create a new campaign. Any authenticated user may create one; the creator is auto-added as its dm.',
-      { name: z.string().min(1).max(120).describe('Campaign name'), description: z.string().max(10_000).optional().describe('Campaign description') },
-      async ({ name, description }) => {
-        const validated = CampaignCreate.parse({ name, ...(description !== undefined ? { description } : {}) });
+      {
+        name: z.string().min(1).max(120).describe('Campaign name'),
+        description: z.string().max(10_000).optional().describe('Campaign description'),
+        ruleSystem: z.string().optional().describe('Rule system (e.g. dnd5e, archmage)'),
+      },
+      async ({ name, description, ruleSystem }) => {
+        const validated = CampaignCreate.parse({
+          name,
+          ...(description !== undefined ? { description } : {}),
+          ...(ruleSystem !== undefined ? { ruleSystem } : {}),
+        });
         return this.campaigns.create(validated, user);
       },
     );
@@ -4509,6 +4522,94 @@ export class McpToolsService {
         // A DM invoking this tool directly is authorized to reveal/replace a live map. The
         // driver seat never reaches here: attach_generated_map is absent from its allow-list.
         return this.aiMap.attach(campaignId as number, jobId as string, body, user, role, { allowLiveReplace: true });
+      },
+    );
+
+    // ── AI portrait generation (issue #1321) ──────────────────────────────────
+    // Member-scoped (a player may generate for their own PC, a DM for anything). Unlike the DM-only
+    // ai-map tools, generation is open to any campaign member because the EXPENSIVE step — linking a
+    // chosen portrait onto an entity — reuses the domain service's own dm-or-owner (character) /
+    // dm-only (NPC) authority inside attach_generated_portrait. So a player can only attach to a
+    // character they own, exactly like a manual portrait upload.
+    this.writeTool(
+      server,
+      user,
+      'generate_ai_portrait',
+      'player: generate portrait CANDIDATES from a free-form brief using the configured AI provider (issue #1321). ' +
+        'Routes HONESTLY: an image-capable provider (OpenAI-compatible) draws a real square portrait; a text-only ' +
+        'provider (Anthropic) or no provider returns external-generator instructions instead of a fabricated image ' +
+        '(there is NO procedural portrait fallback). Previews live in memory only — NOTHING is persisted until you call ' +
+        'attach_generated_portrait, so cancelling leaves no orphan files. `count` (1–4) previews. Optional `style`: ' +
+        '"realistic" | "painterly" | "illustration". Returns the job { id, status, method, previews[], cost, moderation }; ' +
+        'poll get_portrait_generation and then attach_generated_portrait to keep one.',
+      {
+        campaignId: CampaignIdArg,
+        idempotencyKey: z.string().max(120).optional().describe('Optional idempotency key — a retry with the same key returns the same job'),
+        ...AiPortraitGenerationRequest.shape,
+      },
+      async ({ campaignId, idempotencyKey, ...fields }) => {
+        const request = AiPortraitGenerationRequest.parse(fields);
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
+        return this.aiPortrait.createJob(campaignId as number, request, user, role, {
+          idempotencyKey: idempotencyKey as string | undefined,
+          caller: 'co-dm',
+        });
+      },
+    );
+
+    this.tool(
+      server,
+      'get_portrait_generation',
+      'player: fetch the status/progress/previews of an AI portrait generation job (issue #1321). Pass the campaignId ' +
+        'and the jobId returned by generate_ai_portrait / refine_ai_portrait.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('AI portrait job id from generate_ai_portrait'),
+      },
+      async ({ campaignId, jobId }) => {
+        await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
+        return this.aiPortrait.getJob(jobId as string, campaignId as number);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'refine_ai_portrait',
+      'player: refine an existing AI portrait job (issue #1321) — tweak the prompt/count (or reuse a chosen preview\'s ' +
+        'seed for continuity) and regenerate a fresh set of candidates. Returns the new job. Like generate_ai_portrait, ' +
+        'nothing is persisted until attach_generated_portrait.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('The job to refine (from generate_ai_portrait)'),
+        ...AiPortraitRefineRequest.shape,
+      },
+      async ({ campaignId, jobId, ...fields }) => {
+        const refine = AiPortraitRefineRequest.parse(fields);
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
+        return this.aiPortrait.refine(campaignId as number, jobId as string, refine, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'attach_generated_portrait',
+      'player: persist a chosen AI-generated candidate as a `kind="portrait"` attachment (issue #1321) and set it as the ' +
+        'target entity\'s portraitUrl. `entityType` ("character"|"npc") + `entityId` name the target. Linking reuses the ' +
+        'domain service\'s own authority: a player may attach only to a character they OWN (dm-or-owner), and NPC portrait ' +
+        'writes are DM-only — so this call 403s unless the caller owns the target character or is the DM. Prompt, ' +
+        'provider/model, seed/params, dimensions, provenance, moderation, and cost are stamped into the attachment audit ' +
+        'record. Returns { attachment, entity, provenance }.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('The succeeded job to attach a preview from'),
+        ...AttachGeneratedPortraitRequest.shape,
+      },
+      async ({ campaignId, jobId, ...fields }) => {
+        const body = AttachGeneratedPortraitRequest.parse(fields);
+        const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
+        return this.aiPortrait.attach(campaignId as number, jobId as string, body, user, role);
       },
     );
 

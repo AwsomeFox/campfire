@@ -109,6 +109,7 @@ import { RollContextMenu, type RollMode } from '../../components/RollContextMenu
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { NotesRail } from '../../components/NotesRail';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
+import { AiPortraitButton } from '../ai-portrait/AiPortraitWizard';
 import { initials } from './avatar';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
@@ -715,6 +716,9 @@ export default function CharacterPage() {
                     </span>
                   )}
                   <span className="text-[length:var(--type-label)] text-secondary cf-print-hide">Click or drop to change</span>
+                  <div className="cf-print-hide pt-1">
+                    <AiPortraitButton campaignId={cid} target={{ type: 'character', id: character.id }} onAttached={load} />
+                  </div>
                 </>
               ) : character.portraitUrl ? (
                 <img

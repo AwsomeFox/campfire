@@ -39,6 +39,7 @@ describe('McpToolsService coverage unit tests', () => {
     const campaignLibrary = overrides.campaignLibrary ?? {};
     const maps = overrides.maps ?? { listForCampaign: jest.fn().mockResolvedValue([]) };
     const aiMap = overrides.aiMap ?? {};
+    const aiPortrait = overrides.aiPortrait ?? {};
     const audit = overrides.audit ?? { log: jest.fn().mockResolvedValue(undefined) };
     const exportService = overrides.exportService ?? {};
     const aiDm = overrides.aiDm ?? {};
@@ -83,6 +84,7 @@ describe('McpToolsService coverage unit tests', () => {
       campaignLibrary as any,
       maps as any,
       aiMap as any,
+      aiPortrait as any,
       audit as any,
       exportService as any,
       aiDm as any,

@@ -40,7 +40,11 @@ describe('MCP REST parity manifest (#683)', () => {
       {} as never,
       {} as never,
       {} as never,
+      // aiMap
       {} as never,
+      // #1321: AiPortraitService — appended after aiMap.
+      {} as never,
+      // audit
       {} as never,
       {} as never,
       {} as never,
