@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { Character, InventoryItem, PartyCharacter, RuleEntry } from '@campfire/schema';
+import type { Character, CharacterAction, InventoryItem, PartyCharacter, RuleEntry } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn, TextInput, Skeleton } from '../../components/ui';
@@ -206,6 +206,81 @@ export function ItemRow({
       }
     } finally {
       setEquipBusy(false);
+    }
+  }
+
+  /**
+   * Issue #2097: the equipped action is now editable in place. Before this the server could
+   * hold one (and, since #2097, derive one) but the web app could only DISPLAY it — the only
+   * writers were the REST PATCH and the MCP tool, so in practice nobody ever authored or
+   * corrected one. Saving here always flips the row's provenance to `manual` server-side, so
+   * an edit is never regenerated over by a later equip.
+   */
+  const [actionOpen, setActionOpen] = useState(false);
+  const [actionDraft, setActionDraft] = useState<CharacterAction | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  // A party-stash item can never be equipped, so it can never carry an equipped action —
+  // the server rejects one outright. Everything in this block keys off that.
+  const isCharacterOwned = committed.ownerType === 'character' && committed.characterId != null;
+
+  function openActionEditor() {
+    setActionDraft(
+      committed.equippedAction ?? { name: committed.name, kind: '', toHit: '', damage: '', targetAc: '', notes: '' },
+    );
+    setActionError(null);
+    setActionOpen(true);
+  }
+
+  async function saveAction() {
+    if (!actionDraft) return;
+    const name = actionDraft.name.trim();
+    if (!name) {
+      setActionError(t('inventory.equip.actionNameRequired'));
+      return;
+    }
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      // Review (chatgpt-codex-connector P1, Copilot): the stored `spec` is what the resolver
+      // ROLLS — `toHit`/`damage` are only what it shows. Round-tripping the old spec after
+      // editing those numbers displayed the correction and kept rolling the original, which
+      // defeats the whole reason this editor exists. So the spec is dropped whenever a
+      // combat-relevant field changed, and the server rebuilds one from the edited values
+      // (`rebuildEditedActionSpec`); a prose-only edit keeps the existing spec, so an action
+      // authored over MCP with saves or effects survives a typo fix in its name.
+      const prior = committed.equippedAction;
+      const combatFieldsChanged =
+        !prior ||
+        prior.toHit !== actionDraft.toHit ||
+        prior.damage !== actionDraft.damage ||
+        prior.targetAc !== actionDraft.targetAc;
+      const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, {
+        equippedAction: { ...actionDraft, name, spec: combatFieldsChanged ? undefined : actionDraft.spec },
+      });
+      setCommitted(updated);
+      setActionOpen(false);
+      onChanged();
+    } catch (err) {
+      setActionError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  async function removeAction() {
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, { equippedAction: null });
+      setCommitted(updated);
+      setActionOpen(false);
+      onChanged();
+    } catch (err) {
+      setActionError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
+    } finally {
+      setActionBusy(false);
     }
   }
 
@@ -419,9 +494,133 @@ export function ItemRow({
                 line must not claim a stowed item grants a combat action it doesn't currently
                 offer. */}
             {committed.equipped && committed.equippedAction && (
-              <p className="text-[11px] text-secondary" data-testid="inventory-grants-action">
-                {t('inventory.equip.grantsAction', { name: committed.equippedAction.name })}
+              <p className="text-[11px] text-secondary flex flex-wrap items-center gap-1.5" data-testid="inventory-grants-action">
+                <span>{t('inventory.equip.grantsAction', { name: committed.equippedAction.name })}</span>
+                {/* Issue #2097: say plainly that the server built this one, so nobody mistakes
+                    an assumed proficiency bonus for a number a person checked. */}
+                {committed.equippedActionSource === 'derived' && (
+                  <span className="tag text-[10px]" title={t('inventory.equip.derivedHelp')} data-testid="inventory-action-derived-badge">
+                    {t('inventory.equip.derivedBadge')}
+                  </span>
+                )}
               </p>
+            )}
+            {/* The editor is gated on `editable` like every other write control here, and on
+                the server having actually sent the field: a reader who is neither DM nor the
+                owning player gets `equippedAction: null` (fail-closed redaction), and must
+                not be offered an editor that would write one. */}
+            {/* Review (chatgpt-codex-connector P2): also gated on a CHARACTER owner. On the
+                campaign Inventory page `canEditItem` makes every party-stash row editable, so
+                without this the Add-action button appeared on the whole stash section — where
+                saving it can only ever 400 (`Only character-owned items may carry an equipped
+                action`). An affordance that cannot succeed is worse than none. */}
+            {editable && isCharacterOwned && !actionOpen && (
+              <Btn
+                density="xs"
+                ghost
+                className="text-xs self-start"
+                disabled={actionBusy}
+                onClick={openActionEditor}
+                aria-label={t(committed.equippedAction ? 'inventory.equip.editActionAria' : 'inventory.equip.addActionAria', { name: committed.name })}
+                data-testid="inventory-edit-action-btn"
+              >
+                {t(committed.equippedAction ? 'inventory.equip.editAction' : 'inventory.equip.addAction')}
+              </Btn>
+            )}
+            {editable && isCharacterOwned && actionOpen && actionDraft && (
+              <form
+                className="space-y-1.5 rounded border border-subtle p-2"
+                data-testid="inventory-action-editor"
+                onSubmit={(e: FormEvent) => {
+                  e.preventDefault();
+                  void saveAction();
+                }}
+              >
+                <div className="flex flex-wrap gap-1.5">
+                  <TextInput
+                    density="xs"
+                    className="text-xs"
+                    value={actionDraft.name}
+                    placeholder={t('inventory.equip.actionName')}
+                    aria-label={t('inventory.equip.actionName')}
+                    disabled={actionBusy}
+                    onChange={(e) => setActionDraft({ ...actionDraft, name: e.target.value })}
+                    data-testid="inventory-action-name"
+                  />
+                  <TextInput
+                    density="xs"
+                    className="text-xs"
+                    value={actionDraft.kind}
+                    placeholder={t('inventory.equip.actionKindPlaceholder')}
+                    aria-label={t('inventory.equip.actionKind')}
+                    disabled={actionBusy}
+                    onChange={(e) => setActionDraft({ ...actionDraft, kind: e.target.value })}
+                    data-testid="inventory-action-kind"
+                  />
+                  <TextInput
+                    density="xs"
+                    className="text-xs"
+                    value={actionDraft.toHit}
+                    placeholder={t('inventory.equip.actionToHitPlaceholder')}
+                    aria-label={t('inventory.equip.actionToHit')}
+                    disabled={actionBusy}
+                    onChange={(e) => setActionDraft({ ...actionDraft, toHit: e.target.value })}
+                    data-testid="inventory-action-tohit"
+                  />
+                  <TextInput
+                    density="xs"
+                    className="text-xs"
+                    value={actionDraft.damage}
+                    placeholder={t('inventory.equip.actionDamagePlaceholder')}
+                    aria-label={t('inventory.equip.actionDamage')}
+                    disabled={actionBusy}
+                    onChange={(e) => setActionDraft({ ...actionDraft, damage: e.target.value })}
+                    data-testid="inventory-action-damage"
+                  />
+                </div>
+                <TextInput
+                  density="xs"
+                  className="text-xs w-full"
+                  value={actionDraft.notes}
+                  placeholder={t('inventory.equip.actionNotes')}
+                  aria-label={t('inventory.equip.actionNotes')}
+                  disabled={actionBusy}
+                  onChange={(e) => setActionDraft({ ...actionDraft, notes: e.target.value })}
+                  data-testid="inventory-action-notes"
+                />
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Btn density="xs" type="submit" className="text-xs" disabled={actionBusy} data-testid="inventory-action-save-btn">
+                    {actionBusy ? t('inventory.equip.savingAction') : t('inventory.equip.saveAction')}
+                  </Btn>
+                  <Btn
+                    density="xs"
+                    ghost
+                    className="text-xs"
+                    type="button"
+                    disabled={actionBusy}
+                    onClick={() => {
+                      setActionOpen(false);
+                      setActionError(null);
+                    }}
+                  >
+                    {t('common.cancel')}
+                  </Btn>
+                  {committed.equippedAction && (
+                    <Btn
+                      density="xs"
+                      ghost
+                      className="text-xs text-rose-400"
+                      type="button"
+                      disabled={actionBusy}
+                      onClick={() => void removeAction()}
+                      data-testid="inventory-action-remove-btn"
+                    >
+                      {t('inventory.equip.removeAction')}
+                    </Btn>
+                  )}
+                </div>
+                {actionError && <p className="text-[12px] text-rose-400">{actionError}</p>}
+              </form>
             )}
             {slotConflict && (
               <div className="text-[11px] text-amber-400 flex flex-wrap items-center gap-2" data-testid="inventory-slot-conflict">

@@ -266,11 +266,11 @@ export class CampaignLibraryService {
         // finding on other paths.
         const row = request.operation === 'move_inventory_owner'
           ? tx.get(
-              sql`select owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
+              sql`select owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction, equipped_action_source as equippedActionSource from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
             )
           : target.entityType === 'inventory_item'
             ? tx.get(
-                sql`select ${sql.raw(field)} as value, owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
+                sql`select ${sql.raw(field)} as value, owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction, equipped_action_source as equippedActionSource from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
               )
             : tx.get(sql`select ${sql.raw(field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
         if (!row) throw new NotFoundException(`${target.entityType} ${target.entityId} not found in this campaign`);
@@ -329,7 +329,7 @@ export class CampaignLibraryService {
           const moved = before.ownerType !== request.ownerType || before.characterId !== (request.characterId ?? null);
           if (moved) {
             tx.run(
-              sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, equipped_action=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`,
+              sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, equipped_action=NULL, equipped_action_source=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`,
             );
             // Issue #1901 review (chatgpt-codex-connector P2): the previous owner just lost
             // this item's merged action (if any) — invalidate their cached actions/turn
@@ -367,7 +367,7 @@ export class CampaignLibraryService {
             affectedCharacterIds.add(archiveSnapshot.characterId);
           }
           tx.run(
-            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL${archiveClearAction ? sql`, equipped_action=NULL` : sql``}` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
+            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL${archiveClearAction ? sql`, equipped_action=NULL, equipped_action_source=NULL` : sql``}` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
           );
         }
       }
@@ -449,6 +449,7 @@ export class CampaignLibraryService {
                 equipped: z.number().int().optional(),
                 equipSlot: z.string().nullable().optional(),
                 equippedAction: z.string().nullable().optional(),
+                equippedActionSource: z.string().nullable().optional(),
               })
               .parse(value);
             if (!tx.get(sql`select id from inventory_items where id=${row.entityId} and campaign_id=${campaignId} and owner_type=${request.ownerType} and character_id is ${request.characterId ?? null}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
@@ -468,7 +469,7 @@ export class CampaignLibraryService {
             // owner. Only party-stash destinations must remain action-free.
             const restoreEquippedAction = before.ownerType === 'character' ? (before.equippedAction ?? null) : null;
             tx.run(
-              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${restoreEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${restoreEquippedAction}, equipped_action_source=${restoreEquippedAction ? (before.equippedActionSource ?? null) : null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
             );
             // Issue #1901 review (chatgpt-codex-connector P2): the restored character gains
             // this item's action back into their merged list — invalidate their cache.
@@ -482,6 +483,7 @@ export class CampaignLibraryService {
                 equipped: z.number().int().optional(),
                 equipSlot: z.string().nullable().optional(),
                 equippedAction: z.string().nullable().optional(),
+                equippedActionSource: z.string().nullable().optional(),
               })
               .parse(value);
             const after = request.operation === 'archive' ? operation.createdAt : null;
@@ -497,7 +499,10 @@ export class CampaignLibraryService {
                 .object({ ownerType: z.string(), characterId: z.number().int().nullable() })
                 .parse(tx.get(sql`select owner_type as ownerType, character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`));
               const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
-              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+              // Issue #2097 review (devin): the provenance is written in the same
+              // statement as the action, never left behind describing a null.
+              const keepEquippedActionSource = keepEquippedAction ? (scalar.equippedActionSource ?? null) : null;
+              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
               // Issue #1901 review (chatgpt-codex-connector P2): re-archiving may drop this
               // item's action back out of the owner's merged list — invalidate their cache
               // whenever the owner is a character (harmless extra invalidation if the item
@@ -517,8 +522,11 @@ export class CampaignLibraryService {
                 throw new ConflictException('Undo would re-equip this item into a slot another item now occupies; unequip that item first.');
               }
               const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
+              // Issue #2097 review (devin): the provenance is written in the same
+              // statement as the action, never left behind describing a null.
+              const keepEquippedActionSource = keepEquippedAction ? (scalar.equippedActionSource ?? null) : null;
               tx.run(
-                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
               );
               // Issue #1901 review (chatgpt-codex-connector P2): undoing the archive can
               // restore this item's action into the owner's merged list.

@@ -47,6 +47,10 @@ export const SECTION_LABELS: Record<RulePackInstallSection, string> = {
   classes: 'Classes',
   races: 'Races',
   feats: 'Feats',
+  // Open5e mundane gear (issue #2096) — distinct from `items`, which is that API's
+  // magic-item list.
+  weapons: 'Weapons',
+  armor: 'Armor',
   equipment: 'Equipment',
   starships: 'Starships',
   vehicles: 'Vehicles',
@@ -126,6 +130,13 @@ export interface RuleSystemMeta {
 }
 
 const FIVE_E_SECTIONS: RulePackInstallSection[] = ['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'];
+/**
+ * Open5e only (issue #2096). Its `items` section maps to the API's /magicitems/ path, so
+ * mundane gear needs the two extra sections the Open5e importer added. Deliberately NOT
+ * folded into FIVE_E_SECTIONS: that list is shared with Pathfinder 1e, whose importer has
+ * no weapons/armor sections and would 400 on either.
+ */
+const OPEN5E_SECTIONS: RulePackInstallSection[] = [...FIVE_E_SECTIONS, 'weapons', 'armor'];
 const AON_SECTIONS: RulePackInstallSection[] = [
   'creatures',
   'spells',
@@ -157,7 +168,7 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     license: 'Open5e · OGL 1.0a',
     blurb: 'The D&D 5e System Reference Document pulled from the open Open5e API.',
     mechanics: 'Initiative d20 + DEX · ability mod ⌊(score−10)/2⌋ · fixed DCs · 5e conditions · pass/fail.',
-    sections: FIVE_E_SECTIONS,
+    sections: OPEN5E_SECTIONS,
     packSlug: 'open5e-srd',
     requiresUrl: SOURCES_REQUIRING_URL.has('open5e'),
   },

@@ -1851,6 +1851,24 @@ function migrateInventoryItemsEquip1326(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration 0176 (issue #2097): provenance for an item's `equipped_action`. A single
+ * additive TEXT column, NULL on every existing row — and NULL is the safe value, because
+ * the derivation path only ever writes an action into an EMPTY `equipped_action`. An
+ * upgraded row that already carries a hand-authored action therefore keeps it untouched
+ * whatever this column says, and a row with no action has nothing to protect. No backfill:
+ * guessing 'manual' for existing rows would be a claim about who wrote them that the
+ * database cannot support, and guessing 'derived' would invite overwriting a human's work.
+ */
+function migrateInventoryItemsEquippedActionSource2097(sqlite: Database.Database): void {
+  const table = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'").get();
+  if (!table) return; // fresh DB — BOOTSTRAP_SQL creates the column directly.
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'equipped_action_source')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN equipped_action_source TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before the AI-DM operating mode (issue #311): the
  * `ai_dm_seats.mode` column didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN —
  * no table rebuild needed, same shape as the icon_slug migrations above. Existing
@@ -5390,6 +5408,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0174_combatants_manual_order_1923', run: migrateCombatantsTableForManualOrder1923 },
   // #846 campaign status provenance — renumbered to 0175 (0172-0174 taken on main by #2050/#1921/#1923).
   { name: '0175_campaign_status_transitions_846', run: migrateCampaignStatusTransitions846 },
+  // #2097 equipped-action provenance — 0176 (0175 taken on main by #846).
+  { name: '0176_inventory_equipped_action_source_2097', run: migrateInventoryItemsEquippedActionSource2097 },
 ];
 
 /**
