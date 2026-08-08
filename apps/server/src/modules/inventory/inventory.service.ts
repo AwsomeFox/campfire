@@ -267,6 +267,13 @@ export class InventoryService {
   private async deriveActionForEquip(
     existing: typeof inventoryItems.$inferSelect,
     characterId: number,
+    /**
+     * The item's name AFTER this request lands. Review (chatgpt-codex-connector P2): one PATCH
+     * can rename and equip together — reachable from REST and MCP alike — and reading
+     * `existing.name` there produced a row with the new name granting an action titled with
+     * the old one.
+     */
+    finalName: string,
   ): Promise<CharacterAction | null> {
     try {
       const character = await this.db
@@ -310,7 +317,7 @@ export class InventoryService {
       );
 
       return deriveEquippedItemAction({
-        itemName: existing.name,
+        itemName: finalName,
         data,
         character: { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level },
         adapter,
@@ -746,14 +753,20 @@ export class InventoryService {
           )?.ruleSystem ?? ''
         : '';
 
-    const derivedOnEquip =
+    // Review (chatgpt-codex-connector P2): "should we derive?" is tracked separately from
+    // "what did it produce?". A regeneration that yields NOTHING — the accepted snapshot no
+    // longer identifies the item as a weapon, say — has to CLEAR the previous derived action
+    // rather than leave it standing, or the item goes on granting an attack built from source
+    // data that no longer says so. A falsy result used to just skip the branch.
+    const shouldDeriveOnEquip =
       equipWillChange &&
       nextEquipped &&
       finalOwnerType === 'character' &&
       input.equippedAction === undefined &&
-      (moved || !existing.equippedAction || existing.equippedActionSource === EquippedActionSource.enum.derived)
-        ? await this.deriveActionForEquip(existing, finalCharacterId as number)
-        : null;
+      (moved || !existing.equippedAction || existing.equippedActionSource === EquippedActionSource.enum.derived);
+    const derivedOnEquip = shouldDeriveOnEquip
+      ? await this.deriveActionForEquip(existing, finalCharacterId as number, input.name ?? existing.name)
+      : null;
 
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
@@ -902,7 +915,7 @@ export class InventoryService {
           // `derived` one regenerates on the next equip on its own.
           update.equippedActionSource = input.equippedAction ? EquippedActionSource.enum.manual : null;
         } else if (
-          derivedOnEquip &&
+          shouldDeriveOnEquip &&
           (moved || !fresh.equippedAction || fresh.equippedActionSource === EquippedActionSource.enum.derived)
         ) {
           // Review (chatgpt-codex-connector P2) — time-of-check/time-of-use, the same class of
@@ -917,8 +930,11 @@ export class InventoryService {
           // `moved` is exempt because the ownership-change rule discards the old owner's
           // action in this very write regardless of who authored it, so there is nothing left
           // to protect — see CLEARED_EQUIP_STATE.
-          update.equippedAction = JSON.stringify(derivedOnEquip);
-          update.equippedActionSource = EquippedActionSource.enum.derived;
+          // A null derivation clears both fields — see `shouldDeriveOnEquip`. Only a `derived`
+          // (or about-to-be-discarded `moved`) action ever reaches here, so this can never
+          // erase a human's work.
+          update.equippedAction = derivedOnEquip ? JSON.stringify(derivedOnEquip) : null;
+          update.equippedActionSource = derivedOnEquip ? EquippedActionSource.enum.derived : null;
         } else if (moved) {
           // Issue #1326 review (coordinator): THE ownership-change clearing rule —
           // equipped, equipSlot, and equippedAction reset together, atomically, unless
@@ -1130,11 +1146,12 @@ export class InventoryService {
     // which passes the `equipWillChange` gate, derives, and leaves equipped/equipSlot
     // identical — so without this the character's action list would gain an attack that open
     // encounter cards never hear about.
-    // (`derivedOnEquip != null` rather than "the derivation was actually applied": in the
-    // TOCTOU case above it wasn't, but the concurrent manual write emitted its own
+    // Keyed on the ATTEMPT, not the result: a regeneration that clears a stale action changes
+    // the merged list just as much as one that writes a fresh attack. (In the TOCTOU case the
+    // branch may not have applied at all, but the concurrent manual write emitted its own
     // invalidation, and this file's standing rule is that an extra invalidation is harmless
     // while a missing one is the real defect.)
-    const actionContentChanged = equippedActionEdited || renamedGrantingItem || derivedOnEquip != null;
+    const actionContentChanged = equippedActionEdited || renamedGrantingItem || shouldDeriveOnEquip;
 
     await this.audit.log({
       actor: auditActor(user),

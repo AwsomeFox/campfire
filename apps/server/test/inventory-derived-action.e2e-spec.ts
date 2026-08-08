@@ -3,7 +3,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { ruleEntries } from '../src/db/schema';
+import { inventoryItems, ruleEntries } from '../src/db/schema';
 
 const dm = { 'x-dev-user': 'dm', 'x-dev-role': 'dm' };
 const player = { 'x-dev-user': 'player', 'x-dev-role': 'player' };
@@ -332,6 +332,45 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const afterManual = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
     expect(afterManual.body.equippedActionSource).toBe('manual');
     expect(afterManual.body.equippedAction.toHit).toBe('+2');
+  });
+
+  it('a regeneration that yields nothing clears the stale derived action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stale-slot' });
+    expect(equipped.body.equippedAction).not.toBeNull();
+
+    // The accepted snapshot stops identifying this as a weapon. Re-equipping must not leave
+    // the item granting an attack built from source data that no longer says so.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const snapshot = JSON.parse(
+      db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s!,
+    );
+    snapshot.dataJson = JSON.stringify({ category: 'Wondrous Item', rarity: 'Uncommon' });
+    db.update(inventoryItems)
+      .set({ compendiumSnapshot: JSON.stringify(snapshot), ruleEntryId: null })
+      .where(eq(inventoryItems.id, itemId))
+      .run();
+
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+    const reEquipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stale-slot' });
+    expect(reEquipped.status).toBe(200);
+    expect(reEquipped.body.equippedAction).toBeNull();
+    expect(reEquipped.body.equippedActionSource).toBeNull();
+  });
+
+  it('a rename-and-equip in one PATCH derives under the NEW name', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    // Reachable from REST and MCP alike — the row would otherwise carry the new name while
+    // granting an action titled with the old one.
+    const renamed = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ name: 'Ancestral Blade', equipped: true, equipSlot: 'rename-slot' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.name).toBe('Ancestral Blade');
+    expect(renamed.body.equippedAction.name).toBe('Ancestral Blade');
   });
 
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
