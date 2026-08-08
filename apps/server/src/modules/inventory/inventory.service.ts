@@ -888,7 +888,18 @@ export class InventoryService {
           // with it (nothing left to describe), which also re-opens the row to derivation:
           // "delete the action, re-equip" is the deliberate way back to a fresh derivation.
           update.equippedActionSource = input.equippedAction ? EquippedActionSource.enum.manual : null;
-        } else if (derivedOnEquip) {
+        } else if (derivedOnEquip && (moved || !fresh.equippedAction)) {
+          // Review (chatgpt-codex-connector P2) — time-of-check/time-of-use, the same class of
+          // race this transaction already re-validates authorization against. `derivedOnEquip`
+          // was computed BEFORE the transaction opened (it awaits; better-sqlite3 transactions
+          // must be synchronous), reading an action-less row. If a concurrent request authored
+          // a manual action in that window, writing the derived one here would overwrite it —
+          // breaking the one guarantee that makes the editor worth using. Re-checked against
+          // `fresh`, the row as it exists inside this transaction.
+          //
+          // `moved` is exempt because the ownership-change rule discards the old owner's
+          // action in this very write regardless of who authored it, so there is nothing left
+          // to protect — see CLEARED_EQUIP_STATE.
           update.equippedAction = JSON.stringify(derivedOnEquip);
           update.equippedActionSource = EquippedActionSource.enum.derived;
         } else if (moved) {
@@ -1102,6 +1113,10 @@ export class InventoryService {
     // which passes the `equipWillChange` gate, derives, and leaves equipped/equipSlot
     // identical — so without this the character's action list would gain an attack that open
     // encounter cards never hear about.
+    // (`derivedOnEquip != null` rather than "the derivation was actually applied": in the
+    // TOCTOU case above it wasn't, but the concurrent manual write emitted its own
+    // invalidation, and this file's standing rule is that an extra invalidation is harmless
+    // while a missing one is the real defect.)
     const actionContentChanged = equippedActionEdited || renamedGrantingItem || derivedOnEquip != null;
 
     await this.audit.log({

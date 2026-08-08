@@ -221,6 +221,10 @@ export function ItemRow({
   const [actionBusy, setActionBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // A party-stash item can never be equipped, so it can never carry an equipped action —
+  // the server rejects one outright. Everything in this block keys off that.
+  const isCharacterOwned = committed.ownerType === 'character' && committed.characterId != null;
+
   function openActionEditor() {
     setActionDraft(
       committed.equippedAction ?? { name: committed.name, kind: '', toHit: '', damage: '', targetAc: '', notes: '' },
@@ -505,7 +509,12 @@ export function ItemRow({
                 the server having actually sent the field: a reader who is neither DM nor the
                 owning player gets `equippedAction: null` (fail-closed redaction), and must
                 not be offered an editor that would write one. */}
-            {editable && !actionOpen && (
+            {/* Review (chatgpt-codex-connector P2): also gated on a CHARACTER owner. On the
+                campaign Inventory page `canEditItem` makes every party-stash row editable, so
+                without this the Add-action button appeared on the whole stash section — where
+                saving it can only ever 400 (`Only character-owned items may carry an equipped
+                action`). An affordance that cannot succeed is worse than none. */}
+            {editable && isCharacterOwned && !actionOpen && (
               <Btn
                 density="xs"
                 ghost
@@ -518,7 +527,7 @@ export function ItemRow({
                 {t(committed.equippedAction ? 'inventory.equip.editAction' : 'inventory.equip.addAction')}
               </Btn>
             )}
-            {editable && actionOpen && actionDraft && (
+            {editable && isCharacterOwned && actionOpen && actionDraft && (
               <form
                 className="space-y-1.5 rounded border border-subtle p-2"
                 data-testid="inventory-action-editor"

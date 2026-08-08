@@ -131,6 +131,31 @@ describe('deriveEquippedItemAction (#2097)', () => {
   });
 
   describe('refusing to invent numbers', () => {
+    it('produces a text-only action for dice the ROLLER would reject, not just malformed ones', () => {
+      // Review (chatgpt-codex-connector P2): `21d6` and `1d3` both look like dice and both
+      // throw in apps/server/src/common/dice.ts — over the 20-die cap, and a non-polyhedral
+      // face. A spec built on either degrades to an error mid-combat rather than to the
+      // text-only action this module promises, which is strictly worse than not deriving.
+      for (const dice of ['21d6', '1d3', '1d7', '0d6', '2d6+1000']) {
+        const action = deriveEquippedItemAction({
+          itemName: 'Homebrew Blade',
+          data: open5eWeapon({ damageDice: dice, damageType: 'Slashing' }),
+          character: fighter,
+          adapter: dnd5e,
+        });
+        expect(isResolvableSpec(action!.spec)).toBe(false);
+        expect(action!.toHit).toBe('');
+      }
+      // The bound is a real bound, not a blanket refusal: 20d6 is fine.
+      const ok = deriveEquippedItemAction({
+        itemName: 'Big Blade',
+        data: open5eWeapon({ damageDice: '20d6', damageType: 'Slashing' }),
+        character: fighter,
+        adapter: dnd5e,
+      });
+      expect(isResolvableSpec(ok!.spec)).toBe(true);
+    });
+
     it('produces a text-only action when the damage dice are not a dice expression', () => {
       // Open5e serves the SRD Net's damage_dice as the string "0".
       const action = deriveEquippedItemAction({
@@ -250,6 +275,16 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
   it('leaves a caller-supplied spec alone — the MCP path for a richer action', () => {
     const authored = CharacterAction.parse({ ...derived, toHit: '+99', damage: 'nonsense' });
     expect(rebuildEditedActionSpec(authored, 'dnd5e')).toEqual(authored);
+  });
+
+  it('refuses to build a spec from edited dice the roller would reject', () => {
+    // Same bound as the derivation — a hand-typed "21d6 slashing" must not be marked
+    // resolvable and then throw the first time someone attacks with it.
+    for (const damage of ['21d6 slashing', '1d3 piercing', '2d6+1000 fire']) {
+      const out = rebuildEditedActionSpec(CharacterAction.parse({ ...derived, toHit: '+7', damage, spec: undefined }), 'dnd5e');
+      expect(out.spec).toBeUndefined();
+      expect(out.damage).toBe(damage);
+    }
   });
 
   it('produces a text-only action when the edited fields cannot be read', () => {

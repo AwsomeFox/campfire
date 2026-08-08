@@ -20,12 +20,23 @@ test.describe('editable equipped-item actions (#2097)', () => {
     expect(inventoryShared).toContain('data-testid="inventory-action-save-btn"');
   });
 
+  test('the editor is gated on a CHARACTER owner, never offered on the party stash', () => {
+    // Review (chatgpt-codex-connector P2): `canEditItem` makes every party-stash row editable
+    // on the campaign Inventory page, so gating on `editable` alone put an Add-action button
+    // across the whole stash section — where the server rejects the payload outright
+    // ("Only character-owned items may carry an equipped action"). A control that can never
+    // succeed is worse than no control.
+    expect(inventoryShared).toContain("const isCharacterOwned = committed.ownerType === 'character' && committed.characterId != null;");
+    expect(inventoryShared).toContain('{editable && isCharacterOwned && !actionOpen && (');
+    expect(inventoryShared).toContain('{editable && isCharacterOwned && actionOpen && actionDraft && (');
+  });
+
   test('the editor is gated on `editable`, never rendered for a read-only viewer', () => {
     // A campaign member who is neither DM nor the owning player receives
     // `equippedAction: null` from the server's fail-closed redaction; offering them an
     // editor would invite a write that overwrites an action they were never shown.
-    expect(inventoryShared).toContain('{editable && !actionOpen && (');
-    expect(inventoryShared).toContain('{editable && actionOpen && actionDraft && (');
+    expect(inventoryShared).toContain('{editable && isCharacterOwned && !actionOpen && (');
+    expect(inventoryShared).toContain('{editable && isCharacterOwned && actionOpen && actionDraft && (');
   });
 
   test('saving drops the stale `spec` when a combat field changed, and keeps it otherwise', () => {
