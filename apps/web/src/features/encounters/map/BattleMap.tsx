@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { UIIcon } from '../../../components/UIIcon';
 import { GatedControl } from '../../../components/GatedControl';
@@ -184,6 +184,23 @@ export type EncounterGridPatch = Partial<
   >
 >;
 
+/**
+ * Rail glyphs for the cockpit layout (encounter-vtt design import). The template
+ * draws each tool as a glyph over its label; the horizontal card toolbar stays
+ * text-only, so the glyph is decorative (`aria-hidden`) and the button's
+ * accessible name is the label either way.
+ */
+const TOOL_GLYPH: Record<MapTool, string> = {
+  move: '✥',
+  'token-select': '⬚',
+  measure: '⟺',
+  ping: '◎',
+  reveal: '☀',
+  erase: '☁',
+  select: '▭',
+  calibrate: '⊹',
+};
+
 export type BattleMapProps = {
   encounter: EncounterWithCombatants;
   campaignId: number;
@@ -243,6 +260,15 @@ export type BattleMapProps = {
    * counterparts (fill color, accent ring).
    */
   colorVisionAssist?: boolean;
+  /**
+   * Chrome variant. `card` is the historical stacked-card map. `vtt` is the
+   * cockpit layout from the `encounter-vtt` design template: the map surface
+   * fills its container, the interaction tools become the vertical rail along
+   * the left edge, and the remaining chrome (viewport controls, grid & fog
+   * panel, token editor, load status) floats over the canvas. Only layout
+   * changes — every permission, secrecy and gating decision below is shared.
+   */
+  layout?: 'card' | 'vtt';
 };
 
 export const BattleMap = memo(function BattleMap({
@@ -291,8 +317,11 @@ export const BattleMap = memo(function BattleMap({
   targeting = null,
   impactTargetIds = [],
   colorVisionAssist = false,
+  layout = 'card',
 }: BattleMapProps) {
   const isCast = projection === 'cast';
+  /** Cast projection keeps its own bare full-bleed chrome; the rail is session-only. */
+  const isVtt = layout === 'vtt' && !isCast;
   const effectiveIsDm = isCast ? false : isDm;
   const effectiveCanDmWrite = isCast ? false : canDmWrite;
   const effectiveCanDeclareAoe = isCast ? false : canDeclareAoe;
@@ -1865,30 +1894,62 @@ export const BattleMap = memo(function BattleMap({
         className="cf-map-tool cf-map-focusable"
         data-testid={`map-tool-${value}`}
         disabled={disabled}
-        title={hint}
+        title={hint ?? (isVtt ? label : undefined)}
         aria-pressed={tool === value}
         onClick={() => changeTool(value)}
         style={{
-          borderColor: tool === value ? 'var(--color-accent)' : 'var(--color-divider)',
+          borderColor: tool === value ? 'var(--color-accent)' : isVtt ? 'transparent' : 'var(--color-divider)',
           color: tool === value ? 'var(--color-accent)' : undefined,
         }}
       >
-        {label}
+        {isVtt && (
+          <span className="cf-vtt-rail-glyph" aria-hidden>
+            {TOOL_GLYPH[value]}
+          </span>
+        )}
+        <span className={isVtt ? 'cf-vtt-rail-label' : undefined}>{label}</span>
       </button>
     </GatedControl>
   );
 
+  /** Rail-only affordance: the same button shape as `modeBtn`, for one-shot actions. */
+  const railBtn = (
+    key: string,
+    glyph: ReactNode,
+    label: string,
+    onClick: () => void,
+    { disabled = false, hint }: { disabled?: boolean; hint?: string } = {},
+  ) => (
+    <button
+      key={key}
+      type="button"
+      className="cf-map-tool cf-map-focusable"
+      data-testid={`map-rail-${key}`}
+      disabled={disabled}
+      title={hint ?? label}
+      onClick={onClick}
+    >
+      <span className="cf-vtt-rail-glyph" aria-hidden>
+        {glyph}
+      </span>
+      <span className="cf-vtt-rail-label">{label}</span>
+    </button>
+  );
+
   return (
     <Card
-      density="compact" elev={isCast ? undefined : 'sm'} className={isCast ? 'cf-cast-battle-map' : 'reading-exempt'}
+      density="compact" elev={isCast || isVtt ? undefined : 'sm'}
+      className={isCast ? 'cf-cast-battle-map' : isVtt ? `reading-exempt cf-vtt-map${mapImageUrl ? '' : ' cf-vtt-map--empty'}` : 'reading-exempt'}
       data-testid={isCast ? 'cf-cast-battle-map' : 'battle-map'}
       style={{
         padding: 0,
-        overflow: 'hidden',
+        overflow: isVtt ? undefined : 'hidden',
         ...(isCast ? { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' } : {}),
       }}
     >
-      {!isCast && (
+      {/* The cockpit puts the encounter name in the page header and the replace
+          control in the floating aside, so this card header is card-layout only. */}
+      {!isCast && !isVtt && (
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">Battle map</span>
         <div style={{ flex: 1 }} />
@@ -1960,6 +2021,165 @@ export const BattleMap = memo(function BattleMap({
 
       {mapImageUrl && (
         <>
+          {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls.
+              Rendered first so the cockpit rail (which CSS lifts out of flow against the
+              card root) is the map's first tab stop and never nests inside the floating
+              aside below — an absolutely-positioned ancestor would re-anchor it. */}
+          {!isCast && (
+          <div
+            className={isVtt ? 'cf-vtt-rail' : 'flex flex-wrap gap-2 items-center'}
+            style={isVtt ? undefined : { padding: '8px 14px 0' }}
+            data-testid="map-toolbar"
+            role="toolbar"
+            aria-orientation={isVtt ? 'vertical' : undefined}
+            aria-label="Map tools"
+          >
+            {modeBtn('move', 'Move')}
+            {effectiveCanDmWrite && modeBtn('token-select', 'Tokens', false, 'Drag a rectangle to select tokens; hold Alt to lasso; Shift, Ctrl, or Command adds.')}
+            {modeBtn(
+              'measure',
+              'Measure',
+              !canMeasure,
+              canMeasure ? measureToolHelp(gridType) : undefined,
+              canMeasure ? undefined : t('run.gate.measureNoGridScale'),
+            )}
+            {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
+            {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region. Shift-click a grid cell when the grid is on.')}
+            {effectiveCanDmWrite && modeBtn('erase', 'Erase', !fogOn, fogOn ? 'Click-drag to hide a fog region' : 'Enable fog first')}
+            {effectiveCanDmWrite && modeBtn('select', 'Select', !fogOn, fogOn ? 'Select, drag, or delete a revealed region' : 'Enable fog first')}
+            {effectiveCanDmWrite && fogOn && (
+              <>
+                {isVtt && <span className="cf-vtt-rail-sep" aria-hidden />}
+                <button
+                  type="button"
+                  className="cf-map-tool cf-map-focusable"
+                  data-testid="map-fog-undo"
+                  title="Undo last fog edit (Ctrl+Z)"
+                  disabled={!fogUndoUi.canUndo}
+                  onClick={undoFogEdit}
+                >
+                  {isVtt && <span className="cf-vtt-rail-glyph" aria-hidden>↶</span>}
+                  <span className={isVtt ? 'cf-vtt-rail-label' : undefined}>
+                    Undo
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="cf-map-tool cf-map-focusable"
+                  data-testid="map-fog-redo"
+                  title="Redo fog edit (Ctrl+Shift+Z)"
+                  disabled={!fogUndoUi.canRedo}
+                  onClick={redoFogEdit}
+                >
+                  {isVtt && <span className="cf-vtt-rail-glyph" aria-hidden>↷</span>}
+                  <span className={isVtt ? 'cf-vtt-rail-label' : undefined}>
+                    Redo
+                  </span>
+                </button>
+              </>
+            )}
+            {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
+            {effectiveCanDeclareAoe && canAoe && (
+              <>
+                {isVtt ? (
+                  <>
+                    <span className="cf-vtt-rail-sep" aria-hidden />
+                    {railBtn('aoe-circle', '◯', 'Circle', () => addAoe('circle'), { hint: t('encounters.map.aoe.addCircle') })}
+                    {railBtn('aoe-cone', '◭', 'Cone', () => addAoe('cone'), { hint: t('encounters.map.aoe.addCone') })}
+                    {railBtn('aoe-line', '╱', 'Line', () => addAoe('line'), { hint: t('encounters.map.aoe.addLine') })}
+                    {effectiveCanDmWrite && onClearPlayerAoe && (encounter.aoe ?? []).some((template) => template.declaredByUserId != null) &&
+                      railBtn('aoe-clear', <UIIcon name="close" size="xs" />, t('encounters.map.aoe.clearPlayers'), onClearPlayerAoe, {
+                        hint: t('encounters.map.aoe.clearPlayersHint'),
+                      })}
+                  </>
+                ) : (
+                  <>
+                    <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>{t('encounters.map.aoe.label')}:</span>
+                    <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCircle')} onClick={() => addAoe('circle')}>+ Circle</button>
+                    <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCone')} onClick={() => addAoe('cone')}>+ Cone</button>
+                    <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addLine')} onClick={() => addAoe('line')}>+ Line</button>
+                    {effectiveCanDmWrite && onClearPlayerAoe && (encounter.aoe ?? []).some((template) => template.declaredByUserId != null) && (
+                      <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.clearPlayersHint')} onClick={onClearPlayerAoe}>{t('encounters.map.aoe.clearPlayers')}</button>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+            <div style={{ flex: 1 }} />
+            {/* Token-detail mode is a select, not a tool — the cockpit shows it in the
+                floating aside instead, where a dropdown has room to open. */}
+            {effectiveIsDm && !isVtt && (
+              <label className="flex items-center gap-1 text-muted" style={{ fontSize: 11 }}>
+                <span>{t('encounters.map.tokenDetails.label')}</span>
+                <select
+                  className="cf-map-tool"
+                  data-testid="map-token-detail-mode"
+                  aria-label={t('encounters.map.tokenDetails.label')}
+                  value={dmTokenDetailMode}
+                  onChange={(event) => setTokenDetailMode(event.target.value as TokenDetailMode)}
+                  style={{ minWidth: 92, textTransform: 'none', letterSpacing: 0 }}
+                >
+                  <option value="full">{t('encounters.map.tokenDetails.full')}</option>
+                  <option value="minimal">{t('encounters.map.tokenDetails.minimal')}</option>
+                  <option value="off">{t('encounters.map.tokenDetails.off')}</option>
+                </select>
+              </label>
+            )}
+            {effectiveCanDmWrite && (
+              <>
+                {isVtt && <span className="cf-vtt-rail-sep" aria-hidden />}
+                <button
+                  type="button"
+                  className="cf-map-tool cf-map-focusable"
+                  {...gridDisclosure.buttonProps}
+                  title="Grid & fog settings"
+                  style={{ borderColor: gridPanelOpen ? 'var(--color-accent)' : isVtt ? 'transparent' : 'var(--color-divider)' }}
+                >
+                  {isVtt && <span className="cf-vtt-rail-glyph" aria-hidden>▦</span>}
+                  <span className={isVtt ? 'cf-vtt-rail-label' : undefined}>
+                    Grid &amp; fog
+                  </span>
+                </button>
+              </>
+            )}
+          </div>
+          )}
+
+          {/* Everything between the rail and the canvas. In card layout this wrapper is
+              `display: contents` and changes nothing; in the cockpit it becomes the
+              floating aside over the map's top-left. */}
+          <div
+            className={isVtt ? 'cf-vtt-map-aside' : undefined}
+            style={isVtt ? undefined : { display: 'contents' }}
+          >
+          {isVtt && effectiveIsDm && (
+            <label className="flex items-center gap-2 text-muted" style={{ fontSize: 11 }}>
+              <span>{t('encounters.map.tokenDetails.label')}</span>
+              <select
+                className="cf-map-tool"
+                data-testid="map-token-detail-mode"
+                aria-label={t('encounters.map.tokenDetails.label')}
+                value={dmTokenDetailMode}
+                onChange={(event) => setTokenDetailMode(event.target.value as TokenDetailMode)}
+                style={{ minWidth: 92, textTransform: 'none', letterSpacing: 0 }}
+              >
+                <option value="full">{t('encounters.map.tokenDetails.full')}</option>
+                <option value="minimal">{t('encounters.map.tokenDetails.minimal')}</option>
+                <option value="off">{t('encounters.map.tokenDetails.off')}</option>
+              </select>
+            </label>
+          )}
+          {isVtt && effectiveCanDmWrite && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <MapUploadButton
+                campaignId={campaignId}
+                hasMap
+                uploading={uploading || busy}
+                onPick={(file) => void uploadMapFile(file)}
+                onRemove={() => void openMapRemoveDialog()}
+              />
+            </div>
+          )}
           {/* Derivative lifecycle for the battle map (issue #604). The board always
               renders — this row only explains a heavy first load, flags a stale copy,
               or reports a generation failure. Everyone sees the explanation; only a
@@ -2026,97 +2246,9 @@ export const BattleMap = memo(function BattleMap({
             </div>
           )}
 
-          {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
-          {!isCast && (
-          <div
-            className="flex flex-wrap gap-2 items-center"
-            style={{ padding: '8px 14px 0' }}
-            data-testid="map-toolbar"
-            role="toolbar"
-            aria-label="Map tools"
-          >
-            {modeBtn('move', 'Move')}
-            {effectiveCanDmWrite && modeBtn('token-select', 'Tokens', false, 'Drag a rectangle to select tokens; hold Alt to lasso; Shift, Ctrl, or Command adds.')}
-            {modeBtn(
-              'measure',
-              'Measure',
-              !canMeasure,
-              canMeasure ? measureToolHelp(gridType) : undefined,
-              canMeasure ? undefined : t('run.gate.measureNoGridScale'),
-            )}
-            {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
-            {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region. Shift-click a grid cell when the grid is on.')}
-            {effectiveCanDmWrite && modeBtn('erase', 'Erase', !fogOn, fogOn ? 'Click-drag to hide a fog region' : 'Enable fog first')}
-            {effectiveCanDmWrite && modeBtn('select', 'Select', !fogOn, fogOn ? 'Select, drag, or delete a revealed region' : 'Enable fog first')}
-            {effectiveCanDmWrite && fogOn && (
-              <>
-                <button
-                  type="button"
-                  className="cf-map-tool cf-map-focusable"
-                  data-testid="map-fog-undo"
-                  title="Undo last fog edit (Ctrl+Z)"
-                  disabled={!fogUndoUi.canUndo}
-                  onClick={undoFogEdit}
-                >
-                  Undo
-                </button>
-                <button
-                  type="button"
-                  className="cf-map-tool cf-map-focusable"
-                  data-testid="map-fog-redo"
-                  title="Redo fog edit (Ctrl+Shift+Z)"
-                  disabled={!fogUndoUi.canRedo}
-                  onClick={redoFogEdit}
-                >
-                  Redo
-                </button>
-              </>
-            )}
-            {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
-            {effectiveCanDeclareAoe && canAoe && (
-              <>
-                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>{t('encounters.map.aoe.label')}:</span>
-                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCircle')} onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCone')} onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addLine')} onClick={() => addAoe('line')}>+ Line</button>
-                {effectiveCanDmWrite && onClearPlayerAoe && (encounter.aoe ?? []).some((template) => template.declaredByUserId != null) && (
-                  <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.clearPlayersHint')} onClick={onClearPlayerAoe}>{t('encounters.map.aoe.clearPlayers')}</button>
-                )}
-              </>
-            )}
-            <div style={{ flex: 1 }} />
-            {effectiveIsDm && (
-              <label className="flex items-center gap-1 text-muted" style={{ fontSize: 11 }}>
-                <span>{t('encounters.map.tokenDetails.label')}</span>
-                <select
-                  className="cf-map-tool"
-                  data-testid="map-token-detail-mode"
-                  aria-label={t('encounters.map.tokenDetails.label')}
-                  value={dmTokenDetailMode}
-                  onChange={(event) => setTokenDetailMode(event.target.value as TokenDetailMode)}
-                  style={{ minWidth: 92, textTransform: 'none', letterSpacing: 0 }}
-                >
-                  <option value="full">{t('encounters.map.tokenDetails.full')}</option>
-                  <option value="minimal">{t('encounters.map.tokenDetails.minimal')}</option>
-                  <option value="off">{t('encounters.map.tokenDetails.off')}</option>
-                </select>
-              </label>
-            )}
-            {effectiveCanDmWrite && (
-              <button
-                type="button"
-                className="cf-map-tool cf-map-focusable"
-                {...gridDisclosure.buttonProps}
-                title="Grid & fog settings"
-                style={{ borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
-              >
-                Grid &amp; fog
-              </button>
-            )}
-          </div>
-          )}
-
-          {!isCast && effectiveCanDmWrite && (
+          {/* Standing explanation, not a state readout — in the cockpit the same wording
+              lives under Grid & fog rather than taking a permanent slot over the canvas. */}
+          {!isCast && !isVtt && effectiveCanDmWrite && (
             <p
               className="text-muted"
               data-testid="map-player-preview-note"
@@ -2542,6 +2674,8 @@ export const BattleMap = memo(function BattleMap({
             </div>
           )}
 
+          </div>
+
           {/* Viewport navigation (issue #712) — separate from token/map play tools. */}
           <div
             className="flex flex-wrap gap-2 items-center"
@@ -2632,10 +2766,12 @@ export const BattleMap = memo(function BattleMap({
             }
             aria-describedby="map-keyboard-help"
             style={{
-              margin: isCast ? 0 : '8px 14px',
-              aspectRatio: '16 / 9',
-              flex: isCast ? '1 1 auto' : undefined,
-              minHeight: isCast ? 0 : undefined,
+              // Cast and the cockpit both hand the surface a fixed box to fill, so the
+              // 16:9 reservation the card layout needs would fight it.
+              margin: isCast || isVtt ? 0 : '8px 14px',
+              aspectRatio: isCast || isVtt ? undefined : '16 / 9',
+              flex: isCast || isVtt ? '1 1 auto' : undefined,
+              minHeight: isCast || isVtt ? 0 : undefined,
               touchAction:
                 viewportPan || viewport.scale > 1
                   ? 'none'
@@ -3429,6 +3565,12 @@ export const BattleMap = memo(function BattleMap({
             document.body,
           )}
 
+          {/* Token tray + keyboard/tool help. In the cockpit these float over the canvas
+              on the right instead of stacking under it, so the map keeps the full height. */}
+          <div
+            className={isVtt ? 'cf-vtt-map-tray' : undefined}
+            style={isVtt ? undefined : { display: 'contents' }}
+          >
           {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
             <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">
               {effectiveIsDm && (
@@ -3571,6 +3713,7 @@ export const BattleMap = memo(function BattleMap({
           </div>
           </>
           )}
+          </div>
         </>
       )}
       {tokenBatchUndo && (

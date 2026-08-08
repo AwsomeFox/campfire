@@ -464,6 +464,10 @@
      visible even while a dialog, notification, or the undo snackbar is on
      screen (issue #1532). */
   --cf-layer-tabbar: 40;
+  /* Immersive full-viewport surfaces (the encounter VTT cockpit). Above the tab
+     bar and the sticky mobile header it replaces, below dialogs — ConfirmDialog
+     portals to <body>, so confirmations still land on top of the cockpit. */
+  --cf-layer-immersive: 41;
   --cf-layer-dialog: 50;
   --cf-layer-notification: 50;
   --cf-layer-snackbar: 60;
@@ -3067,4 +3071,517 @@ a:hover .cf-name-reveal {
 .cf-safety-display-inner {
   display: flex; flex-direction: column; gap: var(--space-2);
   text-align: center; font-size: clamp(1.5rem, 4vw, 3rem);
+}
+
+/* ---------------------------------------------------------------------------
+   Encounter VTT cockpit — design import of
+   `templates/encounter-vtt/EncounterVtt.dc.html` (Campfire design system).
+
+   A full-viewport, no-scroll combat screen: 54px header, banner row, then a body
+   split between the map canvas (with the map's own tool rail on its left edge)
+   and a 356px tabbed panel. Colours resolve from the Nocturne tokens the
+   template was drawn against, so a retuned accent still carries through.
+   --------------------------------------------------------------------------- */
+html.cf-vtt-locked,
+html.cf-vtt-locked body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+.cf-vtt {
+  /* The chrome tone sits between the page ground and the card surface — the
+     template's #1c1e2b against #161826 / #232532. */
+  --cf-vtt-chrome: color-mix(in srgb, var(--color-surface) 52%, var(--color-bg));
+  --cf-vtt-rail-width: 58px;
+  /* The template draws a 356px panel. Campfire's roster rows carry far more per
+     combatant than the mock's (HP steppers, conditions, action rows), so the panel
+     starts at the template width and grows with the viewport instead of forcing
+     them to wrap on top of each other. */
+  --cf-vtt-panel-width: clamp(356px, 28vw, 460px);
+  --cf-vtt-scrim: color-mix(in srgb, var(--color-bg) 90%, transparent);
+
+  position: fixed;
+  inset: 0;
+  z-index: var(--cf-layer-immersive);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  background: var(--color-bg);
+  color: var(--color-text);
+  overflow: hidden;
+}
+
+.cf-vtt-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 54px;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-divider);
+  background: linear-gradient(180deg, var(--color-surface) 0%, var(--cf-vtt-chrome) 100%);
+  flex-wrap: wrap;
+  z-index: 20;
+}
+.cf-vtt-header-spacer { flex: 1 1 auto; }
+
+.cf-vtt-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.cf-vtt-back { flex: none; }
+.cf-vtt-back .btn { min-height: 32px; }
+
+.cf-vtt-title-text {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-display, Fraunces, Georgia, serif);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Round + turn-timer readout. Styled as the template's pill rather than the two
+   loose tags the card header used. */
+.cf-vtt-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+.cf-vtt-meta:not(:empty) {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+.cf-vtt-meta .tag {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--color-text);
+}
+.cf-vtt-meta > * + * {
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--color-divider);
+}
+
+.cf-vtt-banners {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 34vh;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-divider);
+  background: var(--color-bg);
+}
+/* Collapsed, not removed: `display: none` would drop the element out of the grid
+   entirely and slide the body up into the `auto` row meant for banners, leaving the
+   `1fr` row empty and the map 55px tall. */
+.cf-vtt-banners:empty {
+  padding: 0;
+  border: 0;
+}
+
+.cf-vtt-body {
+  position: relative;
+  display: flex;
+  min-height: 0;
+}
+
+.cf-vtt-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: radial-gradient(
+    120% 90% at 50% 0%,
+    color-mix(in srgb, var(--color-surface) 55%, #101120) 0%,
+    #101120 70%
+  );
+}
+
+/* --- side panel ---------------------------------------------------------- */
+.cf-vtt-panel {
+  flex: none;
+  width: var(--cf-vtt-panel-width);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  border-left: 1px solid var(--color-divider);
+  background: var(--cf-vtt-chrome);
+}
+.cf-vtt-panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: var(--space-2) var(--space-2) 0;
+  border-bottom: 1px solid var(--color-divider);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.cf-vtt-tab {
+  flex: none;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.cf-vtt-tab:hover { color: var(--color-text); }
+.cf-vtt-tab:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+.cf-vtt-tab[aria-selected='true'] {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-text);
+  font-weight: 700;
+}
+.cf-vtt-tab-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  color: var(--color-accent-300);
+  font-size: 10px;
+  font-weight: 700;
+}
+.cf-vtt-panel-close,
+.cf-vtt-panel-reopen {
+  border: 1px solid var(--color-divider);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+.cf-vtt-panel-close {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-md);
+}
+.cf-vtt-panel-close:hover,
+.cf-vtt-panel-reopen:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+.cf-vtt-panel-reopen {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 96px;
+  border-right: 0;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  background: var(--cf-vtt-scrim);
+  backdrop-filter: blur(6px);
+  color: var(--color-accent);
+  font-size: 13px;
+  z-index: 12;
+}
+.cf-vtt-panel-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+/* Panel content is the run page's existing cards; inside a 356px rail they read
+   better edge-to-edge than as nested rounded boxes with their own shadow. */
+.cf-vtt-panel-body .card {
+  box-shadow: none;
+}
+
+/* --- map furniture ------------------------------------------------------- */
+/* Initiative strip — floats over the canvas on the template's bottom scrim.
+   The wrapper is click-through so the map keeps the space; the strip itself is
+   not. */
+.cf-vtt-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9;
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  padding-left: calc(var(--cf-vtt-rail-width) + var(--space-3));
+  background: linear-gradient(180deg, rgba(16, 17, 32, 0) 0%, rgba(16, 17, 32, 0.86) 45%);
+  pointer-events: none;
+}
+.cf-vtt-strip > * { pointer-events: auto; }
+.cf-vtt-strip-toggle {
+  position: absolute;
+  left: calc(var(--cf-vtt-rail-width) + var(--space-3));
+  top: -10px;
+  z-index: 2;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--color-divider);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cf-vtt-chrome) 90%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.cf-vtt-strip-toggle:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+/* Roll button + tray */
+.cf-vtt-fab {
+  position: absolute;
+  right: var(--space-4);
+  bottom: 132px;
+  z-index: 13;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 46px;
+  padding: 0 18px;
+  border: 1px solid var(--color-accent);
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    var(--color-accent) 0%,
+    color-mix(in srgb, var(--color-accent) 84%, #000) 100%
+  );
+  color: #14121f;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+.cf-vtt-fab:hover {
+  background: color-mix(in srgb, var(--color-accent) 82%, #fff);
+}
+.cf-vtt-tray {
+  position: absolute;
+  right: var(--space-4);
+  bottom: 190px;
+  z-index: 13;
+  width: min(320px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-4)));
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--cf-vtt-chrome) 96%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.6);
+}
+
+/* Empty canvas (no map attached, or a player before one is shared). */
+.cf-vtt-canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  overflow-y: auto;
+}
+
+/* --- BattleMap in cockpit layout ----------------------------------------- */
+.cf-vtt-map {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 0 0 var(--cf-vtt-rail-width);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+/* No map yet: the upload/generate flow is long-form, so let it scroll. */
+.cf-vtt-map--empty { overflow-y: auto; }
+
+.cf-vtt-map .cf-vtt-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--cf-vtt-rail-width);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0;
+  border-right: 1px solid var(--color-divider);
+  background: var(--cf-vtt-chrome);
+  overflow-y: auto;
+  scrollbar-width: none;
+  z-index: 10;
+}
+.cf-vtt-rail .cf-map-tool {
+  flex-direction: column;
+  gap: 3px;
+  width: 44px;
+  min-width: 44px;
+  padding: 6px 0;
+  font-size: 8px;
+  line-height: 1.1;
+  border-color: transparent;
+  text-align: center;
+}
+.cf-vtt-rail .cf-map-tool:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-surface) 80%, transparent);
+  color: var(--color-text);
+}
+.cf-vtt-rail .cf-map-tool[aria-pressed='true'] {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+.cf-vtt-rail-glyph {
+  font-size: 17px;
+  line-height: 1;
+}
+.cf-vtt-rail-label {
+  opacity: 0.8;
+  max-width: 42px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-vtt-rail-sep {
+  width: 26px;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--color-divider);
+  flex: none;
+}
+
+/* Secondary map chrome (grid & fog panel, token editor, attach guidance, load
+   status) floats over the canvas instead of pushing it down. Those blocks carry
+   inline `padding`/`margin` from the card layout they were written for, so the
+   override has to win over the style attribute. */
+.cf-vtt-map .cf-vtt-map-aside,
+.cf-vtt-map .cf-vtt-map-tray {
+  position: absolute;
+  top: 56px;
+  width: min(340px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-3)));
+  max-height: calc(100% - 190px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  z-index: 8;
+}
+.cf-vtt-map .cf-vtt-map-aside { left: calc(var(--cf-vtt-rail-width) + var(--space-3)); }
+.cf-vtt-map .cf-vtt-map-tray { right: var(--space-3); }
+.cf-vtt-map .cf-vtt-map-aside > *,
+.cf-vtt-map .cf-vtt-map-tray > * {
+  margin: 0 !important;
+  padding: var(--space-2) var(--space-3) !important;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--cf-vtt-chrome) 96%, transparent);
+  backdrop-filter: blur(6px);
+}
+/* The sr-only keyboard-help node must stay visually hidden, not become a card. */
+.cf-vtt-map .cf-vtt-map-tray > .sr-only {
+  border: 0;
+  background: none;
+  backdrop-filter: none;
+  padding: 0 !important;
+}
+
+.cf-vtt-map [data-testid='map-viewport-toolbar'] {
+  position: absolute;
+  right: var(--space-3);
+  top: var(--space-3);
+  z-index: 9;
+  margin: 0 !important;
+  padding: 4px !important;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--cf-vtt-scrim);
+  backdrop-filter: blur(6px);
+}
+.cf-vtt-map [data-testid='battle-map-surface'] {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  aspect-ratio: auto;
+}
+
+/* --- narrow viewports ----------------------------------------------------- */
+/* Below the cockpit's two-column width the panel stacks under the canvas instead
+   of covering it — a full-bleed overlay would hide the map with no way to keep
+   both in view, which is the one thing this screen exists to do. */
+@media (max-width: 900px) {
+  .cf-vtt { --cf-vtt-rail-width: 50px; }
+  .cf-vtt-body { flex-direction: column; }
+  .cf-vtt-main { flex: 1 1 45%; min-height: 180px; }
+  .cf-vtt-panel {
+    width: auto;
+    flex: 1 1 55%;
+    min-height: 0;
+    border-left: 0;
+    border-top: 1px solid var(--color-divider);
+  }
+  .cf-vtt-panel-reopen {
+    top: auto;
+    bottom: 0;
+    right: var(--space-3);
+    transform: none;
+    width: 96px;
+    height: 26px;
+    border-right: 1px solid var(--color-divider);
+    border-bottom: 0;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
+  .cf-vtt-fab { bottom: 96px; }
+  .cf-vtt-tray { bottom: 150px; }
+  .cf-vtt-map .cf-vtt-map-aside,
+  .cf-vtt-map .cf-vtt-map-tray { max-height: calc(100% - 90px); top: var(--space-2); }
+  .cf-vtt-map .cf-vtt-map-tray { top: 52px; }
+}
+
+/* --- print ---------------------------------------------------------------- */
+@media print {
+  html.cf-vtt-locked,
+  html.cf-vtt-locked body { overflow: visible; }
+  .cf-vtt {
+    position: static;
+    display: block;
+    height: auto;
+    overflow: visible;
+    z-index: auto;
+  }
+  .cf-vtt-header,
+  .cf-vtt-banners,
+  .cf-vtt-body,
+  .cf-vtt-main,
+  .cf-vtt-panel,
+  .cf-vtt-strip,
+  .cf-vtt-fab,
+  .cf-vtt-tray { display: none !important; }
 }
