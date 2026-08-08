@@ -136,6 +136,84 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): temp HP writes an ABSOLUTE value read off the
+   * current character, so two taps before the refresh landed both PATCHed the same number
+   * and one adjustment vanished silently. The control must stay busy until the value it
+   * reads has actually refreshed.
+   */
+  test('the temp HP stepper cannot double-send the same absolute value', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const sent: unknown[] = [];
+    // The bug's window is between the PATCH resolving and the REFETCH landing: the control
+    // re-enabled there while `character.hpTemp` still held the old value. Delaying the GET
+    // (not the PATCH) holds that window open; Playwright's click auto-waits for enabled, so
+    // two back-to-back clicks land as early as the implementation allows them to.
+    let armed = false;
+    await page.route(`**/api/v1/characters/${navigation.characterId}`, async (route) => {
+      const method = route.request().method();
+      if (method === 'PATCH') {
+        sent.push(JSON.parse(route.request().postData() ?? '{}'));
+        armed = true;
+        return route.fallback();
+      }
+      if (method === 'GET' && armed) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+      return route.fallback();
+    });
+
+    await page.goto(`/c/${campaignId}/characters/${navigation.characterId}`);
+    const plus = page.getByTestId('character-temp-hp').getByRole('button', { name: /Add 1 temporary hit point/ });
+    await expect(page.getByTestId('character-temp-hp-value')).toHaveText('0');
+
+    await plus.click();
+    await plus.click();
+    await expect(page.getByTestId('character-temp-hp-value')).toHaveText('2');
+
+    // The second tap must have read the REFRESHED value. Sending {hpTemp:1} twice is the
+    // defect: two visible taps, one applied, no error shown.
+    expect(sent).toEqual([{ hpTemp: 1 }, { hpTemp: 2 }]);
+
+    await page.unroute(`**/api/v1/characters/${navigation.characterId}`);
+    const ctx = await request.newContext({ baseURL: new URL(page.url()).origin });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    await ctx.patch(`/api/v1/characters/${navigation.characterId}`, { data: { hpTemp: 0 } });
+    await ctx.dispose();
+  });
+
+  /**
+   * Regression (Codex review on #2115): `PATCH /characters/:id` writes death-save counters
+   * verbatim — unlike the encounter path it does NOT derive `deathState` from them — so an
+   * editable pip here could leave three failures sitting at 'dying', on the sheet and in a
+   * live fight. The sheet reports the state; the encounter owns the lifecycle.
+   */
+  test('death saves are reported on the sheet, never edited there', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Down But Not Out', className: 'Cleric', level: 2, hpMax: 12, hpCurrent: 0, deathState: 'dying', deathSaveFailures: 1 },
+    })).json()).id as number;
+
+    try {
+      await page.goto(`/c/${campaignId}/characters/${characterId}`);
+      const panel = page.getByTestId('character-death-saves');
+      await expect(panel).toBeVisible();
+      await expect(panel.getByText('Death saves — you are dying')).toBeVisible();
+      // The state is readable...
+      await expect(panel.getByRole('button', { name: 'Failure 1 of 3 (marked)' })).toBeVisible();
+      // ...and every pip is inert, so no half-transition can be written from here.
+      for (const pip of await panel.getByRole('button').all()) {
+        await expect(pip).toBeDisabled();
+      }
+      await expect(panel.getByRole('button', { name: /Roll a death save/ })).toHaveCount(0);
+    } finally {
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Copilot review on #2115): the sheet used to fetch the campaign inventory
    * a second time to derive gear actions, duplicating the read the embedded inventory
    * section already makes on mount. One reader, one source.

@@ -1491,7 +1491,8 @@ function CharacterVitalsRail({
   character: Character;
   adapter: RuleSystemAdapter;
   canEdit: boolean;
-  onChange: () => void;
+  /** Reloads the sheet. Returns a promise so TempHpControl can await it — see its note. */
+  onChange: () => void | Promise<void>;
   onError: (msg: string | null) => void;
   roller: Roller;
   leveledConditionTrack: LeveledConditionTrack | null | undefined;
@@ -1569,9 +1570,7 @@ function CharacterVitalsRail({
               <RestControls character={character} onChange={onChange} onError={onError} adapter={adapter} />
             </div>
           )}
-          {showDeathSaves && (
-            <DeathSavesPanel character={character} canEdit={canEdit} onChange={onChange} onError={onError} />
-          )}
+          {showDeathSaves && <DeathSavesPanel character={character} />}
         </Card>
       </section>
 
@@ -1715,6 +1714,11 @@ function VitalsBlock({
  * field, so this PATCHes the character rather than going through POST /hp — that endpoint
  * moves real hit points, and temporary hit points are a separate pool the damage path
  * spends first.
+ *
+ * Unlike `HpEditor`, which posts commutative DELTAS, this writes an ABSOLUTE value read
+ * off the current prop — so the refresh has to land before the controls re-enable. Letting
+ * `finally` run while `character.hpTemp` was still stale meant two quick `+` taps both
+ * PATCHed 1, and the second adjustment vanished with no error (Codex review on #2115).
  */
 function TempHpControl({
   character,
@@ -1722,7 +1726,8 @@ function TempHpControl({
   onError,
 }: {
   character: Character;
-  onChange: () => void;
+  /** Awaited before the controls re-enable — see the absolute-vs-delta note above. */
+  onChange: () => void | Promise<void>;
   onError: (msg: string | null) => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -1734,7 +1739,7 @@ function TempHpControl({
     onError(null);
     try {
       await api.patch(`${API}/characters/${character.id}`, { hpTemp: next });
-      onChange();
+      await onChange();
       announce(`${character.name} temporary hit points ${next}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't update temporary hit points.");
@@ -1777,41 +1782,20 @@ function TempHpControl({
  * Death saves on the sheet (design template's "Death saves — you are dying" panel).
  * Reuses the encounter tracker so the pips look and announce identically in both places.
  *
- * `canRoll` is deliberately false here: the only authoritative death-save roll in the
- * product is POST /encounters/:id/combatants/:cid/death-save, where the SERVER rolls the
- * d20 and applies the same face to the 5e lifecycle. Rolling one from the sheet would
- * have to decide the outcome client-side, so the panel tracks and edits the counters and
- * points at the encounter for the roll itself.
+ * READ-ONLY, deliberately — neither the roll nor the counters are editable here.
+ *
+ * The 5e death lifecycle lives on the server, in the encounter: both
+ * POST /encounters/:id/combatants/:cid/death-save and the combatant PATCH route counter
+ * changes through `applyCombatantHp`, which DERIVES `deathState` from them (three failures
+ * is dead, three successes is stable). `PATCH /characters/:id` has no such derivation — it
+ * writes the counters verbatim and mirrors them into any live combatant. Marking a third
+ * failure from here would therefore produce `deathSaveFailures: 3` still sitting at
+ * `deathState: 'dying'`, on the sheet AND in the fight (Codex review on #2115).
+ *
+ * So the sheet shows the state and names where it is changed, rather than writing half of
+ * a lifecycle transition it cannot complete.
  */
-function DeathSavesPanel({
-  character,
-  canEdit,
-  onChange,
-  onError,
-}: {
-  character: Character;
-  canEdit: boolean;
-  onChange: () => void;
-  onError: (msg: string | null) => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const announce = useAnnounce();
-
-  async function patch(body: { deathSaveSuccesses?: number; deathSaveFailures?: number }) {
-    if (busy) return;
-    setBusy(true);
-    onError(null);
-    try {
-      await api.patch(`${API}/characters/${character.id}`, body);
-      onChange();
-      announce(`${character.name} death saves updated`);
-    } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't update death saves.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
+function DeathSavesPanel({ character }: { character: Character }) {
   return (
     <div className="cf-inset px-3 py-2 space-y-1" data-testid="character-death-saves">
       <p className="text-[length:var(--type-label)] tracking-wide" style={{ color: 'var(--color-danger, #e5484d)' }}>
@@ -1824,14 +1808,16 @@ function DeathSavesPanel({
       <DeathSaveTracker
         successes={character.deathSaveSuccesses}
         failures={character.deathSaveFailures}
-        canEditPermission={canEdit}
+        canEditPermission={false}
         canRoll={false}
-        busy={busy}
+        busy={false}
         syncBlocked={false}
-        onSet={(next) => void patch(next)}
+        onSet={() => undefined}
         onRoll={() => undefined}
       />
-      <p className="text-[11px] text-secondary">The d20 itself is rolled in the encounter, where the server applies it.</p>
+      <p className="text-[11px] text-secondary">
+        Rolled and tracked in the encounter, where the server applies each save to the death lifecycle.
+      </p>
     </div>
   );
 }
