@@ -870,12 +870,12 @@ const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>, default
   diseases: (src, license) => mapReference('condition', 'Disease', src, license),
 };
 
-async function fetchWithTimeout(url: string, body: string): Promise<Response> {
+async function fetchWithTimeout(url: string, body: string, method = 'POST', timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, {
-      method: 'POST',
+      method,
       signal: controller.signal,
       headers: { accept: 'application/json', 'content-type': 'application/json' },
       body,
@@ -937,6 +937,12 @@ async function fetchPageWithRetry(
 const PIT_KEEP_ALIVE = '2m';
 
 /**
+ * Cap on the best-effort snapshot release. Deliberately far below FETCH_TIMEOUT_MS: the
+ * section's result is already in hand by then, so waiting on cleanup only delays the job.
+ */
+const PIT_CLOSE_TIMEOUT_MS = 5_000;
+
+/**
  * Opens a point-in-time snapshot to page against, or null if the endpoint does not offer
  * one (a mirror, or an older Elasticsearch).
  *
@@ -975,14 +981,16 @@ async function openPit(
   }
 }
 
-/** Best-effort release of the snapshot. Never fails the import — PITs also expire on their own. */
+/**
+ * Best-effort release of the snapshot. Never fails the import — PITs also expire on their
+ * own — and, just as importantly, never DELAYS it: this is awaited from the section's
+ * `finally`, so an endpoint that accepts the searches but stalls on the DELETE would hang
+ * a section that had already finished, and with it the whole install job. Bounded well
+ * below the search timeout, because nothing downstream is waiting on the result.
+ */
 async function closePit(base: string, pitId: string, logger: Pf2eImportLogger, logPrefix: string): Promise<void> {
   try {
-    await fetch(`${base}/_pit`, {
-      method: 'DELETE',
-      headers: { accept: 'application/json', 'content-type': 'application/json' },
-      body: JSON.stringify({ id: pitId }),
-    });
+    await fetchWithTimeout(`${base}/_pit`, JSON.stringify({ id: pitId }), 'DELETE', PIT_CLOSE_TIMEOUT_MS);
   } catch (err) {
     logger.warn(`${logPrefix}: failed to release the point-in-time snapshot (${(err as Error).message}) — it will expire on its own`);
   }

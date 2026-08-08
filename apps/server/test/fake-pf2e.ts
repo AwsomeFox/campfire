@@ -701,3 +701,45 @@ export async function startFakePf2eNoPit(): Promise<FakePf2e> {
     },
   };
 }
+
+/**
+ * Fake AoN that serves searches normally but never answers the PIT `DELETE`.
+ *
+ * Snapshot release is awaited from the section's `finally`, so an unbounded cleanup request
+ * would hang a section whose work was already done — and with it the install job — even
+ * though the PIT expires on its own and nothing downstream needs the result. The importer
+ * must give up on the release and return.
+ */
+export async function startFakePf2eStalledPitClose(): Promise<FakePf2e> {
+  const app = express();
+  app.use(express.json());
+  app.post('/aon/_pit', (_req, res) => res.json({ id: 'pit-aon' }));
+  // Never responds, never closes: the request just hangs until the client aborts.
+  app.delete('/_pit', () => {});
+  app.post(['/aon/_search', '/_search'], (req, res) => {
+    if (parseType(req) !== 'condition') {
+      res.json(aonPage([], req));
+      return;
+    }
+    res.json(
+      aonPage([{ id: 'frightened', name: 'Frightened', type: 'Condition', text: 'Gripped by fear.', source: ['Player Core'] }], req),
+    );
+  });
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    server,
+    close() {
+      return new Promise((resolve, reject) => {
+        // Hung requests hold sockets open; force them shut so the suite can exit.
+        server.closeAllConnections?.();
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}

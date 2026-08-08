@@ -5,6 +5,7 @@ import {
   startFakePf2eLosesRows,
   startFakePf2eMixed,
   startFakePf2eNoPit,
+  startFakePf2eStalledPitClose,
   type FakePf2e,
 } from '../fake-pf2e';
 
@@ -425,6 +426,22 @@ describe('pf2e-importer — paging integrity', () => {
       await fake.close();
     }
   });
+
+  it('gives up on a stalled snapshot release instead of hanging the install job', async () => {
+    // Release is awaited from the section's `finally`; an unbounded request would hang a
+    // section whose work was already done. The entries must still come back.
+    const fake = await startFakePf2eStalledPitClose();
+    try {
+      const started = process.hrtime.bigint();
+      const { entries } = await fetchPf2eSection(fake.baseUrl, 'conditions', silentLogger);
+      const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+      expect(entries.map((e) => e.name)).toEqual(['Frightened']);
+      // Bounded by the cleanup cap, nowhere near the 30s search timeout.
+      expect(elapsedMs).toBeLessThan(15_000);
+    } finally {
+      await fake.close();
+    }
+  }, 30_000);
 
   it('a complete scan UNDER a snapshot is allowed to claim completeness', async () => {
     // The counterpart to the case above: the whole point of opening a PIT is that a clean
