@@ -46,7 +46,11 @@ subtree.
 
 ## Commands
 
-Prerequisites are Node 22 or newer and npm workspaces.
+Prerequisites are Node 22.14 or newer and npm workspaces. The floor is 22.14
+rather than 22.0 because better-sqlite3's bundled binary targets Node-API 10,
+which Node added in 22.14.0 — on 22.0–22.13 the install succeeds and the server
+then fails when it imports the addon. `build-test (22.x)` pins that exact
+version so the declared floor is tested rather than asserted.
 
 - Install: `npm ci`
 - Build: `npm run build`
