@@ -953,11 +953,14 @@ export class EncountersService {
       expectedUsed: number | undefined;
     },
   ): { entry: T; nextUsed: number } {
-    if (!entry || (opts.requirePositiveMax && entry.max <= 0)) {
+    if (!entry) {
       throw new BadRequestException(opts.existenceMessage);
     }
     if (!Number.isInteger(entry.used) || !Number.isInteger(entry.max)) {
       throw new BadRequestException(`${opts.malformedLabel} is malformed (used/max must be integers)`);
+    }
+    if (opts.requirePositiveMax && entry.max <= 0) {
+      throw new BadRequestException(opts.existenceMessage);
     }
     if (opts.expectedUsed !== undefined && opts.expectedUsed !== entry.used) {
       throw new ConflictException({
