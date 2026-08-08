@@ -3982,7 +3982,11 @@ export default function RunSessionPage() {
 
   return (
     <EncounterVttShell
-      className={`cf-print-root${isDm ? ' cf-print-encounter' : ''}`}
+      // `reading-surface` opts the cockpit into the semantic reading scale, exactly as the
+      // pre-cockpit root did — dropping it silently took the encounter page out of the
+      // user's text-size preference (reading-preferences.spec.ts). BattleMap already marks
+      // itself `reading-exempt` so map geometry does not scale with body text.
+      className={`cf-print-root reading-surface${isDm ? ' cf-print-encounter' : ''}`}
       rootProps={entityTargetProps('encounter', encounter.id)}
       backSlot={
         <div className="cf-vtt-back">

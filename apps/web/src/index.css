@@ -3507,7 +3507,12 @@ html.cf-vtt-locked body {
 .cf-vtt-map .cf-vtt-map-tray {
   position: absolute;
   top: 56px;
-  width: min(340px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-3)));
+  /* Half the free canvas at most, so the left-anchored aside and the right-anchored
+     tray can never meet. The old `100% - rail - 2*gap` let each take the FULL usable
+     width: between roughly 900px and 1240px they overlapped by up to ~120px, and since
+     the tray comes later in the DOM at the same z-index it swallowed pointer input over
+     the aside's Grid & fog panel. Below 900px they stop floating altogether. */
+  width: min(340px, calc((100% - var(--cf-vtt-rail-width) - 4 * var(--space-3)) / 2));
   max-height: calc(100% - 190px);
   overflow-y: auto;
   overscroll-behavior: contain;
