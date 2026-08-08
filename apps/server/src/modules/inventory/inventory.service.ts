@@ -986,6 +986,7 @@ export class InventoryService {
     const derivationInputs = (
       row: Pick<typeof inventoryItems.$inferSelect, 'characterId' | 'compendiumSnapshot' | 'ruleEntryId'>,
       characterRevision: string | null,
+      mechanicsRevision: string | null,
     ) =>
       JSON.stringify({
         characterId: row.characterId,
@@ -993,6 +994,11 @@ export class InventoryService {
         ruleEntryId: row.ruleEntryId,
         // The wielder's stats/level, via their row revision.
         characterRevision,
+        // The campaign's rule system. A derivation is system-specific, and a concurrent switch
+        // CLEARS derived rows (CampaignsService.update) — without this the equip transaction
+        // would write the pre-switch action straight back over that cleanup, under the new
+        // adapter. The refresh path fences on the same value in its conditional UPDATE.
+        mechanicsRevision,
       });
     // Captured from `existing` — the row as it stood when this request read it. `fresh` is
     // read inside the transaction BEFORE this request's own update lands, so comparing the
@@ -1006,7 +1012,11 @@ export class InventoryService {
     // transaction BEFORE this request's own update lands, so comparing the two detects changes
     // made by OTHER writers while this one awaited, and never mistakes this request's own
     // rename or move for interference.
-    const derivedFromInputs = derivationInputs(existing, derivation?.characterRevision ?? null);
+    const derivedFromInputs = derivationInputs(
+      existing,
+      derivation?.characterRevision ?? null,
+      derivation?.mechanicsRevision ?? null,
+    );
     /**
      * The name the derivation titled its action with. Review (chatgpt-codex-connector P2):
      * `name` cannot be a plain fingerprint field like the others, because it is the one input
@@ -1164,6 +1174,18 @@ export class InventoryService {
             ? null
             : (tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, finalCharacterId)).get()
                 ?.updatedAt ?? null);
+        // Read inside the transaction, exactly as the character revision is: a campaign PATCH
+        // that switched systems and cleared derived rows while this request awaited must not
+        // have its cleanup undone by this write.
+        const freshCampaign = tx
+          .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+          .from(campaigns)
+          .where(eq(campaigns.id, existing.campaignId))
+          .get();
+        const freshMechanicsRevision = JSON.stringify([
+          freshCampaign?.ruleSystem ?? '',
+          freshCampaign?.customMechanicsProfile ?? null,
+        ]);
         const actionWrite = resolveEquippedActionWrite({
           ...derivationTrigger,
           authoredIsAction: !!input.equippedAction,
@@ -1174,7 +1196,7 @@ export class InventoryService {
           // before this request's own update lands, and comparing them would flag every
           // legitimate handoff as interference.
           derivationInputsUnchanged:
-            derivationInputs(fresh, freshCharacterRevision) === derivedFromInputs &&
+            derivationInputs(fresh, freshCharacterRevision, freshMechanicsRevision) === derivedFromInputs &&
             (fresh.name === existing.name || fresh.name === derivedActionName),
           derivationProducedAction: derivedOnEquip != null,
         });

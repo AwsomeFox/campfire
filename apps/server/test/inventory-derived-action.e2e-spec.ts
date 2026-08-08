@@ -816,6 +816,49 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(tombstone.src).toBeNull();
   });
 
+  it('equipping under the old system cannot undo a mechanics-switch cleanup', async () => {
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Equip Vs Switch' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Racer', level: 5, stats: { STR: 16 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+
+    const profile = {
+      slug: 'e2e-equip-race-hack',
+      label: 'E2E Equip Race Hack',
+      mechanicsSummary: 'A homebrew hack for the equip-versus-switch race, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const switched = await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(switched.status).toBe(200);
+
+    // Equipping AFTER the switch derives under the new adapter, which has no attack math —
+    // so it must not produce a resolvable 5e-shaped spec. (The transactional fence covers the
+    // race where the switch lands mid-derivation; this covers the ordering that IS reachable
+    // over HTTP, and would have failed while the equip path's fence was missing entirely.)
+    const equipped = await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'race-slot' });
+    expect(equipped.status).toBe(200);
+    expect(equipped.body.equippedAction?.spec).toBeUndefined();
+    expect(equipped.body.equippedAction?.toHit ?? '').toBe('');
+  });
+
   it('a no-op campaign PATCH that resends the same mechanics keeps derived actions', async () => {
     const server = ctx.app.getHttpServer();
     // A full-object REST/MCP client resends every field on every update. Treating the mere
