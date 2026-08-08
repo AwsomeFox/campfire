@@ -3,7 +3,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { inventoryItems, ruleEntries } from '../src/db/schema';
+import { characters, inventoryItems, ruleEntries } from '../src/db/schema';
 
 const dm = { 'x-dev-user': 'dm', 'x-dev-role': 'dm' };
 const player = { 'x-dev-user': 'player', 'x-dev-role': 'player' };
@@ -877,6 +877,42 @@ describe('derived equipped-item actions (issue #2097)', () => {
       .send({ equippedAction: { ...equipped.body.equippedAction, toHit: '+11', spec } });
     expect(authored.status).toBe(200);
     expect(authored.body.equippedAction.spec.attack.bonus).toBe('+11');
+  });
+
+  it("a player's refresh can never write a character they do not own, even mid-flight", async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 'player', role: 'player' });
+
+    // A character owned by the requesting player, holding a derived action.
+    const mine = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Mine To Refresh', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player' });
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: mine.body.id, duplicateMode: 'separate' });
+    const itemId = acquired.body.id;
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'authz-race-slot' });
+
+    // The DM reassigns that character to someone else. A pre-write authorization check that
+    // has already passed must not be enough — the write itself has to re-assert it, because
+    // the revision fence answers "is this current?", never "may this caller write it?".
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(characters).set({ ownerUserId: 'dev:someone-else' }).where(eq(characters.id, mine.body.id)).run();
+    const before = db.select({ a: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.a;
+
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '3d12', damageType: 'Slashing', properties: [] });
+    try {
+      await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(player);
+      const after = db.select({ a: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.a;
+      // Whatever the endpoint returned, this caller did not rewrite another user's character's
+      // private action.
+      expect(after).toBe(before);
+      expect(after ?? '').not.toContain('3d12');
+    } finally {
+      restoreLongswordEntry();
+    }
   });
 
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {

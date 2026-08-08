@@ -715,6 +715,19 @@ export class InventoryService {
             // A concurrent switch CLEARS derived rows (CampaignsService.update), and this
             // write must not put one back.
             sql`(select json_array(coalesce(rule_system, ''), custom_mechanics_profile) from campaigns where id = ${row.campaignId}) is ${regeneration.mechanicsRevision === null ? sql`null` : sql`${regeneration.mechanicsRevision}`}`,
+            // …and, for a non-DM caller, the wielder must STILL be their own character.
+            //
+            // Review (chatgpt-codex-connector P1, authorization): the `mayRegenerate` check
+            // above is a check-then-act with an await in between — `deriveActionForEquip`
+            // reads the character, so a DM reassigning that character to another user in
+            // that window is captured by the derivation itself, meaning the character-revision
+            // fence agrees and the former owner writes the new owner's private action. A
+            // revision fence answers "is this data current?", never "may this caller write
+            // it?", so authorization has to ride on the UPDATE rather than precede it. DMs
+            // are unconstrained here exactly as `assertCanWriteOwner` leaves them.
+            role === 'dm'
+              ? undefined
+              : sql`(select owner_user_id from characters where id = ${ownerId}) = ${user.id}`,
           ),
         )
         .returning();
