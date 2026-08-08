@@ -7045,7 +7045,27 @@ export class EncountersService {
         // neighbours' bounds, not whether it differs from them.
         const alreadyBetween =
           origInit !== null && (prevInit === null || origInit <= prevInit) && (nextInit === null || origInit >= nextInit);
-        if (!alreadyBetween) {
+        // Issue #2095 review (Codex P1): `alreadyBetween` above is `false` unconditionally
+        // whenever `origInit === null` (an unrolled combatant), so a null-origin move used
+        // to fall straight into reassignment below. Roster A(20), B(10), U(null), V(null):
+        // dragging U to just after B — where it already sits — had prevInit=10, nextInit=
+        // null, landing in the `prevInit != null` branch and writing `newInitiative = 9`.
+        // That silently rolls an unrolled combatant in for a drop `sortOrder` alone should
+        // have satisfied — the same class of bug as finding 2 above, at the rolled/null
+        // boundary instead of between two rolled neighbours.
+        //
+        // `nextInit === null` is exactly "the drop still lands inside (or at the end of)
+        // the unrolled tier": `sorted` above places every rolled row before every unrolled
+        // one, so the only way an unrolled combatant's NEXT neighbour can be a rolled row is
+        // a drop at the very top of the whole roster (`insertAt === 0`, `prevInit === null`
+        // too) — deliberately rolling it in ahead of everyone. Any other `nextInit === null`
+        // drop keeps at least the row immediately after it (if any) unrolled, so the
+        // combatant belongs in the unrolled tier regardless of `prevInit`. Preserve `null`
+        // there; only the two cases below (`nextInit !== null`) are actually placing an
+        // unrolled combatant into the rolled region, which — unlike the null-preserving
+        // cases — is a deliberate re-roll-by-position, not an accident of the drop math.
+        const stillUnrolled = origInit === null && nextInit === null;
+        if (!alreadyBetween && !stillUnrolled) {
           if (prevInit != null && nextInit != null) {
             newInitiative = prevInit === nextInit ? prevInit : Math.floor((prevInit + nextInit) / 2);
           } else if (prevInit != null) {

@@ -10902,6 +10902,119 @@ describe('encounters — issue #2084: manualOrder records only the DM\'s crossed
     expect(afterM.initiativeBreakdown).toEqual(mBreakdownBefore);
   });
 
+  /**
+   * Issue #2095 review (Codex P1): the same class of bug as finding 2 above, at the
+   * rolled/null boundary instead of between two rolled neighbours. `alreadyBetween` is
+   * unconditionally `false` whenever the moved combatant is unrolled (`origInit ===
+   * null`), so a null-origin move fell straight into reassignment — roster `A(20),
+   * B(10), U(null), V(null)`, dragging U to just after B (where it already sits) had
+   * `prevInit=10, nextInit=null`, landing in the `prevInit != null` branch and silently
+   * rolling U in at `initiative: 9`.
+   */
+  it('an unrolled combatant repositioned within the unrolled group keeps initiative null and only sortOrder changes (finding 2, Codex repro)', async () => {
+    await endAnyRunning();
+    const server = ctx.app.getHttpServer();
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Unrolled boundary drill', hidden: false });
+    const encounterId = created.body.id as number;
+    const a = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'A', hpMax: 10, initMod: 5 });
+    const b = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'B', hpMax: 8, initMod: 2 });
+    const aId = a.body.id as number;
+    const bId = b.body.id as number;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${aId}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${bId}`).set(dm).send({ initiative: 10 });
+    const started = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(started.status).toBe(201);
+    let turnVersion = started.body.turnVersion as number;
+
+    // Late joiners, added AFTER start (running's own precondition only covers the
+    // roster present at start time) — U and V stay unrolled: initiative null.
+    const u = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'U', hpMax: 6, initMod: 0 });
+    const v = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'V', hpMax: 6, initMod: 0 });
+    const uId = u.body.id as number;
+    const vId = v.body.id as number;
+    const seeded = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((seeded.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([aId, bId, uId, vId]);
+    turnVersion = seeded.body.turnVersion as number;
+    const vBreakdownBefore = (seeded.body.combatants as Array<{ id: number; initiativeBreakdown: unknown }>).find((c) => c.id === vId)!.initiativeBreakdown;
+
+    // Move V to right after B — ahead of U within the SAME unrolled tier. This genuinely
+    // changes sortOrder (V now precedes U) but V's own initiative must stay null: it
+    // never crosses into the rolled region (prevInit=10 non-null, but nextInit is U's
+    // null — still "inside the unrolled tier", not "between two rolled neighbours").
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${vId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: bId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+    expect(res.body.initiative).toBeNull();
+    // Untouched — never cleared/rewritten by a move that only changes sortOrder.
+    expect(res.body.initiativeBreakdown).toEqual(vBreakdownBefore);
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((after.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([aId, bId, vId, uId]);
+    const afterV = (after.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === vId)!;
+    expect(afterV.initiative).toBeNull();
+
+    // No initiative-change log line — this is a pure sortOrder move.
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    const reorderEvents = (events.body as Array<{ type: string; targetId: number; detail: string }>).filter(
+      (e) => e.type === 'override' && e.targetId === vId,
+    );
+    expect(reorderEvents.at(-1)!.detail).toBe('reordered in initiative');
+    expect(reorderEvents.at(-1)!.detail).not.toContain('now');
+
+    // The landing "tie group" is null-initiative — never stamped (finding 1's rule:
+    // skipped entirely when the landing initiative is null).
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rows = await db.select().from(combatantsTable).where(inArray(combatantsTable.id, [uId, vId]));
+    expect(rows.every((r) => r.manualOrder === null)).toBe(true);
+  });
+
+  it('the exact reported no-op (an unrolled combatant dropped where it already sits, next to another unrolled row) writes nothing (finding 2, Codex repro)', async () => {
+    await endAnyRunning();
+    const server = ctx.app.getHttpServer();
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Unrolled no-op drill', hidden: false });
+    const encounterId = created.body.id as number;
+    const a = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'A', hpMax: 10, initMod: 5 });
+    const b = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'B', hpMax: 8, initMod: 2 });
+    const aId = a.body.id as number;
+    const bId = b.body.id as number;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${aId}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${bId}`).set(dm).send({ initiative: 10 });
+    const started = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(started.status).toBe(201);
+
+    const u = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'U', hpMax: 6, initMod: 0 });
+    const v = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'V', hpMax: 6, initMod: 0 });
+    const uId = u.body.id as number;
+    const vId = v.body.id as number;
+    const seeded = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    // Natural order A, B, U, V — U is already directly after B.
+    expect((seeded.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([aId, bId, uId, vId]);
+    const turnVersion = seeded.body.turnVersion as number;
+
+    // "Move U after B" — U's own current position. prevInit=10 (B, rolled), nextInit=null
+    // (V, unrolled): the exact repro shape from the review (`Received: 9` before the fix).
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${uId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: bId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+    expect(res.body.initiative).toBeNull();
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((after.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([aId, bId, uId, vId]);
+    const afterU = (after.body.combatants as Array<{ id: number; initiative: number | null }>).find((c) => c.id === uId)!;
+    expect(afterU.initiative).toBeNull();
+
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    const reorderEvents = (events.body as Array<{ type: string; targetId: number; detail: string }>).filter(
+      (e) => e.type === 'override' && e.targetId === uId,
+    );
+    expect(reorderEvents.at(-1)!.detail).toBe('reordered in initiative');
+    expect(reorderEvents.at(-1)!.detail).not.toContain('now');
+  });
+
   it("clears a combatant's manualOrder stamp when its own initiative is directly PATCHed, so it stops deciding the tie it left (finding 1)", async () => {
     const { encounterId, wizardId, fighterId, rogueId, turnVersion } = await seedTiedDifferentDexFight();
     const server = ctx.app.getHttpServer();
