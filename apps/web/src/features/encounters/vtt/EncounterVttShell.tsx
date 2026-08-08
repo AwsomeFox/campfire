@@ -21,13 +21,6 @@ export type VttTab = {
   label: string;
   /** Optional count/dot rendered after the label (e.g. unread log entries). */
   badge?: ReactNode;
-  /**
-   * This tab's panel stays in the document while another tab is showing (hidden, not
-   * unmounted) because something inside it owns state that must outlive a tab click.
-   * Mirrors `VttPanelSection`'s own `keepMounted` — the shell needs it here so a tab
-   * only advertises `aria-controls` for a panel that is actually present.
-   */
-  keepMounted?: boolean;
 };
 
 type Props = {
@@ -149,8 +142,15 @@ export function EncounterVttShell({
           )}
         </div>
 
-        {panelOpen && (
-          <aside className="cf-vtt-panel" aria-label={panelLabel} data-testid="encounter-vtt-panel">
+        {/* Hidden, never unmounted — collapsing the panel is a viewing choice, and it must
+            not throw away an in-flight write's reconciliation guard or a half-typed edit
+            any more than switching tabs does. */}
+        <aside
+          className="cf-vtt-panel"
+          aria-label={panelLabel}
+          data-testid="encounter-vtt-panel"
+          hidden={!panelOpen}
+        >
             <div className="cf-vtt-panel-tabs" role="tablist" aria-label={panelLabel}>
               {tabs.map((tab) => (
                 <button
@@ -161,12 +161,9 @@ export function EncounterVttShell({
                   className="cf-vtt-tab"
                   data-testid={`encounter-vtt-tab-${tab.id}`}
                   aria-selected={tab.id === activeTabId}
-                  // Only advertise a panel that is really in the document: a reference to
-                  // a missing id is worse for assistive tech than none at all. Panels are
-                  // present when selected, and `keepMounted` ones are present always.
-                  aria-controls={
-                    tab.id === activeTabId || tab.keepMounted ? `cf-vtt-tabpanel-${tab.id}` : undefined
-                  }
+                  // Every panel is in the document (see `VttPanelSection`), so every tab
+                  // can point at a real element.
+                  aria-controls={`cf-vtt-tabpanel-${tab.id}`}
                   tabIndex={tab.id === activeTabId ? 0 : -1}
                   onClick={() => onSelectTab(tab.id)}
                   onKeyDown={(event) => {
@@ -197,11 +194,10 @@ export function EncounterVttShell({
               >
                 <span aria-hidden>›</span>
               </button>
-            </div>
-            {/* Scroll container only — each `VttPanelSection` inside is its own tabpanel. */}
-            <div className="cf-vtt-panel-body">{panelSlot}</div>
-          </aside>
-        )}
+          </div>
+          {/* Scroll container only — each `VttPanelSection` inside is its own tabpanel. */}
+          <div className="cf-vtt-panel-body">{panelSlot}</div>
+        </aside>
       </div>
 
       {children}
@@ -210,36 +206,39 @@ export function EncounterVttShell({
 }
 
 /**
- * One tab's panel.
+ * One tab's panel. Always mounted; hidden when it is not the selected tab.
  *
- * `keepMounted` is the important knob. A panel that only renders things is fine to
- * unmount when you switch away — and unmounting keeps the DOM honest, since a hidden
- * copy of the roster still matches a `getByText(...)` and still costs its queries.
+ * Unmounting on a tab change looked like the tidy thing to do and was wrong three
+ * separate times, because a panel is not just a view — it is wherever some component
+ * happens to keep state that has to outlive a click:
  *
- * But a panel whose contents own state that must OUTLIVE a tab click has to stay. The
- * Table tab is the case in point: `ResourceTrackerPanel` carries the ambiguous-write
- * guard from issue #1902 — `pendingKeys`, `stuckKeysRef` and a 5s recovery interval
- * whose whole job is to stop a resource being spent twice when a write's response was
- * lost. Unmounting it mid-flight dropped the guard and came back with empty state and
- * the control re-enabled, i.e. a double spend. Same reasoning keeps the shared dice log
- * mounted behind the Roll tray: it owns the app's only live roll-event subscriber.
+ *  - `ResourceTrackerPanel` (Table) holds the issue #1902 ambiguous-write guard —
+ *    `pendingKeys`, `stuckKeysRef` and a 5s recovery interval whose whole job is to
+ *    stop a resource being spent twice when a write's response was lost. Losing it
+ *    mid-flight re-enables the control against unreconciled state.
+ *  - `CombatantRow` (Party) holds `editingIdentity`, `nameDraft` and `conditionDraft`,
+ *    which are committed only by an explicit action. Remounting silently discards a
+ *    DM's half-typed rename.
+ *  - `SharedDiceLog` (behind the Roll tray) holds the app's only live roll-event
+ *    subscriber.
  *
- * So: add `keepMounted` when you put something with in-flight or reconciliation state
- * into a tab. It is not a performance dial.
+ * The old page kept all of this mounted at once, so staying mounted costs what it
+ * always cost. The rule is simply: layout does not get to decide what is still alive.
+ *
+ * The cost is in tests, not in the app: a hidden panel still matches `getByText`, so a
+ * spec reaching for content that exists in more than one tab has to scope to the
+ * visible one (`getByTestId('encounter-vtt-tabpanel-<id>')`) instead of `.first()`.
  */
 export function VttPanelSection({
   id,
   activeTabId,
-  keepMounted = false,
   children,
 }: {
   id: string;
   activeTabId: string;
-  keepMounted?: boolean;
   children: ReactNode;
 }) {
   const active = id === activeTabId;
-  if (!active && !keepMounted) return null;
   return (
     <div
       className="cf-vtt-panel-section"

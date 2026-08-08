@@ -1,7 +1,7 @@
 import { test, expect, request } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
-import { openCockpitTab } from '../lib/encounterCockpit';
+import { cockpitPanel, openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Multi-client sheet → encounter card refresh (issue #421).
@@ -72,7 +72,7 @@ test.describe('inline character cards — live sheet refresh', () => {
 
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
       await openCockpitTab(page, 'party');
-      await expect(page.getByText('Sheet Sync PC', { exact: false }).first()).toBeVisible();
+      await expect(cockpitPanel(page, 'party').getByText('Sheet Sync PC', { exact: false }).first()).toBeVisible();
       // Ability chips render as "STR" + "10 (+0)" inside a button (owned card auto-expands).
       const strChip = page.getByRole('button', { name: /STR\s*10\s*\(\+0\)/i });
       await expect(strChip).toBeVisible();
@@ -94,7 +94,7 @@ test.describe('inline character cards — live sheet refresh', () => {
       // (issue #415: the encounter card resolves checks through the rule-system roll catalog).
       // Announcer also echoes it (avoid strict-mode dual match).
       await expect(page.getByText('Sheet Sync PC · STR check (STR +4 = +4)', { exact: true })).toBeVisible({ timeout: 10_000 });
-      await expect(page.getByText(/1d20\+4/i).first()).toBeVisible();
+      await expect(cockpitPanel(page, 'party').getByText(/1d20\+4/i).first()).toBeVisible();
     } finally {
       // End before delete so a failed DELETE cannot leave a RUNNING fight that
       // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).

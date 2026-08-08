@@ -10,7 +10,7 @@
  * Both helpers are idempotent — calling them when the target is already open is
  * a no-op, so they are safe to call defensively at the top of a flow.
  */
-import { expect, type Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
 
 export type CockpitTab = 'turn' | 'party' | 'log' | 'table';
 
@@ -22,9 +22,15 @@ export async function openCockpitTab(page: Page, tab: CockpitTab): Promise<void>
 
   const button = page.getByTestId(`encounter-vtt-tab-${tab}`);
   await expect(button).toBeVisible();
-  if ((await button.getAttribute('aria-selected')) === 'true') return;
-  await button.click();
-  await expect(button).toHaveAttribute('aria-selected', 'true');
+  // At phone widths the tab strip scrolls horizontally, so the target can be partly off
+  // its own scroller — scroll it in first, and retry, because a click that lands on the
+  // clipped edge is delivered without changing the selection.
+  await expect(async () => {
+    if ((await button.getAttribute('aria-selected')) === 'true') return;
+    await button.scrollIntoViewIfNeeded();
+    await button.click();
+    await expect(button).toHaveAttribute('aria-selected', 'true', { timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
 }
 
 /** Open the floating dice tray behind the cockpit's Roll button. */
@@ -33,4 +39,16 @@ export async function openCockpitDiceTray(page: Page): Promise<void> {
   await expect(roll).toBeVisible();
   if ((await roll.getAttribute('aria-expanded')) !== 'true') await roll.click();
   await expect(page.getByTestId('encounter-vtt-dice-tray')).toBeVisible();
+}
+
+/**
+ * The panel section for one tab.
+ *
+ * Every section stays mounted and is merely hidden when another tab is showing (see
+ * `VttPanelSection`), so a bare `getByText(...)`/`.first()` can resolve to a copy in a
+ * hidden panel — the roster's combatant names also appear in the Turn panel's summary,
+ * for instance. Scope through this when the text you want exists in more than one tab.
+ */
+export function cockpitPanel(page: Page, tab: CockpitTab): Locator {
+  return page.getByTestId(`encounter-vtt-tabpanel-${tab}`);
 }

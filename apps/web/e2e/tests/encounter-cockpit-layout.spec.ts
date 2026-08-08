@@ -85,18 +85,19 @@ test.describe('encounter cockpit layout', () => {
       // The canvas gets the height left over under the header, not a 16:9 reservation.
       expect(desktop.canvasHeight).toBeGreaterThan(400);
 
-      // The panel's tabs are the page's sections. A presentational panel unmounts when you
-      // switch away; the Table panel stays mounted-but-hidden because it owns state that
-      // must survive a tab click (see VttPanelSection).
+      // Every panel stays MOUNTED and is hidden when another tab shows — panels hold
+      // state that must survive a tab click (an in-flight write's reconciliation guard, a
+      // half-typed rename), so layout does not get to decide what is still alive.
       await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true');
-      await expect(page.getByTestId('encounter-vtt-tabpanel-log')).toHaveCount(0);
-      await expect(page.getByTestId('encounter-vtt-tabpanel-table')).toHaveCount(1);
-      await expect(page.getByTestId('encounter-vtt-tabpanel-table')).not.toBeVisible();
+      for (const tab of ['turn', 'party', 'log', 'table']) {
+        await expect(page.getByTestId(`encounter-vtt-tabpanel-${tab}`)).toHaveCount(1);
+      }
+      await expect(page.getByTestId('encounter-vtt-tabpanel-log')).not.toBeVisible();
       await page.getByTestId('encounter-vtt-tab-log').click();
+      await expect(page.getByTestId('encounter-vtt-tabpanel-log')).toBeVisible();
       await expect(page.getByRole('log', { name: 'Combat log' })).toBeVisible();
 
-      // A tab advertises `aria-controls` only for a panel that is really in the document —
-      // a reference to a missing id is worse for assistive tech than none at all.
+      // …so every tab can point at a panel that really is in the document.
       const tabWiring = await page
         .locator('.cf-vtt-panel-tabs [role="tab"]')
         .evaluateAll((tabs) =>
@@ -110,12 +111,15 @@ test.describe('encounter cockpit layout', () => {
         );
       expect(tabWiring.length).toBeGreaterThan(1);
       for (const tab of tabWiring) {
-        if (tab.controls != null) expect(tab.targetExists).toBe(true);
+        expect(tab.controls).not.toBeNull();
+        expect(tab.targetExists).toBe(true);
       }
 
       // Collapsing the panel hands the whole canvas to the map, and the reopen tab returns it.
       await page.getByTestId('encounter-vtt-panel-close').click();
-      await expect(panel).toHaveCount(0);
+      await expect(panel).not.toBeVisible();
+      // Hidden, not unmounted — collapsing must not discard panel state either.
+      await expect(panel).toHaveCount(1);
       await page.getByTestId('encounter-vtt-panel-open').click();
       await expect(panel).toBeVisible();
 

@@ -4218,7 +4218,7 @@ export default function RunSessionPage() {
         { id: 'turn', label: t('encounters.vtt.tabTurn') },
         { id: 'party', label: t('encounters.vtt.tabParty'), badge: orderedCombatants.length > 0 ? orderedCombatants.length : undefined },
         { id: 'log', label: t('encounters.vtt.tabLog') },
-        { id: 'table', label: t('encounters.vtt.tabTable'), keepMounted: true },
+        { id: 'table', label: t('encounters.vtt.tabTable') },
       ]}
       activeTabId={panelTab}
       onSelectTab={(id) => setPanelTabChoice(id as PanelTab)}
@@ -4788,9 +4788,7 @@ export default function RunSessionPage() {
               <CombatLog events={events} />
               <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} customMechanicsProfile={campaign?.customMechanicsProfile} />
           </VttPanelSection>
-          {/* keepMounted: ResourceTrackerPanel below owns the #1902 ambiguous-write guard,
-              which must survive a tab change or a resource can be spent twice. */}
-          <VttPanelSection id="table" activeTabId={panelTab} keepMounted>
+          <VttPanelSection id="table" activeTabId={panelTab}>
               {/* Player display / Cast controls (issue #547). In the cockpit these live
                   with the other table-wide setup rather than in the 54px header, which the
                   design reserves for identity, round state and the turn controls. */}

@@ -50,10 +50,13 @@ test.describe('encounter cockpit layout', () => {
     // The combat log lives in the Log tab; the shared dice tray moved to the
     // floating Roll control, so it must not be duplicated back into the panel.
     expect(source).toMatch(/<VttPanelSection id="log"[\s\S]{0,120}<CombatLog/);
-    // The Table panel keeps its mount: ResourceTrackerPanel's ambiguous-write guard must
-    // survive a tab change, or a resource can be spent twice.
-    expect(source).toMatch(/<VttPanelSection id="table" activeTabId=\{panelTab\} keepMounted>/);
-    expect(source).toContain("label: t('encounters.vtt.tabTable'), keepMounted: true");
+    // Every panel keeps its mount — see VttPanelSection for the three separate pieces of
+    // state that a tab-change unmount used to destroy.
+    const shell = readFileSync(SHELL, 'utf8');
+    expect(shell).not.toContain('keepMounted');
+    expect(shell).toMatch(/hidden=\{!active\}/);
+    // The side panel hides when collapsed rather than unmounting, for the same reason.
+    expect(shell).toMatch(/className="cf-vtt-panel"[\s\S]{0,220}hidden=\{!panelOpen\}/);
     expect(source).toMatch(/className="cf-vtt-tray"[\s\S]{0,400}<SharedDiceLog/);
     // The tray hides; it never unmounts, or the app loses its only dice.rolled subscriber.
     expect(source).toMatch(/className="cf-vtt-tray"[\s\S]{0,300}hidden=\{!diceTrayOpen\}/);
