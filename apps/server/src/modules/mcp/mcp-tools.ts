@@ -5383,12 +5383,13 @@ export class McpToolsService {
         'location, beat (a story beat filed as story_beat — pass arcId to pin it to an arc), quest (a full quest draft), faction, recap ' +
         '(filed as a session), encounter (reuses generate_encounter #304), or map (reuses generate_map #306). `count` ' +
         '(npc/location/beat/quest/faction only) drafts several at once; recap/encounter/map ignore count. `arcId` (beat only) ' +
-        'pins drafted beats to a story arc. Returns the ' +
+        'pins drafted beats to a story arc. To rewrite an existing storyline entity, use target arc or beat with entityId; ' +
+        'the server supplies its current arc/beat, branches, and linked-play context and files an update proposal. Returns the ' +
         'created proposal ids; approve/reject them with approve_proposal / reject_proposal. Metered against the seat ' +
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | quest | faction | recap | encounter | map'),
+        target: CoDmDraftTarget.describe('What to draft or rewrite: npc | location | arc | beat | quest | faction | recap | encounter | map'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
         count: z
           .number()
@@ -5399,8 +5400,9 @@ export class McpToolsService {
           .describe('How many to draft (npc/location/beat/quest/faction only; ignored for recap/encounter/map)'),
         narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)'),
         arcId: Id.optional().describe('When target is beat, pin drafted beat(s) to this story arc id'),
+        entityId: Id.optional().describe('When target is arc or beat, rewrite this existing entity and file an update proposal'),
       },
-      async ({ campaignId, target, prompt, count, narrationLanguage, arcId }) => {
+      async ({ campaignId, target, prompt, count, narrationLanguage, arcId, entityId }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.coDm.draft(
           campaignId as number,
@@ -5410,6 +5412,7 @@ export class McpToolsService {
             ...(count !== undefined ? { count: count as number } : {}),
             ...(narrationLanguage !== undefined ? { narrationLanguage: narrationLanguage as z.infer<typeof NarrationLanguage> } : {}),
             ...(arcId !== undefined ? { arcId: arcId as number } : {}),
+            ...(entityId !== undefined ? { entityId: entityId as number } : {}),
           },
           user,
           role,

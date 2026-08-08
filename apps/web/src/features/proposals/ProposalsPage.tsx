@@ -27,7 +27,7 @@ import { timeAgo, useTimeTick } from '../../lib/format';
 
 type EntityType = Proposal['entityType'];
 
-const entityIcon: Record<EntityType, string> = {
+const entityIcon: Partial<Record<EntityType, string>> = {
   quest: ENTITY_ICON.quest,
   npc: ENTITY_ICON.npc,
   faction: ENTITY_ICON.faction,
@@ -40,7 +40,9 @@ const entityIcon: Record<EntityType, string> = {
 
 /** `entityIcon` slug lookup with a fallback for entity types outside the shared enum
  *  (e.g. a co-DM 'map' draft, #313/#306) — see the `targetHref` comment above. */
-function iconFor(entityType: EntityType): string {
+function iconFor(entityType: Proposal['entityType']): string {
+  if (entityType === 'story_arc') return 'open-book';
+  if (entityType === 'story_beat') return 'bookmarklet';
   return entityIcon[entityType] ?? ENTITY_ICON.location;
 }
 
@@ -527,7 +529,7 @@ function ProposalCard({
               AI-drafted — review closely before approving.{' '}
               {isGenerated
                 ? 'Approving re-runs the generator with the pinned seed shown below.'
-                : `Approving creates the ${proposal.entityType} through the normal write path.`}
+                : `Approving ${proposal.action === 'update' ? 'updates the existing' : 'creates the'} ${proposal.entityType} through the normal write path.`}
             </p>
           )}
           {proposal.generationProvenance && <GenerationProvenanceView proposal={proposal} />}
@@ -915,5 +917,3 @@ function HistoryRow({ proposal }: { proposal: Proposal }) {
     </Card>
   );
 }
-
-

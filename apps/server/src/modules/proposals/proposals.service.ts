@@ -15,6 +15,8 @@ import {
   GenerateMapParams,
   FactionCreate,
   FactionUpdate,
+  StoryArcCreate,
+  StoryArcUpdate,
   StoryBeatProposalCreate,
   StoryBeatUpdate,
   ProposalApprove,
@@ -65,6 +67,7 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   session: SessionCreate.strict(),
   character: CharacterCreate.strict(),
   faction: FactionCreate.strict(),
+  story_arc: StoryArcCreate.strict(),
   story_beat: StoryBeatProposalCreate.strict(),
   // Co-DM (issue #313): an encounter/map proposal's payload is the (seeded) GENERATOR
   // request, not a persisted row — approve re-runs generate_encounter (#304) /
@@ -81,6 +84,7 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   session: SessionUpdate.strict(),
   character: CharacterUpdate.strict(),
   faction: FactionUpdate.strict(),
+  story_arc: StoryArcUpdate.strict(),
   story_beat: StoryBeatUpdate.strict(),
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
@@ -215,6 +219,24 @@ export class ProposalsService {
             ),
           update: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
           remove: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
+        };
+      case 'story_arc':
+        return {
+          create: (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+            this.storylines.createArc(
+              campaignId,
+              payload as Parameters<StorylinesService['createArc']>[1],
+              user,
+              role,
+            ),
+          update: (id: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+            this.storylines.updateArc(
+              id,
+              payload as Parameters<StorylinesService['updateArc']>[1],
+              user,
+              role,
+            ),
+          remove: (id: number, user: RequestUser, role: Role) => this.storylines.removeArc(id, user, role),
         };
       case 'story_beat':
         return {

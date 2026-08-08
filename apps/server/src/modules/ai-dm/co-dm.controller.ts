@@ -32,7 +32,8 @@ export class CoDmController {
       'budget. Asks the configured provider to draft the requested content (NPC / location / story beat / recap / ' +
       'encounter / map) and files it as PENDING PROPOSAL(S) — nothing is written to canon directly. Encounters/maps ' +
       'reuse the deterministic generators (#304/#306). Returns the created proposal ids; the DM approves/rejects them ' +
-      'via the normal proposal endpoints. Metered against the seat budget; the proposer is the AI seat + model.',
+      'via the normal proposal endpoints. Passing entityId with target arc/beat loads the current storyline context and ' +
+      'files an UPDATE proposal against that same entity (#1311). Metered against the seat budget; the proposer is the AI seat + model.',
   })
   @ApiResponse({ status: 201, description: 'The pending proposal(s) drafted by the co-DM.' })
   @ApiResponse({ status: 403, description: 'Not a dm, feature disabled, seat not enabled, or token budget exhausted.' })

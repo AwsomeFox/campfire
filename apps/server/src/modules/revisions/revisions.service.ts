@@ -14,6 +14,7 @@ import {
   scheduledSessions,
   sessionZero,
   sessions,
+  storyArcs,
   storyBeats,
   timelineCalendars,
   timelineEvents,
@@ -61,7 +62,7 @@ import { ModerationService, type ModerationTx } from '../moderation/moderation.s
  */
 
 /** The prose field snapshotted/restored for each supported entity type. */
-type ProseField = 'recap' | 'body' | 'note' | 'notes';
+type ProseField = 'recap' | 'body' | 'note' | 'notes' | 'summary';
 const PROSE_FIELD: Record<RevisionEntityType, ProseField> = {
   session: 'recap',
   quest: 'body',
@@ -73,6 +74,7 @@ const PROSE_FIELD: Record<RevisionEntityType, ProseField> = {
   timeline_calendar: 'note',
   scheduled_session: 'notes',
   comment: 'body',
+  story_arc: 'summary',
   story_beat: 'body',
   session_zero: 'body',
   campaign_library_monster: 'body',
@@ -693,6 +695,15 @@ export class RevisionsService {
           .get();
         return row ?? null;
       },
+      story_arc: () => {
+        const row = db
+          .select({ campaignId: storyArcs.campaignId, prose: storyArcs.summary, updatedAt: storyArcs.updatedAt })
+          .from(storyArcs)
+          .where(eq(storyArcs.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
       story_beat: () => {
         const row = db
           .select({ campaignId: storyBeats.campaignId, prose: storyBeats.body, updatedAt: storyBeats.updatedAt })
@@ -877,6 +888,16 @@ export class RevisionsService {
               .update(comments)
               .set({ body: prose, updatedAt: ts })
               .where(and(eq(comments.id, entityId), eq(comments.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'story_arc':
+        return (
+          changesOf(
+            db
+              .update(storyArcs)
+              .set({ summary: prose, updatedAt: ts })
+              .where(and(eq(storyArcs.id, entityId), eq(storyArcs.updatedAt, currentUpdatedAt)))
               .run(),
           ) > 0
         );

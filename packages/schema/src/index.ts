@@ -3114,6 +3114,7 @@ export const RevisionEntityType = z.enum([
   'scheduled_session',
   'session_zero',
   'comment',
+  'story_arc',
   'story_beat',
   'campaign_library_monster',
 ]);
@@ -7555,10 +7556,18 @@ export const AiGenerationProvenance = z.object({
 });
 export type AiGenerationProvenance = z.infer<typeof AiGenerationProvenance>;
 
+// Proposal targets include generated/non-note-pin surfaces and Storylines entities that
+// are intentionally not part of the general EntityType relation (#313/#1311).
+export const ProposalEntityType = z.union([
+  EntityType,
+  z.enum(['map', 'rule_entry', 'story_arc', 'story_beat']),
+]);
+export type ProposalEntityType = z.infer<typeof ProposalEntityType>;
+
 export const Proposal = z.object({
   id: Id,
   campaignId: Id,
-  entityType: EntityType,
+  entityType: ProposalEntityType,
   // For creates this is null at propose time; once an approved create-proposal has
   // been applied it is backfilled with the created row's id, so the record's
   // provenance points at the entity it produced (issue #124).
@@ -8821,7 +8830,7 @@ export function aiDmReadinessProgress(
 // (#304/#306); the proposal payload carries their (seeded) params and approval
 // runs the generator. Every draft is metered against the seat budget and the
 // proposer is attributed to the AI seat + model, not a raw token name.
-export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'arc', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
 export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
 
 // POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.
@@ -8834,6 +8843,10 @@ export const CoDmDraftRequest = z.object({
   narrationLanguage: NarrationLanguage.optional(), // per-run override (#635)
   // When target is `beat`, pin the drafted beat(s) to this arc (#1307).
   arcId: Id.optional(),
+  // When target is `arc` or `beat`, rewrite this existing entity and file an UPDATE
+  // proposal against the same id (#1311). The server loads the current snapshot and
+  // related storyline context; clients never supply authoritative context themselves.
+  entityId: Id.optional(),
 });
 export type CoDmDraftRequest = z.infer<typeof CoDmDraftRequest>;
 

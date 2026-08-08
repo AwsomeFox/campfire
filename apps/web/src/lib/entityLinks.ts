@@ -219,8 +219,15 @@ export function proposalTargetHref(campaignId: number, proposal: Pick<Proposal, 
   // Older generated-map proposals can carry a runtime `map` entity type that
   // predates the shared schema and has no detail surface. Preserve “no link”
   // for unknown future types instead of silently landing on the dashboard.
-  return validId(proposal.entityId) && PROPOSAL_TARGET_TYPES.has(proposal.entityType)
-    ? entityHref(campaignId, { type: proposal.entityType, id: proposal.entityId })
+  if (!validId(proposal.entityId)) return null;
+  if (proposal.entityType === 'story_arc') {
+    return entityHref(campaignId, { type: 'arc', id: proposal.entityId });
+  }
+  if (proposal.entityType === 'story_beat') {
+    return entityHref(campaignId, { type: 'beat', id: proposal.entityId });
+  }
+  return PROPOSAL_TARGET_TYPES.has(proposal.entityType)
+    ? entityHref(campaignId, { type: proposal.entityType as EntityType, id: proposal.entityId })
     : null;
 }
 

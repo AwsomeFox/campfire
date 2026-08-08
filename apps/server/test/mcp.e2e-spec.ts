@@ -4456,6 +4456,32 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(provenance.consent!.excludedInboxPrivate).toBe(0);
     });
 
+    it('files an existing story arc rewrite as an update proposal through draft_content', async () => {
+      const arc = await dmAgent
+        .post(`/api/v1/campaigns/${consentCampaignId}/arcs`)
+        .send({ title: 'MCP Rewrite Arc', summary: 'The old summary.' });
+      expect(arc.status).toBe(201);
+      const client = await mcpClient(dmToken);
+      const result = await client.callTool({
+        name: 'draft_content',
+        arguments: {
+          campaignId: consentCampaignId,
+          target: 'arc',
+          entityId: arc.body.id,
+          prompt: 'Make this arc more urgent.',
+        },
+      });
+      expect(result.isError).toBeFalsy();
+      const proposal = (parseResult(result) as {
+        proposals: Array<{ action: string; entityType: string; entityId: number }>;
+      }).proposals[0];
+      expect(proposal).toMatchObject({
+        action: 'update',
+        entityType: 'story_arc',
+        entityId: arc.body.id,
+      });
+    });
+
     /**
      * Review finding (post-#2041): co-DM's first fix set `externalSend = true` whenever a
      * provider config resolved, ignoring `AI_PROVIDER_ENDPOINT_IS_LOCAL` — the operator's

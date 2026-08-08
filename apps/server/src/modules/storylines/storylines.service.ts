@@ -177,6 +177,16 @@ export class StorylinesService {
       throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
     }
     const row = updated[0];
+    if (input.summary !== undefined && input.summary !== existing.summary) {
+      await this.revisions.commitProseVersion({
+        entityType: 'story_arc',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.summary,
+        nextProse: input.summary,
+        user,
+      });
+    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
