@@ -240,12 +240,21 @@ export function ItemRow({
     setActionBusy(true);
     setActionError(null);
     try {
-      // `spec` is deliberately preserved untouched: a derived action carries a structured
-      // spec the resolver uses to auto-resolve the attack, and these five text fields are
-      // not enough to rebuild one. Dropping it on every edit would silently downgrade a
-      // resolvable attack to a text-only row the moment anyone fixed a typo in its name.
+      // Review (chatgpt-codex-connector P1, Copilot): the stored `spec` is what the resolver
+      // ROLLS — `toHit`/`damage` are only what it shows. Round-tripping the old spec after
+      // editing those numbers displayed the correction and kept rolling the original, which
+      // defeats the whole reason this editor exists. So the spec is dropped whenever a
+      // combat-relevant field changed, and the server rebuilds one from the edited values
+      // (`rebuildEditedActionSpec`); a prose-only edit keeps the existing spec, so an action
+      // authored over MCP with saves or effects survives a typo fix in its name.
+      const prior = committed.equippedAction;
+      const combatFieldsChanged =
+        !prior ||
+        prior.toHit !== actionDraft.toHit ||
+        prior.damage !== actionDraft.damage ||
+        prior.targetAc !== actionDraft.targetAc;
       const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, {
-        equippedAction: { ...actionDraft, name },
+        equippedAction: { ...actionDraft, name, spec: combatFieldsChanged ? undefined : actionDraft.spec },
       });
       setCommitted(updated);
       setActionOpen(false);

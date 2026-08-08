@@ -28,11 +28,16 @@ test.describe('editable equipped-item actions (#2097)', () => {
     expect(inventoryShared).toContain('{editable && actionOpen && actionDraft && (');
   });
 
-  test('saving preserves the action `spec` rather than rebuilding it from the text fields', () => {
-    // A derived attack carries a structured spec the resolver auto-resolves. The five text
-    // inputs cannot reconstruct one, so the draft is spread — dropping it would silently
-    // downgrade a resolvable attack to a text-only row on any edit, including a typo fix.
-    expect(inventoryShared).toContain('equippedAction: { ...actionDraft, name }');
+  test('saving drops the stale `spec` when a combat field changed, and keeps it otherwise', () => {
+    // Review (chatgpt-codex-connector P1, Copilot): the resolver ROLLS the structured spec;
+    // toHit/damage are only what it shows. Round-tripping the old spec after editing those
+    // numbers displayed the correction and kept rolling the original — the exact failure the
+    // editor was built to fix. The server rebuilds one from the edited values; a prose-only
+    // edit keeps the existing spec so an MCP-authored action survives a typo fix.
+    expect(inventoryShared).toContain('const combatFieldsChanged =');
+    expect(inventoryShared).toContain('prior.toHit !== actionDraft.toHit');
+    expect(inventoryShared).toContain('prior.damage !== actionDraft.damage');
+    expect(inventoryShared).toContain('spec: combatFieldsChanged ? undefined : actionDraft.spec');
   });
 
   test('a server-derived action is labelled as derived', () => {

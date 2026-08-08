@@ -1,4 +1,4 @@
-import { deriveEquippedItemAction, isResolvableSpec, type ItemActionAdapter } from '@campfire/schema';
+import { CharacterAction, deriveEquippedItemAction, isResolvableSpec, rebuildEditedActionSpec, type ItemActionAdapter } from '@campfire/schema';
 
 /**
  * Issue #2097 — deriving an equipped item's attack from its compendium data.
@@ -217,5 +217,86 @@ describe('deriveEquippedItemAction (#2097)', () => {
       expect(action!.toHit).toBe('+4');
       expect(action!.damage).toContain('electricity');
     });
+  });
+});
+
+/**
+ * Issue #2097 review (chatgpt-codex-connector P1, Copilot). The resolver rolls the structured
+ * `spec`, not the display strings — so an edit that carried the old spec through showed the
+ * corrected numbers and kept rolling the original ones. Invisible at the table, and it defeats
+ * the only reason the editor exists.
+ */
+describe('rebuildEditedActionSpec (#2097 review)', () => {
+  const derived = deriveEquippedItemAction({
+    itemName: 'Longsword',
+    data: { itemKind: 'weapon', damageDice: '1d8', damageType: 'Slashing', properties: [] },
+    character: { stats: { STR: 16, DEX: 12 }, level: 5 },
+    adapter: dnd5e,
+  })!;
+
+  it('rebuilds the spec from edited numbers so the roll matches what is displayed', () => {
+    // The advertised edit: a +1 weapon. Both fields corrected, old spec dropped by the caller.
+    const edited = CharacterAction.parse({ ...derived, toHit: '+7', damage: '1d8+4 slashing', spec: undefined });
+    const out = rebuildEditedActionSpec(edited, 'dnd5e');
+    expect(isResolvableSpec(out.spec)).toBe(true);
+    expect(out.spec?.attack?.bonus).toBe('+7');
+    const part = out.spec?.outcomes?.hit?.damage?.[0];
+    expect(part).toMatchObject({ formula: '1d8', flat: 4, type: 'slashing' });
+    // What the human typed stays exactly as typed.
+    expect(out.toHit).toBe('+7');
+    expect(out.damage).toBe('1d8+4 slashing');
+  });
+
+  it('leaves a caller-supplied spec alone — the MCP path for a richer action', () => {
+    const authored = CharacterAction.parse({ ...derived, toHit: '+99', damage: 'nonsense' });
+    expect(rebuildEditedActionSpec(authored, 'dnd5e')).toEqual(authored);
+  });
+
+  it('produces a text-only action when the edited fields cannot be read', () => {
+    // Never a stale spec, and never an invented one.
+    for (const bad of [
+      { toHit: 'lots', damage: '1d8+4 slashing' },
+      { toHit: '+7', damage: 'a big hit' },
+      { toHit: '+7', damage: '1d8+4' }, // no damage type -> resolver would treat it as untyped
+      { toHit: '', damage: '' },
+    ]) {
+      const out = rebuildEditedActionSpec(CharacterAction.parse({ ...derived, ...bad, spec: undefined }), 'dnd5e');
+      expect(out.spec).toBeUndefined();
+      expect(out.name).toBe('Longsword');
+    }
+  });
+
+  it('keeps a negative modifier out of the rebuilt dice formula', () => {
+    const out = rebuildEditedActionSpec(
+      CharacterAction.parse({ ...derived, toHit: '+1', damage: '1d8-1 slashing', spec: undefined }),
+      'dnd5e',
+    );
+    expect(out.spec?.outcomes?.hit?.damage?.[0]).toMatchObject({ formula: '1d8', flat: -1 });
+  });
+});
+
+describe('text-only actions still carry their damage line (#2097 review, Copilot)', () => {
+  it('shows the known damage on a non-5e system rather than burying it in notes', () => {
+    const action = deriveEquippedItemAction({
+      itemName: 'Longsword',
+      data: { itemKind: 'weapon', damageDice: '1d8', damageType: 'Slashing', properties: [] },
+      character: fighter,
+      adapter: pf2e,
+    })!;
+    // Action lists render `damage` prominently; leaving it empty hid real, sourced data.
+    expect(action.damage).toBe('1d8 slashing');
+    expect(action.toHit).toBe('');
+    expect(isResolvableSpec(action.spec)).toBe(false);
+  });
+
+  it('shows whatever is known even when the dice are unusable', () => {
+    const action = deriveEquippedItemAction({
+      itemName: 'Net',
+      data: { itemKind: 'weapon', damageDice: '0', damageType: 'Bludgeoning', properties: [] },
+      character: fighter,
+      adapter: dnd5e,
+    })!;
+    expect(action.damage).toBe('0 bludgeoning');
+    expect(isResolvableSpec(action.spec)).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
+import { CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, rebuildEditedActionSpec, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
 import type { HomebrewMechanicsProfile, Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { fromJsonText } from '../../common/json';
@@ -276,18 +276,26 @@ export class InventoryService {
         .get();
       if (!character) return null;
 
+      // Review (chatgpt-codex-connector P2): the SNAPSHOT wins, not the live rule entry.
+      // The snapshot is the revision this campaign actually accepted at acquire time; when
+      // an installed pack updates the entry upstream, `withCompendiumStates` reports the
+      // item as `linked_updated` WITHOUT persisting it, and adopting that revision is what
+      // the explicit refresh endpoint is for. Reading the live row first would have equipped
+      // an item into an attack derived from a revision nobody accepted — while its name and
+      // play-safe snapshot still showed the old one. The live entry is the fallback for an
+      // item that has no snapshot at all.
       let data: unknown = null;
-      if (existing.ruleEntryId != null) {
+      if (existing.compendiumSnapshot) {
+        const snapshot = sanitizeCompendiumSnapshot(safeJson(existing.compendiumSnapshot));
+        if (snapshot?.dataJson) data = safeJson(snapshot.dataJson);
+      }
+      if (data == null && existing.ruleEntryId != null) {
         const entry = await this.db
           .select({ dataJson: ruleEntries.dataJson })
           .from(ruleEntries)
           .where(eq(ruleEntries.id, existing.ruleEntryId))
           .get();
         if (entry?.dataJson) data = safeJson(entry.dataJson);
-      }
-      if (data == null && existing.compendiumSnapshot) {
-        const snapshot = sanitizeCompendiumSnapshot(safeJson(existing.compendiumSnapshot));
-        if (snapshot?.dataJson) data = safeJson(snapshot.dataJson);
       }
       if (data == null) return null;
 
@@ -710,8 +718,29 @@ export class InventoryService {
     // overwrite, and a character who hands their sword to someone who equips it should end
     // up in the same state as one who acquired it themselves — not holding an equipped
     // weapon that grants nothing.
+    //
+    // Review (chatgpt-codex-connector P2, devin): gated on `equipWillChange`, NOT on the
+    // final `nextEquipped` state. `nextEquipped` falls back to `existing.equipped` for a
+    // request that touches neither equip field, so without this an unrelated PATCH — a
+    // qtyDelta, a notes edit — against an already-equipped item would derive an action.
+    // That silently undid the Remove-action button (the documented "delete the action,
+    // re-equip" reset), and did it without emitting the `character.updated` invalidation
+    // that keeps open encounter cards honest, since no equip field actually changed.
+    // Resolved up-front for the same reason as the owner ids: the write below is a synchronous
+    // better-sqlite3 transaction, and `rebuildEditedActionSpec` needs the campaign's system.
+    const campaignRuleSystem =
+      input.equippedAction
+        ? (
+            await this.db
+              .select({ ruleSystem: campaigns.ruleSystem })
+              .from(campaigns)
+              .where(eq(campaigns.id, existing.campaignId))
+              .get()
+          )?.ruleSystem ?? ''
+        : '';
+
     const derivedOnEquip =
-      nextEquipped && finalOwnerType === 'character' && input.equippedAction === undefined && (moved || !existing.equippedAction)
+      equipWillChange && nextEquipped && finalOwnerType === 'character' && input.equippedAction === undefined && (moved || !existing.equippedAction)
         ? await this.deriveActionForEquip(existing, finalCharacterId as number)
         : null;
 
@@ -845,7 +874,14 @@ export class InventoryService {
           update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;
         }
         if (input.equippedAction !== undefined) {
-          update.equippedAction = input.equippedAction ? JSON.stringify(input.equippedAction) : null;
+          // Review (chatgpt-codex-connector P1, Copilot): an authored action's structured
+          // `spec` is what the resolver ROLLS; `toHit`/`damage` are only what it shows. A
+          // caller that edits the numbers while carrying the old spec through — exactly what
+          // the web editor's round-trip did — would display the correction and keep rolling
+          // the original. Rebuilt here rather than in the web app so the MCP write path gets
+          // the same guarantee. A caller supplying its own spec is trusted and untouched.
+          const authored = input.equippedAction ? rebuildEditedActionSpec(input.equippedAction, campaignRuleSystem) : null;
+          update.equippedAction = authored ? JSON.stringify(authored) : null;
           // Issue #2097: ANY caller-supplied action is a human's, so the row becomes
           // 'manual' and derivation will never regenerate over it again — that promise is
           // what makes the editor safe to use. Clearing the action clears the provenance
@@ -1060,7 +1096,13 @@ export class InventoryService {
     // equipped gear doesn't change anything the merge renders.
     const renamedGrantingItem =
       input.name !== undefined && input.name !== existing.name && committed.equipped && committed.equippedAction != null;
-    const actionContentChanged = equippedActionEdited || renamedGrantingItem;
+    // Issue #2097: a derivation adds a row to the merged list just as an authored edit does.
+    // `equipChanged` covers the ordinary equip, but not a re-assert of the SAME equip state
+    // (`PATCH {equipped:true, equipSlot:'main-hand'}` on an item already equipped there),
+    // which passes the `equipWillChange` gate, derives, and leaves equipped/equipSlot
+    // identical — so without this the character's action list would gain an attack that open
+    // encounter cards never hear about.
+    const actionContentChanged = equippedActionEdited || renamedGrantingItem || derivedOnEquip != null;
 
     await this.audit.log({
       actor: auditActor(user),
@@ -1238,8 +1280,13 @@ export class InventoryService {
       updatedAt: ts,
     };
     if (ownerType === 'party') {
-      // Party-owned items can never legitimately carry an equipped action.
-      restoreUpdate.equippedAction = null;
+      // Party-owned items can never legitimately carry an equipped action. Review
+      // (chatgpt-codex-connector P2, devin): the provenance goes with it. This is an
+      // owner-changing path like any other, and `redactEquippedActions` short-circuits on a
+      // null action — so a surviving 'derived'/'manual' would be published campaign-wide as
+      // the origin of an action that no longer exists.
+      restoreUpdate.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
+      restoreUpdate.equippedActionSource = CLEARED_EQUIP_STATE.equippedActionSource;
     }
     const [row] = await this.db
       .update(inventoryItems)
