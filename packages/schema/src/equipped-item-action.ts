@@ -401,8 +401,29 @@ export function rebuildEditedActionSpec(
    * response is a text-only action they can see is unfinished, not silent defense bypass.
    */
   damageTypes?: readonly string[],
+  /**
+   * The action currently PERSISTED on the row, when there is one. Review
+   * (chatgpt-codex-connector P1): the web editor strips the spec before sending, but a REST or
+   * MCP client naturally reads the whole action, edits `toHit`/`damage`, and submits it back
+   * WITH its original spec — and "a spec was supplied, so trust it" then updated the displayed
+   * numbers while combat kept resolving the old ones. That is the same defect the editor fix
+   * closed, reached through the other surface, and this repo requires REST and MCP to behave
+   * identically. Passing the persisted action lets this function tell a deliberate spec from a
+   * round-tripped one.
+   */
+  previous?: CharacterAction | null,
 ): CharacterAction {
-  if (edited.spec) return edited;
+  if (edited.spec) {
+    // A spec the caller AUTHORED is trusted — that is the MCP path for saves, effects, and
+    // action economy the five text fields cannot express. A spec that is byte-identical to
+    // the persisted one while the combat fields moved is not authored, it is carried along,
+    // and it is stale by definition. Rebuild that; trust everything else.
+    const roundTripped =
+      !!previous &&
+      JSON.stringify(edited.spec) === JSON.stringify(previous.spec) &&
+      (edited.toHit !== previous.toHit || edited.damage !== previous.damage || edited.targetAc !== previous.targetAc);
+    if (!roundTripped) return edited;
+  }
 
   const bonusMatch = edited.toHit.trim().match(/^([+-]?\d+)$/);
   const bonus = bonusMatch ? Number(bonusMatch[1]) : null;
@@ -411,6 +432,7 @@ export function rebuildEditedActionSpec(
   const damageType = damageMatch ? damageMatch[2].trim().toLowerCase() : '';
   // Same roller check as the derivation: a hand-typed "21d6 slashing" must become a text-only
   // action, not a resolvable spec that throws the first time someone attacks with it.
+  const withoutSpec = CharacterAction.parse({ ...edited, spec: undefined });
   if (
     bonus === null ||
     !Number.isFinite(bonus) ||
@@ -421,7 +443,7 @@ export function rebuildEditedActionSpec(
     damageType.length > MAX_DAMAGE_TYPE_LENGTH ||
     (damageTypes && !damageTypes.some((t) => t.toLowerCase() === damageType))
   ) {
-    return CharacterAction.parse({ ...edited, spec: undefined });
+    return withoutSpec;
   }
 
   try {
@@ -436,13 +458,13 @@ export function rebuildEditedActionSpec(
       ruleSystem,
     );
     // The expander owns the spec; everything the human typed is theirs and is kept as typed.
-    return CharacterAction.parse({ ...edited, spec: rebuilt.spec });
+    return CharacterAction.parse({ ...withoutSpec, spec: rebuilt.spec });
   } catch {
     // Backstop, matching `deriveEquippedItemAction`'s own guard: this module is TOTAL, and
     // every escape hatch leads to a text-only action rather than out of the function. The
     // explicit bounds above are what this path is expected to be — a `ZodError` reaching
     // here means the expander grew a constraint this function does not yet know about, and
     // an unfinished-looking action beats a 500 on save.
-    return CharacterAction.parse({ ...edited, spec: undefined });
+    return withoutSpec;
   }
 }

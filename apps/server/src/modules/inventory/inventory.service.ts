@@ -63,6 +63,8 @@ export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 interface DerivedActionResult {
   action: CharacterAction | null;
   characterRevision: string | null;
+  /** The campaign mechanics the calculation ran under — see `adapterForCampaign`. */
+  mechanicsRevision: string | null;
 }
 
 export const CLEARED_EQUIP_STATE: {
@@ -284,16 +286,26 @@ export class InventoryService {
    * accepted it. One helper, so the two paths cannot disagree about what system this campaign
    * is playing.
    */
-  private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
+  private async adapterForCampaign(campaignId: number): Promise<{ adapter: RuleSystemAdapter; mechanicsRevision: string }> {
     const campaign = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .select({
+        ruleSystem: campaigns.ruleSystem,
+        customMechanicsProfile: campaigns.customMechanicsProfile,
+      })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .get();
-    return ruleSystemAdapter(
-      campaign?.ruleSystem ?? '',
-      fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
-    );
+    return {
+      adapter: ruleSystemAdapter(
+        campaign?.ruleSystem ?? '',
+        fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+      ),
+      // Review (chatgpt-codex-connector P2): the MECHANICS the derivation ran under, so both
+      // fences can reject a derivation computed before a concurrent system switch. Keyed on
+      // the values themselves rather than the campaign's `updatedAt`, so an unrelated campaign
+      // edit does not needlessly invalidate a perfectly current derivation.
+      mechanicsRevision: JSON.stringify([campaign?.ruleSystem ?? '', campaign?.customMechanicsProfile ?? null]),
+    };
   }
 
   private async deriveActionForEquip(
@@ -313,7 +325,7 @@ export class InventoryService {
         .from(characters)
         .where(eq(characters.id, characterId))
         .get();
-      if (!character) return { action: null, characterRevision: null };
+      if (!character) return { action: null, characterRevision: null, mechanicsRevision: null };
 
       // Review (chatgpt-codex-connector P2): the SNAPSHOT wins, not the live rule entry.
       // The snapshot is the revision this campaign actually accepted at acquire time; when
@@ -342,11 +354,12 @@ export class InventoryService {
           .get();
         if (entry?.dataJson) data = safeJson(entry.dataJson);
       }
-      if (data == null) return { action: null, characterRevision: character.updatedAt };
+      if (data == null) return { action: null, characterRevision: character.updatedAt, mechanicsRevision: null };
 
-      const adapter = await this.adapterForCampaign(existing.campaignId);
+      const { adapter, mechanicsRevision } = await this.adapterForCampaign(existing.campaignId);
 
       return {
+        mechanicsRevision,
         action: deriveEquippedItemAction({
           itemName: finalName,
           data,
@@ -363,7 +376,7 @@ export class InventoryService {
       // Equipping is the user's action; deriving is a convenience on top of it. A failure
       // here leaves the item equipped with no granted action — recoverable by hand — rather
       // than failing a write the caller did ask for.
-      return { action: null, characterRevision: null };
+      return { action: null, characterRevision: null, mechanicsRevision: null };
     }
   }
 
@@ -698,6 +711,10 @@ export class InventoryService {
             // a subquery so it is evaluated by the UPDATE itself rather than in a separate
             // read that could go stale between the check and the write.
             sql`(select updated_at from characters where id = ${ownerId}) is ${regeneration.characterRevision === null ? sql`null` : sql`${regeneration.characterRevision}`}`,
+            // …and the campaign must still be playing the system the math was computed under.
+            // A concurrent switch CLEARS derived rows (CampaignsService.update), and this
+            // write must not put one back.
+            sql`(select json_array(coalesce(rule_system, ''), custom_mechanics_profile) from campaigns where id = ${row.campaignId}) is ${regeneration.mechanicsRevision === null ? sql`null` : sql`${regeneration.mechanicsRevision}`}`,
           ),
         )
         .returning();
@@ -894,7 +911,7 @@ export class InventoryService {
     // The system's canonical damage-type vocabulary and id, so an edited action is held to the
     // same standard as a derived one — see `rebuildEditedActionSpec`. Resolved through
     // `adapterForCampaign` so a homebrew campaign's profile is honoured here too.
-    const editAdapter = input.equippedAction ? await this.adapterForCampaign(existing.campaignId) : null;
+    const editAdapter = input.equippedAction ? (await this.adapterForCampaign(existing.campaignId)).adapter : null;
     const campaignRuleSystem = editAdapter?.id ?? '';
     const campaignDamageTypes = editAdapter?.damageTypes;
 
@@ -1151,7 +1168,15 @@ export class InventoryService {
           // the web editor's round-trip did — would display the correction and keep rolling
           // the original. Rebuilt here rather than in the web app so the MCP write path gets
           // the same guarantee. A caller supplying its own spec is trusted and untouched.
-          const authored = rebuildEditedActionSpec(input.equippedAction!, campaignRuleSystem, campaignDamageTypes);
+          // `fresh` carries the action as persisted, so a round-tripped spec (edited numbers,
+          // original spec carried along by a REST/MCP client) is detectable and rebuilt.
+          const persistedAction = fresh.equippedAction ? CharacterAction.safeParse(safeJson(fresh.equippedAction)) : null;
+          const authored = rebuildEditedActionSpec(
+            input.equippedAction!,
+            campaignRuleSystem,
+            campaignDamageTypes,
+            persistedAction?.success ? persistedAction.data : null,
+          );
           update.equippedAction = JSON.stringify(authored);
           update.equippedActionSource = EquippedActionSource.enum.manual;
         } else if (actionWrite.kind === 'derived') {

@@ -762,6 +762,34 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(afterManual.body.equippedAction.name).toBe('Mine');
   });
 
+  it('a no-op campaign PATCH that resends the same mechanics keeps derived actions', async () => {
+    const server = ctx.app.getHttpServer();
+    // A full-object REST/MCP client resends every field on every update. Treating the mere
+    // PRESENCE of `customMechanicsProfile` as a mechanics change erased every generated
+    // weapon action during an otherwise no-op PATCH.
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'No-Op Update' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Unchanged', level: 5, stats: { STR: 16 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'noop-slot' });
+
+    // Same ruleSystem (unset) and same profile (none) as the campaign already has.
+    const noOp = await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ name: 'No-Op Update Renamed', customMechanicsProfile: null });
+    expect(noOp.status).toBe(200);
+
+    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
+    expect(after.body.equippedActionSource).toBe('derived');
+    expect(after.body.equippedAction).not.toBeNull();
+  });
+
   it('an identical concurrent rename does not clear the action the other one derived', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
@@ -813,6 +841,42 @@ describe('derived equipped-item actions (issue #2097)', () => {
       // for the new owner on this caller's behalf.
       expect(row).toBeDefined();
     }
+  });
+
+  it('an MCP-style round-trip edit rebuilds the spec, not just the display fields', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'roundtrip-slot' });
+    const derived = equipped.body.equippedAction;
+    expect(derived.spec.attack.bonus).toBe('+6');
+
+    // The web editor strips the spec before sending; a REST/MCP client naturally reads the
+    // whole action, edits the numbers, and submits it back WITH its original spec. That used
+    // to update the display while combat kept resolving the old numbers.
+    const roundTripped = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { ...derived, toHit: '+9', damage: '2d6+5 slashing' } });
+    expect(roundTripped.status).toBe(200);
+    expect(roundTripped.body.equippedAction.spec.attack.bonus).toBe('+9');
+    expect(roundTripped.body.equippedAction.spec.outcomes.hit.damage[0]).toMatchObject({ formula: '2d6', flat: 5 });
+  });
+
+  it('a deliberately authored spec is still trusted, not rebuilt', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'authored-slot' });
+
+    // A caller that changes the spec ITSELF is expressing intent the five text fields cannot
+    // — the MCP path for saves, effects, action economy. Only a carried-along spec is stale.
+    const spec = JSON.parse(JSON.stringify(equipped.body.equippedAction.spec));
+    spec.attack.bonus = '+11';
+    const authored = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { ...equipped.body.equippedAction, toHit: '+11', spec } });
+    expect(authored.status).toBe(200);
+    expect(authored.body.equippedAction.spec.attack.bonus).toBe('+11');
   });
 
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {

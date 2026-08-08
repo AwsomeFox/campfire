@@ -979,6 +979,24 @@ export class CampaignsService {
     }
     const customMechanicsProfilePatch =
       nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
+    /**
+     * Whether this PATCH actually changes the campaign's MECHANICS (issue #2097 review).
+     *
+     * A derived equipped action encodes the rule system it was derived under, and
+     * `ActionResolverService` resolves whatever is stored against the campaign's CURRENT
+     * adapter — so a system switch has to drop them or 5e numbers keep being rolled under the
+     * new mechanics.
+     *
+     * Compared by EFFECTIVE VALUE, not field presence (chatgpt-codex-connector P2): a
+     * full-object REST or MCP client resends `customMechanicsProfile` unchanged on every
+     * update, and treating that as a change would erase every generated weapon action during
+     * an otherwise no-op PATCH. Serialized both sides so an equal-but-not-identical object
+     * compares equal.
+     */
+    const mechanicsChanged =
+      (campaignInput.ruleSystem !== undefined && campaignInput.ruleSystem !== existing.ruleSystem) ||
+      (nextCustomMechanicsProfile !== undefined &&
+        (nextCustomMechanicsProfile ?? null) !== (existing.customMechanicsProfile ?? null));
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of
@@ -1164,6 +1182,11 @@ export class CampaignsService {
       if (statusChanging) {
         await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
       }
+      // Review (chatgpt-codex-connector P2): the archive+revoke path returns HERE, so the
+      // ordinary path's cleanup never ran for a PATCH that switched systems while archiving.
+      // The stale action then reappeared, still carrying the old system's numbers, the moment
+      // the campaign was reactivated.
+      if (mechanicsChanged) await this.clearDerivedEquippedActions(id, user);
       return toDomain(row);
     }
 
@@ -1246,9 +1269,7 @@ export class CampaignsService {
     // text-only rows anyway. This module's rule throughout is that stale numbers are worse
     // than none — an empty action is visibly unfinished, a wrong one is not. `manual` actions
     // are untouched: a human wrote those and it is their call whether they still apply.
-    const mechanicsChanged =
-      (campaignInput.ruleSystem !== undefined && campaignInput.ruleSystem !== existing.ruleSystem) ||
-      customMechanicsProfileInput !== undefined;
+
     if (mechanicsChanged) await this.clearDerivedEquippedActions(id, user);
 
     await this.audit.log({
