@@ -482,9 +482,11 @@ export function sortCombatants(
     // sortOrder, so a plain sortOrder rewrite from a drag is silently discarded whenever
     // the tied combatants have different initMod. reorderCombatant stamps manualOrder on
     // every combatant in the roster when it runs against a running encounter; consult it
-    // here ONLY when both sides have a value, so a tie where neither (or only one) side
-    // was ever manually reordered still falls through to the adapter's own rule
-    // unchanged. Deliberately checked before breakTie, not inside it — this is roster
+    // here whenever EITHER side has a value: two stamped rows compare by position, a stamped
+    // row precedes an unstamped one, and only a tie where NEITHER side was ever manually
+    // reordered falls through to the adapter's own rule unchanged. (An earlier version
+    // consulted it only when BOTH sides had a value — see the transitivity note below for
+    // why that was not merely narrower but actually cyclic.) Deliberately checked before breakTie, not inside it — this is roster
     // state the adapter itself never sees.
     // `?? null`, NOT `!== null`. The Zod schema defaults this to null, so anything parsed
     // through it is null-or-number — but a Combatant assembled without going through the

@@ -91,14 +91,14 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
     const fn = source.slice(fnStart, fnEnd);
 
     // An early return on all three, ahead of the mutate call — not merely a mention.
-    const guardIndex = fn.search(/if \(reconcileBlocks \|\| riskyBlocked \|\| pendingCombatantIds\.has\(combatantId\)\) return;/);
+    const guardIndex = fn.search(/if \(reconcileBlocks \|\| riskyBlocked \|\| reorderCombatant\.isPending\) return;/);
     expect(guardIndex).toBeGreaterThan(-1);
     expect(guardIndex).toBeLessThan(fn.indexOf('reorderCombatant.mutate('));
 
     // Stale-closure guard: each gate must appear in the dependency array too.
     const depsMatch = fn.match(/\[encounter,[^\]]*\],\s*\);/);
     expect(depsMatch).not.toBeNull();
-    for (const dep of ['reconcileBlocks', 'riskyBlocked', 'pendingCombatantIds']) {
+    for (const dep of ['reconcileBlocks', 'riskyBlocked', 'reorderCombatant']) {
       expect(depsMatch![0]).toContain(dep);
     }
   });

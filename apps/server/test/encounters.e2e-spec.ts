@@ -10286,6 +10286,7 @@ describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
     // every state (see combatant-reorder-schema.spec.ts, which pins that), so read the
     // preparing encounter's current turnVersion and send it rather than omitting the CAS.
     const prep = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(prep.status).toBe(200);
     const prepTurnVersion = prep.body.turnVersion as number;
     expect(typeof prepTurnVersion).toBe('number');
     const res = await request(server)

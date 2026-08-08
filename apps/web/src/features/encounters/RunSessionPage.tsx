@@ -3621,10 +3621,18 @@ export default function RunSessionPage() {
       // the server, and a second drag could start before the first was confirmed.
       // Gating the two entry points separately is what let them drift; gating the single
       // write path they share makes them agree by construction.
-      if (reconcileBlocks || riskyBlocked || pendingCombatantIds.has(combatantId)) return;
+      // `reorderCombatant.isPending`, NOT `pendingCombatantIds.has(combatantId)`. A reorder is a
+      // TOPOLOGY-wide write: it renumbers the whole roster and bumps `turnVersion`. The per-row
+      // pending set is the right granularity for an HP tick, which is why `buildReorderControls`
+      // uses it — but copying that shape here meant dragging combatant B while A's reorder was
+      // still in flight sailed past the guard, and both requests carried the SAME rendered
+      // `turnVersion`, so one came back TURN_VERSION_MISMATCH instead of being prevented.
+      if (reconcileBlocks || riskyBlocked || reorderCombatant.isPending) return;
       reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion });
     },
-    [encounter, reorderCombatant, reconcileBlocks, riskyBlocked, pendingCombatantIds],
+    // `reorderCombatant` covers `.isPending` — the mutation object is a new reference on each
+    // status change, so the closure re-forms when pending flips.
+    [encounter, reorderCombatant, reconcileBlocks, riskyBlocked],
   );
   const rosterDragReorder = useCombatantDragReorder({
     axis: 'y',
