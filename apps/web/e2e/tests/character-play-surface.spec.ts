@@ -637,6 +637,75 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): a slot swap unequips the incumbent and equips the
+   * new item in ONE server write, but the response carries only the newly equipped one. If
+   * the follow-up GET fails, a consumer applying just that response still believes the
+   * incumbent is equipped — and offers both slot-conflicting actions at once.
+   */
+  test('a slot swap unequips the incumbent in Play even when the refetch fails', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Swaps Main Hand', className: 'Fighter', level: 3 },
+    })).json()).id as number;
+    let heldId: number | null = null;
+    let takenId: number | null = null;
+
+    try {
+      heldId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+        data: { name: 'Old Axe', qty: 1, ownerType: 'character', characterId },
+      })).json()).id as number;
+      takenId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+        data: { name: 'New Spear', qty: 1, ownerType: 'character', characterId },
+      })).json()).id as number;
+      await ctx.patch(`/api/v1/inventory/${heldId}`, {
+        data: {
+          equipped: true,
+          equipSlot: 'main hand',
+          equippedAction: { name: 'Old Axe Chop', kind: 'melee', toHit: '+5', damage: '1d8+3', targetAc: '', notes: '' },
+        },
+      });
+      await ctx.patch(`/api/v1/inventory/${takenId}`, {
+        data: { equippedAction: { name: 'New Spear Thrust', kind: 'melee', toHit: '+6', damage: '1d6+3', targetAc: '', notes: '' } },
+      });
+
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=build`);
+      const inventory = page.getByTestId('character-inventory');
+
+      // Every inventory refetch from the first equip attempt onwards fails.
+      let attempted = false;
+      await page.route(`**/api/v1/campaigns/${campaignId}/inventory`, async (route) => {
+        if (route.request().method() === 'GET' && attempted) return route.abort('failed');
+        return route.fallback();
+      });
+      await page.route(`**/api/v1/inventory/${takenId}`, async (route) => {
+        if (route.request().method() === 'PATCH') attempted = true;
+        return route.fallback();
+      });
+
+      await inventory.getByRole('button', { name: 'Equip New Spear' }).click();
+      // The slot field carries a datalist, so its implicit role is combobox, not textbox.
+      await inventory.getByLabel('Slot', { exact: true }).fill('main hand');
+      await inventory.getByRole('button', { name: 'Equip', exact: true }).click();
+      // The server answers 409, the card offers the swap, and the swap does both halves.
+      await inventory.getByRole('button', { name: /Replace Old Axe/ }).click();
+
+      await page.getByRole('tab', { name: /^Play/ }).click();
+      const gear = page.getByTestId('character-granted-actions');
+      await expect(gear.getByRole('button', { name: /to hit \+6/ })).toBeVisible();
+      // The displaced item must not still be offering its attack.
+      await expect(gear.getByText('Equip Old Axe to use this action.')).toBeVisible();
+      await expect(gear.getByRole('button', { name: /to hit \+5/ })).toHaveCount(0);
+    } finally {
+      if (heldId != null) await ctx.delete(`/api/v1/inventory/${heldId}`);
+      if (takenId != null) await ctx.delete(`/api/v1/inventory/${takenId}`);
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Copilot review on #2115): the sheet used to fetch the campaign inventory
    * a second time to derive gear actions, duplicating the read the embedded inventory
    * section already makes on mount. One reader, one source.

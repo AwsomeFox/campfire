@@ -47,7 +47,15 @@ export function newIdempotencyKey(): string {
  * item stale — the card showed the new state from its own `committed`, while a parent that
  * derives from the fetched list kept the old one (Codex review on #2115).
  */
-export type InventoryItemChange = { readonly updated: InventoryItem } | { readonly deletedId: number };
+export type InventoryItemChange =
+  /**
+   * `displacedId` is the OTHER item a slot swap unequipped. The server does both halves
+   * atomically but returns only the newly equipped one, so without this a consumer applying
+   * the response still believes the incumbent is equipped — and would offer two
+   * slot-conflicting items at once until a refetch happened to succeed.
+   */
+  | { readonly updated: InventoryItem; readonly displacedId?: number }
+  | { readonly deletedId: number };
 
 export function ItemSection({
   title,
@@ -208,7 +216,8 @@ export function ItemRow({
       setCommitted(updated);
       setSlotConflict(null);
       setEquipOpen(false);
-      onChanged({ updated });
+      // Report BOTH halves of the atomic swap — see `displacedId`.
+      onChanged({ updated, displacedId: slotConflict.itemId });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
         setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? slotConflict.slot });

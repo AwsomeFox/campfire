@@ -75,7 +75,19 @@ export function CharacterInventorySection({
     (change?: InventoryItemChange) => {
       if (change && 'updated' in change) {
         const next = change.updated;
-        setItems((prev) => (prev.some((i) => i.id === next.id) ? prev.map((i) => (i.id === next.id ? next : i)) : [...prev, next]));
+        const displacedId = change.displacedId;
+        setItems((prev) => {
+          // A slot swap unequipped the incumbent in the same server write; apply that half
+          // too, or both items claim the slot (and both offer their actions) until a
+          // refetch succeeds.
+          const withDisplaced =
+            displacedId == null
+              ? prev
+              : prev.map((i) => (i.id === displacedId ? { ...i, equipped: false, equipSlot: null } : i));
+          return withDisplaced.some((i) => i.id === next.id)
+            ? withDisplaced.map((i) => (i.id === next.id ? next : i))
+            : [...withDisplaced, next];
+        });
       } else if (change && 'deletedId' in change) {
         setItems((prev) => prev.filter((i) => i.id !== change.deletedId));
       }
