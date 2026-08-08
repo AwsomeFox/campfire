@@ -12,11 +12,31 @@
  * RunSessionPage's `combatantRowRefs`) — so this hook owns no element registration of
  * its own and cannot drift out of sync with what is actually rendered.
  */
-import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { afterCombatantIdForDrop } from '../combatantReorder';
 
 /** Pixels of pointer travel before a press on the handle commits to a drag. */
 const DRAG_START_SLOP_PX = 6;
+
+/**
+ * `releasePointerCapture` can throw `NotFoundError` when the browser already released
+ * capture itself — one way that happens is the SAME mid-gesture `enabled` flip the
+ * issue #2084 finding 4 effect below exists to recover from: the handle element
+ * unmounting releases capture as a side effect, and then this call, made moments later
+ * against a `pointerId` the browser no longer considers captured, throws. Every call
+ * site here must go through this wrapper — a throw from a bare `releasePointerCapture`
+ * call would abort the surrounding handler BEFORE it reaches `reset()`, leaving
+ * `gestureRef` populated on exactly the path meant to clear it (issue #2095 review).
+ */
+function safeReleasePointerCapture(target: HTMLElement, pointerId: number): void {
+  try {
+    target.releasePointerCapture?.(pointerId);
+  } catch {
+    // Already released (or never captured) — nothing left to clean up here. The
+    // caller's own `reset()` (never skipped, never gated on this succeeding) is what
+    // actually matters.
+  }
+}
 
 type Axis = 'x' | 'y';
 
@@ -100,6 +120,37 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     setOver(null);
   }, []);
 
+  // Issue #2084 finding 4: a mid-gesture `enabled` flip must not strand `gestureRef`.
+  // `onPointerDown`'s own `enabled` check only ever gates the START of a NEW gesture —
+  // nothing previously reacted to `enabled` going false while a gesture was already
+  // under way. Two different call sites hit that gap in two different ways: the
+  // roster's `CombatantRow` withholds `handleProps` (via `{...(reorder.busy ? {} :
+  // reorder.dragHandleProps)}`) without unmounting the handle, which drops the
+  // `onPointerUp`/`onPointerCancel` listeners the browser would otherwise fire;
+  // `InitiativeStrip` instead stops RENDERING the handle element outright, which
+  // unmounts those same listeners along with it. Either way `gestureRef.current` is
+  // never cleared, and `onPointerDown`'s `if (!enabled || !e.isPrimary ||
+  // gestureRef.current) return;` then refuses every later drag — for the whole roster
+  // or strip, since this hook has one instance per caller — until a reload.
+  //
+  // Fixed at the SOURCE both call sites share: reset (and release pointer capture)
+  // here, in the hook itself, the moment `enabled` goes false — independent of whether
+  // the caller keeps the handle mounted-but-inert or unmounts it. A gesture can only
+  // exist here if it started while `enabled` was true (that is `onPointerDown`'s own
+  // gate), so no "was this a true→false transition" bookkeeping is needed: if `enabled`
+  // is false and a gesture is still recorded, it must have survived a flip.
+  useEffect(() => {
+    if (enabled) return;
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    // Order matters (issue #2095 review): the release attempt goes through the
+    // never-throwing wrapper, and `reset()` runs unconditionally after it — NOT inside
+    // a `try` whose `catch` might be the only path back to it. A throwing release must
+    // never prevent the state clear this effect exists to guarantee.
+    safeReleasePointerCapture(gesture.captureTarget, gesture.pointerId);
+    reset();
+  }, [enabled, reset]);
+
   const onPointerDown = useCallback(
     (combatantId: number, e: ReactPointerEvent<HTMLElement>) => {
       if (!enabled || !e.isPrimary || gestureRef.current) return;
@@ -131,7 +182,11 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     (e: ReactPointerEvent<HTMLElement>) => {
       const gesture = gestureRef.current;
       if (!gesture || gesture.pointerId !== e.pointerId) return;
-      gesture.captureTarget.releasePointerCapture?.(e.pointerId);
+      // issue #2095 review: same never-throwing wrapper as the enabled-transition
+      // effect above — an already-released capture (e.g. this pointerup arriving after
+      // the browser released capture on its own) must not stop the drop resolution or
+      // `reset()` below from running.
+      safeReleasePointerCapture(gesture.captureTarget, e.pointerId);
       const resolvedOver = overRef.current;
       if (gesture.moved && resolvedOver) {
         const afterId = afterCombatantIdForDrop(orderedIds, gesture.combatantId, resolvedOver.id, resolvedOver.after);
@@ -146,7 +201,7 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     (e: ReactPointerEvent<HTMLElement>) => {
       const gesture = gestureRef.current;
       if (!gesture || gesture.pointerId !== e.pointerId) return;
-      gesture.captureTarget.releasePointerCapture?.(e.pointerId);
+      safeReleasePointerCapture(gesture.captureTarget, e.pointerId);
       reset();
     },
     [reset],
@@ -162,5 +217,16 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     [onPointerDown, onPointerMove, onPointerUp, onPointerCancel],
   );
 
-  return { draggingId, overId: over?.id ?? null, overAfter: over?.after ?? false, handleProps };
+  // Issue #2084 finding 3: `handleProps` just above is properly memoized, but the WRAPPER
+  // object returning it was not — a fresh object literal every render gives
+  // `rosterDragReorder` a new identity every render, which invalidates
+  // `buildReorderControls`'s `useCallback` (it is in that hook's dependency array), which
+  // hands every roster row a brand-new `reorder` object, which defeats `CombatantRow`'s
+  // `React.memo` for the ENTIRE roster on every SSE tick, timer tick, and HP feedback
+  // event. `useMemo` here restores the boundary `handleProps`'s own memoization already
+  // intended.
+  return useMemo(
+    () => ({ draggingId, overId: over?.id ?? null, overAfter: over?.after ?? false, handleProps }),
+    [draggingId, over, handleProps],
+  );
 }

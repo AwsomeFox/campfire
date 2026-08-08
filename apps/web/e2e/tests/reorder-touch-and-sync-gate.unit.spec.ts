@@ -69,3 +69,28 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
     expect(depsMatch![0]).toContain('riskyBlocked');
   });
 });
+
+test.describe('a mid-gesture sync-gate flip does not strand the roster drag tracker (issue #2084 finding 4)', () => {
+  test("rosterDragReorder's `enabled` folds in reconcileBlocks and riskyBlocked, so the hook's own enabled-transition reset actually fires for the roster", () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    // `buildReorderControls`' `busy` (pinned above) already withholds `dragHandleProps`
+    // on the row when these gates trip — but withholding props off an element that
+    // stays MOUNTED only drops the DOM listeners; it tells `useCombatantDragReorder`
+    // nothing. The hook only resets an in-progress gesture (issue #2084 finding 4) when
+    // its OWN `enabled` argument goes false, so that argument — not just `busy` — must
+    // carry the same gates. This is a REGRESSION guard, not the mechanism itself: the
+    // mechanism is `useCombatantDragReorder`'s own enabled-transition effect, unit-tested
+    // directly in `test/component/useCombatantDragReorder.spec.tsx`.
+    const fnStart = source.indexOf('const rosterDragReorder = useCombatantDragReorder({');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = source.indexOf('});', fnStart);
+    expect(fnEnd).toBeGreaterThan(fnStart);
+    const fn = source.slice(fnStart, fnEnd);
+
+    const enabledLineMatch = fn.match(/enabled:\s*([^,]+),/);
+    expect(enabledLineMatch).not.toBeNull();
+    const enabledExpression = enabledLineMatch![1];
+    expect(enabledExpression).toContain('reconcileBlocks');
+    expect(enabledExpression).toContain('riskyBlocked');
+  });
+});

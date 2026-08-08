@@ -5216,6 +5216,17 @@ export class EncountersService {
         _beforeSucc = fresh.deathSaveSuccesses;
         _beforeFail = fresh.deathSaveFailures;
         const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+        // Issue #2084 finding 1 (the "clear the stamp" half): a DM's manual `initiative`
+        // PATCH (set or clear) moves this combatant out of whatever tie group its
+        // `manualOrder` stamp referred to — that tie no longer exists, so the stamp must
+        // not go on deciding a DIFFERENT tie the combatant lands in later (or continue
+        // being consulted for a tie it no longer belongs to at all). Compared against
+        // `fresh`, the transaction-local row, not the pre-transaction `existing` snapshot,
+        // for the same staleness reason `expectedUpdatedAt` is re-checked against `fresh`
+        // above. A same-value PATCH (idempotent resend) leaves the stamp alone.
+        if (staticUpdate.initiative !== undefined && staticUpdate.initiative !== fresh.initiative) {
+          writeSet.manualOrder = null;
+        }
         if (actionUsesPatch) {
           // Rebase the DM's uses override against the FRESH row, for the same reason the
           // condition block below does (issue #747): `action_uses` is a single JSON map of
@@ -6569,6 +6580,13 @@ export class EncountersService {
         .set({
           initiative: sql`CASE ${combatants.id} ${cases} END`,
           initiativeBreakdown: sql`CASE ${combatants.id} ${breakdownCases} END`,
+          // Issue #2084 finding 1: this row's initiative is moving off null, so any
+          // `manualOrder` it carries can only be leftover from data written under the
+          // pre-#2084 roster-wide stamp (which stamped unrolled `preparing` rows too) —
+          // never a value this narrower scheme would itself have written, since a
+          // null-initiative row is never stamped now. Clear it so a first roll can't hand
+          // a brand-new tie an insertion-order decision instead of the adapter's.
+          manualOrder: null,
         })
         .where(and(inArray(combatants.id, rolled.map((r) => r.id)), isNull(combatants.initiative)))
         .run();
@@ -6821,7 +6839,16 @@ export class EncountersService {
         });
 
         tx.update(combatants)
-          .set({ initiative, initiativeBreakdown: toJsonText(breakdown) })
+          .set({
+            initiative,
+            initiativeBreakdown: toJsonText(breakdown),
+            // Issue #2084 finding 1: an overwrite re-roll (or a first roll off a legacy
+            // null-but-stamped row) assigns a fresh initiative value, so whatever tie
+            // group any prior `manualOrder` referred to no longer applies — the DM's next
+            // drag, if any, will re-establish one for wherever this combatant actually
+            // lands now.
+            manualOrder: null,
+          })
           .where(eq(combatants.id, combatantId))
           .run();
 
@@ -6947,13 +6974,32 @@ export class EncountersService {
    *
    * `initiative` is only ever touched while the encounter is `running` — `sortCombatants`
    * ignores `initiative` entirely while `preparing` (plain sortOrder ascending), so a
-   * preparing-time reorder is establishing tie-break order for later, not overriding a
-   * rolled value. While running, a move that stays within the SAME initiative value (the
-   * moved combatant's own initiative already equals a new neighbor's, e.g. reordering a
-   * tied 14) only rewrites `sortOrder`. A move that crosses initiative values sets the
-   * moved combatant's `initiative` to a value between its NEW neighbors — so the manual
-   * placement survives a later resort — and clears the now-stale `initiativeBreakdown`
-   * (#1476: this must never fabricate a breakdown for a manually-assigned value).
+   * preparing-time reorder never overrides a rolled value. Whether it also establishes
+   * tie-break order for later depends on whether the moved combatant already has a real
+   * `initiative` at drag time: `manualOrder` is skipped whenever the landing value is
+   * null (see that field's schema doc), which it usually is before `/start` — a
+   * preparing-time drag of two still-unrolled combatants records ONLY `sortOrder`, and
+   * once real values are rolled, a tie between them resolves through the adapter, not
+   * this drag. Only a prep-time reorder among combatants that ALREADY carry a real
+   * `initiative` (set ahead of the roll) establishes real tie-break order. Deciding what
+   * "the DM's ordering intent" even means for combatants that have not rolled yet — which
+   * of them the DM meant relative to which, when the tie groups they will land in do not
+   * exist — is tracked as a follow-up (issue #2102), not attempted here: it is the exact
+   * design question whose rushed first answer (stamping unconditionally during prep)
+   * produced #2084's "encodes add order" defect in the first place. While running, a
+   * move that leaves the moved combatant's own initiative
+   * already sitting between its NEW neighbours' values (the ordinary within-a-tie case,
+   * e.g. reordering a tied 14, but also a move that happens to land back where the value
+   * already belonged) only rewrites `sortOrder` — issue #2084 finding 2: the old
+   * "differs from both neighbours" predicate rewrote a rolled value whenever it merely
+   * differed, including when it already sat correctly between them. A move that truly
+   * crosses initiative values sets the moved combatant's `initiative` to a value between
+   * its NEW neighbors — so the manual placement survives a later resort — and clears the
+   * now-stale `initiativeBreakdown` (#1476: this must never fabricate a breakdown for a
+   * manually-assigned value). `manualOrder` is stamped for every row sharing the moved
+   * combatant's landing initiative — its whole tie group, not the roster and not just the
+   * rows the drag physically crossed (issue #2084 finding 1, corrected to whole-group
+   * scope by issue #2095 review) — see that field's own doc comment in @campfire/schema.
    *
    * `expectedTurnVersion` CAS: 409s when it no longer matches the encounter's current
    * `turnVersion` (bumped on every turn advance) — a drag issued against a roster the DM
@@ -7020,7 +7066,38 @@ export class EncountersService {
         const origInit = moved.initiative;
         const prevInit = prev?.initiative ?? null;
         const nextInit = next?.initiative ?? null;
-        if (origInit !== prevInit && origInit !== nextInit) {
+        // Issue #2084 finding 2 (originally reported as review finding 4): the predicate
+        // used to be "origInit differs from BOTH neighbours", which is true even when
+        // origInit already sits strictly BETWEEN them — its natural, already-correct
+        // position. Roster A(20), M(14), C(6): dragging M to just after A (a no-op, or
+        // "Move after A" from the menu) has prev=20, next=6; 14 differs from both, so the
+        // old code wrote floor((20+6)/2)=13 and nulled a real, already-fine
+        // initiativeBreakdown for a move that changed nothing about the ordering. The
+        // question that matters is whether the CURRENT value already lies within the new
+        // neighbours' bounds, not whether it differs from them.
+        const alreadyBetween =
+          origInit !== null && (prevInit === null || origInit <= prevInit) && (nextInit === null || origInit >= nextInit);
+        // Issue #2095 review (Codex P1): `alreadyBetween` above is `false` unconditionally
+        // whenever `origInit === null` (an unrolled combatant), so a null-origin move used
+        // to fall straight into reassignment below. Roster A(20), B(10), U(null), V(null):
+        // dragging U to just after B — where it already sits — had prevInit=10, nextInit=
+        // null, landing in the `prevInit != null` branch and writing `newInitiative = 9`.
+        // That silently rolls an unrolled combatant in for a drop `sortOrder` alone should
+        // have satisfied — the same class of bug as finding 2 above, at the rolled/null
+        // boundary instead of between two rolled neighbours.
+        //
+        // `nextInit === null` is exactly "the drop still lands inside (or at the end of)
+        // the unrolled tier": `sorted` above places every rolled row before every unrolled
+        // one, so the only way an unrolled combatant's NEXT neighbour can be a rolled row is
+        // a drop at the very top of the whole roster (`insertAt === 0`, `prevInit === null`
+        // too) — deliberately rolling it in ahead of everyone. Any other `nextInit === null`
+        // drop keeps at least the row immediately after it (if any) unrolled, so the
+        // combatant belongs in the unrolled tier regardless of `prevInit`. Preserve `null`
+        // there; only the two cases below (`nextInit !== null`) are actually placing an
+        // unrolled combatant into the rolled region, which — unlike the null-preserving
+        // cases — is a deliberate re-roll-by-position, not an accident of the drop math.
+        const stillUnrolled = origInit === null && nextInit === null;
+        if (!alreadyBetween && !stillUnrolled) {
           if (prevInit != null && nextInit != null) {
             newInitiative = prevInit === nextInit ? prevInit : Math.floor((prevInit + nextInit) / 2);
           } else if (prevInit != null) {
@@ -7044,20 +7121,70 @@ export class EncountersService {
       // initModDescThenSortOrderAsc, which compares initMod BEFORE sortOrder) — a
       // sortOrder-only rewrite is silently discarded whenever the tied combatants have
       // different initMod (different DEX), so the DM's drag has no visible effect. Stamp
-      // `manualOrder` on EVERY combatant in the newly computed order (not just the moved
-      // one) so sortCombatants can hold the whole roster at this position across a
-      // re-sort.
+      // `manualOrder` to hold the moved combatant's new position across a re-sort.
       //
-      // Stamped for a PREPARING encounter too (#2074 review finding 2). It is inert while
-      // preparing — `sortCombatants` orders by sortOrder alone there and never reaches the
-      // adapter tiebreak — but `/start` re-sorts the roster in RUNNING mode, so without it
-      // a prep-time reorder is discarded at exactly the moment the fight begins, by exactly
-      // the mechanism above. Gating the stamp on status reintroduced the bug on the
-      // preparing→running edge; the doc on this method already promised the opposite ("a
-      // preparing-time reorder is establishing tie-break order for later"), and only
-      // stamping unconditionally makes that true.
+      // Issue #2084 finding 1: NOT every combatant in the roster. The original fix
+      // stamped the whole roster on every drag, so after one reorder EVERY row carried a
+      // value, and `sortCombatants` consults `manualOrder` ahead of the adapter tiebreak
+      // whenever a stamped row is involved — so `adapter.initiativeTiebreak` never ran
+      // again for this encounter, including for ties the DM never touched. It was worse
+      // while `preparing`, where most rows have no rolled initiative yet and the stamped
+      // index encoded add order, not a DM decision.
+      //
+      // The narrower rule: stamp only rows that share the moved combatant's landing
+      // (possibly just-reassigned) initiative value — its FULL tie group as it exists in
+      // the newly computed order, not merely the ones the drag's own start/end positions
+      // happened to span. A tie group nobody dragged into stays entirely null and keeps
+      // falling through to the adapter, since only same-initiative rows are relevant to a
+      // tiebreak comparison at all (`sortCombatants` never calls into `manualOrder` for
+      // two different initiative values — it decides those numerically first).
+      //
+      // Issue #2095 review (Devin, Codex, and Copilot, same root cause, three independent
+      // repros): an
+      // earlier version stamped only the moved combatant plus whichever OTHER tie-group
+      // members its start/end positions physically crossed — but #2088's
+      // stamped-before-unstamped total-order rule (relanded in this same PR, see
+      // `sortCombatants`) makes ANY stamped row sort ahead of ANY unstamped one within a
+      // tie, with no regard for whether that row was crossed. A partial stamp therefore
+      // does not merely fail to help the untouched members — it ACTIVELY sinks them below
+      // the touched ones, an order the DM never asked for:
+      //
+      //   running A(20), W/X/Y/Z all tied at 14; drag Z to just after X. Crossing only
+      //   spans Y, so the old code stamped {Z, Y} and left W/X null — sorting to
+      //   A, Z, Y, W, X instead of the requested A, W, X, Z, Y.
+      //
+      // Smaller and nastier: a tied [A, B, C], no-op move of B to right after A crosses
+      // NOBODY (insertAt already equals B's old position) — the old code still stamped
+      // only B, and a stamped B alone now sorts ahead of unstamped A and C: a no-op drag
+      // silently reorders its own tie group.
+      //
+      // Stamping the WHOLE landing group, using each member's index in this SAME
+      // `orderedIds` pass, also closes a second issue both reviewers noted: `manualOrder`
+      // is an absolute index into `orderedIds`, so a stamp from an EARLIER drag lives in a
+      // different index space than one from this drag. A partial stamp could leave part of
+      // a tie group holding stale indices from a prior operation while the rest got fresh
+      // ones, risking duplicate or inverted values within one group. Every member of the
+      // group is (re)stamped together here, in one consistent space, every time.
+      //
+      // Deliberately skipped altogether when the moved combatant's landing initiative is
+      // null (unrolled): `sortCombatants` decides an unrolled tie by `sortOrder` alone
+      // (its own null/null branch), same as every row while `preparing` — there is no
+      // adapter tiebreak for a stamp to protect there, and stamping it anyway is exactly
+      // what reproduced the preparing-time "encodes add order" bug even under this
+      // narrower scheme, since prep-time rows are null far more often than not.
+      const finalInitiative = newInitiative;
+      const manualOrderIds = new Set<number>();
+      if (finalInitiative !== null) {
+        manualOrderIds.add(combatantId);
+        for (const c of withoutMoved) {
+          if (c.initiative === finalInitiative) manualOrderIds.add(c.id);
+        }
+      }
       orderedIds.forEach((id, index) => {
-        tx.update(combatants).set({ sortOrder: index, manualOrder: index }).where(eq(combatants.id, id)).run();
+        tx.update(combatants)
+          .set({ sortOrder: index, ...(manualOrderIds.has(id) ? { manualOrder: index } : {}) })
+          .where(eq(combatants.id, id))
+          .run();
       });
       const initiativeChanged = newInitiative !== moved.initiative;
       if (initiativeChanged) {
