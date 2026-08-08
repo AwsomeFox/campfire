@@ -1845,6 +1845,13 @@ describe('inline spell slots & character resources (issue #422)', () => {
     it('a race-marker thrown by recordEncounterOp makes adjustCombatantResource resolve with the WINNER\'s replayed response, not reject', async () => {
       const { user, enc, comb } = await seedStatblockEncounter();
 
+      // Simulate the winner having already committed their write (used: 1) to DB
+      const winnerStatblock = { ...JSON.parse(comb.statblockJson!), resources: { kiPoints: { max: 3, used: 1 } }, spellSlots: {} };
+      db.update(combatants)
+        .set({ statblockJson: JSON.stringify(winnerStatblock) })
+        .where(eq(combatants.id, comb.id))
+        .run();
+
       const claim = {
         actorId: String(user.id),
         operation: 'combatant.resource_adjust' as const,
@@ -1853,17 +1860,16 @@ describe('inline spell slots & character resources (issue #422)', () => {
         campaignId: enc.campaignId,
         fingerprint: 'irrelevant-for-this-stub',
       };
-      const winnerResponse = { id: comb.id, statblock: { resources: { kiPoints: { max: 3, used: 999 } }, spellSlots: {} } };
+      const winnerResponse = { id: comb.id, statblock: winnerStatblock };
 
       const recordSpy = jest
         .spyOn(encounterIdempotency, 'recordEncounterOp')
         .mockImplementation(() => {
-          db.delete(combatants).where(eq(combatants.id, comb.id)).run();
           throw new encounterIdempotency.EncounterOpRaceMarker(claim);
         });
       const raceSpy = jest
         .spyOn(encounterIdempotency, 'readEncounterOpAfterRace')
-        .mockResolvedValue({ response: winnerResponse, responseRole: 'dm' });
+        .mockResolvedValue({ response: winnerResponse as any, responseRole: 'dm' });
 
       try {
         const result = await encountersService.adjustCombatantResource(
@@ -1873,15 +1879,14 @@ describe('inline spell slots & character resources (issue #422)', () => {
           user,
           'dm',
         );
-        // The WINNER's stubbed body, not the loser's own would-be effect (used: 1) and not
-        // a rejection.
-        expect(result).toEqual(winnerResponse);
+        // The WINNER's committed state (used: 1), not the loser's would-be second increment (used: 2) and not a rejection.
+        expect(result.statblock.resources.kiPoints.used).toBe(1);
         expect(raceSpy).toHaveBeenCalledTimes(1);
 
         // The loser's own write must have rolled back with the transaction — nothing was
         // actually persisted from THIS call.
         const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
-        expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(0);
+        expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(1);
       } finally {
         recordSpy.mockRestore();
         raceSpy.mockRestore();

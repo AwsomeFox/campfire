@@ -247,4 +247,106 @@ describe('EncountersService — rollCombatantInitiative replay visibility harden
     expect(result!.combatant.id).toBe(42);
     expect(result!.combatant.name).toBe('Deleted Hero Name');
   });
+  it('re-applies fog redaction to stored response when combatant is hard-deleted and fog is enabled', async () => {
+    const deletedTokenCombatant: Combatant = {
+      id: 42,
+      encounterId: 10,
+      name: 'Deleted Token',
+      kind: 'character',
+      initiative: 10,
+      tokenX: 100,
+      tokenY: 200,
+    } as any;
+
+    const emptySnapshot: EncounterWithCombatants = {
+      id: 10,
+      campaignId: 1,
+      name: 'Test Encounter',
+      status: 'active',
+      round: 1,
+      turnIndex: 0,
+      combatants: [],
+      fog: JSON.stringify({ enabled: true, revealed: [] }),
+      mapAttachmentId: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as any;
+
+    const mockPriorResponse = {
+      combatant: deletedTokenCombatant,
+      roll: null,
+    };
+
+    const mockTxDeleted = {
+      delete: jest.fn().mockReturnValue({
+        where: jest.fn().mockReturnValue({
+          run: jest.fn(),
+        }),
+      }),
+      select: jest.fn().mockReturnValue({
+        from: jest.fn().mockReturnValue({
+          where: jest.fn().mockReturnValue({
+            limit: jest.fn().mockReturnValue({
+              all: jest.fn().mockReturnValue([
+                {
+                  actorId: 'user-player-1',
+                  operation: 'combatant.roll_initiative',
+                  key: 'idem-key-deleted-fog',
+                  encounterId: 10,
+                  campaignId: 1,
+                  fingerprint: encounterOpFingerprint({ combatantId: 42, overwrite: true }),
+                  responseRole: 'player',
+                  responseJson: JSON.stringify(mockPriorResponse),
+                  expiresAt: Date.now() + 100000,
+                },
+              ]),
+            }),
+          }),
+        }),
+      }),
+    };
+
+    const mockDb = {
+      transaction: jest.fn().mockImplementation((cb: (tx: any) => void) => cb(mockTxDeleted)),
+      select: mockTxDeleted.select,
+    };
+
+    const rollsDouble: Pick<RollsService, 'redactRollForRole'> = {
+      redactRollForRole: jest.fn().mockImplementation(async (roll) => roll),
+    };
+
+    const attachmentsServiceDouble = {
+      isFogProtectedEncounterMap: jest.fn().mockResolvedValue(false),
+    };
+
+    const serviceTarget = new EncountersService(
+      mockDb as any,
+      {} as any,
+      {} as any,
+      rollsDouble as unknown as RollsService,
+      {} as any,
+      attachmentsServiceDouble as any,
+      {} as any,
+      {} as any,
+      null as any,
+    );
+
+    jest.spyOn(serviceTarget, 'getRowOrThrow').mockResolvedValue({ id: 10, campaignId: 1, hidden: false, fog: JSON.stringify({ enabled: true, revealed: [] }), mapAttachmentId: null } as any);
+    jest.spyOn(serviceTarget, 'getWithCombatantsOrThrow').mockResolvedValue(emptySnapshot);
+
+    const result = await serviceTarget.rollCombatantInitiative(
+      10,
+      42,
+      'idem-key-deleted-fog',
+      true,
+      playerUser,
+      'player',
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.combatant.id).toBe(42);
+    // Token coordinates must be redacted in fog for player
+    expect(result!.combatant.tokenX).toBeNull();
+    expect(result!.combatant.tokenY).toBeNull();
+  });
 });
