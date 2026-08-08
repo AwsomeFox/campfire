@@ -753,8 +753,9 @@ function deathSaveRollEventDetail(
  *
  * Issue #1925: the encounter's `monsterHpDisplay` dial controls how much of that is
  * withheld. `band` (default) is the behaviour above, unchanged. `exact` ships the real
- * hpCurrent/hpMax/hpTemp/sp/rp to non-DMs too (statblock + pendingConcentrationChecks
- * stay stripped regardless — separate secrecy concerns, issue #425/#606). `hidden` ships
+ * hpCurrent/hpMax/hpTemp/sp/rp to non-DMs too (unrevealed statblocks and
+ * pendingConcentrationChecks stay stripped — separate secrecy concerns, issue #425/#606).
+ * A revealed statblock follows the same HP mode for its template `hp` field. `hidden` ships
  * neither the numbers NOR the band — except a combatant at 0 HP still reports
  * `hpBand: 'down'` in every mode, so the table always knows who dropped. This is the
  * SOLE server-side choke point for the mode; there is no client-side hiding anywhere
@@ -768,11 +769,18 @@ function redactMonsterHp(c: Combatant, mode: MonsterHpDisplay): Combatant {
   // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
   // never carries the field until the DM turns it on. HP banding itself is entirely
   // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
+  // A revealed statblock can carry the same exact template HP used to seed hpMax
+  // (issue #2080). Strip that field in band/hidden modes too; otherwise REST and
+  // MCP callers could recover the number even though hpMax itself is null (issue #2093).
   // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
   // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
+  let visibleStatblock = c.statblockRevealed ? c.statblock : null;
+  if (mode !== 'exact' && visibleStatblock) {
+    visibleStatblock = { ...visibleStatblock, hp: null };
+  }
   const redacted: Combatant = {
     ...c,
-    statblock: c.statblockRevealed ? c.statblock : null,
+    statblock: visibleStatblock,
     turnState: {
       ...c.turnState,
       pendingConcentrationChecks: [],

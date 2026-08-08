@@ -2244,7 +2244,7 @@ describe('encounters — issue #1926: statblock reveal to players (e2e)', () => 
     const add = await request(server as never)
       .post(`/api/v1/encounters/${encounterId}/combatants`)
       .set(dm)
-      .send({ kind: 'monster', name: 'Troll', hpMax, statblock: SECRET_STATBLOCK });
+      .send({ kind: 'monster', name: 'Troll', hpMax, statblock: { ...SECRET_STATBLOCK, hp: hpMax } });
     expect(add.status).toBe(201);
     return { encounterId, combatantId: add.body.id as number };
   }
@@ -2360,20 +2360,45 @@ describe('encounters — issue #1926: statblock reveal to players (e2e)', () => 
     expect(noteEventsAfterNoop.length).toBe(1);
   });
 
-  it('reveal never affects HP banding — exact HP stays redacted for a non-DM regardless of statblockRevealed', async () => {
+  it('a revealed statblock follows the HP display mode: template HP is redacted in band/hidden and available in exact', async () => {
     const server = ctx.app.getHttpServer();
     const { encounterId, combatantId } = await addRevealBoss(server, 100);
     await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ hpSet: 40 });
     await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ statblockRevealed: true });
 
-    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
-    const boss = (
-      res.body.combatants as Array<{ id: number; statblock: unknown; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>
-    ).find((c) => c.id === combatantId)!;
-    expect(boss.statblock).not.toBeNull();
-    expect(boss.hpCurrent).toBeNull();
-    expect(boss.hpMax).toBeNull();
-    expect(boss.hpBand).toBe('bloodied');
+    type RevealedBoss = {
+      id: number;
+      statblock: { hp: number | null } | null;
+      hpCurrent: number | null;
+      hpMax: number | null;
+      hpBand: string | null;
+    };
+    const getBoss = async (): Promise<RevealedBoss> => {
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      return (res.body.combatants as RevealedBoss[]).find((c) => c.id === combatantId)!;
+    };
+
+    const bandBoss = await getBoss();
+    expect(bandBoss.statblock).not.toBeNull();
+    expect(bandBoss.statblock!.hp).toBeNull();
+    expect(bandBoss.hpCurrent).toBeNull();
+    expect(bandBoss.hpMax).toBeNull();
+    expect(bandBoss.hpBand).toBe('bloodied');
+    expect(JSON.stringify(bandBoss)).not.toContain('"hp":100');
+
+    await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ monsterHpDisplay: 'hidden' });
+    const hiddenBoss = await getBoss();
+    expect(hiddenBoss.statblock!.hp).toBeNull();
+    expect(hiddenBoss.hpCurrent).toBeNull();
+    expect(hiddenBoss.hpMax).toBeNull();
+    expect(hiddenBoss.hpBand).toBeNull();
+    expect(JSON.stringify(hiddenBoss)).not.toContain('"hp":100');
+
+    await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ monsterHpDisplay: 'exact' });
+    const exactBoss = await getBoss();
+    expect(exactBoss.statblock!.hp).toBe(100);
+    expect(exactBoss.hpCurrent).toBe(40);
+    expect(exactBoss.hpMax).toBe(100);
   });
 
   it('a hidden encounter still 404s a non-DM regardless of statblockRevealed', async () => {

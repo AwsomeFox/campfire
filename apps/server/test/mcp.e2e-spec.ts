@@ -3072,7 +3072,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
           kind: 'monster',
           name: 'MCP Troll',
           hpMax: 20,
-          statblock: { ac: 14, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
+          statblock: { ac: 14, hp: 20, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
         },
       }),
     ) as { id: number };
@@ -3104,11 +3104,13 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const afterReveal = parseResult(
       await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
-    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number } | null }> };
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number; hp: number | null } | null }> };
     const afterBoss = afterReveal.combatants.find((c) => c.id === added.id)!;
     expect(afterBoss.statblockRevealed).toBe(true);
     expect(afterBoss.statblock).not.toBeNull();
     expect(afterBoss.statblock!.ac).toBe(14);
+    expect(afterBoss.statblock!.hp).toBeNull();
+    expect(JSON.stringify(afterBoss)).not.toContain('"hp":20');
   });
 
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {
