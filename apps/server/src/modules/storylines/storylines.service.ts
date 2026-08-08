@@ -30,6 +30,11 @@ type StoryBeatUpdateInput = z.infer<typeof StoryBeatUpdate>;
 type StoryBeatStatusPatchInput = z.infer<typeof StoryBeatStatusPatch>;
 type StoryBranchCreateInput = z.infer<typeof StoryBranchCreate>;
 type StoryBranchUpdateInput = z.infer<typeof StoryBranchUpdate>;
+type StorylineUpdateOptions = {
+  expectedUpdatedAt?: string;
+  /** Revision authorship may differ from the human who approves and audits a proposal. */
+  revisionUser?: RequestUser;
+};
 
 function arcToDomain(row: typeof storyArcs.$inferSelect): StoryArc {
   return {
@@ -160,7 +165,7 @@ export class StorylinesService {
     input: StoryArcUpdateInput,
     user: RequestUser,
     role: Role,
-    opts?: { expectedUpdatedAt?: string },
+    opts?: StorylineUpdateOptions,
   ): Promise<StoryArc> {
     const existing = await this.getArcRowOrThrow(id);
     const updated = await this.db
@@ -184,7 +189,7 @@ export class StorylinesService {
         campaignId: existing.campaignId,
         priorProse: existing.summary,
         nextProse: input.summary,
-        user,
+        user: opts?.revisionUser ?? user,
       });
     }
     await this.audit.log({
@@ -374,7 +379,7 @@ export class StorylinesService {
     input: StoryBeatUpdateInput,
     user: RequestUser,
     role: Role,
-    opts?: { expectedUpdatedAt?: string },
+    opts?: StorylineUpdateOptions,
   ): Promise<StoryBeat> {
     const existing = await this.getBeatRowOrThrow(id);
     // Validate any play-record links being SET (non-null) belong to the beat's campaign
@@ -403,7 +408,7 @@ export class StorylinesService {
         campaignId: existing.campaignId,
         priorProse: existing.body,
         nextProse: input.body,
-        user,
+        user: opts?.revisionUser ?? user,
       });
     }
     await this.audit.log({

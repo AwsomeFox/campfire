@@ -58,6 +58,15 @@ describe('ProposalsService.approve (issue #681)', () => {
     };
 
     const audit = { log: jest.fn() };
+    const storylines = {
+      createArc: jest.fn(),
+      updateArc: jest.fn(),
+      removeArc: jest.fn(),
+      addBeat: jest.fn(),
+      updateBeat: jest.fn(),
+      removeBeat: jest.fn(),
+      getArcRowOrThrow: jest.fn(),
+    };
 
     const service = new ProposalsService(
       records as unknown as ProposalRecordsService,
@@ -71,10 +80,10 @@ describe('ProposalsService.approve (issue #681)', () => {
       {} as never,
       {} as never,
       {} as never,
-      {} as never,
+      storylines as never,
     );
 
-    return { service, records, quests, audit, existing };
+    return { service, records, quests, storylines, audit, existing };
   }
 
   it('rejects stale update targets with STALE_PROPOSAL_TARGET before claiming', async () => {
@@ -125,6 +134,46 @@ describe('ProposalsService.approve (issue #681)', () => {
     expect(records.finalizeApproved).toHaveBeenCalled();
     expect(audit.log).toHaveBeenCalledWith(
       expect.objectContaining({ action: 'proposal.approve.finalize_failed', entityId: 9 }),
+    );
+  });
+
+  it('passes the storyline base token through compare-and-set and credits an unamended AI rewrite', async () => {
+    const base = {
+      id: 42,
+      campaignId: 1,
+      title: 'Before',
+      summary: 'Old summary',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    const { service, storylines } = makeService({
+      existing: {
+        entityType: 'story_arc',
+        action: 'update',
+        snapshot: JSON.stringify(base),
+        baseUpdatedAt: base.updatedAt,
+        baseSnapshotHash: null,
+        payload: '{"title":"After","summary":"AI summary"}',
+        proposer: 'AI DM (eval-model)',
+        proposerUserId: 'ai-dm:1',
+        proposerToken: null,
+      },
+      currentSnapshot: base,
+    });
+
+    await service.approve(9, {}, user, role);
+
+    expect(storylines.updateArc).toHaveBeenCalledWith(
+      42,
+      { title: 'After', summary: 'AI summary' },
+      user,
+      role,
+      {
+        expectedUpdatedAt: base.updatedAt,
+        revisionUser: expect.objectContaining({
+          id: 'ai-dm:1',
+          proposalAttribution: expect.objectContaining({ proposerUserId: 'ai-dm:1' }),
+        }),
+      },
     );
   });
 });

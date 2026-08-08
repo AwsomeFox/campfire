@@ -6,7 +6,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import crypto from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   NpcCreate,
@@ -48,6 +48,16 @@ type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
 /** Upper bound on a draft turn's output, before the remaining-budget clamp. */
 const DRAFT_MAX_TOKENS = 4096;
 const CO_DM_PROMPT_VERSION = 'co-dm-draft-v3';
+/** Keep multi-beat arc context useful without letting 50k prose fields multiply unboundedly. */
+const ARC_BEAT_BODY_CONTEXT_CHARS = 2_000;
+/** Roughly 25k tokens before system instructions; larger storylines should be edited beat-by-beat. */
+const STORYLINE_PROVIDER_PROMPT_MAX_CHARS = 100_000;
+
+type LinkedPlayContext = {
+  sessions: Map<number, Pick<typeof sessions.$inferSelect, 'id' | 'number' | 'title'>>;
+  quests: Map<number, Pick<typeof quests.$inferSelect, 'id' | 'title' | 'status'>>;
+  encounters: Map<number, Pick<typeof encounters.$inferSelect, 'id' | 'name' | 'status'>>;
+};
 
 /** Which proposal entity type each co-DM target files under. */
 const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
@@ -143,6 +153,11 @@ export class CoDmService {
     const providerPrompt = edit
       ? JSON.stringify({ rewriteInstructions: input.prompt, currentStoryline: edit.providerContext })
       : input.prompt;
+    if (edit && providerPrompt.length > STORYLINE_PROVIDER_PROMPT_MAX_CHARS) {
+      throw new UnprocessableEntityException(
+        'Storyline rewrite context is too large for AI editing. Rewrite a single beat or shorten the arc before retrying.',
+      );
+    }
     const count = MULTI_TARGETS.has(input.target) && !editing ? input.count ?? 1 : 1;
     if (input.target === 'beat' && input.arcId != null) {
       const [arc] = await this.db
@@ -422,6 +437,7 @@ export class CoDmService {
       if (arc.campaignId !== campaignId) {
         throw new BadRequestException(`Story arc ${entityId} does not belong to this campaign`);
       }
+      const linkedPlay = await this.loadLinkedPlayContext(arc.beats, campaignId);
       return {
         providerContext: {
           target: 'arc' as const,
@@ -430,7 +446,9 @@ export class CoDmService {
             title: arc.title,
             summary: arc.summary,
             status: arc.status,
-            beats: await Promise.all(arc.beats.map((beat) => this.storyBeatContext(beat, campaignId))),
+            beats: arc.beats.map((beat) =>
+              this.storyBeatContext(beat, linkedPlay, ARC_BEAT_BODY_CONTEXT_CHARS),
+            ),
           },
         },
         baseSnapshot: {
@@ -454,11 +472,12 @@ export class CoDmService {
     if (arc.campaignId !== campaignId) {
       throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
     }
+    const linkedPlay = await this.loadLinkedPlayContext([beat], campaignId);
     return {
       providerContext: {
         target: 'beat' as const,
         arc: { id: arc.id, title: arc.title, summary: arc.summary, status: arc.status },
-        beat: await this.storyBeatContext(beat, campaignId),
+        beat: this.storyBeatContext(beat, linkedPlay),
       },
       baseSnapshot: {
         id: beat.id,
@@ -477,37 +496,56 @@ export class CoDmService {
     };
   }
 
-  private async storyBeatContext(beat: StoryBeatWithBranches, campaignId: number) {
-    const [session, quest, encounter] = await Promise.all([
-      beat.sessionId == null
-        ? Promise.resolve(null)
+  /** Resolve all linked play records in at most one query per table, regardless of beat count. */
+  private async loadLinkedPlayContext(
+    beats: StoryBeatWithBranches[],
+    campaignId: number,
+  ): Promise<LinkedPlayContext> {
+    const sessionIds = [...new Set(beats.flatMap((beat) => beat.sessionId == null ? [] : [beat.sessionId]))];
+    const questIds = [...new Set(beats.flatMap((beat) => beat.questId == null ? [] : [beat.questId]))];
+    const encounterIds = [...new Set(beats.flatMap((beat) => beat.encounterId == null ? [] : [beat.encounterId]))];
+    const [sessionRows, questRows, encounterRows] = await Promise.all([
+      sessionIds.length === 0
+        ? Promise.resolve([])
         : this.db
             .select({ id: sessions.id, number: sessions.number, title: sessions.title })
             .from(sessions)
-            .where(and(eq(sessions.id, beat.sessionId), eq(sessions.campaignId, campaignId)))
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-      beat.questId == null
-        ? Promise.resolve(null)
+            .where(and(eq(sessions.campaignId, campaignId), inArray(sessions.id, sessionIds))),
+      questIds.length === 0
+        ? Promise.resolve([])
         : this.db
             .select({ id: quests.id, title: quests.title, status: quests.status })
             .from(quests)
-            .where(and(eq(quests.id, beat.questId), eq(quests.campaignId, campaignId)))
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-      beat.encounterId == null
-        ? Promise.resolve(null)
+            .where(and(eq(quests.campaignId, campaignId), inArray(quests.id, questIds))),
+      encounterIds.length === 0
+        ? Promise.resolve([])
         : this.db
             .select({ id: encounters.id, name: encounters.name, status: encounters.status })
             .from(encounters)
-            .where(and(eq(encounters.id, beat.encounterId), eq(encounters.campaignId, campaignId)))
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
+            .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, encounterIds))),
     ]);
+    return {
+      sessions: new Map(sessionRows.map((row) => [row.id, row])),
+      quests: new Map(questRows.map((row) => [row.id, row])),
+      encounters: new Map(encounterRows.map((row) => [row.id, row])),
+    };
+  }
+
+  private storyBeatContext(
+    beat: StoryBeatWithBranches,
+    linkedPlay: LinkedPlayContext,
+    bodyLimit?: number,
+  ) {
+    const bodyTruncated = bodyLimit != null && beat.body.length > bodyLimit;
+    const truncationNotice = '\n[truncated for arc rewrite context]';
+    const body = bodyTruncated
+      ? `${beat.body.slice(0, Math.max(0, bodyLimit - truncationNotice.length))}${truncationNotice}`
+      : beat.body;
     return {
       id: beat.id,
       title: beat.title,
-      body: beat.body,
+      body,
+      ...(bodyTruncated ? { bodyTruncated: true } : {}),
       status: beat.status,
       branches: beat.branches.map((branch) => ({
         id: branch.id,
@@ -515,7 +553,11 @@ export class CoDmService {
         toBeatId: branch.toBeatId,
         sortOrder: branch.sortOrder,
       })),
-      linkedPlayRecords: { session, quest, encounter },
+      linkedPlayRecords: {
+        session: beat.sessionId == null ? null : linkedPlay.sessions.get(beat.sessionId) ?? null,
+        quest: beat.questId == null ? null : linkedPlay.quests.get(beat.questId) ?? null,
+        encounter: beat.encounterId == null ? null : linkedPlay.encounters.get(beat.encounterId) ?? null,
+      },
     };
   }
 

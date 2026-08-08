@@ -209,6 +209,10 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
       .post(`/api/v1/campaigns/${campaignId}/arcs`)
       .set(dm)
       .send({ title: 'Quiet Rebellion', summary: 'The guilds exchange coded letters.' });
+    await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'A very detailed beat', body: 'x'.repeat(3_000) });
 
     h.script({ text: JSON.stringify({ title: 'The Ember Rebellion', summary: 'The guilds prepare to strike before dawn.' }) });
     const rewritten = await draft({
@@ -222,6 +226,12 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
       entityType: 'story_arc',
       entityId: arc.body.id,
     });
+    const sent = JSON.parse(h.mock.received.at(-1)!.messages.at(-1)!.content ?? '');
+    expect(sent.currentStoryline.arc.beats[0]).toMatchObject({
+      title: 'A very detailed beat',
+      bodyTruncated: true,
+    });
+    expect(sent.currentStoryline.arc.beats[0].body).toHaveLength(2_000);
 
     const approved = await request(h.server)
       .post(`/api/v1/proposals/${rewritten.body.proposalIds[0]}/approve`)
@@ -234,6 +244,14 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     expect(history.body).toEqual([
       expect.objectContaining({ snapshot: { summary: 'The guilds exchange coded letters.' } }),
     ]);
+    const audit = await h.getAudit(campaignId);
+    expect(audit.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'storyline.arc.update',
+        entityId: arc.body.id,
+        actor: 'dev:ai-eval-dm',
+      }),
+    ]));
 
     const current = await request(h.server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
     h.script({ text: JSON.stringify({ title: 'The Ember Rebellion', summary: 'A final, sharper rewrite.' }) });
@@ -270,12 +288,45 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
       baseUpdatedAt: current.body.updatedAt,
       snapshot: { summary: current.body.summary },
     });
+    const revisedHistory = await request(h.server).get(`/api/v1/revisions/story_arc/${arc.body.id}`).set(dm);
+    expect(revisedHistory.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        snapshot: { summary: 'The guilds prepare to strike before dawn.' },
+        authorSource: 'ai',
+        authorUserId: `ai-dm:${campaignId}`,
+      }),
+    ]));
     const staleApprove = await request(h.server)
       .post(`/api/v1/proposals/${staleDraft.body.proposalIds[0]}/approve`)
       .set(dm)
       .send({});
     expect(staleApprove.status).toBe(409);
     expect(staleApprove.body.code).toBe('STALE_PROPOSAL_TARGET');
+  });
+
+  it('rejects an oversized arc rewrite context before calling the provider', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Oversized arc', summary: 's'.repeat(50_000) });
+    for (let index = 0; index < 16; index += 1) {
+      const beat = await request(h.server)
+        .post(`/api/v1/arcs/${arc.body.id}/beats`)
+        .set(dm)
+        .send({ title: `Large beat ${index + 1}`, body: 'b'.repeat(3_000) });
+      expect(beat.status).toBe(201);
+    }
+    const providerCallsBefore = h.mock.received.length;
+
+    const response = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      prompt: 'p'.repeat(20_000),
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body.message).toContain('Storyline rewrite context is too large');
+    expect(h.mock.received).toHaveLength(providerCallsBefore);
   });
 
   it('rejects beat drafts that target an arc from another campaign', async () => {

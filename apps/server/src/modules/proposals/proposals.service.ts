@@ -46,6 +46,24 @@ import { assertProposalTargetFresh } from './proposal-snapshot';
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
 type ProposalApproveInput = z.infer<typeof ProposalApprove>;
 
+function revisionUserForApprovedProposal(
+  proposal: Pick<Proposal, 'proposer' | 'proposerUserId' | 'proposerToken'>,
+  approver: RequestUser,
+  amended: boolean,
+): RequestUser {
+  if (amended || !proposal.proposerUserId?.startsWith('ai-dm:')) return approver;
+  return {
+    id: proposal.proposerUserId,
+    name: proposal.proposer || 'AI Dungeon Master',
+    serverRole: 'user',
+    proposalAttribution: {
+      proposer: proposal.proposer || 'AI Dungeon Master',
+      proposerUserId: proposal.proposerUserId,
+      proposerToken: proposal.proposerToken,
+    },
+  };
+}
+
 /** One entry in a batch approve/reject result — success carries the resolved proposal, failure the reason. */
 export type BatchResolveResult =
   | { id: number; ok: true; proposal: Proposal }
@@ -229,12 +247,19 @@ export class ProposalsService {
               user,
               role,
             ),
-          update: (id: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+          update: (
+            id: number,
+            payload: Record<string, unknown>,
+            user: RequestUser,
+            role: Role,
+            opts?: Parameters<StorylinesService['updateArc']>[4],
+          ) =>
             this.storylines.updateArc(
               id,
               payload as Parameters<StorylinesService['updateArc']>[1],
               user,
               role,
+              opts,
             ),
           remove: (id: number, user: RequestUser, role: Role) => this.storylines.removeArc(id, user, role),
         };
@@ -256,12 +281,19 @@ export class ProposalsService {
             }
             return this.storylines.addBeat(resolvedArcId, beatInput, user, role);
           },
-          update: (id: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+          update: (
+            id: number,
+            payload: Record<string, unknown>,
+            user: RequestUser,
+            role: Role,
+            opts?: Parameters<StorylinesService['updateBeat']>[4],
+          ) =>
             this.storylines.updateBeat(
               id,
               payload as Parameters<StorylinesService['updateBeat']>[1],
               user,
               role,
+              opts,
             ),
           remove: (id: number, user: RequestUser, role: Role) => this.storylines.removeBeat(id, user, role),
         };
@@ -363,8 +395,21 @@ export class ProposalsService {
           }
         }
       } else {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (service as any).update(existing.entityId, validated, user, role);
+        if (existing.entityType === 'story_arc' || existing.entityType === 'story_beat') {
+          // The freshness read above and the domain write are separate operations. Pass
+          // the proposal's original row token into Storylines' compare-and-set so an edit
+          // landing in that gap cannot be silently overwritten. For an unamended AI draft,
+          // revision history credits the AI while Storylines still audits `user`, the human
+          // approver who authorized the domain write.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (service as any).update(existing.entityId, validated, user, role, {
+            expectedUpdatedAt: existing.baseUpdatedAt ?? undefined,
+            revisionUser: revisionUserForApprovedProposal(existing, user, amended),
+          });
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (service as any).update(existing.entityId, validated, user, role);
+        }
       }
     } catch (err) {
       // The entity write failed — undo the claim so the proposal returns to pending
