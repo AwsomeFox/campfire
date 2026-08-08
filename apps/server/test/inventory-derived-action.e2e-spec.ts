@@ -1,6 +1,9 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { ruleEntries } from '../src/db/schema';
 
 const dm = { 'x-dev-user': 'dm', 'x-dev-role': 'dm' };
 const player = { 'x-dev-user': 'player', 'x-dev-role': 'player' };
@@ -185,6 +188,111 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(equipped.status).toBe(200);
     expect(equipped.body.equippedAction).toBeNull();
     expect(equipped.body.equippedActionSource).toBeNull();
+  });
+
+  // ---- review findings (chatgpt-codex-connector, devin, Copilot) ----
+
+  it('an unrelated PATCH to an already-equipped item never derives an action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'unrelated-slot' });
+    // Deliberately removed — "delete the action, re-equip" is the documented reset flow.
+    const removed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: null });
+    expect(removed.body.equippedAction).toBeNull();
+
+    // A notes edit and a qty change are not equip transitions. Before the fix, `nextEquipped`
+    // fell back to `existing.equipped`, so either of these silently brought the action back —
+    // and did it without emitting the invalidation that keeps open encounter cards honest.
+    const noted = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ notes: 'just a note' });
+    expect(noted.status).toBe(200);
+    expect(noted.body.equippedAction).toBeNull();
+    expect(noted.body.equippedActionSource).toBeNull();
+
+    const requantified = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ qtyDelta: 1, idempotencyKey: `derive-guard-${itemId}` });
+    expect(requantified.status).toBe(200);
+    expect(requantified.body.equippedAction).toBeNull();
+  });
+
+  it('re-asserting the same equip state still derives, and still says so', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'reassert-slot' });
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: null });
+
+    // Identical equip state, so `equipChanged` is false — but the action list DOES change,
+    // and the invalidation that keeps open encounter cards honest has to fire anyway.
+    const again = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'reassert-slot' });
+    expect(again.status).toBe(200);
+    expect(again.body.equippedActionSource).toBe('derived');
+    expect(again.body.equippedAction.toHit).toBe('+6');
+  });
+
+  it('editing the numbers rewrites the spec the resolver actually rolls', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'magic-slot' });
+    expect(equipped.body.equippedAction.spec.attack.bonus).toBe('+6');
+
+    // The advertised edit: a +1 weapon. The displayed numbers and the rolled ones must agree —
+    // carrying the old spec through would show +7 and keep rolling +6.
+    const edited = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Longsword +1', kind: 'melee', toHit: '+7', damage: '1d8+4 slashing', targetAc: '', notes: '' } });
+    expect(edited.status).toBe(200);
+    expect(edited.body.equippedAction.spec.attack.bonus).toBe('+7');
+    expect(edited.body.equippedAction.spec.outcomes.hit.damage[0]).toMatchObject({ formula: '1d8', flat: 4, type: 'slashing' });
+  });
+
+  it('derives from the revision this campaign accepted, not an unaccepted upstream one', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+
+    // The installed pack's entry changes upstream. `withCompendiumStates` reports the item as
+    // linked_updated without persisting it, and adopting the new revision is what the explicit
+    // refresh endpoint is for — so equipping must NOT silently pick it up.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(ruleEntries)
+      .set({ dataJson: JSON.stringify({ itemKind: 'weapon', damageDice: '4d12', damageType: 'Force', properties: [] }) })
+      .where(eq(ruleEntries.id, longswordEntryId))
+      .run();
+
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'snapshot-slot' });
+    expect(equipped.status).toBe(200);
+    expect(equipped.body.equippedAction.damage).toContain('1d8+3');
+    expect(equipped.body.equippedAction.damage).not.toContain('4d12');
+  });
+
+  it('restoring a trashed item to the party stash clears the provenance with the action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'trash-slot' });
+
+    // Trash the owning character, then the item, so restore() takes its party fallback.
+    const doomed = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Doomed Owner', level: 1, stats: { STR: 10 } });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ ownerType: 'character', characterId: doomed.body.id, equipped: true, equipSlot: 'trash-slot' });
+    await request(server).delete(`/api/v1/inventory/${itemId}`).set(dm);
+    // Trashing the owner is what makes `restore()` take its party fallback — `validateOwner`
+    // no longer resolves the character (same setup as case 5 of the enumerated clearing spec).
+    const delChar = await request(server).delete(`/api/v1/characters/${doomed.body.id}`).set(dm);
+    expect(delChar.status).toBe(200);
+
+    const restored = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(dm).send({});
+    expect([200, 201]).toContain(restored.status);
+    expect(restored.body.ownerType).toBe('party');
+    expect(restored.body.equippedAction).toBeNull();
+    // redactEquippedActions short-circuits on a null action, so a surviving source would be
+    // published campaign-wide as the origin of an action that no longer exists.
+    expect(restored.body.equippedActionSource).toBeNull();
   });
 
   it('a reader who is neither DM nor owner sees neither the derived action nor its provenance', async () => {

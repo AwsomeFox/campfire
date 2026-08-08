@@ -156,9 +156,24 @@ function weaponProfileFrom(data: unknown): WeaponProfile | null {
   };
 }
 
-/** A named action with prose and no resolvable spec — the honest output when the numbers aren't knowable. */
-function textOnlyAction(itemName: string, desc: string): CharacterAction {
-  return CharacterAction.parse({ name: itemName.slice(0, 120), kind: 'attack', notes: desc.slice(0, 500) });
+/**
+ * A named action with its known damage line, prose, and NO resolvable spec — the honest
+ * output when the numbers aren't knowable.
+ *
+ * Review (Copilot): `damage` is populated whenever a damage line is known, rather than being
+ * left empty with the text buried in `notes`. Action lists render `damage` prominently, so
+ * hiding it there made a text-only row far less useful than the data behind it justified —
+ * and contradicted this module's own claim that a non-5e system still gets a real damage
+ * line, just no derived to-hit. Omitting the SPEC is what makes this text-only; omitting the
+ * damage string was never the point.
+ */
+function textOnlyAction(itemName: string, desc: string, damage = ''): CharacterAction {
+  return CharacterAction.parse({
+    name: itemName.slice(0, 120),
+    kind: 'attack',
+    damage: damage.slice(0, 80),
+    notes: desc.slice(0, 500),
+  });
 }
 
 /**
@@ -186,12 +201,13 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
     // system would opt in later; until one does, borrowing 5e's numbers would be exactly the
     // "silent PF2e math on a 5e fight" the resolver refuses to do, in the other direction.
     if (adapter.id !== 'dnd5e') {
-      const line = [profile.damageDice, profile.damageType].filter(Boolean).join(' ');
+      const line = [profile.damageDice, profile.damageType.toLowerCase()].filter(Boolean).join(' ');
       return textOnlyAction(
         name,
         line
           ? `Equipped weapon — ${line}. Attack bonus is not derived for this rule system; fill it in.`
           : 'Equipped weapon — fill in its attack bonus and damage.',
+        line,
       );
     }
 
@@ -199,12 +215,13 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
       // Untyped damage would silently bypass a target's resistances and immunities in the
       // resolver, and unusable dice would only fail when someone actually rolls it mid-fight.
       // Both are worse than a row that plainly says "finish me".
-      const known = [profile.damageDice, profile.damageType].filter(Boolean).join(' ');
+      const known = [profile.damageDice, profile.damageType.toLowerCase()].filter(Boolean).join(' ');
       return textOnlyAction(
         name,
         known
           ? `Equipped weapon — ${known}. Its damage could not be read as a rollable, typed expression; check it.`
           : 'Equipped weapon — no usable damage on its compendium entry; fill it in.',
+        known,
       );
     }
 
@@ -249,3 +266,51 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
  */
 export const EquippedActionSource = z.enum(['derived', 'manual']);
 export type EquippedActionSource = z.infer<typeof EquippedActionSource>;
+
+/**
+ * Rebuild the structured `spec` of a hand-edited equipped action from its own display fields
+ * (issue #2097 review: chatgpt-codex-connector P1, Copilot).
+ *
+ * The editor exists so a player can fix an assumed proficiency bonus, add a magic weapon's +1,
+ * or correct a damage die. But `ActionResolverService` resolves an attack from the structured
+ * `spec`, NOT from `toHit`/`damage` — so an edit that carried the old spec through displayed
+ * the corrected numbers while continuing to roll the original ones. Silently rolling different
+ * numbers than it shows is the worst failure mode this feature could have had: it is invisible
+ * at the table, and it defeats the single reason the editor was added.
+ *
+ * The contract:
+ *  - A caller who supplies their OWN spec is trusted and untouched — that is the MCP path for
+ *    authoring a rich action (saves, effects, action economy) the five text fields cannot express.
+ *  - Otherwise the spec is rebuilt from `toHit` + `damage` through {@link expandRawStatblockAction},
+ *    the same expander the derivation and every statblock use, so an edited action stays
+ *    resolvable with the numbers the editor actually shows.
+ *  - When those fields can't be read as a bonus and a rollable, typed damage expression, the
+ *    action keeps its text and carries NO spec. Text-only is the correct outcome for input the
+ *    resolver cannot honour — never a stale spec, and never an invented one.
+ *
+ * `name`, `kind`, and `notes` are preserved verbatim: they never feed the roll.
+ */
+export function rebuildEditedActionSpec(edited: CharacterAction, ruleSystem = ''): CharacterAction {
+  if (edited.spec) return edited;
+
+  const bonusMatch = edited.toHit.trim().match(/^([+-]?\d+)$/);
+  // `damage` is the human-facing "1d8+3 slashing" line: dice first, type as the remainder.
+  const damageMatch = edited.damage.trim().match(/^(\d+d\d+(?:\s*[+-]\s*\d+)?)\s+(.+)$/i);
+  const damageType = damageMatch ? damageMatch[2].trim().toLowerCase() : '';
+  if (!bonusMatch || !damageMatch || !damageType || damageType.length > MAX_DAMAGE_TYPE_LENGTH) {
+    return CharacterAction.parse({ ...edited, spec: undefined });
+  }
+
+  const rebuilt = expandRawStatblockAction(
+    {
+      name: edited.name,
+      attackBonus: Number(bonusMatch[1]),
+      damage: [{ expression: damageMatch[1].replace(/\s+/g, ''), type: damageType }],
+      desc: edited.notes,
+    },
+    'attack',
+    ruleSystem,
+  );
+  // The expander owns the spec; everything the human typed is theirs and is kept as typed.
+  return CharacterAction.parse({ ...edited, spec: rebuilt.spec });
+}

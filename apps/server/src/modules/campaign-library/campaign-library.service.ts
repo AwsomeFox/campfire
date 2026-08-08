@@ -499,7 +499,10 @@ export class CampaignLibraryService {
                 .object({ ownerType: z.string(), characterId: z.number().int().nullable() })
                 .parse(tx.get(sql`select owner_type as ownerType, character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`));
               const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
-              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+              // Issue #2097 review (devin): the provenance is written in the same
+              // statement as the action, never left behind describing a null.
+              const keepEquippedActionSource = keepEquippedAction ? (scalar.equippedActionSource ?? null) : null;
+              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
               // Issue #1901 review (chatgpt-codex-connector P2): re-archiving may drop this
               // item's action back out of the owner's merged list — invalidate their cache
               // whenever the owner is a character (harmless extra invalidation if the item
@@ -519,8 +522,11 @@ export class CampaignLibraryService {
                 throw new ConflictException('Undo would re-equip this item into a slot another item now occupies; unequip that item first.');
               }
               const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
+              // Issue #2097 review (devin): the provenance is written in the same
+              // statement as the action, never left behind describing a null.
+              const keepEquippedActionSource = keepEquippedAction ? (scalar.equippedActionSource ?? null) : null;
               tx.run(
-                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
               );
               // Issue #1901 review (chatgpt-codex-connector P2): undoing the archive can
               // restore this item's action into the owner's merged list.
