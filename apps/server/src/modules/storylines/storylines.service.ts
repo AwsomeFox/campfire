@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, max } from 'drizzle-orm';
+import crypto from 'node:crypto';
+import { and, asc, eq, inArray, max } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   StoryArcCreate,
@@ -34,6 +35,15 @@ type StorylineUpdateOptions = {
   expectedUpdatedAt?: string;
   /** Revision authorship may differ from the human who approves and audits a proposal. */
   revisionUser?: RequestUser;
+};
+
+/** Keep multi-beat arc context useful without letting 50k prose fields multiply unboundedly. */
+const ARC_BEAT_BODY_CONTEXT_CHARS = 2_000;
+
+type LinkedPlayContext = {
+  sessions: Map<number, Pick<typeof sessions.$inferSelect, 'id' | 'number' | 'title'>>;
+  quests: Map<number, Pick<typeof quests.$inferSelect, 'id' | 'title' | 'status'>>;
+  encounters: Map<number, Pick<typeof encounters.$inferSelect, 'id' | 'name' | 'status'>>;
 };
 
 function arcToDomain(row: typeof storyArcs.$inferSelect): StoryArc {
@@ -133,6 +143,149 @@ export class StorylinesService {
   async getArcWithBeatsOrThrow(id: number): Promise<StoryArcWithBeats> {
     const row = await this.getArcRowOrThrow(id);
     return { ...arcToDomain(row), beats: await this.beatsForArc(id) };
+  }
+
+  /**
+   * Build the authoritative context used for storyline rewrites. Keeping this in the
+   * domain service lets generation and proposal approval hash the exact same shape,
+   * including child beats, branches, and linked play-record labels.
+   */
+  async getRewriteContext(campaignId: number, target: 'arc' | 'beat', entityId: number) {
+    if (target === 'arc') {
+      const arc = await this.getArcWithBeatsOrThrow(entityId);
+      if (arc.campaignId !== campaignId) {
+        throw new BadRequestException(`Story arc ${entityId} does not belong to this campaign`);
+      }
+      const linkedPlay = await this.loadLinkedPlayContext(arc.beats, campaignId);
+      const providerContext = {
+        target: 'arc' as const,
+        arc: {
+          id: arc.id,
+          title: arc.title,
+          summary: arc.summary,
+          status: arc.status,
+          beats: arc.beats.map((beat) =>
+            this.storyBeatRewriteContext(beat, linkedPlay, ARC_BEAT_BODY_CONTEXT_CHARS),
+          ),
+        },
+      };
+      return {
+        providerContext,
+        contextHash: this.rewriteContextHash(providerContext),
+        baseSnapshot: {
+          id: arc.id,
+          campaignId: arc.campaignId,
+          title: arc.title,
+          summary: arc.summary,
+          status: arc.status,
+          sortOrder: arc.sortOrder,
+          createdAt: arc.createdAt,
+          updatedAt: arc.updatedAt,
+        },
+      };
+    }
+
+    const beat = await this.getBeatWithBranchesOrThrow(entityId);
+    if (beat.campaignId !== campaignId) {
+      throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
+    }
+    const arc = await this.getArcRowOrThrow(beat.arcId);
+    if (arc.campaignId !== campaignId) {
+      throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
+    }
+    const linkedPlay = await this.loadLinkedPlayContext([beat], campaignId);
+    const providerContext = {
+      target: 'beat' as const,
+      arc: { id: arc.id, title: arc.title, summary: arc.summary, status: arc.status },
+      beat: this.storyBeatRewriteContext(beat, linkedPlay),
+    };
+    return {
+      providerContext,
+      contextHash: this.rewriteContextHash(providerContext),
+      baseSnapshot: {
+        id: beat.id,
+        campaignId: beat.campaignId,
+        arcId: beat.arcId,
+        title: beat.title,
+        body: beat.body,
+        status: beat.status,
+        sortOrder: beat.sortOrder,
+        sessionId: beat.sessionId,
+        questId: beat.questId,
+        encounterId: beat.encounterId,
+        createdAt: beat.createdAt,
+        updatedAt: beat.updatedAt,
+      },
+    };
+  }
+
+  /** Resolve all linked play records in at most one query per table, regardless of beat count. */
+  private async loadLinkedPlayContext(
+    beats: StoryBeatWithBranches[],
+    campaignId: number,
+  ): Promise<LinkedPlayContext> {
+    const sessionIds = [...new Set(beats.flatMap((beat) => beat.sessionId == null ? [] : [beat.sessionId]))];
+    const questIds = [...new Set(beats.flatMap((beat) => beat.questId == null ? [] : [beat.questId]))];
+    const encounterIds = [...new Set(beats.flatMap((beat) => beat.encounterId == null ? [] : [beat.encounterId]))];
+    const [sessionRows, questRows, encounterRows] = await Promise.all([
+      sessionIds.length === 0
+        ? Promise.resolve([])
+        : this.db
+            .select({ id: sessions.id, number: sessions.number, title: sessions.title })
+            .from(sessions)
+            .where(and(eq(sessions.campaignId, campaignId), inArray(sessions.id, sessionIds))),
+      questIds.length === 0
+        ? Promise.resolve([])
+        : this.db
+            .select({ id: quests.id, title: quests.title, status: quests.status })
+            .from(quests)
+            .where(and(eq(quests.campaignId, campaignId), inArray(quests.id, questIds))),
+      encounterIds.length === 0
+        ? Promise.resolve([])
+        : this.db
+            .select({ id: encounters.id, name: encounters.name, status: encounters.status })
+            .from(encounters)
+            .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, encounterIds))),
+    ]);
+    return {
+      sessions: new Map(sessionRows.map((row) => [row.id, row])),
+      quests: new Map(questRows.map((row) => [row.id, row])),
+      encounters: new Map(encounterRows.map((row) => [row.id, row])),
+    };
+  }
+
+  private storyBeatRewriteContext(
+    beat: StoryBeatWithBranches,
+    linkedPlay: LinkedPlayContext,
+    bodyLimit?: number,
+  ) {
+    const bodyTruncated = bodyLimit != null && beat.body.length > bodyLimit;
+    const truncationNotice = '\n[truncated for arc rewrite context]';
+    const body = bodyTruncated
+      ? `${beat.body.slice(0, Math.max(0, bodyLimit - truncationNotice.length))}${truncationNotice}`
+      : beat.body;
+    return {
+      id: beat.id,
+      title: beat.title,
+      body,
+      ...(bodyTruncated ? { bodyTruncated: true } : {}),
+      status: beat.status,
+      branches: beat.branches.map((branch) => ({
+        id: branch.id,
+        label: branch.label,
+        toBeatId: branch.toBeatId,
+        sortOrder: branch.sortOrder,
+      })),
+      linkedPlayRecords: {
+        session: beat.sessionId == null ? null : linkedPlay.sessions.get(beat.sessionId) ?? null,
+        quest: beat.questId == null ? null : linkedPlay.quests.get(beat.questId) ?? null,
+        encounter: beat.encounterId == null ? null : linkedPlay.encounters.get(beat.encounterId) ?? null,
+      },
+    };
+  }
+
+  private rewriteContextHash(providerContext: unknown): string {
+    return crypto.createHash('sha256').update(JSON.stringify(providerContext)).digest('hex');
   }
 
   async createArc(campaignId: number, input: StoryArcCreateInput, user: RequestUser, role: Role): Promise<StoryArc> {

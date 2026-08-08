@@ -19,6 +19,7 @@ import {
   StoryArcUpdate,
   StoryBeatProposalCreate,
   StoryBeatUpdate,
+  AiGenerationProvenance,
   ProposalApprove,
   ProposalResolve,
   HomebrewRuleEntryInput,
@@ -354,12 +355,29 @@ export class ProposalsService {
         existing.entityId!,
         role,
       );
+      const provenance = AiGenerationProvenance.nullable()
+        .catch(null)
+        .parse(fromJsonText<unknown>(existing.generationProvenance, null));
+      const isStorylineRewrite =
+        action === 'update' &&
+        (existing.entityType === 'story_arc' || existing.entityType === 'story_beat');
+      const baseContextHash = isStorylineRewrite ? provenance?.sourceContextHash ?? null : null;
+      const currentContextHash =
+        baseContextHash !== null && currentSnapshot !== null && isStorylineRewrite
+          ? (await this.storylines.getRewriteContext(
+              existing.campaignId,
+              existing.entityType === 'story_arc' ? 'arc' : 'beat',
+              existing.entityId!,
+            )).contextHash
+          : null;
       assertProposalTargetFresh({
         action,
         baseSnapshot,
         baseSnapshotHash: existing.baseSnapshotHash ?? null,
         currentSnapshot,
         proposed: action === 'delete' ? null : (validated ?? payload),
+        baseContextHash,
+        currentContextHash,
       });
     }
 

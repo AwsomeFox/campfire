@@ -48,6 +48,20 @@ describe('proposal-snapshot (issue #681)', () => {
     ).not.toThrow();
   });
 
+  it('assertProposalTargetFresh rejects changed rewrite context when the target row still matches', () => {
+    expect(() =>
+      assertProposalTargetFresh({
+        action: 'update',
+        baseSnapshot: base,
+        baseSnapshotHash: hashProposalSnapshot(base),
+        currentSnapshot: { ...base },
+        proposed: { title: 'Changed' },
+        baseContextHash: 'original-context',
+        currentContextHash: 'changed-context',
+      }),
+    ).toThrow('source context changed');
+  });
+
   it('assertProposalTargetFresh throws STALE_PROPOSAL_TARGET with a three-way diff when stale', () => {
     const hash = hashProposalSnapshot(base);
     const current = { ...base, title: 'DM edited', updatedAt: '2026-01-02T00:00:00.000Z' };

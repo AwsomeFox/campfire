@@ -7505,6 +7505,9 @@ export const AiGenerationProvenance = z.object({
   }),
   sourceIds: z.record(z.string(), z.array(z.union([Id, z.string()])).or(Id).or(z.string()).or(z.null())).default({}),
   sourceHash: z.string().nullable().default(null),
+  // Hash of the authoritative domain context supplied to a rewrite model. Approval
+  // revalidates it so changes to dependent source rows cannot land stale AI prose.
+  sourceContextHash: z.string().length(64).nullable().optional(),
   promptVersion: z.string().max(80),
   promptHash: z.string(),
   ruleset: z.object({

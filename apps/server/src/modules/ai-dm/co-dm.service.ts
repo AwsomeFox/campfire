@@ -6,7 +6,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import crypto from 'node:crypto';
-import { and, eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   NpcCreate,
@@ -25,9 +25,9 @@ import {
   StoryArcUpdate,
   ruleSystemAdapter,
 } from '@campfire/schema';
-import type { AiExternalContentPolicy, AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, HomebrewMechanicsProfile, NarrationLanguage, Proposal, Role, RuleSystemAdapter, StoryBeatWithBranches } from '@campfire/schema';
+import type { AiExternalContentPolicy, AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, HomebrewMechanicsProfile, NarrationLanguage, Proposal, Role, RuleSystemAdapter } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, encounters, quests, rulePacks, sessions, storyArcs } from '../../db/schema';
+import { campaigns, rulePacks, storyArcs } from '../../db/schema';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { fromJsonText } from '../../common/json';
@@ -48,16 +48,8 @@ type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
 /** Upper bound on a draft turn's output, before the remaining-budget clamp. */
 const DRAFT_MAX_TOKENS = 4096;
 const CO_DM_PROMPT_VERSION = 'co-dm-draft-v3';
-/** Keep multi-beat arc context useful without letting 50k prose fields multiply unboundedly. */
-const ARC_BEAT_BODY_CONTEXT_CHARS = 2_000;
 /** Roughly 25k tokens before system instructions; larger storylines should be edited beat-by-beat. */
 const STORYLINE_PROVIDER_PROMPT_MAX_CHARS = 100_000;
-
-type LinkedPlayContext = {
-  sessions: Map<number, Pick<typeof sessions.$inferSelect, 'id' | 'number' | 'title'>>;
-  quests: Map<number, Pick<typeof quests.$inferSelect, 'id' | 'title' | 'status'>>;
-  encounters: Map<number, Pick<typeof encounters.$inferSelect, 'id' | 'name' | 'status'>>;
-};
 
 /** Which proposal entity type each co-DM target files under. */
 const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
@@ -148,7 +140,7 @@ export class CoDmService {
       throw new BadRequestException('arcId and count are not used when rewriting an existing storyline entity');
     }
     const edit = editing
-      ? await this.buildStorylineEditContext(campaignId, input.target as 'arc' | 'beat', input.entityId!)
+      ? await this.storylines.getRewriteContext(campaignId, input.target as 'arc' | 'beat', input.entityId!)
       : null;
     const providerPrompt = edit
       ? JSON.stringify({ rewriteInstructions: input.prompt, currentStoryline: edit.providerContext })
@@ -372,6 +364,7 @@ export class CoDmService {
       ruleset: { id: adapter.id, pack: campaign?.ruleSystem || null, version: packVersion },
       campaignPolicy,
       externalSend,
+      sourceContextHash: edit?.contextHash ?? null,
     });
     const attribution = {
       proposer: `AI DM (${modelLabel})`,
@@ -427,141 +420,6 @@ export class CoDmService {
   }
 
   /**
-   * Load authoritative storyline context for an AI rewrite (#1311). The browser sends
-   * only target + id + instructions; this server-side assembly prevents a stale or
-   * tampered client snapshot from becoming the model's source of truth.
-   */
-  private async buildStorylineEditContext(campaignId: number, target: 'arc' | 'beat', entityId: number) {
-    if (target === 'arc') {
-      const arc = await this.storylines.getArcWithBeatsOrThrow(entityId);
-      if (arc.campaignId !== campaignId) {
-        throw new BadRequestException(`Story arc ${entityId} does not belong to this campaign`);
-      }
-      const linkedPlay = await this.loadLinkedPlayContext(arc.beats, campaignId);
-      return {
-        providerContext: {
-          target: 'arc' as const,
-          arc: {
-            id: arc.id,
-            title: arc.title,
-            summary: arc.summary,
-            status: arc.status,
-            beats: arc.beats.map((beat) =>
-              this.storyBeatContext(beat, linkedPlay, ARC_BEAT_BODY_CONTEXT_CHARS),
-            ),
-          },
-        },
-        baseSnapshot: {
-          id: arc.id,
-          campaignId: arc.campaignId,
-          title: arc.title,
-          summary: arc.summary,
-          status: arc.status,
-          sortOrder: arc.sortOrder,
-          createdAt: arc.createdAt,
-          updatedAt: arc.updatedAt,
-        },
-      };
-    }
-
-    const beat = await this.storylines.getBeatWithBranchesOrThrow(entityId);
-    if (beat.campaignId !== campaignId) {
-      throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
-    }
-    const arc = await this.storylines.getArcRowOrThrow(beat.arcId);
-    if (arc.campaignId !== campaignId) {
-      throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
-    }
-    const linkedPlay = await this.loadLinkedPlayContext([beat], campaignId);
-    return {
-      providerContext: {
-        target: 'beat' as const,
-        arc: { id: arc.id, title: arc.title, summary: arc.summary, status: arc.status },
-        beat: this.storyBeatContext(beat, linkedPlay),
-      },
-      baseSnapshot: {
-        id: beat.id,
-        campaignId: beat.campaignId,
-        arcId: beat.arcId,
-        title: beat.title,
-        body: beat.body,
-        status: beat.status,
-        sortOrder: beat.sortOrder,
-        sessionId: beat.sessionId,
-        questId: beat.questId,
-        encounterId: beat.encounterId,
-        createdAt: beat.createdAt,
-        updatedAt: beat.updatedAt,
-      },
-    };
-  }
-
-  /** Resolve all linked play records in at most one query per table, regardless of beat count. */
-  private async loadLinkedPlayContext(
-    beats: StoryBeatWithBranches[],
-    campaignId: number,
-  ): Promise<LinkedPlayContext> {
-    const sessionIds = [...new Set(beats.flatMap((beat) => beat.sessionId == null ? [] : [beat.sessionId]))];
-    const questIds = [...new Set(beats.flatMap((beat) => beat.questId == null ? [] : [beat.questId]))];
-    const encounterIds = [...new Set(beats.flatMap((beat) => beat.encounterId == null ? [] : [beat.encounterId]))];
-    const [sessionRows, questRows, encounterRows] = await Promise.all([
-      sessionIds.length === 0
-        ? Promise.resolve([])
-        : this.db
-            .select({ id: sessions.id, number: sessions.number, title: sessions.title })
-            .from(sessions)
-            .where(and(eq(sessions.campaignId, campaignId), inArray(sessions.id, sessionIds))),
-      questIds.length === 0
-        ? Promise.resolve([])
-        : this.db
-            .select({ id: quests.id, title: quests.title, status: quests.status })
-            .from(quests)
-            .where(and(eq(quests.campaignId, campaignId), inArray(quests.id, questIds))),
-      encounterIds.length === 0
-        ? Promise.resolve([])
-        : this.db
-            .select({ id: encounters.id, name: encounters.name, status: encounters.status })
-            .from(encounters)
-            .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, encounterIds))),
-    ]);
-    return {
-      sessions: new Map(sessionRows.map((row) => [row.id, row])),
-      quests: new Map(questRows.map((row) => [row.id, row])),
-      encounters: new Map(encounterRows.map((row) => [row.id, row])),
-    };
-  }
-
-  private storyBeatContext(
-    beat: StoryBeatWithBranches,
-    linkedPlay: LinkedPlayContext,
-    bodyLimit?: number,
-  ) {
-    const bodyTruncated = bodyLimit != null && beat.body.length > bodyLimit;
-    const truncationNotice = '\n[truncated for arc rewrite context]';
-    const body = bodyTruncated
-      ? `${beat.body.slice(0, Math.max(0, bodyLimit - truncationNotice.length))}${truncationNotice}`
-      : beat.body;
-    return {
-      id: beat.id,
-      title: beat.title,
-      body,
-      ...(bodyTruncated ? { bodyTruncated: true } : {}),
-      status: beat.status,
-      branches: beat.branches.map((branch) => ({
-        id: branch.id,
-        label: branch.label,
-        toBeatId: branch.toBeatId,
-        sortOrder: branch.sortOrder,
-      })),
-      linkedPlayRecords: {
-        session: beat.sessionId == null ? null : linkedPlay.sessions.get(beat.sessionId) ?? null,
-        quest: beat.questId == null ? null : linkedPlay.quests.get(beat.questId) ?? null,
-        encounter: beat.encounterId == null ? null : linkedPlay.encounters.get(beat.encounterId) ?? null,
-      },
-    };
-  }
-
-  /**
    * Issue #1993 — co-DM's member-identifying surface, audited against the #501/#1520
    * standard scribe's `consent` block was built for (see `scribe-consent.ts`).
    *
@@ -604,6 +462,7 @@ export class CoDmService {
     ruleset: { id: string; pack: string | null; version: string | null };
     campaignPolicy: AiExternalContentPolicy;
     externalSend: boolean;
+    sourceContextHash: string | null;
   }): AiGenerationProvenance {
     const promptHash = crypto
       .createHash('sha256')
@@ -622,6 +481,7 @@ export class CoDmService {
       endpoint: { scope: input.endpointScope, baseUrl: input.endpointBaseUrl ?? null },
       sourceIds: { target: input.target },
       sourceHash: crypto.createHash('sha256').update(input.prompt).digest('hex'),
+      sourceContextHash: input.sourceContextHash,
       promptVersion: CO_DM_PROMPT_VERSION,
       promptHash,
       ruleset: input.ruleset,
@@ -740,11 +600,23 @@ export class CoDmService {
         case 'location':
           return LocationCreate.parse(raw) as Record<string, unknown>;
         case 'arc':
+          if (opts?.editing) {
+            if (typeof raw.title !== 'string' || typeof raw.summary !== 'string') {
+              throw new Error('arc rewrite responses must include both title and summary');
+            }
+            return StoryArcUpdate.parse({ title: raw.title, summary: raw.summary }) as Record<string, unknown>;
+          }
           return StoryArcUpdate.parse({
             title: raw.title ?? raw.name ?? 'Untitled arc',
             summary: raw.summary ?? raw.body ?? raw.description ?? '',
           }) as Record<string, unknown>;
         case 'beat':
+          if (opts?.editing) {
+            if (typeof raw.title !== 'string' || typeof raw.body !== 'string') {
+              throw new Error('beat rewrite responses must include both title and body');
+            }
+            return StoryBeatUpdate.parse({ title: raw.title, body: raw.body }) as Record<string, unknown>;
+          }
           return (opts?.editing ? StoryBeatUpdate : StoryBeatProposalCreate).parse({
             title: raw.title ?? raw.name ?? 'Untitled beat',
             body: raw.body ?? raw.summary ?? raw.description ?? '',
@@ -808,8 +680,8 @@ const DRAFT_JSON_SHAPE = (adapter: RuleSystemAdapter): Record<CoDmDraftTarget, s
   npc: '{"name": string (required), "role"?: string, "disposition"?: string, "body"?: string, "dmSecret"?: string}',
   location:
     '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
-  arc: '{"title": string (required), "summary": string (markdown)}',
-  beat: '{"title": string (required), "body"?: string (markdown)}',
+  arc: '{"title": string (required), "summary": string (required, markdown)}',
+  beat: '{"title": string (required), "body": string (required, markdown)}',
   quest:
     '{"title": string (required), "body"?: string (markdown), "reward"?: string, "status"?: "available"|"active"|"completed"|"failed", "dmSecret"?: string}',
   faction:

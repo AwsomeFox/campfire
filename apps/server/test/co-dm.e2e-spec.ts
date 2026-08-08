@@ -204,6 +204,40 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     });
   });
 
+  it('rejects incomplete storyline rewrite responses instead of erasing existing fields', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Complete Arc', summary: 'Keep this summary.' });
+    const beat = await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Complete Beat', body: 'Keep this body.' });
+
+    h.script({ text: JSON.stringify({ summary: 'A summary without its title.' }) });
+    const incompleteArc = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      prompt: 'Rewrite the arc.',
+    });
+    expect(incompleteArc.status).toBe(422);
+    expect(incompleteArc.body.message).toContain('must include both title and summary');
+
+    h.script({ text: JSON.stringify({ title: 'A title without its body' }) });
+    const incompleteBeat = await draft({
+      target: 'beat',
+      entityId: beat.body.id,
+      prompt: 'Rewrite the beat.',
+    });
+    expect(incompleteBeat.status).toBe(422);
+    expect(incompleteBeat.body.message).toContain('must include both title and body');
+
+    const unchangedArc = await request(h.server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+    const unchangedBeat = await request(h.server).get(`/api/v1/beats/${beat.body.id}`).set(dm);
+    expect(unchangedArc.body).toMatchObject({ title: 'Complete Arc', summary: 'Keep this summary.' });
+    expect(unchangedBeat.body).toMatchObject({ title: 'Complete Beat', body: 'Keep this body.' });
+  });
+
   it('rewrites an arc in place with revision history and rejects approval after the target goes stale', async () => {
     const arc = await request(h.server)
       .post(`/api/v1/campaigns/${campaignId}/arcs`)
@@ -302,6 +336,64 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
       .send({});
     expect(staleApprove.status).toBe(409);
     expect(staleApprove.body.code).toBe('STALE_PROPOSAL_TARGET');
+  });
+
+  it('rejects arc rewrite approval when branch or linked-play context changed', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Context Arc', summary: 'The old plan.' });
+    const beat = await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Context Beat', body: 'The party waits.' });
+    const session = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 402, title: 'Context Session' });
+    const linkedBeat = await request(h.server)
+      .patch(`/api/v1/beats/${beat.body.id}`)
+      .set(dm)
+      .send({ sessionId: session.body.id, expectedUpdatedAt: beat.body.updatedAt });
+    expect(linkedBeat.status).toBe(200);
+
+    h.script({ text: JSON.stringify({ title: 'Context Arc Revised', summary: 'A plan based on the current branch.' }) });
+    const branchProposal = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      prompt: 'Rewrite around the available choices.',
+    });
+    expect(branchProposal.body.proposals[0].generationProvenance.sourceContextHash).toMatch(/^[a-f0-9]{64}$/);
+
+    const branch = await request(h.server)
+      .post(`/api/v1/beats/${beat.body.id}/branches`)
+      .set(dm)
+      .send({ label: 'Take the hidden road' });
+    expect(branch.status).toBe(201);
+    const branchStale = await request(h.server)
+      .post(`/api/v1/proposals/${branchProposal.body.proposalIds[0]}/approve`)
+      .set(dm)
+      .send({});
+    expect(branchStale.status).toBe(409);
+    expect(branchStale.body.code).toBe('STALE_PROPOSAL_TARGET');
+
+    h.script({ text: JSON.stringify({ title: 'Context Arc Revised', summary: 'A plan based on the linked session.' }) });
+    const linkedProposal = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      prompt: 'Rewrite around the linked play record.',
+    });
+    const sessionChanged = await request(h.server)
+      .patch(`/api/v1/sessions/${session.body.id}`)
+      .set(dm)
+      .send({ title: 'Context Session Changed', expectedUpdatedAt: session.body.updatedAt });
+    expect(sessionChanged.status).toBe(200);
+    const linkedStale = await request(h.server)
+      .post(`/api/v1/proposals/${linkedProposal.body.proposalIds[0]}/approve`)
+      .set(dm)
+      .send({});
+    expect(linkedStale.status).toBe(409);
+    expect(linkedStale.body.code).toBe('STALE_PROPOSAL_TARGET');
   });
 
   it('rejects an oversized arc rewrite context before calling the provider', async () => {
