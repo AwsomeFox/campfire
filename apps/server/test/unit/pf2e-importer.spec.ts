@@ -1,5 +1,5 @@
 import { fetchPf2eSection, fetchSf2eSection, entryTypeForSection, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
-import { startFakePf2e, startFakePf2eDuplicates, startFakePf2eMixed, type FakePf2e } from '../fake-pf2e';
+import { startFakePf2e, startFakePf2eDuplicates, startFakePf2eLosesRows, startFakePf2eMixed, type FakePf2e } from '../fake-pf2e';
 
 /**
  * Unit tests for the PF2e importer (issue #295) against the fake AoN Elasticsearch source
@@ -329,5 +329,76 @@ describe('pf2e-importer — mixed-row source-type guard (issue #326)', () => {
 describe('pf2e-importer — license fallback', () => {
   it('exports a sane OGL/ORC default license', () => {
     expect(PF2E_DEFAULT_LICENSE).toMatch(/OGL|ORC/);
+  });
+});
+
+/**
+ * Paging integrity. These two properties are what stand between a scan that quietly loses
+ * rows and `rules.service` DELETING the installed entries missing from that scan (and
+ * severing their combatant references) — see `manifestIsComplete`/`completeManifestOptions`.
+ */
+describe('pf2e-importer — paging integrity', () => {
+  it('pages inside a point-in-time snapshot so a mid-scan index refresh cannot move the cursor', async () => {
+    const fake = await startFakePf2e();
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      let body: Record<string, unknown> = {};
+      try {
+        body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
+      } catch {
+        body = {};
+      }
+      requests.push({ path: new URL(url).pathname, body });
+      return realFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const { entries } = await fetchPf2eSection(fake.baseUrl, 'conditions', silentLogger);
+      expect(entries.length).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = realFetch;
+      await fake.close();
+    }
+
+    // Opened a PIT, searched it with no index in the path, sorted on `_shard_doc` (which
+    // exists only inside a PIT), asked for an exact total, and released the snapshot.
+    expect(requests.some((r) => r.path === '/aon/_pit')).toBe(true);
+    const search = requests.find((r) => r.path === '/_search');
+    expect(search).toBeDefined();
+    expect(search!.body.pit).toMatchObject({ id: 'pit-aon' });
+    expect(search!.body.sort).toEqual([{ _shard_doc: 'asc' }]);
+    expect(search!.body.track_total_hits).toBe(true);
+    expect(requests.some((r) => r.path === '/_pit')).toBe(true);
+  });
+
+  it.each([true, false])(
+    'refuses to call a row-losing scan complete (point-in-time available: %s)',
+    async (withPit) => {
+      const fake = await startFakePf2eLosesRows({ withPit });
+      try {
+        const result = await fetchPf2eSection(fake.baseUrl, 'conditions', silentLogger);
+        // Two rows served against a reported total of three. Nothing was malformed and
+        // nothing hit a cap, so without the row-count check this fetch would look complete
+        // and authorise removing whatever the third row was.
+        expect(result.entries).toHaveLength(2);
+        expect(result.skippedCount).toBe(0);
+        expect(result.truncated).toBe(true);
+      } finally {
+        await fake.close();
+      }
+    },
+  );
+
+  it('still imports when the endpoint offers no point-in-time snapshot', async () => {
+    // A mirror or an older Elasticsearch: degrade to plain `_doc` paging rather than fail.
+    const fake = await startFakePf2eLosesRows({ withPit: false });
+    try {
+      const { entries } = await fetchPf2eSection(fake.baseUrl, 'conditions', silentLogger);
+      expect(entries.map((e) => e.name).sort()).toEqual(['Frightened', 'Prone']);
+    } finally {
+      await fake.close();
+    }
   });
 });

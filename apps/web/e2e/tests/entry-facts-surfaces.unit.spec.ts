@@ -18,16 +18,23 @@ const reader = readFileSync(resolve(__dirname, '../../src/features/compendium/Re
 const rulesLookup = readFileSync(resolve(__dirname, '../../src/features/encounters/RulesLookupPanel.tsx'), 'utf8');
 const inventoryShared = readFileSync(resolve(__dirname, '../../src/features/inventory/inventoryShared.tsx'), 'utf8');
 
+const combatantStatblock = readFileSync(
+  resolve(__dirname, '../../src/features/encounters/combat/CombatantStatblock.tsx'),
+  'utf8',
+);
+
 const SURFACES: Array<[string, string]> = [
   ['compendium reader', reader],
   ['encounter rules lookup', rulesLookup],
   ['inventory row + compendium picker', inventoryShared],
+  ['in-combat statblock', combatantStatblock],
 ];
 
 test.describe('non-creature entry stats are rendered wherever an item is read', () => {
   for (const [name, source] of SURFACES) {
     test(`${name} renders EntryFacts from dataJson`, () => {
-      expect(source).toContain("from '../../components/EntryFacts'");
+      // Depth-agnostic: these files sit at different nesting levels under src/features.
+      expect(source).toMatch(/from '(?:\.\.\/)+components\/EntryFacts'/);
       expect(source).toContain('hasEntryFacts(');
       expect(source).toContain('<EntryFacts');
     });
@@ -46,10 +53,6 @@ test.describe('non-creature entry stats are rendered wherever an item is read', 
     // every item, spell and feat. A surface that gates a creature-only view on it hides the
     // fact list from exactly the entries that need it. `entryRendersMonsterStatblock`
     // additionally requires `type === 'monster'`; these surfaces must use only that.
-    const combatantStatblock = readFileSync(
-      resolve(__dirname, '../../src/features/encounters/combat/CombatantStatblock.tsx'),
-      'utf8',
-    );
     for (const source of [reader, rulesLookup, combatantStatblock]) {
       expect(source).toContain('entryRendersMonsterStatblock(');
       // The bare predicate must not appear outside the entry-aware wrapper's own name.
@@ -71,5 +74,23 @@ test.describe('non-creature entry stats are rendered wherever an item is read', 
 
   test('the compendium picker previews the highlighted entry stats before acquiring', () => {
     expect(inventoryShared).toContain('hasEntryFacts(selectedEntry.dataJson)');
+  });
+
+  test('a hazard combatant still gets a structured view in encounters', () => {
+    // AddCombatantPanel searches for and accepts `hazard` entries as well as `monster`, so
+    // gating the in-combat panel on `type === 'monster'` alone would leave every hazard
+    // showing "No statblock details for this entry."
+    const addPanel = readFileSync(resolve(__dirname, '../../src/features/encounters/combat/AddCombatantPanel.tsx'), 'utf8');
+    expect(addPanel).toContain("['monster', 'hazard']");
+    expect(combatantStatblock).toMatch(/entry && hasEntryFacts\(entry\.dataJson\) \? \(/);
+  });
+
+  test('the picker preview is height-bounded so the Add button stays reachable', () => {
+    // The modal card is `max-h-[85vh] overflow-hidden` and the results list holds a
+    // `min-h-[200px]` floor, so it cannot shrink to absorb a tall preview. An unbounded
+    // stat block would push the owner/quantity fields and the Add button out of the card
+    // with nothing scrollable to reach them.
+    expect(inventoryShared).toMatch(/max-h-\[\d+vh\] overflow-y-auto[^>]*compendium-picker-stats/s);
+    expect(inventoryShared).toContain('max-h-[85vh]');
   });
 });

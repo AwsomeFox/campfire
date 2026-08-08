@@ -196,6 +196,8 @@ interface AonHit {
 }
 interface AonPage {
   hits?: { total?: { value?: number } | number; hits?: AonHit[] };
+  /** Refreshed point-in-time id; a PIT search may hand back a new one to carry forward. */
+  pit_id?: unknown;
 }
 
 function asString(v: unknown): string {
@@ -931,23 +933,89 @@ async function fetchPageWithRetry(
   throw lastErr ?? new Error('unknown fetch failure');
 }
 
+/** How long AoN should hold the paging snapshot open between our page requests. */
+const PIT_KEEP_ALIVE = '2m';
+
 /**
- * One `_search` request body. Two deliberate choices, both learned from the live index:
+ * Opens a point-in-time snapshot to page against, or null if the endpoint does not offer
+ * one (a mirror, or an older Elasticsearch).
  *
- *  - `sort: [{_doc: 'asc'}]` + `search_after` instead of `from`/`size`. AoN enforces the
- *    Elasticsearch default `max_result_window` of 10 000, so `from` paging simply 400s past
- *    that — and PF2e's `type:item` holds ~11.1k rows. Worse, the default relevance order is
- *    not a total order, so deep `from` paging over tied scores can repeat and skip rows.
- *    `_doc` is a stable total order on this single-shard index and has no window limit.
- *  - a POST body rather than the `q=` URL param, because `search_after` is body-only.
+ * WHY A SNAPSHOT AND NOT JUST `search_after`. `_doc` is an internal Lucene position, stable
+ * only within one searcher: if AoN refreshes or merges segments between two of our page
+ * requests, a cursor from the previous request no longer denotes the same position, and the
+ * scan can silently skip rows. That is not merely lossy — a scan that loses rows still ends
+ * on a short page with `truncated === false` and `skippedCount === 0`, which is exactly the
+ * shape `manifestIsComplete` in rules.service reads as "this fetch is the whole pack", and
+ * removal would then delete the skipped-over entries and sever their combatant references.
+ *
+ * A PIT pins one searcher for the whole scan, so `_shard_doc` cursors stay meaningful.
+ * `verifyScanWasComplete` below is the independent second line of defence for the case
+ * where no PIT is available.
  */
-function searchBody(aonType: string, searchAfter: unknown[] | null): string {
+async function openPit(
+  base: string,
+  index: string,
+  section: Pf2eSection,
+  logger: Pf2eImportLogger,
+  logPrefix: string,
+): Promise<string | null> {
+  try {
+    const res = await fetchWithTimeout(`${base}/${index}/_pit?keep_alive=${PIT_KEEP_ALIVE}`, '');
+    if (!res.ok) {
+      logger.warn(
+        `${logPrefix} section "${section}": point-in-time snapshot unavailable (HTTP ${res.status}) — paging without one; a mid-scan index refresh will be caught by the row-count check instead`,
+      );
+      return null;
+    }
+    const body = (await res.json()) as { id?: unknown };
+    return typeof body.id === 'string' && body.id ? body.id : null;
+  } catch (err) {
+    logger.warn(`${logPrefix} section "${section}": could not open a point-in-time snapshot (${(err as Error).message}) — paging without one`);
+    return null;
+  }
+}
+
+/** Best-effort release of the snapshot. Never fails the import — PITs also expire on their own. */
+async function closePit(base: string, pitId: string, logger: Pf2eImportLogger, logPrefix: string): Promise<void> {
+  try {
+    await fetch(`${base}/_pit`, {
+      method: 'DELETE',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ id: pitId }),
+    });
+  } catch (err) {
+    logger.warn(`${logPrefix}: failed to release the point-in-time snapshot (${(err as Error).message}) — it will expire on its own`);
+  }
+}
+
+/**
+ * One `_search` request body. The deliberate choices, all learned from the live index:
+ *
+ *  - `search_after` instead of `from`/`size`. AoN enforces the Elasticsearch default
+ *    `max_result_window` of 10 000, so `from` paging simply 400s past that — and PF2e's
+ *    `type:item` holds ~11.1k rows. Worse, the default relevance order is not a total
+ *    order, so deep `from` paging over tied scores can repeat and skip rows.
+ *  - a POST body rather than the `q=` URL param, because `search_after` is body-only.
+ *  - `_shard_doc` when paging inside a PIT (it exists only there), `_doc` otherwise.
+ *  - `track_total_hits` so the reported total is exact rather than capped at 10 000;
+ *    {@link verifyScanWasComplete} compares against it.
+ */
+function searchBody(aonType: string, searchAfter: unknown[] | null, pitId: string | null): string {
   return JSON.stringify({
     size: PAGE_SIZE,
-    sort: [{ _doc: 'asc' }],
+    sort: [pitId ? { _shard_doc: 'asc' } : { _doc: 'asc' }],
     query: { query_string: { query: `type:${aonType}` } },
+    track_total_hits: true,
+    ...(pitId ? { pit: { id: pitId, keep_alive: PIT_KEEP_ALIVE } } : {}),
     ...(searchAfter ? { search_after: searchAfter } : {}),
   });
+}
+
+function totalOf(page: AonPage): number {
+  const total = page.hits?.total;
+  if (typeof total === 'number') return total;
+  if (total && typeof total === 'object' && typeof total.value === 'number') return total.value;
+  return 0;
 }
 
 /**
@@ -966,7 +1034,6 @@ export async function fetchPf2eSection(
   const aonType = SECTION_TO_AON_TYPE[section];
   const mapper = SECTION_MAPPER[section];
   const base = baseUrl.replace(/\/$/, '');
-  const url = `${base}/${index}/_search`;
   const logPrefix = `[${systemLabel.toLowerCase()}-importer]`;
   // De-dupe same-name rows to one canonical entry per (name, type): a section is a single
   // type, so a lowercased name is the (name, type) key. First-seen wins (stable order).
@@ -976,93 +1043,123 @@ export async function fetchPf2eSection(
   let dedupedCount = 0;
   let searchAfter: unknown[] | null = null;
   let pagesFetched = 0;
+  // Rows the source actually handed us, counted BEFORE de-duping/skipping so it can be
+  // compared against the reported total to prove nothing was paged over.
+  let rowsSeen = 0;
+  let reportedTotal = 0;
 
-  for (;;) {
-    if (byName.size >= MAX_ENTRIES_PER_SECTION) {
-      logger.warn(`${logPrefix} section "${section}": hit entry cap (${MAX_ENTRIES_PER_SECTION}) — stopping`);
-      // Truncation, NOT a dropped row: tracked on its own flag so the skip count keeps meaning
-      // "rows discarded" while rules.service's manifestIsComplete() still sees that this fetch
-      // may have left entries behind and must not authorise deletion. The entry cap used to
-      // exit the loop silently, so a capped section was reported as a COMPLETE manifest.
-      truncated = true;
-      break;
-    }
-    if (pagesFetched >= MAX_PAGES_PER_SECTION) {
-      logger.warn(`${logPrefix} section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
-      truncated = true;
-      break;
-    }
-    pagesFetched += 1;
-    let res: Response;
-    try {
-      res = await fetchPageWithRetry(url, searchBody(aonType, searchAfter), section, logger, systemLabel);
-    } catch (err) {
-      throw new BadRequestException(`Failed to fetch ${systemLabel} section "${section}" from ${url}: ${(err as Error).message}`);
-    }
-    if (!res.ok) {
-      throw new BadRequestException(`${systemLabel} section "${section}" returned HTTP ${res.status} for ${url}`);
-    }
-    let page: AonPage;
-    try {
-      page = (await res.json()) as AonPage;
-    } catch (err) {
-      throw new BadRequestException(`${systemLabel} section "${section}" returned invalid JSON: ${(err as Error).message}`);
-    }
-    const hits = page.hits?.hits;
-    if (!Array.isArray(hits)) {
-      throw new BadRequestException(`${systemLabel} section "${section}" response missing "hits.hits" array (unexpected shape)`);
-    }
-    if (hits.length === 0) break; // exhausted
+  // A PIT pins one searcher for the whole scan; without it a mid-scan refresh can move the
+  // cursor's meaning underneath us. Searching a PIT takes no index in the path.
+  let pitId = await openPit(base, index, section, logger, logPrefix);
+  const url = pitId ? `${base}/_search` : `${base}/${index}/_search`;
 
-    for (const hit of hits) {
-      let entry: ImportedEntry;
-      try {
-        const src = hit?._source;
-        if (!src || typeof src !== 'object') throw new Error('missing _source');
-        // Guard the AoN `type` filter: some indices return mixed rows for a broad `q`.
-        // Compare the SOURCE row's declared type against the section's AoN type — the
-        // mapped entry.type is a per-section constant, so comparing it to the
-        // section's own entry type (also derived from the section) never fires.
-        // CASE-INSENSITIVE: live AoN `_source.type` is capitalized ('Spell', 'Item', …)
-        // while the q=type:x match works on the lowercased analyzed token — a
-        // case-sensitive compare here skipped EVERY row (0-entry imports).
-        if (asString((src as Record<string, unknown>).type).toLowerCase() !== aonType.toLowerCase()) {
-          skippedCount += 1;
-          continue;
-        }
-        // Preserve the open-rules boundary: never ingest adventure/scenario/story books.
-        if (isAdventureSource(src as Record<string, unknown>)) {
-          skippedCount += 1;
-          continue;
-        }
-        entry = mapper(src as Record<string, unknown>);
-        if (!entry.name) throw new Error('missing name');
-      } catch {
-        skippedCount += 1;
-        continue;
-      }
-      const key = entry.name.trim().toLowerCase();
-      if (byName.has(key)) {
-        dedupedCount += 1;
-        continue;
-      }
-      if (byName.size >= MAX_ENTRIES_PER_SECTION) break;
-      byName.set(key, entry);
-    }
-
-    // Advance the cursor to the last hit of this page. A page whose final hit carries no
-    // `sort` array cannot be paged past — stop rather than re-request page one forever.
-    const cursor = hits[hits.length - 1]?.sort;
-    if (!Array.isArray(cursor) || cursor.length === 0) {
-      if (hits.length >= PAGE_SIZE) {
-        logger.warn(`${logPrefix} section "${section}": response carries no sort cursor — stopping after ${byName.size} entries`);
+  try {
+    for (;;) {
+      if (byName.size >= MAX_ENTRIES_PER_SECTION) {
+        logger.warn(`${logPrefix} section "${section}": hit entry cap (${MAX_ENTRIES_PER_SECTION}) — stopping`);
+        // Truncation, NOT a dropped row: tracked on its own flag so the skip count keeps meaning
+        // "rows discarded" while rules.service's manifestIsComplete() still sees that this fetch
+        // may have left entries behind and must not authorise deletion. The entry cap used to
+        // exit the loop silently, so a capped section was reported as a COMPLETE manifest.
         truncated = true;
+        break;
       }
-      break;
+      if (pagesFetched >= MAX_PAGES_PER_SECTION) {
+        logger.warn(`${logPrefix} section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
+        truncated = true;
+        break;
+      }
+      pagesFetched += 1;
+      let res: Response;
+      try {
+        res = await fetchPageWithRetry(url, searchBody(aonType, searchAfter, pitId), section, logger, systemLabel);
+      } catch (err) {
+        throw new BadRequestException(`Failed to fetch ${systemLabel} section "${section}" from ${url}: ${(err as Error).message}`);
+      }
+      if (!res.ok) {
+        throw new BadRequestException(`${systemLabel} section "${section}" returned HTTP ${res.status} for ${url}`);
+      }
+      let page: AonPage;
+      try {
+        page = (await res.json()) as AonPage;
+      } catch (err) {
+        throw new BadRequestException(`${systemLabel} section "${section}" returned invalid JSON: ${(err as Error).message}`);
+      }
+      const hits = page.hits?.hits;
+      if (!Array.isArray(hits)) {
+        throw new BadRequestException(`${systemLabel} section "${section}" response missing "hits.hits" array (unexpected shape)`);
+      }
+      // Carry forward the refreshed snapshot id when the search hands one back.
+      if (typeof page.pit_id === 'string' && page.pit_id) pitId = page.pit_id;
+      if (pagesFetched === 1) reportedTotal = totalOf(page);
+      if (hits.length === 0) break; // exhausted
+      rowsSeen += hits.length;
+
+      for (const hit of hits) {
+        let entry: ImportedEntry;
+        try {
+          const src = hit?._source;
+          if (!src || typeof src !== 'object') throw new Error('missing _source');
+          // Guard the AoN `type` filter: some indices return mixed rows for a broad `q`.
+          // Compare the SOURCE row's declared type against the section's AoN type — the
+          // mapped entry.type is a per-section constant, so comparing it to the
+          // section's own entry type (also derived from the section) never fires.
+          // CASE-INSENSITIVE: live AoN `_source.type` is capitalized ('Spell', 'Item', …)
+          // while the q=type:x match works on the lowercased analyzed token — a
+          // case-sensitive compare here skipped EVERY row (0-entry imports).
+          if (asString((src as Record<string, unknown>).type).toLowerCase() !== aonType.toLowerCase()) {
+            skippedCount += 1;
+            continue;
+          }
+          // Preserve the open-rules boundary: never ingest adventure/scenario/story books.
+          if (isAdventureSource(src as Record<string, unknown>)) {
+            skippedCount += 1;
+            continue;
+          }
+          entry = mapper(src as Record<string, unknown>);
+          if (!entry.name) throw new Error('missing name');
+        } catch {
+          skippedCount += 1;
+          continue;
+        }
+        const key = entry.name.trim().toLowerCase();
+        if (byName.has(key)) {
+          dedupedCount += 1;
+          continue;
+        }
+        if (byName.size >= MAX_ENTRIES_PER_SECTION) break;
+        byName.set(key, entry);
+      }
+
+      // Advance the cursor to the last hit of this page. A page whose final hit carries no
+      // `sort` array cannot be paged past — stop rather than re-request page one forever.
+      const cursor = hits[hits.length - 1]?.sort;
+      if (!Array.isArray(cursor) || cursor.length === 0) {
+        if (hits.length >= PAGE_SIZE) {
+          logger.warn(`${logPrefix} section "${section}": response carries no sort cursor — stopping after ${byName.size} entries`);
+          truncated = true;
+        }
+        break;
+      }
+      searchAfter = cursor;
+      // A short page means the index is exhausted.
+      if (hits.length < PAGE_SIZE) break;
     }
-    searchAfter = cursor;
-    // A short page means the index is exhausted.
-    if (hits.length < PAGE_SIZE) break;
+  } finally {
+    if (pitId) await closePit(base, pitId, logger, logPrefix);
+  }
+
+  // Independent proof that the scan saw every row, whatever the paging mechanism did. A
+  // scan that silently paged over rows otherwise ends looking IDENTICAL to a complete one
+  // — short final page, nothing skipped, not truncated — and that is precisely the shape
+  // rules.service's manifestIsComplete() reads as authority to DELETE installed entries
+  // that are missing from the fetch. Fail closed: fewer rows than the source reported
+  // means this fetch cannot prove it is the whole pack.
+  if (!truncated && reportedTotal > 0 && rowsSeen < reportedTotal) {
+    logger.warn(
+      `${logPrefix} section "${section}": saw ${rowsSeen} of ${reportedTotal} reported rows — the scan lost rows (index refreshed mid-scan?); marking the manifest incomplete so nothing is removed`,
+    );
+    truncated = true;
   }
 
   const entries = [...byName.values()];

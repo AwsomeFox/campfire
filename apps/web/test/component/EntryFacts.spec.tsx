@@ -178,3 +178,67 @@ describe('creature-statblock gate vs. non-creature entries', () => {
     expect(factValue('Damage')).toBe('1d8 S');
   });
 });
+
+/**
+ * Structured values the fact list cannot render as one line.
+ *
+ * A flattener that emits what it understands and returns '' for the rest looks correct on
+ * the data it was written against while quietly discarding everything else — and this
+ * component replaced the inventory card's raw-JSON disclosure, so a dropped value became
+ * unreachable from every surface. Datasworn asset entries are the live case: `controls`
+ * nests four levels (`integrity → controls → battered → …`).
+ */
+describe('EntryFacts — values too structured for a fact line', () => {
+  // Trimmed from the real Starforged "Starship" asset as the importer stores it.
+  const DATASWORN_ASSET = {
+    category: 'Command Vehicle',
+    shared: true,
+    controls: {
+      integrity: {
+        label: 'integrity',
+        field_type: 'condition_meter',
+        min: 0,
+        max: 5,
+        controls: { battered: { label: 'battered', field_type: 'checkbox', value: false } },
+      },
+    },
+  };
+
+  test('keeps them reachable as raw data instead of dropping them', () => {
+    render(<EntryFacts data={DATASWORN_ASSET} />);
+    // The flat facts still render normally…
+    expect(factValue('Category')).toBe('Command Vehicle');
+    expect(factValue('Shared')).toBe('Yes');
+    // …and the nested structure is present rather than silently gone.
+    const raw = screen.getByTestId('entry-facts-raw');
+    expect(raw.textContent).toContain('battered');
+    expect(raw.textContent).toContain('condition_meter');
+    expect(JSON.parse(raw.textContent!)).toEqual({ controls: DATASWORN_ASSET.controls });
+  });
+
+  test('reports them through parseEntryFacts rather than folding them into facts', () => {
+    const parsed = parseEntryFacts(DATASWORN_ASSET)!;
+    expect(parsed.facts.map((f) => f.key)).toEqual(['category', 'shared']);
+    expect(Object.keys(parsed.complex)).toEqual(['controls']);
+  });
+
+  test('an entry whose ONLY content is structured still renders something', () => {
+    // Previously this produced a null parse and the caller fell through to
+    // "No details available" while the data sat in dataJson.
+    expect(hasEntryFacts({ controls: DATASWORN_ASSET.controls })).toBe(true);
+    render(<EntryFacts data={{ controls: DATASWORN_ASSET.controls }} />);
+    expect(screen.getByTestId('entry-facts-raw')).toBeTruthy();
+  });
+
+  test('a list of objects is kept whole, not flattened to its scalar crumbs', () => {
+    const parsed = parseEntryFacts({ price: '1 gp', stages: [{ stage: 1, effect: 'weakened' }] })!;
+    expect(parsed.facts.map((f) => f.key)).toEqual(['price']);
+    expect(parsed.complex).toEqual({ stages: [{ stage: 1, effect: 'weakened' }] });
+  });
+
+  test('one level of scalar nesting stays inline — it reads fine and needs no disclosure', () => {
+    const parsed = parseEntryFacts({ saves: { fortitude: 9, reflex: -1 } })!;
+    expect(parsed.complex).toEqual({});
+    expect(parsed.facts[0].value).toBe('fortitude +9, reflex -1');
+  });
+});

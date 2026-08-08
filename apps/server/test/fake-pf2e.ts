@@ -418,7 +418,10 @@ function searchAfterOf(req: { body?: unknown }): number {
 function aonPage(rows: Array<Record<string, unknown>>, req: { body?: unknown }, size = 500) {
   const after = searchAfterOf(req);
   const slice = rows.slice(after + 1, after + 1 + size);
+  const body = req.body as { pit?: { id?: unknown } } | undefined;
   return {
+    // Echoing `pit_id` back mirrors a real PIT search; the importer carries it forward.
+    ...(typeof body?.pit?.id === 'string' ? { pit_id: body.pit.id } : {}),
     hits: {
       total: { value: rows.length },
       hits: slice.map((src, i) => ({ _id: src.id, _source: src, sort: [after + 1 + i] })),
@@ -426,11 +429,24 @@ function aonPage(rows: Array<Record<string, unknown>>, req: { body?: unknown }, 
   };
 }
 
+/**
+ * Point-in-time endpoints. The importer opens a PIT per section so a mid-scan index refresh
+ * cannot move its cursors, and searches a PIT with NO index in the path — reproduce both
+ * here so tests exercise the path production takes rather than only the fallback.
+ */
+function mountPit(app: express.Express, indices: string[]) {
+  for (const index of indices) {
+    app.post(`/${index}/_pit`, (_req, res) => res.json({ id: `pit-${index}` }));
+  }
+  app.delete('/_pit', (_req, res) => res.json({ succeeded: true, num_freed: 1 }));
+}
+
 export async function startFakePf2e(): Promise<FakePf2e> {
   const app = express();
   app.use(express.json());
 
-  app.post(['/aon/_search', '/aonsf/_search'], (req, res) => {
+  mountPit(app, ['aon', 'aonsf']);
+  app.post(['/aon/_search', '/aonsf/_search', '/_search'], (req, res) => {
     const type = parseType(req);
     res.json(aonPage(BY_TYPE[type] ?? [], req, Number((req.body as { size?: number })?.size ?? 500) || 500));
   });
@@ -465,7 +481,8 @@ export async function startFakePf2e(): Promise<FakePf2e> {
 export async function startFakePf2eMixed(): Promise<FakePf2e> {
   const app = express();
   app.use(express.json());
-  app.post('/aon/_search', (req, res) => {
+  mountPit(app, ['aon']);
+  app.post(['/aon/_search', '/_search'], (req, res) => {
     const type = parseType(req);
     if (type !== 'background') {
       res.json(aonPage([], req));
@@ -510,7 +527,8 @@ export async function startFakePf2eMixed(): Promise<FakePf2e> {
 export async function startFakePf2eDuplicates(): Promise<FakePf2e> {
   const app = express();
   app.use(express.json());
-  app.post('/aon/_search', (req, res) => {
+  mountPit(app, ['aon']);
+  app.post(['/aon/_search', '/_search'], (req, res) => {
     const type = parseType(req);
     if (type !== 'creature') {
       res.json(aonPage([], req));
@@ -559,7 +577,8 @@ export async function startFakePf2eDuplicates(): Promise<FakePf2e> {
 export async function startFakePf2eCrossSection(): Promise<FakePf2e> {
   const app = express();
   app.use(express.json());
-  app.post('/aon/_search', (req, res) => {
+  mountPit(app, ['aon']);
+  app.post(['/aon/_search', '/_search'], (req, res) => {
     const type = parseType(req);
     if (type === 'feat') {
       // Same `id` as the background below -> same slug ('cleave'); both map to entry
@@ -583,6 +602,54 @@ export async function startFakePf2eCrossSection(): Promise<FakePf2e> {
 
   return {
     baseUrl,
+    server,
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}
+
+/**
+ * Fake AoN that reproduces a scan LOSING rows: it reports a total of 3 but only ever serves
+ * 2. That is what a mid-scan index refresh looks like from the importer's side — the scan
+ * ends on a short page having skipped nothing and truncated nothing, which is byte-for-byte
+ * the shape `manifestIsComplete` reads as "this fetch is the whole pack" and acts on by
+ * DELETING installed entries missing from it. The importer must instead notice the row
+ * shortfall and mark the manifest incomplete.
+ *
+ * `withPit: false` additionally drops the point-in-time endpoints, so this doubles as the
+ * fallback-path fixture: the importer must degrade to plain `_doc` paging, not fail.
+ */
+export async function startFakePf2eLosesRows({ withPit }: { withPit: boolean }): Promise<FakePf2e> {
+  const app = express();
+  app.use(express.json());
+  if (withPit) mountPit(app, ['aon']);
+  app.post(['/aon/_search', '/_search'], (req, res) => {
+    if (parseType(req) !== 'condition') {
+      res.json({ hits: { total: { value: 0 }, hits: [] } });
+      return;
+    }
+    const after = searchAfterOf(req);
+    const rows = [
+      { id: 'frightened', name: 'Frightened', type: 'Condition', text: 'Gripped by fear.', source: ['Player Core'] },
+      { id: 'prone', name: 'Prone', type: 'Condition', text: 'Lying on the ground.', source: ['Player Core'] },
+    ];
+    const slice = rows.slice(after + 1);
+    res.json({
+      // Reports THREE rows but only ever serves two — one was paged over.
+      hits: { total: { value: 3 }, hits: slice.map((src, i) => ({ _id: src.id, _source: src, sort: [after + 1 + i] })) },
+    });
+  });
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
     server,
     close() {
       return new Promise((resolve, reject) => {

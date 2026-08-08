@@ -25,6 +25,11 @@ export interface EntryFact {
 export interface ParsedEntryFacts {
   facts: EntryFact[];
   traits: string[];
+  /**
+   * Keys whose values are too structured to render as a fact line, kept verbatim so the
+   * data stays reachable rather than being silently discarded. See {@link FormattedValue}.
+   */
+  complex: Record<string, unknown>;
 }
 
 /**
@@ -173,31 +178,73 @@ function formatSpeedMap(value: Record<string, unknown>): string {
   return parts.join(', ');
 }
 
-function formatValue(key: string, value: unknown): string {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (typeof value === 'number') return SIGNED_KEYS.has(key) ? signed(value) : String(value);
-  if (typeof value === 'string') return value.trim();
+/**
+ * The outcome of trying to render one value as a fact line.
+ *
+ * `lossless` is the important half. A flattener that renders what it understands and
+ * silently returns '' for the rest looks correct on the data it was written against and
+ * quietly discards everything else — and this component replaced the inventory card's raw
+ * JSON disclosure, so "discarded here" meant "unreachable anywhere". Datasworn asset
+ * entries are the live example: their `controls` nest four levels deep
+ * (`integrity → controls → battered → …`), which no single-line rendering represents
+ * honestly. Anything not `lossless` is therefore NOT dropped — {@link EntryFacts} keeps it
+ * as raw data behind a disclosure.
+ */
+interface FormattedValue {
+  text: string;
+  lossless: boolean;
+}
+
+function isScalar(v: unknown): v is string | number | boolean {
+  return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+}
+
+function scalarText(key: string, v: string | number | boolean): string {
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  if (typeof v === 'number') return SIGNED_KEYS.has(key) ? signed(v) : String(v);
+  return v.trim();
+}
+
+function formatValue(key: string, value: unknown): FormattedValue {
+  if (value === null || value === undefined) return { text: '', lossless: true };
+  if (isScalar(value)) return { text: scalarText(key, value), lossless: true };
+
   if (Array.isArray(value)) {
-    return value
-      .map((item) => (typeof item === 'string' || typeof item === 'number' ? String(item).trim() : ''))
+    // A list of scalars reads fine inline; a list of objects does not, and flattening one
+    // would drop structure the reader may need.
+    if (!value.every((item) => item === null || item === undefined || isScalar(item))) {
+      return { text: '', lossless: false };
+    }
+    const text = value
+      .filter(isScalar)
+      .map((item) => scalarText(key, item))
       .filter(Boolean)
       .join(', ');
+    return { text, lossless: true };
   }
+
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    if (key === 'speed') return formatSpeedMap(record);
+    if (key === 'speed') return { text: formatSpeedMap(record), lossless: true };
+    // One level of scalar-valued nesting is readable ("fortitude +9, reflex -1"); deeper
+    // than that is not, so hand it to the raw-data disclosure instead of mangling it.
+    if (!Object.values(record).every((v) => v === null || v === undefined || isScalar(v))) {
+      return { text: '', lossless: false };
+    }
     const signedMap = SIGNED_MAP_KEYS.has(key);
-    return Object.entries(record)
+    const text = Object.entries(record)
       .map(([k, v]) => {
         if (typeof v === 'number') return `${k} ${signedMap ? signed(v) : v}`;
         if (typeof v === 'string' && v.trim()) return `${k} ${v.trim()}`;
+        if (typeof v === 'boolean') return `${k} ${v ? 'Yes' : 'No'}`;
         return '';
       })
       .filter(Boolean)
       .join(', ');
+    return { text, lossless: true };
   }
-  return '';
+
+  return { text: '', lossless: false };
 }
 
 /** Accept the raw `dataJson` string, an already-parsed object, or null; never throw. */
@@ -232,11 +279,16 @@ export function parseEntryFacts(data: unknown): ParsedEntryFacts | null {
   if (typeof d.itemCategory === 'string' && d.itemCategory.trim()) redundant.add('category');
 
   const facts: EntryFact[] = [];
+  const complex: Record<string, unknown> = {};
   for (const [key, raw] of Object.entries(d)) {
     if (HIDDEN_KEYS.has(key) || redundant.has(key)) continue;
-    const value = formatValue(key, raw);
-    if (!value) continue;
-    facts.push({ key, label: humanizeKey(key), value });
+    const { text, lossless } = formatValue(key, raw);
+    if (!lossless) {
+      complex[key] = raw;
+      continue;
+    }
+    if (!text) continue;
+    facts.push({ key, label: humanizeKey(key), value: text });
   }
 
   facts.sort((a, b) => {
@@ -245,7 +297,9 @@ export function parseEntryFacts(data: unknown): ParsedEntryFacts | null {
     return ai !== bi ? ai - bi : a.label.localeCompare(b.label);
   });
 
-  return facts.length > 0 || traits.length > 0 ? { facts, traits } : null;
+  return facts.length > 0 || traits.length > 0 || Object.keys(complex).length > 0
+    ? { facts, traits, complex }
+    : null;
 }
 
 /** True when `data` yields at least one renderable fact or trait. */
@@ -269,7 +323,8 @@ export function EntryFacts({
   const parsed = parseEntryFacts(data);
   const listId = useId();
   if (!parsed) return null;
-  const { facts, traits } = parsed;
+  const { facts, traits, complex } = parsed;
+  const complexKeys = Object.keys(complex);
   const fontSize = compact ? 11.5 : 13;
 
   return (
@@ -311,6 +366,21 @@ export function EntryFacts({
             </Fragment>
           ))}
         </dl>
+      )}
+      {complexKeys.length > 0 && (
+        // Nested mechanics no single line represents honestly (Datasworn asset controls,
+        // for one). Collapsed so it never crowds the readable facts, but present — this
+        // component replaced the inventory card's raw-JSON disclosure, so dropping these
+        // would have made them unreachable from every surface.
+        <details style={{ fontSize: compact ? 11 : 12 }}>
+          <summary>{complexKeys.map(humanizeKey).join(', ')}</summary>
+          <pre
+            data-testid="entry-facts-raw"
+            style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: compact ? 10.5 : 11.5 }}
+          >
+            {JSON.stringify(complex, null, 2)}
+          </pre>
+        </details>
       )}
     </section>
   );

@@ -923,9 +923,18 @@ export function CompendiumItemPickerModal({
         {selectedEntry && (
           <div className="pt-3 border-t border-[var(--color-neutral-800)] space-y-3">
             {/* Stats for the highlighted row, so the choice is made on damage/price/bulk
-                rather than on the name alone. */}
+                rather than on the name alone.
+
+                Height-bounded and independently scrollable ON PURPOSE. This card is
+                `max-h-[85vh] overflow-hidden` and the results list above it holds a
+                `min-h-[200px]` floor, so it cannot shrink to absorb a tall sibling: an
+                unbounded preview (a magic weapon carries a dozen-plus facts) would push the
+                owner/quantity fields and the Add button past the card edge, clipped with no
+                way to scroll to them. */}
             {hasEntryFacts(selectedEntry.dataJson) && (
-              <EntryFacts data={selectedEntry.dataJson} compact label={t('inventory.compendium.statsLabel')} />
+              <div className="max-h-[22vh] overflow-y-auto pr-1" data-testid="compendium-picker-stats">
+                <EntryFacts data={selectedEntry.dataJson} compact label={t('inventory.compendium.statsLabel')} />
+              </div>
             )}
             {duplicatePrompt ? (
               <div className="p-3 rounded bg-[var(--color-neutral-800)] space-y-2">

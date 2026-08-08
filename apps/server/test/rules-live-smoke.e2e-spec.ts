@@ -112,6 +112,8 @@ interface SmokeEntry {
 
 interface ProbeSectionResult {
   entries: SmokeEntry[];
+  /** Optional so a probe can return any importer's result type; only the AoN probes read it. */
+  truncated?: boolean;
 }
 
 /**
@@ -630,6 +632,19 @@ liveSmoke('rules — live rule-source smoke (issue #568)', () => {
             const missing = facts.requiredFactKeys
               .map((key) => ({ key, present: parsed.filter((d) => d[key] !== undefined && d[key] !== null).length }))
               .filter(({ present }) => present / entries.length < facts.minRatio);
+
+            // A live section that cannot prove it saw every row is a real regression even
+            // though it imports fine: `truncated` is what stops rules.service from treating
+            // the fetch as a complete manifest, so it silently disables removal on every
+            // subsequent re-import. It is set here only when the scan actually lost rows
+            // (see the row-count check in the importer) or hit a cap this section is nowhere
+            // near, so on a healthy upstream it must be false.
+            if (result.truncated) {
+              throw new Error(
+                `${label}: the scan could not account for every row the source reported (truncated) — ` +
+                  'paging lost rows, or the section outgrew its cap. Pack re-imports will refuse to remove stale entries until this is fixed.',
+              );
+            }
 
             if (missing.length > 0) {
               throw new Error(
