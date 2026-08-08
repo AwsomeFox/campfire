@@ -129,6 +129,27 @@ describe('UsersService unit tests', () => {
     expect(disabled.colorVisionAssist).toBe(false);
   });
 
+  it('defaults tableAudio to off and round-trips every level independently of other preferences (#1920)', async () => {
+    const created = await usersService.create({
+      username: 'finn',
+      displayName: 'Finn',
+      password: 'password123',
+    });
+    expect(created.tableAudio).toBe('off');
+
+    const enabled = await usersService.updatePreferences(created.id, { tableAudio: 'medium' }, adminActor);
+    expect(enabled.tableAudio).toBe('medium');
+    // Untouched preferences are not disturbed by a partial update.
+    expect(enabled.textSize).toBe('default');
+    expect(enabled.colorVisionAssist).toBe(false);
+
+    const fetched = await usersService.getOrThrow(created.id);
+    expect(fetched.tableAudio).toBe('medium');
+
+    const disabled = await usersService.updatePreferences(created.id, { tableAudio: 'off' }, adminActor);
+    expect(disabled.tableAudio).toBe('off');
+  });
+
   it('creates SSO user and syncs OIDC role', async () => {
     const ssoUser = await usersService.createSso({
       username: 'oidcuser',

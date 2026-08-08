@@ -477,6 +477,25 @@ export function sortCombatants(
     if (a.initiative === null) return 1;
     if (b.initiative === null) return -1;
     if (a.initiative !== b.initiative) return b.initiative - a.initiative;
+    // DM manual-reorder override (issue #1923 review finding 1): a running encounter's
+    // adapter tiebreak (e.g. 5e's initModDescThenSortOrderAsc) compares initMod BEFORE
+    // sortOrder, so a plain sortOrder rewrite from a drag is silently discarded whenever
+    // the tied combatants have different initMod. reorderCombatant stamps manualOrder on
+    // every combatant in the roster when it runs against a running encounter; consult it
+    // here ONLY when both sides have a value, so a tie where neither (or only one) side
+    // was ever manually reordered still falls through to the adapter's own rule
+    // unchanged. Deliberately checked before breakTie, not inside it — this is roster
+    // state the adapter itself never sees.
+    // `?? null`, NOT `!== null`. The Zod schema defaults this to null, so anything parsed
+    // through it is null-or-number — but a Combatant assembled without going through the
+    // parser (`{...} as Combatant` fixtures, and any future hand-built row) leaves the field
+    // `undefined`. A strict `!== null` treats `undefined` as "has a manual order", and the
+    // subtraction then yields NaN, which makes this comparator return NaN and hands the
+    // whole tie group an arbitrary order. That is how the first version of this broke four
+    // pre-existing adapter-tiebreak tests (#2074 review round 2).
+    const aManual = a.manualOrder ?? null;
+    const bManual = b.manualOrder ?? null;
+    if (aManual !== null && bManual !== null) return aManual - bManual;
     return breakTie(a, b);
   });
 }
@@ -754,6 +773,91 @@ export function resetLegendaryUsage(turnState: CombatantTurnState): CombatantTur
   const used = { ...turnState.used };
   delete used[LEGENDARY_ACTION_SLOT];
   return { ...turnState, used };
+}
+
+/** One spent recharge action's persisted spend map, as {@link EncountersService} reads/writes it. */
+export type ActionUsesMap = Record<string, { spent: number }>;
+
+/**
+ * A recharge roll's delta on one action, recorded so {@link undoActionUsesRecharge} can revert
+ * it. `max` is the pool's effective size, needed to clamp the revert — the roll always hands
+ * back exactly one use, so reverting it is always "spend one back", and `max` is the ceiling.
+ * Deliberately NOT the pre-roll `spent` count: an absolute restore would discard any spend
+ * that happened during the turn being undone, which is the ordinary case for a monster that
+ * recharges an ability at turn start and then fires it.
+ */
+export type ActionUsesRechargeDelta = { key: string; actionName: string; max: number };
+
+/** The observable result of one action's recharge roll — for the combat-log line. */
+export type ActionUsesRechargeRoll = { key: string; actionName: string; roll: number; needs: number; recovered: boolean };
+
+/**
+ * Roll recharge for each currently-SPENT recharge-tracked action of the combatant starting
+ * its turn (issue #1921) — 5e's "roll a d6 at the start of your turn; on a 5 or 6 it
+ * recharges" rule, generalized to any `recharge-N-M` threshold. Pure: the die is injected
+ * (`roll`, e.g. `() => rollDice('1d6').total`) so the outcome is deterministic under test.
+ * Only entries already spent (`spent > 0`) are rolled — an unspent recharge action has
+ * nothing to recharge, and rolling it anyway would manufacture combat-log noise no table
+ * asked for. X/day pools never reach this function at all: the caller only passes entries
+ * whose `min` came from a parsed `recharge-N-M` condition (see
+ * `ActionResolverService.usesTrackedActions` + `parseRechargeRange`).
+ */
+export function rollRechargeAtTurnStart(
+  currentUses: ActionUsesMap,
+  entries: ReadonlyArray<{ key: string; name: string; min: number; max: number }>,
+  roll: () => number,
+): { uses: ActionUsesMap; delta: ActionUsesRechargeDelta[]; rolls: ActionUsesRechargeRoll[] } {
+  const uses = { ...currentUses };
+  const delta: ActionUsesRechargeDelta[] = [];
+  const rolls: ActionUsesRechargeRoll[] = [];
+  for (const entry of entries) {
+    const spentBefore = currentUses[entry.key]?.spent ?? 0;
+    if (spentBefore <= 0) continue;
+    const rollValue = roll();
+    const recovered = rollValue >= entry.min;
+    rolls.push({ key: entry.key, actionName: entry.name, roll: rollValue, needs: entry.min, recovered });
+    if (recovered) {
+      // ONE use back, not the whole pool. `max` and `recharge` are independent on `ActionUses`,
+      // so `{ max: 3, recharge: 'recharge-5-6' }` is a legitimate authored shape (statblock
+      // editor, MCP `update_combatant`) that reaches this tick — `spent: 0` handed all three
+      // uses back on one lucky die.
+      uses[entry.key] = { spent: Math.max(0, spentBefore - 1) };
+      delta.push({ key: entry.key, actionName: entry.name, max: entry.max });
+    }
+  }
+  return { uses, delta, rolls };
+}
+
+/**
+ * Undo counterpart to {@link rollRechargeAtTurnStart} (issue #1921): put back the one use each
+ * recorded roll handed out, so `undoTurn` returns a dragon's Breath Weapon to "spent" when
+ * undoing the very turn-start tick that recharged it.
+ *
+ * This is a DELTA (`spent + 1`, clamped to the pool's `max`), not a restore of the pre-roll
+ * count. The distinction only shows on a pool deeper than one use, where the two disagree in
+ * the ordinary case: a monster recharges its ability at turn start and then FIRES it on that
+ * same turn. With `{ max: 3 }` and `spent: 2`, the roll leaves `spent: 1`, the apply takes it
+ * back to `2`, and undoing the turn must reach `3` — the pre-turn 2 plus the new use minus the
+ * undone recharge. Assigning the recorded pre-roll `2` would instead swallow that use and hand
+ * the monster a free extra firing. This mirrors how `action-resolver.service.ts` refunds action
+ * economy and uses: subtract what was added, never re-assert a snapshot.
+ *
+ * `undoTurn` only ever consumes the immediately-preceding turn-advance snapshot, so at most one
+ * roll per action is ever in flight — hence exactly one use back, not a count.
+ */
+export function undoActionUsesRecharge(
+  currentUses: ActionUsesMap,
+  delta: ReadonlyArray<ActionUsesRechargeDelta>,
+): { uses: ActionUsesMap; restoredNames: string[] } {
+  if (delta.length === 0) return { uses: currentUses, restoredNames: [] };
+  const uses = { ...currentUses };
+  const restoredNames: string[] = [];
+  for (const d of delta) {
+    const current = uses[d.key]?.spent ?? 0;
+    uses[d.key] = { spent: Math.min(Math.max(1, d.max), current + 1) };
+    restoredNames.push(d.actionName);
+  }
+  return { uses, restoredNames };
 }
 
 /**

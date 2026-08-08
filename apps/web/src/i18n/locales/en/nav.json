@@ -69,6 +69,8 @@
     "lostAccessTitle": "You no longer have access to this campaign",
     "backToCampaigns": "Back to your campaigns",
     "archivedBanner": "This campaign is {{status}} — archived and read-only.",
+    "archivedBy": " Archived by {{actor}} on {{date}}.",
+    "archivedBySomeone": "Someone",
     "archivedDmHint": " Set its status back to active in Settings to make changes.",
     "offlineBanner": "Offline — showing last-known data.",
     "offlineSyncedAt": " Last synced {{when}}.",

@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ActionSpec, Character, Combatant, TokenSize, CustomMechanicsProfile, UsableAction } from '@campfire/schema';
 import { defaultCombatantStatblock, hasDeathSavesForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
@@ -27,6 +27,7 @@ import { RulesHintPopover } from '../../../components/RulesHintPopover';
 import { conditionHintKey, rulesHintCompendiumHref } from '../../../lib/rulesHints';
 import { canAdjustSpecialResource, findSpecialResource, specialResourceAdjustBody } from '../../characters/specialCharacterResource';
 import { adapterResourceLabel } from '../../../lib/adapterVocabularyLabel';
+import { ReorderMenu } from './ReorderMenu';
 
 const HP_BAND_LABEL: Record<string, string> = { healthy: 'Healthy', bloodied: 'Bloodied', critical: 'Critical', down: 'Down' };
 const HP_BAND_PCT: Record<string, number> = { healthy: 100, bloodied: 50, critical: 20, down: 0 };
@@ -194,6 +195,7 @@ export type CombatantRowProps = {
   isDm?: boolean;
   myUserId?: string | number;
   /**
+  /**
    * Issue #1939: campaign id for condition-tag rules-hint popovers' "Full rule" link.
    * Deliberately separate from `campaignId` above, which goes `undefined` whenever the
    * viewer lacks edit permission or sheets are stale — the rules-hint popover is public
@@ -203,6 +205,30 @@ export type CombatantRowProps = {
   /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
    *  entries — gates the "Full rule" link on condition-tag rules-hint popovers. */
   rulesHintCompendiumAvailable?: boolean;
+  /**
+   * Manual initiative reorder controls (issue #1923) — a drag handle plus the accessible
+   * "Move up / Move down / Move after…" fallback menu. `null` when the caller (DM only,
+   * encounter preparing/running) is not permitted to reorder right now — the whole
+   * control does not mount, matching every other DM-only affordance on this row so a
+   * player/viewer never sees a handle or menu at all.
+   */
+  reorder?: {
+    canMoveUp: boolean;
+    canMoveDown: boolean;
+    onMoveUp: () => void;
+    onMoveDown: () => void;
+    menuTargets: readonly { id: number; name: string }[];
+    onMoveAfter: (afterCombatantId: number | 'top') => void;
+    dragHandleProps: {
+      onPointerDown: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerMove: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerUp: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerCancel: (e: ReactPointerEvent<HTMLElement>) => void;
+    };
+    isDragging: boolean;
+    isDropTarget: boolean;
+    busy: boolean;
+  } | null;
 };
 
 export const CombatantRow = memo(function CombatantRow({
@@ -264,6 +290,7 @@ export const CombatantRow = memo(function CombatantRow({
   myUserId,
   rulesHintCampaignId,
   rulesHintCompendiumAvailable = false,
+  reorder = null,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   const [showWhisper, setShowWhisper] = useState(false);
@@ -932,6 +959,46 @@ export const CombatantRow = memo(function CombatantRow({
               >
                 ✎
               </button>
+            )}
+            {reorder && (
+              <span className="inline-flex items-center gap-1">
+                {/* Pointer-only drag handle (issue #1923) — mirrors the token-drag pointer
+                    conventions (setPointerCapture, a distance slop before committing).
+                    aria-hidden: a screen-reader / keyboard user reorders via the menu
+                    button beside it, which is the actual accessible entry point. */}
+                <span
+                  aria-hidden="true"
+                  data-testid={`reorder-drag-handle-${combatant.id}`}
+                  className="cf-target-44"
+                  style={{
+                    cursor: reorder.busy ? 'default' : 'grab',
+                    touchAction: 'none',
+                    padding: '2px 6px',
+                    opacity: reorder.busy ? 0.5 : 1,
+                    outline: reorder.isDropTarget ? '2px solid var(--color-accent)' : undefined,
+                  }}
+                  // Issue #2074 review finding 4: while a reorder write is in flight
+                  // (`reorder.busy`), the handle must not start a NEW pointer gesture — the
+                  // shared drag hook keeps a single in-flight gesture ref across every row,
+                  // and starting a second drag on top of a first that hasn't been
+                  // acknowledged by the server yet raced two writes against each other.
+                  // Withhold the pointer handlers entirely rather than merely disabling the
+                  // visual affordance above.
+                  {...(reorder.busy ? {} : reorder.dragHandleProps)}
+                >
+                  ⠿
+                </span>
+                <ReorderMenu
+                  combatantName={combatant.name}
+                  canMoveUp={reorder.canMoveUp}
+                  canMoveDown={reorder.canMoveDown}
+                  onMoveUp={reorder.onMoveUp}
+                  onMoveDown={reorder.onMoveDown}
+                  menuTargets={reorder.menuTargets}
+                  onMoveAfter={reorder.onMoveAfter}
+                  disabled={reorder.busy}
+                />
+              </span>
             )}
           </div>
         )}

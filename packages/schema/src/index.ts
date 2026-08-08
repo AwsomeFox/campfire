@@ -221,11 +221,19 @@ export type AiExternalContentPolicy = z.infer<typeof AiExternalContentPolicy>;
 export const MapAlignment = z.enum(['preserve', 'reset']);
 export type MapAlignment = z.infer<typeof MapAlignment>;
 
+/**
+ * Lifecycle status of a campaign (issue #16). `active` is editable; `paused` and
+ * `completed` are read-only ("archived"). Named so the status-transition record
+ * (#846) and the web status control share one canonical enum.
+ */
+export const CampaignStatus = z.enum(['active', 'paused', 'completed']);
+export type CampaignStatus = z.infer<typeof CampaignStatus>;
+
 export const Campaign = z.object({
   id: Id,
   name: z.string().min(1).max(120),
   description: z.string().max(10_000).default(''),
-  status: z.enum(['active', 'paused', 'completed']).default('active'),
+  status: CampaignStatus.default('active'),
   currentLocationId: Id.nullable().default(null),
   dangerLevel: DangerLevel.default('low').describe(
     "Campaign-wide narrative tone/challenge backdrop the DM sets (low/moderate/high/deadly). " +
@@ -294,11 +302,39 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
+
+/**
+ * One durable lifecycle-status transition for a campaign (issue #846): who changed
+ * the status, when, the from/to pair, and an optional DM-only reason. The table is
+ * append-only, so reactivating (back to active) and re-archiving keeps the full
+ * history; the latest row is the current provenance shown in the archived banner/settings.
+ *
+ * `actorUserId` is the durable install-local id; `actorName` is a display-name
+ * snapshot captured at transition time (a later rename does not rewrite history).
+ * `reason` is DM operational text and must NOT be shown to players; the banner uses
+ * only actor + status + time for the player-visible line.
+ */
+export const CampaignStatusTransition = z.object({
+  id: Id,
+  campaignId: Id,
+  actorUserId: z.string().max(120),
+  actorName: z.string().max(200),
+  fromStatus: CampaignStatus,
+  toStatus: CampaignStatus,
+  reason: z.string().max(500).default(''),
+  createdAt: IsoDate,
+});
+export type CampaignStatusTransition = z.infer<typeof CampaignStatusTransition>;
+
 export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true, customMechanicsProfile: true });
 export const CampaignUpdate = CampaignCreate.partial().extend({
   // Map replacement lifecycle (issue #870). 'reset' clears location pin coordinates
   // in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.
   mapAlignment: MapAlignment.optional(),
+  // Issue #846: optional DM-only reason recorded with a status transition. Not a
+  // stored column; the service consumes it to stamp the provenance row, then strips
+  // it before the row update. Ignored when `status` is absent or unchanged.
+  statusChangeReason: z.string().max(500).optional(),
 });
 
 /**
@@ -464,6 +500,9 @@ export const CampaignImport = z
     compendiumDependencies: z.array(ImportedEntity).optional(),
     /** When refs cannot resolve: block (default) or import with detached snapshots. */
     onUnresolvedCompendium: z.enum(['block', 'detach']).optional(),
+    // Issue #846: durable lifecycle-status provenance (actor/time/from->to/reason),
+    // re-inserted with fresh ids. Loose; the importer is defensive (see importCampaign).
+    statusTransitions: z.array(ImportedEntity).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
@@ -6588,6 +6627,17 @@ export const DiceTheme = z.enum([
   'mahogany_wood',
 ]);
 export type DiceTheme = z.infer<typeof DiceTheme>;
+
+/**
+ * Table audio & haptics level (issue #1920): a single field covers both the
+ * on/off toggle and a 3-step volume, so there is no separate "enabled" boolean
+ * that could disagree with the level. 'off' is the default and produces zero
+ * sound and zero vibration — every cue call site must check this before
+ * synthesizing audio or calling `navigator.vibrate`. No media assets are
+ * involved: cues are synthesized client-side via WebAudio.
+ */
+export const TableAudioLevel = z.enum(['off', 'low', 'medium', 'high']);
+export type TableAudioLevel = z.infer<typeof TableAudioLevel>;
 export { TimeFormat, DEFAULT_TIME_FORMAT } from './timeFormat';
 import { TimeFormat } from './timeFormat';
 
@@ -6626,6 +6676,13 @@ export const User = z.object({
    * default so default-path rendering is unchanged.
    */
   colorVisionAssist: z.boolean().default(false),
+  /**
+   * Table audio & haptics (issue #1920): synthesized dice-clatter/crit/fumble/
+   * your-turn cues and vibration. 'off' by default — no sound or vibration
+   * plays until the user opts in. No DM/player distinction and no secrecy
+   * interaction: cues fire only on events the viewer already sees.
+   */
+  tableAudio: TableAudioLevel.default('off'),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -6652,6 +6709,7 @@ export const PreferencesUpdate = z.object({
   timeFormat: TimeFormat.optional(),
   animateOthersRolls: z.boolean().optional(),
   colorVisionAssist: z.boolean().optional(),
+  tableAudio: TableAudioLevel.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 
@@ -9606,6 +9664,13 @@ export const Encounter = z.object({
   // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
   currentCombatantId: Id.nullable().default(null),
+  // Monotonic generation counter bumped on every turn advance (issue #1923's
+  // compare-and-set token; the column itself predates this issue). Readable by every
+  // role — not a secret, purely a concurrency marker — so a client can echo the value
+  // it last rendered back as `expectedTurnVersion` on POST .../combatants/:cid/reorder
+  // and get a 409 instead of silently reordering a roster the turn has already moved on
+  // from.
+  turnVersion: z.number().int().nonnegative().default(0),
   // Boss-fight scheduling (issue #618): when `turnPhase` is `lair`, `currentCombatantId`
   // is null and `lairResumeCombatantId` is the next combatant after the lair slot resolves.
   turnPhase: EncounterTurnPhase.default('combatant'),
@@ -10675,6 +10740,18 @@ export const Combatant = z.object({
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
+  // DM manual-reorder override (issue #1923 review finding 1). Set on EVERY combatant in
+  // the roster (not just the moved one) whenever `reorderCombatant` runs against a
+  // running encounter, to the combatant's index in the newly computed order. Null until
+  // the first manual reorder on a running encounter (and for legacy rows). This exists
+  // because a running encounter's `sortCombatants` orders by initiative, and an adapter's
+  // `initiativeTiebreak` (e.g. 5e's `initModDescThenSortOrderAsc`) compares `initMod`
+  // BEFORE `sortOrder` — a pure `sortOrder` rewrite is silently discarded by the adapter
+  // tiebreak whenever the tied combatants have different `initMod` (different DEX).
+  // `sortCombatants` consults this ahead of the adapter tiebreak, but only when BOTH
+  // combatants in the comparison have a non-null value, so an unrelated tie (one or both
+  // never manually reordered) still falls through to the adapter's own rule untouched.
+  manualOrder: z.number().int().nullable().default(null),
   // Battle-map token position (issue #39): 0–100 percent overlay on the encounter's
   // map image, mirroring location.mapX/mapY. null = not yet placed on the map.
   tokenX: z.number().nullable().default(null),
@@ -10787,6 +10864,31 @@ export type CombatantRemoveUndo = z.infer<typeof CombatantRemoveUndo>;
 export const DamageSaveOutcome = z.enum(['full', 'half']);
 export type DamageSaveOutcome = z.infer<typeof DamageSaveOutcome>;
 
+/**
+ * DM force-toggle of a combatant's limited-use action pool (issue #1921) — sets `spent`
+ * directly to a value in `[0, max]` (server-clamped), rather than a relative delta, so a
+ * single call both forces a recharge (`spent: 0`) and forces an exhaust (`spent: max`).
+ * The target action is identified the SAME way `resolve_action`/`list_usable_actions`
+ * identify one — by `actionIndex` or `actionName` on the combatant's current sheet/
+ * statblock action list — never by the server's internal fingerprint+source spend key,
+ * which is an implementation detail no caller should have to construct.
+ */
+export const CombatantActionUsesPatch = z
+  .object({
+    actionIndex: z.number().int().min(0).max(99).optional(),
+    actionName: z.string().max(120).optional(),
+    spent: z.number().int().min(0).max(99),
+  })
+  // Both identifiers optional individually, but at least one is required: a patch naming no
+  // action at all is not a meaningful request, and letting it through only defers the failure
+  // into `resolveActionUsesTarget` as a confusing "Action undefined not found" at write time.
+  // Reject it at parse time, where the caller gets a field-level 400 instead.
+  .refine((v) => v.actionIndex !== undefined || v.actionName !== undefined, {
+    message: 'Provide actionIndex or actionName to identify which action to set.',
+    path: ['actionIndex'],
+  });
+export type CombatantActionUsesPatch = z.infer<typeof CombatantActionUsesPatch>;
+
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
   // Direct encounter damage metadata (issue #605).  These fields are meaningful only
@@ -10858,6 +10960,10 @@ export const CombatantUpdate = z.object({
   // name/hpMax/initMod/tokenSize/initiative above). Toggling logs a combat-log
   // 'note' event and an audit row.
   statblockRevealed: z.boolean().optional(),
+  // DM force-toggle of a limited-use/recharge action's spend state (issue #1921) — dm
+  // only, enforced server-side (rejected outright for a non-DM patch, same list as
+  // statblockRevealed above). Audit-logged; does not touch action-economy or spell slots.
+  actionUses: CombatantActionUsesPatch.optional(),
   // Issue #580: per-intent operation id. `hpDelta` / `spDelta` / `rpDelta` are
   // relative writes — replaying one double-damages. Send a key
   // minted at the click and a retry after a lost response replays the ORIGINAL
@@ -10954,6 +11060,23 @@ export const CombatantRollInitiativeRequest = z.object({
   overwrite: z.boolean().optional(),
 });
 export type CombatantRollInitiativeRequest = z.infer<typeof CombatantRollInitiativeRequest>;
+
+/**
+ * Body for the DM-only manual reorder (issue #1923) — POST
+ * /encounters/:id/combatants/:cid/reorder. `sortCombatants`'s own tiebreak comparators
+ * (initiative-tiebreak.ts) are the automatic answer to a tie; this is the documented manual
+ * escape hatch, and the only mechanical expression of Delay/Ready ("the fighter acts after
+ * the wizard now"). `afterCombatantId` names the combatant the moved one should land
+ * immediately after under `sortCombatants`, or the literal `'top'` to become first.
+ * `expectedTurnVersion` is a compare-and-set against the encounter's monotonic
+ * `turnVersion` (bumped on every turn advance) — a stale drag issued after the turn moved
+ * on 409s instead of silently reordering against a roster the DM is no longer looking at.
+ */
+export const CombatantReorderRequest = z.object({
+  afterCombatantId: z.union([Id, z.literal('top')]),
+  expectedTurnVersion: z.number().int().nonnegative().optional(),
+});
+export type CombatantReorderRequest = z.infer<typeof CombatantReorderRequest>;
 
 /**
  * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).

@@ -2,6 +2,20 @@
   "encounters": {
     "title": "Encounters",
     "combatLogHeading": "Combat log",
+    "actions": {
+      "title": "Actions",
+      "use": "Use",
+      "useGroup": "Run for group",
+      "uses": {
+        "rechargeSingle": "Recharge {{min}}",
+        "recharge": "Recharge {{min}}–{{max}}",
+        "spent": "spent",
+        "perDay": "{{max}}/day",
+        "left": "{{count}} left",
+        "left_other": "{{count}} left",
+        "disabledReason": "No uses remaining ({{label}})"
+      }
+    },
     "vitals": {
       "editMaxHp": "Edit max HP",
       "maxHp": "Max HP",
@@ -32,6 +46,16 @@
       "presetSeconds": "{{seconds}}s"
     },
     "initiativeChipLabel": "Initiative: {{value}}",
+    "reorder": {
+      "menuLabel": "Reorder {{name}} in initiative",
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "moveAfterLabel": "Move after…",
+      "top": "the top",
+      "go": "Move",
+      "delayingBadge": "Delaying",
+      "announcement": "Moved {{name}} in the initiative order."
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
@@ -206,10 +230,18 @@
       },
       "ping": {
         "menuLabel": "Ping intent",
+        "keyboardHint": "Shift+Enter opens the Look, Danger, or Move here menu.",
         "intents": {
           "look": "Look",
           "danger": "Danger",
           "move": "Move here"
+        },
+        "surfaceAriaLabel": "Ping the map center for everyone. {{hint}} Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.",
+        "toolHelp": "Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone. {{hint}}",
+"log": {
+          "unknownSender": "Someone",
+          "labeled": "{{name}} pings: {{label}}",
+          "plain": "{{name}} pinged the map"
         }
       },
       "dragDistance": {
@@ -279,11 +311,6 @@
       "noTargets": "No legal targets.",
       "systemMathNotice": "Resolved with math that hasn't been audited for your system — verify the result."
     },
-    "actions": {
-      "title": "Actions",
-      "use": "Use",
-      "useGroup": "Run for group"
-    },
     "groupAction": {
       "heading": "{{actorName}} · {{actionName}} · group",
       "regionLabel": "Run {{actionName}} for the group",
@@ -303,7 +330,8 @@
         "applied": "Applied",
         "skipped": "Skipped — no action left",
         "failed": "Failed",
-        "notRun": "Not run"
+        "notRun": "Not run",
+        "skippedNoUses": "Skipped — no uses left"
       },
       "undo": "Undo",
       "undone": "Undone",

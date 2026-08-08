@@ -105,6 +105,7 @@ export function decideMapPingTapRelease(
 /** True for a bare Enter / Space activation (no modifier chord, no key-repeat). */
 export function isMapPingKeyboardActivation(event: {
   key: string;
+  shiftKey?: boolean;
   altKey?: boolean;
   ctrlKey?: boolean;
   metaKey?: boolean;
@@ -112,6 +113,26 @@ export function isMapPingKeyboardActivation(event: {
   repeat?: boolean;
 }): boolean {
   if (event.repeat) return false;
-  if (event.altKey || event.ctrlKey || event.metaKey) return false;
+  if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
+  return event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar';
+}
+
+/**
+ * Shift+Enter / Shift+Space, with Ping armed, opens the Look/Danger/Move-here intent
+ * menu — the keyboard-only mirror of the long-press (touch) and right-click (mouse)
+ * paths added by issue #1937, neither of which has any keyboard equivalent (issue
+ * #2047). Only the Shift modifier opens it; Ctrl/Alt/Meta chords are left alone so
+ * this never collides with a browser/OS/AT shortcut on the same keys.
+ */
+export function isMapPingIntentMenuKeyboardActivation(event: {
+  key: string;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  repeat?: boolean;
+}): boolean {
+  if (event.repeat) return false;
+  if (!event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return false;
   return event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar';
 }

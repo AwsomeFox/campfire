@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
-import type { DiceTheme, TextSize, TimeFormat, User } from '@campfire/schema';
+import type { DiceTheme, TableAudioLevel, TextSize, TimeFormat, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { MCP_CATALOG_COUNTS } from '../../lib/mcp-catalog.generated';
 import { joinPublicBase } from '../../lib/public-base';
@@ -133,6 +133,13 @@ export default function PreferencesPage() {
   const [animateOthersRolls, setAnimateOthersRolls] = useState<boolean>(
     () => me?.user?.animateOthersRolls ?? true,
   );
+  // Issue #1920 — table audio & haptics: a single field covers on/off + 3-step
+  // volume, persisted immediately like diceTheme/animateOthersRolls above (not
+  // deferred to the profile Save button).
+  const [tableAudioLevel, setTableAudioLevel] = useState<TableAudioLevel>(
+    () => me?.user?.tableAudio ?? 'off',
+  );
+  const latestTableAudioRequest = useRef(0);
 
   useEffect(() => {
     if (me?.user?.diceTheme) {
@@ -141,7 +148,10 @@ export default function PreferencesPage() {
     if (me?.user?.animateOthersRolls !== undefined) {
       setAnimateOthersRolls(me.user.animateOthersRolls);
     }
-  }, [me?.user?.diceTheme, me?.user?.animateOthersRolls]);
+    if (me?.user?.tableAudio !== undefined) {
+      setTableAudioLevel(me.user.tableAudio);
+    }
+  }, [me?.user?.diceTheme, me?.user?.animateOthersRolls, me?.user?.tableAudio]);
 
   if (!user) {
     return (
@@ -191,6 +201,22 @@ export default function PreferencesPage() {
       await refresh();
     } catch {
       setAnimateOthersRolls(previous);
+    }
+  }
+
+  async function selectTableAudioLevel(level: TableAudioLevel) {
+    const previous = tableAudioLevel;
+    setTableAudioLevel(level);
+    // Same token-guard pattern as selectDiceTheme above: a stale in-flight PATCH
+    // must not roll the control back over a newer selection that already settled.
+    const token = (latestTableAudioRequest.current += 1);
+    try {
+      await api.patch<User>(`${API}/me/preferences`, { tableAudio: level });
+      await refresh();
+    } catch {
+      if (latestTableAudioRequest.current === token) {
+        setTableAudioLevel(previous);
+      }
     }
   }
 
@@ -551,6 +577,29 @@ export default function PreferencesPage() {
             onChange={(e) => toggleAnimateOthersRolls(e.target.checked)}
             className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
           />
+        </div>
+        <div className="pt-3 border-t border-muted/20 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <label htmlFor="prefs-table-audio" className="text-sm font-medium cursor-pointer block">
+              {t('preferences.tableAudio')}
+            </label>
+            <p className="text-xs text-muted m-0">
+              {t('preferences.tableAudioDescription')}
+            </p>
+          </div>
+          <select
+            id="prefs-table-audio"
+            className="input"
+            style={{ maxWidth: 160 }}
+            value={tableAudioLevel}
+            aria-label={t('preferences.tableAudioLabel')}
+            onChange={(e) => selectTableAudioLevel(e.target.value as TableAudioLevel)}
+          >
+            <option value="off">{t('preferences.tableAudioOff')}</option>
+            <option value="low">{t('preferences.tableAudioLow')}</option>
+            <option value="medium">{t('preferences.tableAudioMedium')}</option>
+            <option value="high">{t('preferences.tableAudioHigh')}</option>
+          </select>
         </div>
       </Card>
 

@@ -33,7 +33,7 @@ import { formatRulerReadout, gridCellUnitPlural, measureToolHelp, rulerDistanceF
 import { hexAoeCirclePolygons, hexPolygons, hexKeyboardStepPx, mapPercentGridDistance, snapFogRectToHexGrid, snapMapPercentToHex, tokenFootprintDiameterPx } from '../hexGeometry';
 import { dragBudget, dragMoveFt, isCurrentActorDrag, type DragBudget } from '../dragDistance';
 import { scrollBehavior, prefersReducedMotion } from '../../../lib/prefersReducedMotion';
-import { armMapPingTap, decideMapPingTapRelease, isMapPingKeyboardActivation, mapPingTapExceededSlop, MAP_PING_KEYBOARD_POINT, MAP_PING_TAP_MAX_MS, type MapPingTapArm } from '../mapPingTap';
+import { armMapPingTap, decideMapPingTapRelease, isMapPingIntentMenuKeyboardActivation, isMapPingKeyboardActivation, mapPingTapExceededSlop, MAP_PING_KEYBOARD_POINT, MAP_PING_TAP_MAX_MS, type MapPingTapArm } from '../mapPingTap';
 import { applyPinch, applyWheelZoom, clampPan, DEFAULT_MAP_VIEWPORT, fitViewport, formatViewportZoomPercent, MAP_VIEWPORT_PAN_STEP_PX, MAP_VIEWPORT_ZOOM_STEP, panBy, resetViewport, surfaceToContentPoint, viewportTransformStyle, zoomByFactor, type MapViewportState, type PinchGesture } from '../mapViewport';
 import { tokenDiameterPx } from '../tokenFootprint';
 import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from '../tokenIdentity';
@@ -632,7 +632,32 @@ export const BattleMap = memo(function BattleMap({
   // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
   // as the DM drags. Every consumer below reads geometry through this (and its px form),
   // and — because it derives purely from encounter state — every viewport renders it the same.
-  const baseCalibration = useMemo(() => resolveGridCalibration(encounter), [encounter]);
+  // Keyed on the SIX grid fields `resolveGridCalibration` actually reads, not on `encounter`
+  // (issue #1917 stage 2, review round 2). React Query hands back a new encounter object on
+  // every refetch, SSE-driven invalidation and optimistic `setQueryData`, so an `[encounter]`
+  // dependency recomputed this on every HP tick — and since `calibration` → `calibrationPx` →
+  // `hexCells` all chain off it, two of `GridOverlay`'s props were reference-different every
+  // time. Its `memo()` comparator is shallow, so it re-rendered exactly as it had before being
+  // extracted: the containment this stage exists to deliver was not happening at all. These
+  // six are primitives, so the memo now holds while the grid geometry itself is unchanged.
+  const calGridSize = encounter.gridSize;
+  const calGridCellHeight = encounter.gridCellHeight;
+  const calGridOffsetX = encounter.gridOffsetX;
+  const calGridOffsetY = encounter.gridOffsetY;
+  const calGridRotation = encounter.gridRotation;
+  const calGridOpacity = encounter.gridOpacity;
+  const baseCalibration = useMemo(
+    () =>
+      resolveGridCalibration({
+        gridSize: calGridSize,
+        gridCellHeight: calGridCellHeight,
+        gridOffsetX: calGridOffsetX,
+        gridOffsetY: calGridOffsetY,
+        gridRotation: calGridRotation,
+        gridOpacity: calGridOpacity,
+      }),
+    [calGridSize, calGridCellHeight, calGridOffsetX, calGridOffsetY, calGridRotation, calGridOpacity],
+  );
   const calibration = useMemo<GridCalibration | null>(() => {
     if (!baseCalibration || !calibrateDrag || !mapRect) return baseCalibration;
     const w = mapRect.width;
@@ -834,6 +859,13 @@ export const BattleMap = memo(function BattleMap({
   }
 
   function onViewportKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    // Issue #2047: Shift+Enter/Space, checked before the plain-ping activation below,
+    // opens the intent menu instead of sending an unlabeled ping — the keyboard-only
+    // path to the same Look/Danger/Move-here menu long-press and right-click reach.
+    if (tool === 'ping' && isMapPingIntentMenuKeyboardActivation(e)) {
+      onPingIntentMenuKeyDown(e);
+      return;
+    }
     if (tool === 'ping' && isMapPingKeyboardActivation(e)) {
       onPingKeyDown(e);
       return;
@@ -1452,24 +1484,82 @@ export const BattleMap = memo(function BattleMap({
     setPingIntentMenu({ x: pct.x, y: pct.y, clientX: e.clientX, clientY: e.clientY });
   }
 
+  /**
+   * Shift+Enter/Space, with Ping armed, opens the intent menu at the map center —
+   * the keyboard-only mirror of the long-press and right-click paths above, neither
+   * of which has any keyboard equivalent (issue #2047). The menu's own popover
+   * (`clientX`/`clientY`) is anchored on the map surface itself, mirroring how a
+   * plain keyboard ping (above) always lands at `MAP_PING_KEYBOARD_POINT` regardless
+   * of pointer position.
+   */
+  function onPingIntentMenuKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    if (tool !== 'ping' || !isMapPingIntentMenuKeyboardActivation(e)) return;
+    e.preventDefault();
+    // Discrete keyboard activation never shares ownership with an armed pointer tap.
+    if (activeGestureRef.current) return;
+    pingIntentOpenedByKeyboardRef.current = true;
+    const rect = surfaceRef.current?.getBoundingClientRect();
+    setPingIntentMenu({
+      x: MAP_PING_KEYBOARD_POINT.x,
+      y: MAP_PING_KEYBOARD_POINT.y,
+      clientX: rect ? rect.left + rect.width / 2 : 0,
+      clientY: rect ? rect.top + rect.height / 2 : 0,
+    });
+  }
+
   function choosePingIntent(key: PingIntentKey) {
     const menu = pingIntentMenu;
     if (!menu) return;
     setPingIntentMenu(null);
     onPing(menu.x, menu.y, pingIntentLabel(key));
+    // Return focus to the map surface so a keyboard user who opened the menu with
+    // Shift+Enter/Space isn't left with focus on a button that just unmounted.
+    surfaceRef.current?.focus();
   }
 
   function dismissPingIntentMenu() {
     setPingIntentMenu(null);
   }
 
+  // The first menu item is focused once the menu opens (issue #2047) — the intent
+  // menu is a portal appended at the end of `document.body`, so its DOM tab order does
+  // not follow the map surface; without an explicit focus move, a keyboard user who just
+  // opened it via Shift+Enter/Space would have no reliable way to reach it at all.
+  // When opened via keyboard, focus move is deferred until keyup so holding Shift+Enter
+  // does not immediately auto-repeat into native button activation on the first item.
+  const pingIntentOpenedByKeyboardRef = useRef(false);
+  const pingIntentFirstItemRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!pingIntentMenu) return;
+    if (pingIntentOpenedByKeyboardRef.current) {
+      const handleKeyUp = (e: KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+          pingIntentOpenedByKeyboardRef.current = false;
+          pingIntentFirstItemRef.current?.focus();
+          window.removeEventListener('keyup', handleKeyUp);
+        }
+      };
+      window.addEventListener('keyup', handleKeyUp);
+      return () => {
+        pingIntentOpenedByKeyboardRef.current = false;
+        window.removeEventListener('keyup', handleKeyUp);
+      };
+    }
+    pingIntentFirstItemRef.current?.focus();
+  }, [pingIntentMenu]);
+
   // Close the intent menu on Escape or an outside pointerdown, matching the established
-  // long-press/right-click popover pattern (RollContextMenu).
+  // long-press/right-click popover pattern (RollContextMenu). Escape additionally returns
+  // focus to the map surface — the outside-pointerdown path leaves focus alone, since the
+  // user's pointer action already moved their attention elsewhere.
   useEffect(() => {
     if (!pingIntentMenu) return;
     const closeOnOutside = () => dismissPingIntentMenu();
     const closeOnEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') dismissPingIntentMenu();
+      if (e.key === 'Escape') {
+        dismissPingIntentMenu();
+        surfaceRef.current?.focus();
+      }
     };
     window.addEventListener('pointerdown', closeOnOutside);
     window.addEventListener('keydown', closeOnEscape);
@@ -2532,7 +2622,12 @@ export const BattleMap = memo(function BattleMap({
             tabIndex={0}
             aria-label={
               tool === 'ping'
-                ? 'Ping the map center for everyone. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
+                ? // Issue #2047 review: the whole sentence resolves from one key rather than
+                  // interpolating a translated hint into an English template. That template
+                  // shape is the exact defect #2048 fixed one file over and #2053 tracks —
+                  // an Arabic screen-reader user would otherwise hear an English label with
+                  // a single Arabic sentence embedded in it.
+                  t('encounters.map.ping.surfaceAriaLabel', { hint: t('encounters.map.ping.keyboardHint') })
                 : 'Battle map viewport. +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
             }
             aria-describedby="map-keyboard-help"
@@ -3270,11 +3365,14 @@ export const BattleMap = memo(function BattleMap({
               <div className="absolute top-2 left-2 flex flex-col gap-1 z-20 pointer-events-none" style={{ maxWidth: 200 }}>
                 {pings.slice().reverse().map((p) => {
                   const intentIcon = pingIntentIconForLabel(p.label);
+                  const senderName = p.senderName || t('encounters.map.ping.log.unknownSender');
                   return (
                     <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
                       <span className="truncate mr-2 font-medium flex items-center gap-1">
                         {intentIcon && <GameIcon slug={intentIcon} size={UI_ICON_SIZE.xs} />}
-                        {p.senderName || 'Someone'} {p.label ? `pings: ${p.label}` : 'pinged'}
+                        {p.label
+                          ? t('encounters.map.ping.log.labeled', { name: senderName, label: p.label })
+                          : t('encounters.map.ping.log.plain', { name: senderName })}
                       </span>
                       <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
                         <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
@@ -3312,9 +3410,10 @@ export const BattleMap = memo(function BattleMap({
               }}
               onPointerDown={(e) => e.stopPropagation()}
             >
-              {PING_INTENTS.map((intent) => (
+              {PING_INTENTS.map((intent, index) => (
                 <button
                   key={intent.key}
+                  ref={index === 0 ? pingIntentFirstItemRef : undefined}
                   type="button"
                   role="menuitem"
                   className="cf-menu-item"
@@ -3463,7 +3562,7 @@ export const BattleMap = memo(function BattleMap({
                   : tool === 'select'
                     ? 'Click a revealed region to select it, drag to move, Delete to remove. Escape deselects when a region is focused.'
                     : tool === 'ping'
-                  ? 'Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone.'
+                  ? t('encounters.map.ping.toolHelp', { hint: t('encounters.map.ping.keyboardHint') })
                   : viewportPan
                     ? 'Drag to pan the map. Pinch with two fingers to zoom on touch devices.'
                     : effectiveIsDm
