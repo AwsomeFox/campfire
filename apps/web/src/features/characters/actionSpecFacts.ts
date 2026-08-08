@@ -93,6 +93,19 @@ function actionFlagTexts(spec: ActionSpec): string[] {
   return out;
 }
 
+/**
+ * "2 Ki", "Ki"; '' when the action consumes no named resource.
+ *
+ * A resource cost is independent of the action's OWN limited-use pool: an at-will action
+ * can still spend from a shared pool, so reading only `max`/`recharge` made such an action
+ * look free. The amount is only stated when the spec gives one.
+ */
+export function actionResourceText(spec: ActionSpec): string {
+  const key = spec.uses.resourceKey.trim();
+  if (!key) return '';
+  return spec.uses.resourceCost > 0 ? `${spec.uses.resourceCost} ${key}` : key;
+}
+
 /** The ordered, non-empty facts for an action's spec (empty when it states nothing). */
 export function actionSpecFacts(spec: ActionSpec | undefined | null): ActionFact[] {
   if (!spec) return [];
@@ -103,6 +116,7 @@ export function actionSpecFacts(spec: ActionSpec | undefined | null): ActionFact
     { label: 'Targets', value: actionTargetText(spec) },
     { label: 'Save', value: actionSaveText(spec) },
     { label: 'Uses', value: actionUsesText(spec) },
+    { label: 'Resource', value: actionResourceText(spec) },
     { label: 'Casting', value: flags.join(' · ') },
   ];
   return candidates.filter((f) => f.value !== '');

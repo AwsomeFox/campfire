@@ -59,6 +59,8 @@ import {
   type RuleSystemAdapter,
   type RollCheckDefinition,
   checkCatalogForAdapter,
+  checkRollExpr,
+  initiativeModelForAdapter,
   sortCheckCatalog,
   formatCheckBreakdown,
   restOptionsForAdapter,
@@ -516,7 +518,7 @@ export default function CharacterPage() {
               aria-labelledby={`${characterSheetSectionId('abilities')}-heading`}
               className="cf-sheet-section"
             >
-              <AbilityScoresCard character={character} adapter={adapter} roller={roller} />
+              <AbilityScoresCard character={character} adapter={adapter} roller={roller} canRoll={canEdit} />
             </section>
 
             <section
@@ -1399,10 +1401,17 @@ function AbilityScoresCard({
   character,
   adapter,
   roller,
+  canRoll,
 }: {
   character: Character;
   adapter: RuleSystemAdapter;
   roller: Roller;
+  /**
+   * POST /characters/:id/checks/roll requires the DM or the OWNING player on a writable
+   * campaign (issue #1479). A reader who is neither sees the scores, not a button that
+   * only ever 403s.
+   */
+  canRoll: boolean;
 }) {
   const abilityFields = useMemo(() => abilityFieldsForCharacter(adapter, character), [adapter, character]);
   const abilityChecks = useMemo(() => {
@@ -1439,7 +1448,7 @@ function AbilityScoresCard({
               </p>
             </>
           );
-          if (!def) {
+          if (!def || !canRoll) {
             return (
               <div key={key} className="cf-inset text-center py-2.5 px-1.5">
                 {body}
@@ -1451,13 +1460,10 @@ function AbilityScoresCard({
             <div key={key} className="cf-inset text-center py-2.5 px-1.5">
               <RollContextMenu
                 className="w-full h-full block"
-                onRoll={(m) =>
-                  void roller.rollCheck(
-                    character.id,
-                    def.id,
-                    toCheckRollMode(def.supportsAdvantage ? m : 'normal'),
-                  )
-                }
+                onRoll={(m) => {
+                  const resolved = toCheckRollMode(def.supportsAdvantage ? m : 'normal');
+                  void roller.rollCheck(character.id, def.id, resolved, undefined, checkRollExpr(def, resolved));
+                }}
                 disabled={roller.rolling}
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
                 title={`Roll ${label} check (${signed(def.modifier)}) [${breakdownStr}]`}
@@ -1508,6 +1514,11 @@ function CharacterVitalsRail({
   defenseLabel: string;
   defenseTitle: string;
 }) {
+  // Initiative is not a per-character stat in a group-initiative system (Swords &
+  // Wizardry, Labyrinth Lord, OSE roll one d6 per SIDE), yet the neutral catalog still
+  // carries an entry. Offering a personal roll there would contradict both the adapter and
+  // the encounter's own group flow, so the tile is omitted rather than shown as unknown.
+  const showInitiative = initiativeModelForAdapter(adapter).mode !== 'group';
   const initiative = useMemo(() => {
     const def = checkCatalogForAdapter(adapter, character).find((c) => c.category === 'initiative') ?? null;
     if (!def) return null;
@@ -1593,7 +1604,9 @@ function CharacterVitalsRail({
         character={character}
         adapter={adapter}
         roller={roller}
-        initiative={initiative}
+        initiative={showInitiative ? initiative : null}
+        showInitiative={showInitiative}
+        canRoll={canEdit}
         defenseLabel={defenseLabel}
         defenseTitle={defenseTitle}
       />
@@ -1647,6 +1660,8 @@ function VitalsBlock({
   adapter,
   roller,
   initiative,
+  showInitiative,
+  canRoll,
   defenseLabel,
   defenseTitle,
 }: {
@@ -1654,6 +1669,10 @@ function VitalsBlock({
   adapter: RuleSystemAdapter;
   roller: Roller;
   initiative: RollCheckDefinition | null;
+  /** False for a group-initiative system, where initiative is not a per-character stat. */
+  showInitiative: boolean;
+  /** Whether this viewer may roll at all — see AbilityScoresCard's `canRoll`. */
+  canRoll: boolean;
   defenseLabel: string;
   defenseTitle: string;
 }) {
@@ -1682,17 +1701,14 @@ function VitalsBlock({
             <p className={tileValue}>{character.ac ?? '—'}</p>
           </div>
         )}
-        {initiative ? (
+        {initiative && canRoll ? (
           <div className={tile}>
             <RollContextMenu
               className="w-full h-full block"
-              onRoll={(m) =>
-                void roller.rollCheck(
-                  character.id,
-                  initiative.id,
-                  toCheckRollMode(initiative.supportsAdvantage ? m : 'normal'),
-                )
-              }
+              onRoll={(m) => {
+                const resolved = toCheckRollMode(initiative.supportsAdvantage ? m : 'normal');
+                void roller.rollCheck(character.id, initiative.id, resolved, undefined, checkRollExpr(initiative, resolved));
+              }}
               disabled={roller.rolling}
               style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
               title={`Roll initiative (${signed(initiative.modifier)}) [${formatCheckBreakdown(initiative)}]`}
@@ -1702,12 +1718,12 @@ function VitalsBlock({
               <p className={tileValue}>{signed(initiative.modifier)}</p>
             </RollContextMenu>
           </div>
-        ) : (
+        ) : showInitiative ? (
           <div className={tile}>
             <p className={tileLabel}>Initiative</p>
-            <p className={tileValue}>—</p>
+            <p className={tileValue}>{initiative ? signed(initiative.modifier) : '—'}</p>
           </div>
-        )}
+        ) : null}
         <div className={tile}>
           <p className={tileLabel}>Speed</p>
           <p className={tileValue}>{character.speed ?? '—'}</p>
@@ -1911,17 +1927,27 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
           const breakdownStr = formatCheckBreakdown(def);
           return (
             <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
-              <RollContextMenu
-                className="w-full h-full block"
-                onRoll={(m, e) => void roller.rollCheck(character.id, def.id, toCheckRollMode(def.supportsAdvantage ? rollModeForClick(m, mode, e) : 'normal'))}
-                disabled={roller.rolling}
-                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-                title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}]`}
-                aria-label={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)})`}
-              >
-                <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
-                <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
-              </RollContextMenu>
+              {canEdit ? (
+                <RollContextMenu
+                  className="w-full h-full block"
+                  onRoll={(m, e) => {
+                    const resolved = toCheckRollMode(def.supportsAdvantage ? rollModeForClick(m, mode, e) : 'normal');
+                    void roller.rollCheck(character.id, def.id, resolved, undefined, checkRollExpr(def, resolved));
+                  }}
+                  disabled={roller.rolling}
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                  title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}]`}
+                  aria-label={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)})`}
+                >
+                  <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
+                  <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
+                </RollContextMenu>
+              ) : (
+                <div title={breakdownStr}>
+                  <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
+                  <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
+                </div>
+              )}
               {canEdit ? (
                 <>
                   <button
@@ -2038,18 +2064,29 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                   {marker}
                 </span>
               )}
-              <RollContextMenu
-                className="flex-1 flex items-center gap-1.5 min-w-0"
-                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(def.supportsAdvantage ? m : 'normal'))}
-                disabled={roller.rolling}
-                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-                title={`Roll ${name} (${signed(mod)}) [${breakdownStr}]`}
-                aria-label={`Roll ${name} (${signed(mod)})`}
-              >
-                <span className="flex-1 text-left truncate">{name}</span>
-                {ability && <span className="text-[10px] text-secondary">{ability}</span>}
-                <span className="w-8 text-right font-semibold">{signed(mod)}</span>
-              </RollContextMenu>
+              {canEdit ? (
+                <RollContextMenu
+                  className="flex-1 flex items-center gap-1.5 min-w-0"
+                  onRoll={(m) => {
+                    const resolved = toCheckRollMode(def.supportsAdvantage ? m : 'normal');
+                    void roller.rollCheck(character.id, def.id, resolved, undefined, checkRollExpr(def, resolved));
+                  }}
+                  disabled={roller.rolling}
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                  title={`Roll ${name} (${signed(mod)}) [${breakdownStr}]`}
+                  aria-label={`Roll ${name} (${signed(mod)})`}
+                >
+                  <span className="flex-1 text-left truncate">{name}</span>
+                  {ability && <span className="text-[10px] text-secondary">{ability}</span>}
+                  <span className="w-8 text-right font-semibold">{signed(mod)}</span>
+                </RollContextMenu>
+              ) : (
+                <span className="flex-1 flex items-center gap-1.5 min-w-0" title={breakdownStr}>
+                  <span className="flex-1 text-left truncate">{name}</span>
+                  {ability && <span className="text-[10px] text-secondary">{ability}</span>}
+                  <span className="w-8 text-right font-semibold">{signed(mod)}</span>
+                </span>
+              )}
             </div>
           );
         })}

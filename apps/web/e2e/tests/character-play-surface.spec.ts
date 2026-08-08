@@ -146,6 +146,97 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): POST /characters/:id/checks/roll requires the DM
+   * or owning player on a WRITABLE campaign (issue #1479). Read authority is dm-or-owner
+   * too, so a viewer never sees the sheet — but an owner whose campaign has been archived
+   * can still read it, and every roll control was live and 403-only for them.
+   */
+  test('an archived campaign leaves the roll controls inert rather than 403-only', async ({ page, baseURL }) => {
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    // A campaign of its own: archiving the shared seeded one would break every other spec.
+    const campaign = await (await ctx.post('/api/v1/campaigns', { data: { name: 'Archived Sheet Campaign' } })).json();
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaign.id}/characters`, {
+      data: { name: 'Frozen In Amber', className: 'Fighter', level: 3, stats: { STR: 16, DEX: 14, CON: 12, INT: 10, WIS: 10, CHA: 8 } },
+    })).json()).id as number;
+
+    try {
+      // Active: the controls are live.
+      await page.goto(`/c/${campaign.id}/characters/${characterId}?tab=play`);
+      await expect(page.getByRole('button', { name: /^Roll STR check/ })).toBeVisible();
+      await expect(page.getByRole('button', { name: /^Roll initiative/ })).toBeVisible();
+
+      const archived = await ctx.patch(`/api/v1/campaigns/${campaign.id}`, { data: { status: 'paused' } });
+      expect(archived.ok()).toBeTruthy();
+
+      // Archived: still readable by the owner, but nothing offers a roll it cannot make.
+      await page.goto(`/c/${campaign.id}/characters/${characterId}?tab=play`);
+      await expect(page.getByRole('heading', { level: 1, name: 'Frozen In Amber' })).toBeVisible();
+      await expect(page.getByRole('button', { name: /^Roll STR check/ })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /^Roll initiative/ })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /^Roll .* save/ })).toHaveCount(0);
+    } finally {
+      await ctx.delete(`/api/v1/campaigns/${campaign.id}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
+   * Regression (Codex review on #2115): Swords & Wizardry, Labyrinth Lord and OSE roll one
+   * d6 per SIDE, but the neutral catalog still carries an initiative entry. A per-character
+   * initiative tile there contradicts both the adapter and the encounter's group flow.
+   */
+  test('a group-initiative system gets no per-character initiative tile', async ({ page, baseURL }) => {
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    // The OSR variant slugs need their rule pack installed, so the two initiative models
+    // are declared directly through `customMechanicsProfile` — the same seam the shipped
+    // variants are built from (`createOsrVariantAdapter`).
+    const profile = (slug: string, initiativeMode: 'group' | 'individual') => ({
+      slug,
+      label: slug,
+      abilityTable: 'bx-banded' as const,
+      abilityCap: 6,
+      saves: ['Death', 'Wands', 'Paralysis', 'Breath', 'Spells'],
+      acMode: 'descending' as const,
+      acAnchor: 9,
+      initiativeMode,
+      initiativeDie: 6,
+      initiativeUsesDexMod: true,
+      tiebreak: 'dex-then-order' as const,
+    });
+    const group = await (await ctx.post('/api/v1/campaigns', {
+      data: { name: 'Group Init Table', ruleSystem: 'homebrew-group', customMechanicsProfile: profile('homebrew-group', 'group') },
+    })).json();
+    const individual = await (await ctx.post('/api/v1/campaigns', {
+      data: { name: 'Individual Init Table', ruleSystem: 'homebrew-solo', customMechanicsProfile: profile('homebrew-solo', 'individual') },
+    })).json();
+    const stats = { STR: 16, DEX: 14, CON: 12, INT: 10, WIS: 10, CHA: 8 };
+
+    try {
+      const groupCharacter = (await (await ctx.post(`/api/v1/campaigns/${group.id}/characters`, {
+        data: { name: 'Rolls With The Party', className: 'Fighter', level: 2, stats },
+      })).json()).id as number;
+      const soloCharacter = (await (await ctx.post(`/api/v1/campaigns/${individual.id}/characters`, {
+        data: { name: 'Rolls Alone', className: 'Fighter', level: 2, stats },
+      })).json()).id as number;
+
+      await page.goto(`/c/${group.id}/characters/${groupCharacter}?tab=play`);
+      const vitals = page.getByTestId('character-vitals');
+      await expect(vitals).toBeVisible();
+      await expect(vitals.getByText('Initiative')).toHaveCount(0);
+
+      // The sibling OSR variant that DOES roll individually keeps its tile.
+      await page.goto(`/c/${individual.id}/characters/${soloCharacter}?tab=play`);
+      await expect(page.getByTestId('character-vitals').getByText('Initiative')).toBeVisible();
+    } finally {
+      await ctx.delete(`/api/v1/campaigns/${group.id}`);
+      await ctx.delete(`/api/v1/campaigns/${individual.id}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Codex review on #2115): an unset ability score is NOT a 10. The catalog
    * defaults a missing stat to 10, so trusting its modifier printed "— / +0" on a draft
    * sheet and let the player roll a check for a score they never set.

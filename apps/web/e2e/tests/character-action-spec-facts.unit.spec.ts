@@ -84,6 +84,20 @@ test.describe('actionSpecFacts — states only what the spec carries', () => {
       .toContainEqual({ label: 'Uses', value: 'Recharge 6' });
   });
 
+  /**
+   * A named resource cost is independent of the action's own limited-use pool: an at-will
+   * action can still spend from a shared pool (2 Ki), and reading only max/recharge made
+   * that action look free.
+   */
+  test('a named resource cost is stated even for an otherwise at-will action', () => {
+    expect(actionSpecFacts(ActionSpec.parse({ mode: 'attack', uses: { resourceKey: 'Ki', resourceCost: 2 } })))
+      .toContainEqual({ label: 'Resource', value: '2 Ki' });
+    // No amount given — name the pool, do not invent a number.
+    expect(actionSpecFacts(ActionSpec.parse({ mode: 'attack', uses: { resourceKey: 'Ki' } })))
+      .toContainEqual({ label: 'Resource', value: 'Ki' });
+    expect(actionSpecFacts(ActionSpec.parse({ mode: 'attack' })).map((f) => f.label)).not.toContain('Resource');
+  });
+
   test('a REST cadence keeps its own wording rather than being relabelled daily', () => {
     // describeActionUses renders every non-die-roll pool as "N/Day", which would call a
     // short-rest ability daily. Only the die-roll branch defers to it.
