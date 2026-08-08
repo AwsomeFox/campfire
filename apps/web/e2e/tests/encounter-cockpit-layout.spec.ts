@@ -86,6 +86,27 @@ test.describe('encounter cockpit layout', () => {
       await page.getByTestId('encounter-vtt-tab-log').click();
       await expect(page.getByRole('log', { name: 'Combat log' })).toBeVisible();
 
+      // Because only the selected panel is mounted, only the selected tab may carry
+      // `aria-controls` — an unselected tab pointing at an id that is not in the
+      // document is worse for assistive tech than omitting the reference.
+      const tabWiring = await page
+        .locator('.cf-vtt-panel-tabs [role="tab"]')
+        .evaluateAll((tabs) =>
+          tabs.map((tab) => ({
+            selected: tab.getAttribute('aria-selected') === 'true',
+            controls: tab.getAttribute('aria-controls'),
+            targetExists: Boolean(
+              tab.getAttribute('aria-controls')
+              && document.getElementById(tab.getAttribute('aria-controls')!),
+            ),
+          })),
+        );
+      expect(tabWiring.length).toBeGreaterThan(1);
+      for (const tab of tabWiring) {
+        if (tab.selected) expect(tab.targetExists).toBe(true);
+        else expect(tab.controls).toBeNull();
+      }
+
       // Collapsing the panel hands the whole canvas to the map, and the reopen tab returns it.
       await page.getByTestId('encounter-vtt-panel-close').click();
       await expect(panel).toHaveCount(0);

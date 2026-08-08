@@ -145,7 +145,13 @@ export function EncounterVttShell({
                   className="cf-vtt-tab"
                   data-testid={`encounter-vtt-tab-${tab.id}`}
                   aria-selected={tab.id === activeTabId}
-                  aria-controls={`cf-vtt-tabpanel-${tab.id}`}
+                  // Only the selected tab's panel is in the DOM — the panel holds the run
+                  // page's heavy sections (roster, log, table-wide setup) and mounting all
+                  // four would quadruple their queries and live subscriptions. So
+                  // `aria-controls` is set only on the selected tab: an omitted reference is
+                  // allowed by the tabs pattern, whereas one pointing at an id that does not
+                  // exist actively misleads assistive tech.
+                  aria-controls={tab.id === activeTabId ? `cf-vtt-tabpanel-${tab.id}` : undefined}
                   tabIndex={tab.id === activeTabId ? 0 : -1}
                   onClick={() => onSelectTab(tab.id)}
                   onKeyDown={(event) => {
