@@ -5,6 +5,15 @@ export type RollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
 
 interface RollContextMenuProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   children: React.ReactNode;
+  /**
+   * Called with the mode this interaction asked for.
+   *
+   * The `event` argument is only passed on the PLAIN-CLICK path, never from the context /
+   * long-press menu, and callers rely on that to tell the two apart: both emit `'normal'`,
+   * but a plain click means "no preference" (defer to a chooser, if the caller has one)
+   * while the menu's Normal item is an explicit request for a flat roll. See
+   * `rollModeForClick` in features/characters/rollMode.ts. Keep the asymmetry.
+   */
   onRoll: (mode: RollMode, event?: React.MouseEvent) => void;
 }
 

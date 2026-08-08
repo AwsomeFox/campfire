@@ -69,20 +69,27 @@ export function resolveRollMode(chosen: RollMode, modifiers: { shiftKey: boolean
 }
 
 /**
- * Resolve the mode for ONE click on a `RollContextMenu`-backed control that also has a
- * visible chooser beside it.
+ * Resolve the mode for ONE interaction with a `RollContextMenu`-backed control that also
+ * has a visible chooser beside it.
  *
- * `RollContextMenu` has already folded shift/alt-click and its long-press menu into the
- * single `clicked` mode it emits, and emits `'normal'` when the user expressed no
- * preference for this click — which is exactly when the chooser's standing selection
- * should apply. Call sites previously passed `clicked` straight into
- * {@link resolveRollMode} along with modifiers derived from `clicked` itself, which made
- * that call a no-op and left the chooser purely decorative: a touch user who selected
- * Advantage and tapped the attack still submitted a flat d20 — the exact gap issue #713
- * added the chooser to close.
+ * `RollContextMenu` folds shift/alt-click and its long-press menu into the single `clicked`
+ * mode it emits. A non-`normal` value is always an explicit override and wins. `'normal'`
+ * is ambiguous — it is emitted both by a plain click (no preference expressed, so the
+ * chooser's standing selection should apply) and by picking "Normal" from the menu (an
+ * explicit request for a flat roll, which must NOT be overridden by the chooser).
+ *
+ * `event` disambiguates them: `RollContextMenu` passes the MouseEvent on the plain-click
+ * path and nothing on the menu path. That contract is load-bearing here — see the note on
+ * `onRoll` in RollContextMenu.tsx.
+ *
+ * Call sites previously passed `clicked` into {@link resolveRollMode} with modifiers
+ * derived from `clicked` itself, making that call a no-op and the chooser decorative: a
+ * touch user who selected Advantage and tapped an attack still submitted a flat d20 — the
+ * exact gap issue #713 added the chooser to close.
  */
-export function rollModeForClick(clicked: RollMode, chosen: RollMode): RollMode {
-  return clicked === 'normal' ? chosen : clicked;
+export function rollModeForClick(clicked: RollMode, chosen: RollMode, event?: unknown): RollMode {
+  if (clicked !== 'normal') return clicked;
+  return event === undefined ? 'normal' : chosen;
 }
 
 export function toCheckRollMode(mode: RollMode): 'normal' | 'advantage' | 'disadvantage' | 'crit' {

@@ -1376,7 +1376,8 @@ function RollChip({
 }: {
   label: string;
   title: string;
-  onClick: (mode: RollMode) => void;
+  /** `event` is forwarded verbatim: its presence is what marks a plain click. */
+  onClick: (mode: RollMode, event?: MouseEvent) => void;
   disabled: boolean;
 }) {
   return (
@@ -1889,7 +1890,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
             <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
               <RollContextMenu
                 className="w-full h-full block"
-                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(def.supportsAdvantage ? rollModeForClick(m, mode) : 'normal'))}
+                onRoll={(m, e) => void roller.rollCheck(character.id, def.id, toCheckRollMode(def.supportsAdvantage ? rollModeForClick(m, mode, e) : 'normal'))}
                 disabled={roller.rolling}
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
                 title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}]`}
@@ -2286,8 +2287,8 @@ function ActionsCard({
                         label={`to hit ${action.toHit}`}
                         title={`Roll ${action.name} attack (${attackExpr}) · ${rollModeSummary(mode)}`}
                         disabled={roller.rolling}
-                        onClick={(m) => {
-                          const resolvedMode = rollModeForClick(m, mode);
+                        onClick={(m, e) => {
+                          const resolvedMode = rollModeForClick(m, mode, e);
                           void roller.roll(toHitExpr(action.toHit, resolvedMode === 'advantage' ? 'adv' : resolvedMode === 'disadvantage' ? 'dis' : 'flat')! , `${character.name} · ${action.name} to hit${resolvedMode !== 'normal' ? ` (${resolvedMode})` : ''}`);
                         }}
                       />
@@ -2419,8 +2420,8 @@ function ActionsCard({
                               label={`to hit ${granted.toHit}`}
                               title={`Roll ${granted.name} attack (${attackExpr})`}
                               disabled={roller.rolling}
-                              onClick={(m) => {
-                                const resolved = rollModeForClick(m, mode);
+                              onClick={(m, e) => {
+                                const resolved = rollModeForClick(m, mode, e);
                                 void roller.roll(
                                   toHitExpr(granted.toHit, resolved === 'advantage' ? 'adv' : resolved === 'disadvantage' ? 'dis' : 'flat')!,
                                   `${character.name} · ${granted.name} to hit${resolved !== 'normal' ? ` (${resolved})` : ''}`,

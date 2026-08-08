@@ -306,6 +306,18 @@ test.describe('character sheet play surface', () => {
       await actions.getByRole('button', { name: /to hit \+4/ }).click();
       const body = JSON.parse((await rolled).postData() ?? '{}');
       expect(body.expr).toMatch(/2d20kh1/);
+
+      // ...and the context menu's own "Normal" is still an explicit override of it. Both a
+      // plain tap and that menu item emit 'normal'; only the tap means "no preference".
+      const flat = page.waitForRequest(
+        (req) => req.url().includes(`/campaigns/${campaignId}/roll`) && req.method() === 'POST',
+      );
+      await actions.getByRole('button', { name: /to hit \+4/ }).click({ button: 'right' });
+      await page.getByRole('menu').getByRole('menuitem', { name: /Normal/ }).click();
+      const flatBody = JSON.parse((await flat).postData() ?? '{}');
+      expect(flatBody.expr).not.toMatch(/2d20/);
+      // The chooser keeps its selection — the override was for that one roll only.
+      await expect(chooser.getByRole('radio', { name: /Advantage/ })).toHaveAttribute('aria-checked', 'true');
     } finally {
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();

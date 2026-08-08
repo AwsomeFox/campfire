@@ -91,22 +91,39 @@ test.describe('modifier-key shortcut coexists with the chooser (issue #713)', ()
  * issue added the chooser to close.
  */
 test.describe('rollModeForClick — the chooser is the default, one click can override it', () => {
+  // RollContextMenu passes the MouseEvent on the plain-click path and nothing from its
+  // menu. A bare object stands in for that event here; only its presence is read.
+  const plainClick = {};
+
   test('a plain click rolls whatever the chooser has selected', () => {
     for (const chosen of ROLL_MODES) {
-      expect(rollModeForClick('normal', chosen)).toBe(chosen);
+      expect(rollModeForClick('normal', chosen, plainClick)).toBe(chosen);
     }
   });
 
   test('an explicit click mode wins over the chooser for that roll', () => {
-    expect(rollModeForClick('advantage', 'disadvantage')).toBe('advantage');
-    expect(rollModeForClick('disadvantage', 'advantage')).toBe('disadvantage');
+    expect(rollModeForClick('advantage', 'disadvantage', plainClick)).toBe('advantage');
+    expect(rollModeForClick('disadvantage', 'advantage', plainClick)).toBe('disadvantage');
     // The long-press / context menu can also ask for a crit; it is an override like any other.
     expect(rollModeForClick('crit', 'advantage')).toBe('crit');
   });
 
+  /**
+   * Both a plain tap and the menu's own "Normal" item emit 'normal'. Only the tap means
+   * "no preference"; the menu item is an explicit request for a flat roll, and treating it
+   * as no-preference made that command do nothing whenever a mode was chosen.
+   */
+  test('an explicit Normal from the menu beats the chooser; a plain tap does not', () => {
+    for (const chosen of ROLL_MODES) {
+      expect(rollModeForClick('normal', chosen)).toBe('normal');
+    }
+    expect(rollModeForClick('normal', 'advantage', plainClick)).toBe('advantage');
+    expect(rollModeForClick('normal', 'disadvantage', plainClick)).toBe('disadvantage');
+  });
+
   test('it is pure — overriding once leaves the chooser selection intact', () => {
     const chosen: RollMode = 'advantage';
-    rollModeForClick('disadvantage', chosen);
-    expect(rollModeForClick('normal', chosen)).toBe('advantage');
+    rollModeForClick('disadvantage', chosen, plainClick);
+    expect(rollModeForClick('normal', chosen, plainClick)).toBe('advantage');
   });
 });
