@@ -136,6 +136,54 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): the roll-mode chooser was gated on
+   * `character.actions` alone, so a character whose only attack comes from equipped gear
+   * got a rollable chip with no chooser beside it — stuck on Normal unless they happened
+   * to find the context menu. The chooser must appear exactly when a rollable chip does.
+   */
+  test('a gear-only attacker still gets the roll-mode chooser, and it applies', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    // No sheet actions at all — every attack this character has comes from the item.
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Gear Only Attacker', className: 'Fighter', level: 3 },
+    })).json()).id as number;
+
+    try {
+      const itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+        data: { name: 'Loaned Warhammer', qty: 1, ownerType: 'character', characterId },
+      })).json()).id as number;
+      await ctx.patch(`/api/v1/inventory/${itemId}`, {
+        data: {
+          equipped: true,
+          equipSlot: 'main hand',
+          equippedAction: { name: 'Warhammer Swing', kind: 'melee', toHit: '+4', damage: '1d8+2', notes: '', targetAc: '' },
+        },
+      });
+
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=play`);
+      const actions = page.locator('#character-section-actions');
+      await expect(actions.getByRole('button', { name: /to hit \+4/ })).toBeVisible();
+
+      const chooser = actions.getByRole('radiogroup', { name: 'Attack roll mode' });
+      await expect(chooser).toBeVisible();
+      await chooser.getByRole('radio', { name: /Advantage/ }).click();
+
+      // A plain tap now rolls the chosen mode — advantage is two d20s, keep the higher.
+      const rolled = page.waitForRequest(
+        (req) => req.url().includes(`/campaigns/${campaignId}/roll`) && req.method() === 'POST',
+      );
+      await actions.getByRole('button', { name: /to hit \+4/ }).click();
+      const body = JSON.parse((await rolled).postData() ?? '{}');
+      expect(body.expr).toMatch(/2d20kh1/);
+    } finally {
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Codex review on #2115): temp HP writes an ABSOLUTE value read off the
    * current character, so two taps before the refresh landed both PATCHed the same number
    * and one adjustment vanished silently. The control must stay busy until the value it

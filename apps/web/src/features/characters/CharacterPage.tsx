@@ -2167,9 +2167,18 @@ function ActionsCard({
     );
   }
 
-  // Only surface the chooser when at least one action carries a "to hit" roll —
-  // a list of feature-only actions has nothing to take with advantage.
-  const hasAttackRoll = character.actions.some((a) => a.toHit && toHitExpr(a.toHit, 'flat'));
+  // Only surface the chooser when at least one action carries a "to hit" roll — a list of
+  // feature-only actions has nothing to take with advantage.
+  //
+  // Gear counts, and only while EQUIPPED: the chooser has to appear exactly when a rollable
+  // attack chip does, or a character whose only attack comes from an equipped item gets the
+  // chip with no way to set advantage but the one-shot context menu (Codex review on #2115).
+  const hasAttackRoll = useMemo(
+    () =>
+      character.actions.some((a) => a.toHit && toHitExpr(a.toHit, 'flat')) ||
+      grantedActions.some((item) => item.equipped && item.equippedAction?.toHit && toHitExpr(item.equippedAction.toHit, 'flat')),
+    [character.actions, grantedActions],
+  );
 
   return (
     <Card className="space-y-2.5">
