@@ -487,6 +487,7 @@ export default function CharacterPage() {
           adapter={adapter}
           canEdit={canEdit}
           onChange={load}
+          onUpdated={setCharacter}
           onError={setActionError}
           roller={roller}
           leveledConditionTrack={leveledConditionTrack}
@@ -1487,6 +1488,7 @@ function CharacterVitalsRail({
   adapter,
   canEdit,
   onChange,
+  onUpdated,
   onError,
   roller,
   leveledConditionTrack,
@@ -1498,6 +1500,8 @@ function CharacterVitalsRail({
   canEdit: boolean;
   /** Reloads the sheet. Returns a promise so TempHpControl can await it — see its note. */
   onChange: () => void | Promise<void>;
+  /** Applies an authoritative character straight from a write's own response. */
+  onUpdated: (next: Character) => void;
   onError: (msg: string | null) => void;
   roller: Roller;
   leveledConditionTrack: LeveledConditionTrack | null | undefined;
@@ -1577,7 +1581,7 @@ function CharacterVitalsRail({
           {canEdit && (
             <div className="space-y-2 cf-print-hide">
               <HpEditor character={character} onChange={onChange} onError={onError} />
-              <TempHpControl character={character} onChange={onChange} onError={onError} />
+              <TempHpControl character={character} onUpdated={onUpdated} onChange={onChange} onError={onError} />
               <RestControls character={character} onChange={onChange} onError={onError} adapter={adapter} />
             </div>
           )}
@@ -1727,17 +1731,29 @@ function VitalsBlock({
  * spends first.
  *
  * Unlike `HpEditor`, which posts commutative DELTAS, this writes an ABSOLUTE value read
- * off the current prop — so the refresh has to land before the controls re-enable. Letting
- * `finally` run while `character.hpTemp` was still stale meant two quick `+` taps both
- * PATCHed 1, and the second adjustment vanished with no error (Codex review on #2115).
+ * off the current character — so the displayed value must be current before the controls
+ * re-enable, or two quick `+` taps both PATCH 1 and the second adjustment vanishes with no
+ * error (Codex review on #2115).
+ *
+ * The PATCH response IS the post-write character, so it is applied directly rather than
+ * awaiting a follow-up GET. Awaiting the parent refresh was not enough: `load()` catches
+ * its own fetch failure and resolves anyway, so a failed refresh looked identical to a
+ * successful one and re-enabled the controls over a stale value. Reading the write's own
+ * result cannot drift that way — and costs one request fewer.
+ *
+ * A `?proposed=true`-style 202 (a proposal, not a write) has no `hpTemp`, so anything that
+ * is not a character falls back to the refresh instead of being trusted.
  */
 function TempHpControl({
   character,
+  onUpdated,
   onChange,
   onError,
 }: {
   character: Character;
-  /** Awaited before the controls re-enable — see the absolute-vs-delta note above. */
+  /** Applies the authoritative post-write character straight from the PATCH response. */
+  onUpdated: (next: Character) => void;
+  /** Fallback refresh, awaited, for a response that is not a character. */
   onChange: () => void | Promise<void>;
   onError: (msg: string | null) => void;
 }) {
@@ -1749,8 +1765,9 @@ function TempHpControl({
     setBusy(true);
     onError(null);
     try {
-      await api.patch(`${API}/characters/${character.id}`, { hpTemp: next });
-      await onChange();
+      const updated = await api.patch<Character>(`${API}/characters/${character.id}`, { hpTemp: next });
+      if (updated && typeof updated.hpTemp === 'number') onUpdated(updated);
+      else await onChange();
       announce(`${character.name} temporary hit points ${next}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't update temporary hit points.");

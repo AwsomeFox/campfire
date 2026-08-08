@@ -378,6 +378,45 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): the parent `load()` catches its own fetch failure
+   * and resolves, so awaiting it could not distinguish a refreshed value from a stale one.
+   * The write's own response is authoritative, so a broken GET must not strand the stepper
+   * on the old number and swallow the next adjustment.
+   */
+  test('temp HP stays correct even when the follow-up refresh fails', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const sent: unknown[] = [];
+    let patched = false;
+    await page.route(`**/api/v1/characters/${navigation.characterId}`, async (route) => {
+      const method = route.request().method();
+      if (method === 'PATCH') {
+        sent.push(JSON.parse(route.request().postData() ?? '{}'));
+        patched = true;
+        return route.fallback();
+      }
+      // Every refresh AFTER the first write fails outright.
+      if (method === 'GET' && patched) return route.abort('failed');
+      return route.fallback();
+    });
+
+    await page.goto(`/c/${campaignId}/characters/${navigation.characterId}`);
+    const plus = page.getByTestId('character-temp-hp').getByRole('button', { name: /Add 1 temporary hit point/ });
+    await expect(page.getByTestId('character-temp-hp-value')).toHaveText('0');
+
+    await plus.click();
+    await expect(page.getByTestId('character-temp-hp-value')).toHaveText('1');
+    await plus.click();
+    await expect(page.getByTestId('character-temp-hp-value')).toHaveText('2');
+    expect(sent).toEqual([{ hpTemp: 1 }, { hpTemp: 2 }]);
+
+    await page.unroute(`**/api/v1/characters/${navigation.characterId}`);
+    const ctx = await request.newContext({ baseURL: new URL(page.url()).origin });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    await ctx.patch(`/api/v1/characters/${navigation.characterId}`, { data: { hpTemp: 0 } });
+    await ctx.dispose();
+  });
+
+  /**
    * Regression (Codex review on #2115): `PATCH /characters/:id` writes death-save counters
    * verbatim — unlike the encounter path it does NOT derive `deathState` from them — so an
    * editable pip here could leave three failures sitting at 'dying', on the sheet and in a
