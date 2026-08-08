@@ -98,6 +98,36 @@ describe('deriveEquippedItemAction (#2097)', () => {
       expect(action!.damage).toContain('1d4+3');
     });
 
+    it('flags a thrown finesse weapon whose melee/ranged reading changed the ability', () => {
+      // Open5e publishes no melee/ranged discriminator: the Dagger (simple MELEE) and the Dart
+      // (simple RANGED) are byte-identical in its payload. Finesse takes the better of STR and
+      // DEX, so the readings only diverge for a STR-dominant wielder — correct for a Dagger,
+      // too high for a Dart. The action says so rather than guessing either way.
+      const thrownFinesse = open5eWeapon({
+        damageDice: '1d4',
+        damageType: 'Piercing',
+        range: 20,
+        longRange: 60,
+        properties: [{ name: 'Finesse', type: null, detail: null }, { name: 'Thrown', type: null, detail: 'Range 20/60' }],
+      });
+      const strWielder = deriveEquippedItemAction({ itemName: 'Dart', data: thrownFinesse, character: fighter, adapter: dnd5e })!;
+      expect(strWielder.notes).toContain('melee or a thrown ranged weapon');
+
+      // A DEX-dominant wielder gets DEX under BOTH readings, so there is nothing to warn about.
+      const dexWielder = deriveEquippedItemAction({ itemName: 'Dart', data: thrownFinesse, character: rogue, adapter: dnd5e })!;
+      expect(dexWielder.notes).not.toContain('melee or a thrown ranged weapon');
+
+      // An unambiguous weapon stays quiet: a bow is Ammunition-marked, a longsword neither
+      // thrown nor finesse.
+      for (const [label, data] of [
+        ['Longbow', open5eWeapon({ damageType: 'Piercing', properties: [{ name: 'Ammunition', type: null, detail: null }] })],
+        ['Longsword', open5eWeapon()],
+      ] as const) {
+        const action = deriveEquippedItemAction({ itemName: label, data, character: fighter, adapter: dnd5e })!;
+        expect(action.notes).not.toContain('melee or a thrown ranged weapon');
+      }
+    });
+
     it('states the proficiency assumption in the action itself', () => {
       // Campfire's Character carries no weapon-proficiency data, so proficiency is an assumed
       // default. It has to be visible to whoever reads the row, not buried in a commit message.

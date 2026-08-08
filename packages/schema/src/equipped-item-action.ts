@@ -91,6 +91,25 @@ interface WeaponProfile {
   ranged: boolean;
   /** 5e Finesse — attacks with the better of STR and DEX. */
   finesse: boolean;
+  /**
+   * True when the source data cannot say whether this is a melee or a ranged weapon, and the
+   * distinction would change which ability the attack uses (issue #2097 review,
+   * chatgpt-codex-connector P2).
+   *
+   * Open5e v2 publishes no melee/ranged discriminator — verified against the live endpoint:
+   * the Dagger (simple MELEE) and the Dart (simple RANGED) are byte-identical in its payload,
+   * both `range: 20/60`, `is_simple: true`, `properties: [Finesse, Thrown, …]`. The PHB's own
+   * "Simple Melee / Simple Ranged" table column is simply not in the API, so there is nothing
+   * to preserve at import time and no honest way to tell them apart here.
+   *
+   * Finesse takes the BETTER of STR and DEX, so the two readings only diverge for a wielder
+   * whose STR beats their DEX: that is correct for a Dagger (melee finesse) and too high for a
+   * Dart (ranged, which is DEX outright). Rather than guess, or degrade every thrown finesse
+   * weapon — the Dagger is common and currently right — the action says so in its own notes,
+   * the same way it already declares the proficiency assumption. Visible and correctable beats
+   * silently right-most-of-the-time.
+   */
+  abilityAmbiguous: boolean;
 }
 
 // Review (chatgpt-codex-connector P2): this used to be a local regex, which accepted shapes
@@ -173,14 +192,20 @@ function weaponProfileFrom(data: unknown): WeaponProfile | null {
 
   // Open5e mundane weapons (issue #2096) — the explicit discriminator.
   if (str(d.itemKind).toLowerCase() === 'weapon') {
+    // Ranged means "attacks with DEX", which is NOT the same as "reports a range": a thrown
+    // Dagger carries a real 20/60 and is still a melee weapon whose attack uses STR (or DEX
+    // via Finesse). Ammunition is the property that actually marks a bow/crossbow/sling.
+    const ranged = hasProperty(d.properties, 'Ammunition');
+    const finesse = hasProperty(d.properties, 'Finesse');
+    const thrown = hasProperty(d.properties, 'Thrown');
     return {
       damageDice: str(d.damageDice),
       damageType: damageTypeOf(d.damageType),
-      // Ranged means "attacks with DEX", which is NOT the same as "reports a range": a thrown
-      // Dagger carries a real 20/60 and is still a melee weapon whose attack uses STR (or DEX
-      // via Finesse). Ammunition is the property that actually marks a bow/crossbow/sling.
-      ranged: hasProperty(d.properties, 'Ammunition'),
-      finesse: hasProperty(d.properties, 'Finesse'),
+      ranged,
+      finesse,
+      // See {@link WeaponProfile.abilityAmbiguous}: a thrown finesse weapon with no Ammunition
+      // is either a melee weapon (Dagger) or a ranged one (Dart), and this data cannot say.
+      abilityAmbiguous: !ranged && thrown && finesse,
     };
   }
 
@@ -194,6 +219,8 @@ function weaponProfileFrom(data: unknown): WeaponProfile | null {
     damageType,
     ranged: range !== null && range > 0,
     finesse: hasProperty(d.properties, 'Finesse'),
+    // A flat-keyed source states its range outright, so there is no melee/ranged ambiguity.
+    abilityAmbiguous: false,
   };
 }
 
@@ -314,7 +341,13 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
         damage: [{ expression: damageExpression, type: profile.damageType.toLowerCase() }],
         desc:
           `Derived from the equipped ${name}: ${abilityKey} ${signed(abilityMod)}, proficiency ${signed(prof)}. ` +
-          'Assumes proficiency with this weapon — edit the action if that is wrong, or to add a magic bonus.',
+          'Assumes proficiency with this weapon — edit the action if that is wrong, or to add a magic bonus.' +
+          // Only when the choice actually differed: a thrown finesse weapon whose wielder is
+          // stronger than they are dexterous. If DEX won anyway, both readings agree and
+          // there is nothing to warn about.
+          (profile.abilityAmbiguous && abilityKey === 'STR'
+            ? ' Its source data cannot say whether this is a melee or a thrown ranged weapon; a ranged one would use DEX instead.'
+            : ''),
       },
       'attack',
       'dnd5e',

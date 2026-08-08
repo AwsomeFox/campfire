@@ -836,12 +836,27 @@ export class InventoryService {
     // longer identifies the item as a weapon, say — has to CLEAR the previous derived action
     // rather than leave it standing, or the item goes on granting an attack built from source
     // data that no longer says so. A falsy result used to just skip the branch.
+    // Two things trigger a (re)derivation, kept as separate named conditions because the
+    // reasons are unrelated:
+    const equipTransition = equipWillChange && nextEquipped;
+    // Review (chatgpt-codex-connector P2): a rename of an already-equipped item. A derived
+    // action is named after the item, and only a MANUAL action may intentionally carry a name
+    // of its own — so without this the row and its granted action drift apart permanently,
+    // with the source label showing the new name and the action itself the old one.
+    const renameOfDerivedAction =
+      input.name !== undefined &&
+      input.name !== existing.name &&
+      existing.equipped &&
+      existing.equippedActionSource === EquippedActionSource.enum.derived;
+
     const shouldDeriveOnEquip =
-      equipWillChange &&
-      nextEquipped &&
+      (equipTransition || renameOfDerivedAction) &&
       finalOwnerType === 'character' &&
       input.equippedAction === undefined &&
       (moved || !existing.equippedAction || existing.equippedActionSource === EquippedActionSource.enum.derived);
+    // The revision the derivation reads, fenced on inside the transaction below — see the
+    // matching fence in `refreshCompendium`.
+    const derivedFromSnapshot = existing.compendiumSnapshot;
     const derivedOnEquip = shouldDeriveOnEquip
       ? await this.deriveActionForEquip(existing, finalCharacterId as number, input.name ?? existing.name)
       : null;
@@ -994,7 +1009,14 @@ export class InventoryService {
           update.equippedActionSource = input.equippedAction ? EquippedActionSource.enum.manual : null;
         } else if (
           shouldDeriveOnEquip &&
-          (moved || !fresh.equippedAction || fresh.equippedActionSource === EquippedActionSource.enum.derived)
+          (moved || !fresh.equippedAction || fresh.equippedActionSource === EquippedActionSource.enum.derived) &&
+          // Review (chatgpt-codex-connector P2): …and the row must still hold the revision the
+          // derivation actually read. `refreshCompendium` can accept a newer one while this
+          // request awaits — and when the item is unequipped at that moment, refresh performs
+          // no regeneration of its own, so the fresh row still looks actionless-and-derived
+          // and every other check here passes. Without this, revision-A mechanics land on a
+          // revision-B snapshot. Same fence, same reasoning, as the refresh path's.
+          fresh.compendiumSnapshot === derivedFromSnapshot
         ) {
           // Review (chatgpt-codex-connector P2) — time-of-check/time-of-use, the same class of
           // race this transaction already re-validates authorization against. `derivedOnEquip`

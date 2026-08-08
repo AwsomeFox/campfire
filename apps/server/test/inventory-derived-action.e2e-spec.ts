@@ -550,6 +550,38 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(authored.body.equippedAction.damage).toBe('1d8 ichor');
   });
 
+  it('renaming an equipped item renames the action it grants', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'rename-only-slot' });
+    expect(equipped.body.equippedAction.name).toBe('Longsword');
+
+    // A rename alone is not an equip transition, so the derived action used to keep the old
+    // name indefinitely while the row and its `equipped: <item>` source label showed the new
+    // one. Only a MANUAL action may intentionally carry a name of its own.
+    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Oathkeeper' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.name).toBe('Oathkeeper');
+    expect(renamed.body.equippedActionSource).toBe('derived');
+    expect(renamed.body.equippedAction.name).toBe('Oathkeeper');
+  });
+
+  it('renaming an equipped item never renames a MANUAL action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'rename-manual-slot' });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Named By Hand', kind: 'melee', toHit: '+6', damage: '1d8+3 slashing', targetAc: '', notes: '' } });
+
+    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Renamed Again' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.name).toBe('Renamed Again');
+    expect(renamed.body.equippedActionSource).toBe('manual');
+    expect(renamed.body.equippedAction.name).toBe('Named By Hand');
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)
