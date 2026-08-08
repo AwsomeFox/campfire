@@ -68,4 +68,53 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
     expect(depsMatch).not.toBeNull();
     expect(depsMatch![0]).toContain('riskyBlocked');
   });
+
+  /**
+   * Review round 2 on PR #2074. Gating `buildReorderControls` above covered the roster
+   * row's drag handle and menu, but `InitiativeStrip` funnels into the SAME
+   * `handleReorderDrop` mutation and was handed `canReorder={canEditEncounter}` — the
+   * DM/not-ended check alone. During an SSE outage that disabled every other
+   * conflict-prone write on the page, a strip drag still reached the server, and a
+   * second drag could start before the first was confirmed.
+   *
+   * Two entry points to one write, gated separately, is what let them drift. These pin
+   * the gate on the shared write path (so a future third entry point inherits it) AND on
+   * the strip's own affordance (so the control is withdrawn rather than silently
+   * swallowing the drop).
+   */
+  test('handleReorderDrop — the write path BOTH entry points share — refuses while blocked or in flight', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const fnStart = source.indexOf('const handleReorderDrop = useCallback(');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = source.indexOf('const rosterDragReorder', fnStart);
+    expect(fnEnd).toBeGreaterThan(fnStart);
+    const fn = source.slice(fnStart, fnEnd);
+
+    // An early return on all three, ahead of the mutate call — not merely a mention.
+    const guardIndex = fn.search(/if \(reconcileBlocks \|\| riskyBlocked \|\| reorderCombatant\.isPending\) return;/);
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeLessThan(fn.indexOf('reorderCombatant.mutate('));
+
+    // Stale-closure guard: each gate must appear in the dependency array too.
+    const depsMatch = fn.match(/\[encounter,[^\]]*\],\s*\);/);
+    expect(depsMatch).not.toBeNull();
+    for (const dep of ['reconcileBlocks', 'riskyBlocked', 'reorderCombatant']) {
+      expect(depsMatch![0]).toContain(dep);
+    }
+  });
+
+  test('the initiative strip\'s canReorder withdraws the affordance during an outage, not just the drop', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    // Anchored to a JSX attribute on its own line. `handleReorderDrop`'s comment above
+    // quotes the OLD `canReorder={canEditEncounter}` to explain what changed, and an
+    // unanchored match found THAT first and read the pre-fix expression — this assertion
+    // failed against the very fix it exists to pin. Prose naming the old code is exactly
+    // what a source scan must not mistake for the code.
+    const propMatch = source.match(/^\s*canReorder=\{([^}]+)\}$/m);
+    expect(propMatch).not.toBeNull();
+    const expression = propMatch![1];
+    expect(expression).toContain('canEditEncounter');
+    expect(expression).toContain('!reconcileBlocks');
+    expect(expression).toContain('!riskyBlocked');
+  });
 });
