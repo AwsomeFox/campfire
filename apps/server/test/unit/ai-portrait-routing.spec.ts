@@ -49,6 +49,7 @@ function failingFetch(): FetchLike {
 /** Build a service with a stubbed provider config + recording attachment/character/npc/audit fakes. */
 function makeService(config: AiProviderConfig | null) {
   const created: Array<{ campaignId: number; kind: string; mime: string; auditDetail?: string }> = [];
+  const removed: number[] = [];
   const characterUpdates: Array<{ id: number; portraitUrl: string }> = [];
   const npcUpdates: Array<{ id: number; portraitUrl: string }> = [];
   const attachments = {
@@ -64,14 +65,18 @@ function makeService(config: AiProviderConfig | null) {
       return { id: 7171, campaignId, kind, filename: file.filename, mime: file.mime, hidden: false, updatedAt: '2024-01-01T00:00:00Z' } as never;
     },
     versionToken: () => 'abc123',
+    remove: async (id: number) => { removed.push(id); return {} as never; },
   };
   const characters = {
+    getRowOrThrow: async (id: number) => ({ id, campaignId: 1, ownerUserId: 'u1' }),
+    assertCanWrite: () => undefined,
     update: async (id: number, input: { portraitUrl?: string }) => {
       characterUpdates.push({ id, portraitUrl: input.portraitUrl ?? '' });
       return {} as never;
     },
   };
   const npcs = {
+    getRowOrThrow: async (id: number) => ({ id, campaignId: 1 }),
     update: async (id: number, input: { portraitUrl?: string }) => {
       npcUpdates.push({ id, portraitUrl: input.portraitUrl ?? '' });
       return {} as never;
@@ -86,7 +91,7 @@ function makeService(config: AiProviderConfig | null) {
     npcs as never,
     audit as never,
   );
-  return { service, created, characterUpdates, npcUpdates };
+  return { service, created, removed, characterUpdates, npcUpdates };
 }
 
 const openAiImageConfig = (fetchImpl: FetchLike): AiProviderConfig => ({
@@ -183,7 +188,9 @@ describe('AiPortraitService routing (#1321)', () => {
 describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity link)', () => {
   it('persists a portrait attachment and links it onto the target character via characters.update', async () => {
     const { service, created, characterUpdates } = makeService(openAiImageConfig(imageFetch()));
-    const campaignId = nextCampaign();
+    // Use campaignId=1 because the mock getRowOrThrow returns campaignId=1 — validateTarget
+    // rejects a cross-campaign mismatch.
+    const campaignId = 1;
     const job = await service.createJob(campaignId, { prompt: 'a cleric', count: 1 } as never, USER, 'dm');
     const { attachment, entity, provenance } = await service.attach(
       campaignId,
@@ -207,7 +214,7 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
 
   it('persists a portrait attachment and links it onto the target NPC via npcs.update (DM only)', async () => {
     const { service, npcUpdates } = makeService(openAiImageConfig(imageFetch()));
-    const campaignId = nextCampaign();
+    const campaignId = 1; // mock getRowOrThrow returns campaignId=1
     const job = await service.createJob(campaignId, { prompt: 'a tavern keeper', count: 1 } as never, USER, 'dm');
     const { entity } = await service.attach(
       campaignId,
@@ -222,9 +229,9 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
     expect(npcUpdates[0].portraitUrl).toMatch(/\/attachments\/7171\/file\?v=/);
   });
 
-  it('refuses an NPC attach from a non-DM caller', async () => {
-    const { service } = makeService(openAiImageConfig(imageFetch()));
-    const campaignId = nextCampaign();
+  it('refuses an NPC attach from a non-DM caller BEFORE persisting (no orphan attachment)', async () => {
+    const { service, created } = makeService(openAiImageConfig(imageFetch()));
+    const campaignId = 1;
     const job = await service.createJob(campaignId, { prompt: 'a tavern keeper', count: 1 } as never, USER, 'dm');
     await expect(
       service.attach(
@@ -235,6 +242,56 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
         'player',
       ),
     ).rejects.toThrow(/only a dm/i);
+    // validateTarget runs BEFORE createGenerated, so no attachment is persisted (review feedback).
+    expect(created).toHaveLength(0);
+  });
+
+  it('rejects a cross-campaign target BEFORE persisting (no orphan attachment)', async () => {
+    const { service, created } = makeService(openAiImageConfig(imageFetch()));
+    // Generate in campaign 2 (so the job belongs to campaign 2), then attach — the mock
+    // getRowOrThrow always returns campaignId=1, so validateTarget detects the mismatch.
+    const job = await service.createJob(2, { prompt: 'a hero', count: 1 } as never, USER, 'dm');
+    await expect(
+      service.attach(
+        2,
+        job.id,
+        { previewId: job.previews[0].id, entityType: 'character', entityId: 55 } as never,
+        USER,
+        'dm',
+      ),
+    ).rejects.toThrow(/not in campaign/i);
+    // validateTarget runs BEFORE createGenerated, so no attachment is persisted.
+    expect(created).toHaveLength(0);
+  });
+
+  it('rolls back the attachment if the entity linkage fails', async () => {
+    // A service whose characters.update throws to simulate a concurrent-edit race.
+    const created: Array<{ campaignId: number; kind: string }> = [];
+    const removed: number[] = [];
+    const attachments = {
+      createGenerated: async (campaignId: number, kind: string) => {
+        created.push({ campaignId, kind });
+        return { id: 7171, campaignId, kind, hidden: false, updatedAt: '2024-01-01T00:00:00Z' } as never;
+      },
+      versionToken: () => 'abc123',
+      remove: async (id: number) => { removed.push(id); return {} as never; },
+    };
+    const characters = {
+      getRowOrThrow: async (id: number) => ({ id, campaignId: 1, ownerUserId: 'u1' }),
+      assertCanWrite: () => undefined,
+      update: async () => { throw new Error('concurrent edit race'); },
+    };
+    const npcs = { getRowOrThrow: async () => ({}), update: async () => ({} as never) };
+    const audit = { log: async () => undefined };
+    const providerConfig = { resolveEffectiveConfig: async () => openAiImageConfig(imageFetch()) };
+    const service = new AiPortraitService(providerConfig as never, attachments as never, characters as never, npcs as never, audit as never);
+    const job = await service.createJob(1, { prompt: 'a hero', count: 1 } as never, USER, 'dm');
+    await expect(
+      service.attach(1, job.id, { previewId: job.previews[0].id, entityType: 'character', entityId: 55 } as never, USER, 'dm'),
+    ).rejects.toThrow(/concurrent edit race/i);
+    // The attachment was persisted then rolled back (review feedback: no quota-charged orphan).
+    expect(created).toHaveLength(1);
+    expect(removed).toEqual([7171]);
   });
 
   it('rejects attach for a non-succeeded job', async () => {

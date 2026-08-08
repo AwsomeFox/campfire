@@ -4761,11 +4761,27 @@ export class McpToolsService {
     );
 
     // ── AI portrait generation (issue #1321) ──────────────────────────────────
-    // Member-scoped (a player may generate for their own PC, a DM for anything). Unlike the DM-only
-    // ai-map tools, generation is open to any campaign member because the EXPENSIVE step — linking a
-    // chosen portrait onto an entity — reuses the domain service's own dm-or-owner (character) /
-    // dm-only (NPC) authority inside attach_generated_portrait. So a player can only attach to a
-    // character they own, exactly like a manual portrait upload.
+    // Player-or-above scoped (a player may generate for their own PC, a DM for anything). The
+    // EXPENSIVE step — linking a chosen portrait onto an entity — reuses the domain service's own
+    // dm-or-owner (character) / dm-only (NPC) authority inside attach_generated_portrait, so a
+    // player can only attach to a character they own, exactly like a manual portrait upload.
+    this.tool(
+      server,
+      'get_portrait_readiness',
+      'player: estimate cost + readiness for an AI portrait brief WITHOUT generating (issue #1321). Reports the method ' +
+        'that would be used (image-provider vs external-instructions), provider capabilities, cost estimate, moderation, ' +
+        'and warnings — so a caller can preview the spend before committing to generate_ai_portrait. Non-mutating.',
+      {
+        campaignId: CampaignIdArg,
+        ...AiPortraitGenerationRequest.shape,
+      },
+      async ({ campaignId, ...fields }) => {
+        const request = AiPortraitGenerationRequest.parse(fields);
+        await this.access.requireRole(user, campaignId as number, 'player');
+        return this.aiPortrait.readiness(campaignId as number, request);
+      },
+    );
+
     this.writeTool(
       server,
       user,

@@ -199,6 +199,7 @@ export const MCP_TOOL_NAMES = [
   'attach_generated_map',
   'generate_ai_portrait',
   'get_portrait_generation',
+  'get_portrait_readiness',
   'refine_ai_portrait',
   'attach_generated_portrait',
   'add_combatant',

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -249,7 +250,10 @@ export class AiPortraitService {
       ...prior.request,
       prompt: refine.prompt ?? prior.request.prompt,
       count: refine.count ?? prior.request.count,
-      // Continuity: reuse the chosen preview's seed as the base seed for the refined render.
+      // Seed is a LOCAL label only — it identifies candidates in previews/audit and lets a refined
+      // job derive deterministic preview ids. The OpenAI-compatible image API has no seed parameter,
+      // so this does NOT influence the provider's output pixels (unlike the procedural map renderer).
+      // It is retained for stable attribution, not for reproducibility.
       seed: fromPreview?.seed ?? prior.request.seed,
     };
     return this.createJob(campaignId, merged, user, role, { ...opts, caller: prior.caller });
@@ -299,10 +303,11 @@ export class AiPortraitService {
    * attachment write is atomic (rolls back its own bytes on failure), and it is the ONLY disk
    * write in the whole flow.
    *
-   * AUTHORITY: the attach endpoint is reachable by any campaign member, but LINKING the portrait
-   * reuses the domain service's own authority. `CharactersService.update` enforces dm-or-owner,
-   * so a player may attach only to their OWN character; NPC updates are DM-only and the caller's
-   * role must already be `'dm'` (asserted by the controller/MCP before reaching here).
+   * AUTHORITY: generation is player-or-above scoped (the controller/MCP asserts `requireRole
+   * 'player')`, but LINKING the portrait reuses the domain service's own authority. The target
+   * entity is validated to belong to the SAME campaign and the caller's write authority is checked
+   * BEFORE the attachment is persisted — so a rejected attach never consumes quota or leaves an
+   * orphan. `CharactersService.update` re-checks dm-or-owner; NPC portrait writes are DM-only.
    */
   async attach(
     campaignId: number,
@@ -320,6 +325,11 @@ export class AiPortraitService {
     if (!preview || !stored) {
       throw new NotFoundException(`Preview ${body.previewId} not found on job ${jobId}.`);
     }
+
+    // Validate the target entity belongs to THIS campaign and the caller has write authority,
+    // BEFORE persisting the attachment — so a cross-campaign or unauthorized target is rejected
+    // without consuming quota or leaving an orphan attachment (issue #1321 review feedback).
+    await this.validateTarget(campaignId, body.entityType, body.entityId, user, role);
 
     const ext = mimeExt(stored.mime);
     const filename = sanitizeFilename(body.filename ?? `ai-portrait-${preview.seed}`) + `.${ext}`;
@@ -363,21 +373,67 @@ export class AiPortraitService {
     // Link the chosen portrait onto the target entity by reusing the domain service's own update
     // path — which enforces dm-or-owner for a character and (for NPCs) requires the caller to be
     // a DM. The stored URL carries the version token (issue #498) so a later re-upload or
-    // reveal/hide toggle invalidates any cached copy.
+    // reveal/hide toggle invalidates any cached copy. The target was already validated above, so
+    // this should not throw on authority — but roll back the attachment on ANY linkage failure so
+    // a rejected target never leaves a quota-charged orphan (issue #1321 review feedback).
     const portraitUrl = `/api/v1/attachments/${attachment.id}/file?v=${this.attachments.versionToken(attachment)}`;
-
-    if (body.entityType === 'character') {
-      // CharactersService.update asserts dm-or-owner — a player can only set their OWN portrait.
-      await this.characters.update(body.entityId, { portraitUrl }, user, role);
-    } else {
-      // NPC portrait writes are DM-only — the controller/MCP must have asserted `role === 'dm'`.
-      if (role !== 'dm') {
-        throw new ForbiddenException('Only a DM may attach a portrait to an NPC.');
+    try {
+      if (body.entityType === 'character') {
+        // CharactersService.update asserts dm-or-owner — a player can only set their OWN portrait.
+        await this.characters.update(body.entityId, { portraitUrl }, user, role);
+      } else {
+        await this.npcs.update(body.entityId, { portraitUrl }, user, role);
       }
-      await this.npcs.update(body.entityId, { portraitUrl }, user, role);
+    } catch (err) {
+      // Defensive: the pre-validation should have caught authority issues, but a race or a
+      // concurrent edit could still fail the linkage. Roll back the just-created attachment so
+      // the campaign is not charged quota for a portrait that was never linked.
+      try {
+        await this.attachments.remove(attachment.id, user, role);
+      } catch (cleanupErr) {
+        this.logger.error(
+          `AI portrait attach linkage failed for ${body.entityType}:${body.entityId} and attachment rollback could not complete: ${
+            cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)
+          }`,
+        );
+      }
+      throw err;
     }
 
     return { attachment, entity: { type: body.entityType, id: body.entityId }, provenance: preview.provenance };
+  }
+
+  /**
+   * Validate the target entity exists, belongs to THIS campaign, and the caller has write
+   * authority — BEFORE the attachment is persisted. This closes the cross-campaign gap (a DM in
+   * campaign A supplying a character/NPC id from campaign B) and the persist-before-authorize
+   * ordering issue (issue #1321 review feedback). Character authority is dm-or-owner (delegated to
+   * `CharactersService.assertCanWrite`); NPC authority is DM-only.
+   */
+  private async validateTarget(
+    campaignId: number,
+    entityType: 'character' | 'npc',
+    entityId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<void> {
+    if (entityType === 'character') {
+      const row = await this.characters.getRowOrThrow(entityId);
+      if (row.campaignId !== campaignId) {
+        throw new BadRequestException(`Character ${entityId} is not in campaign ${campaignId}.`);
+      }
+      // CharactersService.assertCanWrite: dm or the owning player. A viewer or non-owner player 403s
+      // here, before any attachment bytes are written.
+      this.characters.assertCanWrite(row, user, role);
+    } else {
+      if (role !== 'dm') {
+        throw new ForbiddenException('Only a DM may attach a portrait to an NPC.');
+      }
+      const row = await this.npcs.getRowOrThrow(entityId);
+      if (row.campaignId !== campaignId) {
+        throw new BadRequestException(`NPC ${entityId} is not in campaign ${campaignId}.`);
+      }
+    }
   }
 
   // ── generation core ───────────────────────────────────────────────────────────
@@ -439,7 +495,12 @@ export class AiPortraitService {
     const previews: AiPortraitPreview[] = result.images.map((img, i) => {
       const seed = `${baseSeed(request)}-${i}`;
       const previewId = `${job.id}-p${i}`;
-      record.bytes.set(previewId, { buf: img.bytes, mime: img.mime });
+      // Whitelist raster mimes only (issue #1321 review feedback): a provider returning SVG or an
+      // unexpected mime would bypass the attachment image-probe exemption and could introduce XSS
+      // when the portrait is later served through <img src=...>. Reject anything that is not a
+      // known raster format rather than trusting img.mime blindly.
+      const mime = assertRasterMime(img.mime);
+      record.bytes.set(previewId, { buf: img.bytes, mime });
       const provenance: AiPortraitProvenance = {
         method: 'image-provider',
         providerType: config.providerType,
@@ -451,7 +512,7 @@ export class AiPortraitService {
         id: previewId,
         method: 'image-provider',
         imageBase64: img.bytes.toString('base64'),
-        mime: img.mime,
+        mime,
         width: img.width ?? dims.width,
         height: img.height ?? dims.height,
         seed,
@@ -628,4 +689,20 @@ function sanitizeFilename(s: string): string {
 function excerpt(s: string, n: number): string {
   const t = s.trim();
   return t.length <= n ? t : `${t.slice(0, n)}…`;
+}
+
+/** The only mimes a portrait attachment may have — raster formats servable through <img> safely. */
+const ALLOWED_PORTRAIT_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+
+/**
+ * Assert a provider-returned mime is a whitelisted raster format (issue #1321 review feedback).
+ * A provider returning SVG or an unexpected mime would bypass the attachment image-probe exemption
+ * and could introduce XSS when served through <img src=...>. Returns the mime if allowed, else
+ * throws to fail the job.
+ */
+function assertRasterMime(mime: string): string {
+  if (!ALLOWED_PORTRAIT_MIMES.has(mime)) {
+    throw new AiProviderError('invalid_response', `image provider returned unsupported mime type "${mime}"; expected one of ${[...ALLOWED_PORTRAIT_MIMES].join(', ')}`);
+  }
+  return mime;
 }

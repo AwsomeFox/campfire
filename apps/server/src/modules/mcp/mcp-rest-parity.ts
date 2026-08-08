@@ -90,7 +90,7 @@ export const MCP_REST_PARITY_ISSUE_683: readonly McpRestParityEntry[] = [
   { rest: 'GET /campaigns/:id/inbox/sweep/:jobId', mcpTool: 'get_inbox_sweep_result' },
   // AI portrait generation (issue #1321) — member-scoped generation; attach links via the domain
   // service's own dm-or-owner (character) / dm-only (NPC) authority.
-  { rest: 'POST /campaigns/:campaignId/ai-portraits/readiness', mcpTool: null, note: 'Non-mutating cost preview — use REST POST /campaigns/:campaignId/ai-portraits/readiness or fold it into generate_ai_portrait directly.' },
+  { rest: 'POST /campaigns/:campaignId/ai-portraits/readiness', mcpTool: 'get_portrait_readiness' },
   { rest: 'POST /campaigns/:campaignId/ai-portraits', mcpTool: 'generate_ai_portrait' },
   { rest: 'GET /campaigns/:campaignId/ai-portraits/:jobId', mcpTool: 'get_portrait_generation' },
   { rest: 'POST /campaigns/:campaignId/ai-portraits/:jobId/refine', mcpTool: 'refine_ai_portrait' },
