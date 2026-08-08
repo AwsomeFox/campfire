@@ -10715,11 +10715,15 @@ describe('encounters — issue #2084: manualOrder records only the DM\'s crossed
     expect((started.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([wizardId, bId, aId, clericId]);
   });
 
-  it('the moved combatant and only the crossed same-tie-group row are stamped — the rest of the roster is untouched (finding 1)', async () => {
+  it('the moved combatant and its landing tie-group partner are stamped — a DIFFERENT-initiative row is untouched (finding 1)', async () => {
     const { encounterId, wizardId, fighterId, rogueId, clericId, turnVersion } = await seedTiedDifferentDexFight();
     const server = ctx.app.getHttpServer();
 
-    // Fighter(initMod 1) after Wizard, ahead of Rogue(initMod 3) — crosses only Rogue.
+    // Fighter(initMod 1) after Wizard, ahead of Rogue(initMod 3) — a two-member tie
+    // group, so this alone cannot distinguish "the whole landing group" from "only the
+    // rows physically crossed" (see the three-and-more-member tests below for that).
+    // What it DOES pin: Wizard/Cleric, at different initiative values entirely, must
+    // never be stamped by a reorder that never touches their tie.
     const res = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants/${fighterId}/reorder`)
       .set(dm)
@@ -10737,6 +10741,111 @@ describe('encounters — issue #2084: manualOrder records only the DM\'s crossed
     expect(byId.get(fighterId)!.manualOrder).not.toBeNull();
     expect(byId.get(rogueId)!.manualOrder).not.toBeNull();
     expect(byId.get(fighterId)!.manualOrder!).toBeLessThan(byId.get(rogueId)!.manualOrder!);
+  });
+
+  /**
+   * Issue #2095 review (Devin 🔴 + Codex P1, same root cause, independent repros):
+   * partial (crossed-only) stamping is incompatible with the stamped-before-unstamped
+   * total-order rule. `sortCombatants` puts ANY stamped row ahead of ANY unstamped one
+   * within a tie, with no regard for whether that specific row was physically crossed —
+   * so stamping only the crossed subset doesn't just fail to help the untouched
+   * members, it actively sinks them below the touched ones. The fix stamps the WHOLE
+   * landing tie group.
+   */
+  it("a tie group of 4+ where the moved row lands in the MIDDLE: the whole group is stamped and holds the DM's exact requested order (finding 1, Devin's repro)", async () => {
+    await endAnyRunning();
+    const server = ctx.app.getHttpServer();
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Middle-of-tie drill', hidden: false });
+    const encounterId = created.body.id as number;
+    // Insertion order A, W, X, Y, Z; all of W/X/Y/Z share initMod 0 (and will share
+    // initiative 14), so absent any stamp their tie breaks by sortOrder — i.e. exactly
+    // insertion order, W,X,Y,Z. That is DIFFERENT from the order this test requests
+    // (W,X,Z,Y), so a pass cannot be an accident of the adapter's own tiebreak.
+    const a = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'A', hpMax: 10, initMod: 5 });
+    const w = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'W', hpMax: 8, initMod: 0 });
+    const x = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'X', hpMax: 8, initMod: 0 });
+    const y = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Y', hpMax: 8, initMod: 0 });
+    const z = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Z', hpMax: 8, initMod: 0 });
+    const aId = a.body.id as number;
+    const wId = w.body.id as number;
+    const xId = x.body.id as number;
+    const yId = y.body.id as number;
+    const zId = z.body.id as number;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${aId}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${wId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${xId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${yId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${zId}`).set(dm).send({ initiative: 14 });
+    const started = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(started.status).toBe(201);
+    expect((started.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([aId, wId, xId, yId, zId]);
+    const turnVersion = started.body.turnVersion as number;
+
+    // Drag Z to just after X — landing in the MIDDLE of the tie group. This crosses
+    // only Y (the span between Z's old slot and its new one); W and X are untouched by
+    // the physical move but are still members of the SAME landing tie group.
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${zId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: xId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    // The DM's exact request: A, W, X, Z, Y. NOT Devin's reported bug shape (A, Z, Y, W, X).
+    expect((after.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([aId, wId, xId, zId, yId]);
+
+    // The order survives a SECOND, independent reload (no dependence on any in-memory
+    // state from the request that moved it) — and the whole group, including the
+    // untouched W and X, is now consistently stamped in one index space.
+    const reload = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((reload.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([aId, wId, xId, zId, yId]);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rows = await db.select().from(combatantsTable).where(inArray(combatantsTable.id, [aId, wId, xId, yId, zId]));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    expect(byId.get(aId)!.manualOrder).toBeNull(); // different initiative — untouched
+    for (const id of [wId, xId, yId, zId]) expect(byId.get(id)!.manualOrder).not.toBeNull();
+  });
+
+  it("a no-op drag that crosses NOBODY in its tie group does not reorder the group (finding 1, Codex's repro)", async () => {
+    await endAnyRunning();
+    const server = ctx.app.getHttpServer();
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'No-one-crossed drill', hidden: false });
+    const encounterId = created.body.id as number;
+    // Three combatants, all tied, same initMod — insertion order IS the tiebreak order.
+    const p = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'P', hpMax: 8, initMod: 0 });
+    const q = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Q', hpMax: 8, initMod: 0 });
+    const r = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'R', hpMax: 8, initMod: 0 });
+    const pId = p.body.id as number;
+    const qId = q.body.id as number;
+    const rId = r.body.id as number;
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${pId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${qId}`).set(dm).send({ initiative: 14 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${rId}`).set(dm).send({ initiative: 14 });
+    const started = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(started.status).toBe(201);
+    expect((started.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([pId, qId, rId]);
+    const turnVersion = started.body.turnVersion as number;
+
+    // Q is already directly after P — "Move after P" crosses nobody (insertAt equals
+    // Q's own current position).
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${qId}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: pId, expectedTurnVersion: turnVersion });
+    expect(res.status).toBe(201);
+
+    const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    // Order is UNCHANGED. Codex's reported bug shape was [qId, pId, rId] — the moved
+    // combatant jumping to the front of its own untouched tie group.
+    expect((after.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([pId, qId, rId]);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const rows = await db.select().from(combatantsTable).where(inArray(combatantsTable.id, [pId, qId, rId]));
+    const byId = new Map(rows.map((r2) => [r2.id, r2]));
+    // The whole group — including P and R, neither of which the drag "crossed" — is
+    // stamped together, so a future re-sort cannot pull just one of them loose.
+    for (const id of [pId, qId, rId]) expect(byId.get(id)!.manualOrder).not.toBeNull();
   });
 
   it('a no-op drag (the moved value already lies between its new neighbours) leaves initiative and initiativeBreakdown untouched, and logs no initiative change (finding 2)', async () => {

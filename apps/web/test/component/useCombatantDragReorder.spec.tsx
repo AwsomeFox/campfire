@@ -185,6 +185,117 @@ describe('useCombatantDragReorder — a mid-gesture `enabled` flip does not stra
     expect(() => act(() => rerender({ enabled: false }))).not.toThrow();
     expect(result.current.draggingId).toBeNull();
   });
+
+  /**
+   * Issue #2095 review: `releasePointerCapture` can throw `NotFoundError` when the
+   * browser already released capture itself — one way that happens is the handle
+   * element unmounting mid-gesture, which is EXACTLY the scenario the enabled-transition
+   * effect above exists to recover from. A bare (unguarded) `releasePointerCapture` call
+   * would throw INSIDE the effect, abort before `reset()` runs, and strand the gesture
+   * on precisely the path meant to un-strand it — worse than no fix at all. This is the
+   * assertion that distinguishes "we call release" (the previous test) from "we recover
+   * even when release itself fails".
+   */
+  test('a throwing releasePointerCapture during the enabled-transition reset still clears the gesture, and a later onPointerDown still starts a new drag', () => {
+    const elA = { getBoundingClientRect: () => rect({ left: 0, right: 100, top: 0, bottom: 40 }) } as HTMLElement;
+    const elementsRef = { current: new Map<number, HTMLElement>([[1, elA]]) };
+    const onDrop = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useCombatantDragReorder({ axis: 'x', orderedIds: [1], enabled, elementsRef, onDrop }),
+      { initialProps: { enabled: true } },
+    );
+
+    const throwingRelease = vi.fn(() => {
+      throw new DOMException('already released', 'NotFoundError');
+    });
+    const downEvent = {
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 0,
+      clientY: 20,
+      currentTarget: { setPointerCapture: vi.fn(), releasePointerCapture: throwingRelease } as unknown as HTMLElement,
+    } as unknown as ReactPointerEvent<HTMLElement>;
+
+    act(() => {
+      result.current.handleProps(1).onPointerDown(downEvent);
+    });
+    act(() => {
+      // Past the drag-start slop — a real gesture is now in progress, matching the
+      // non-throwing sibling test's shape.
+      result.current.handleProps(1).onPointerMove(fakePointerEvent(80, 20));
+    });
+    expect(result.current.draggingId).toBe(1);
+
+    // The gate trips mid-gesture. The release the effect attempts THROWS.
+    expect(() => act(() => rerender({ enabled: false }))).not.toThrow();
+    expect(throwingRelease).toHaveBeenCalledWith(1);
+    // The gesture is STILL reset — draggingId returns to idle — despite the throw.
+    expect(result.current.draggingId).toBeNull();
+
+    // A brand-new gesture still starts cleanly — the throw did not stop `reset()`.
+    const secondDown = {
+      pointerId: 2,
+      isPrimary: true,
+      clientX: 0,
+      clientY: 20,
+      currentTarget: { setPointerCapture: vi.fn(), releasePointerCapture: vi.fn() } as unknown as HTMLElement,
+    } as unknown as ReactPointerEvent<HTMLElement>;
+    act(() => {
+      rerender({ enabled: true });
+    });
+    act(() => {
+      result.current.handleProps(1).onPointerDown(secondDown);
+    });
+    act(() => {
+      result.current.handleProps(1).onPointerMove({ ...fakePointerEvent(80, 20), pointerId: 2 } as ReactPointerEvent<HTMLElement>);
+    });
+    // Pre-fix, a bare `releasePointerCapture` call throwing here would have aborted the
+    // effect before `gestureRef.current = null` ran, and this onPointerDown would have
+    // silently no-op'd (gestureRef still holding pointerId 1) — draggingId would stay null.
+    expect(result.current.draggingId).toBe(1);
+  });
+
+  /**
+   * Same guard, exercised on the `onPointerUp` path rather than the effect — issue #2095
+   * review explicitly calls out both.
+   */
+  test('a throwing releasePointerCapture on pointerup still resolves the drop and resets the gesture', () => {
+    const elA = { getBoundingClientRect: () => rect({ left: 0, right: 100, top: 0, bottom: 40 }) } as HTMLElement;
+    const elB = { getBoundingClientRect: () => rect({ left: 100, right: 200, top: 0, bottom: 40 }) } as HTMLElement;
+    const elementsRef = { current: new Map<number, HTMLElement>([[1, elA], [2, elB]]) };
+    const onDrop = vi.fn();
+    const { result } = renderHook(() => useCombatantDragReorder({ axis: 'x', orderedIds: [1, 2], enabled: true, elementsRef, onDrop }));
+
+    const throwingRelease = vi.fn(() => {
+      throw new DOMException('already released', 'NotFoundError');
+    });
+    const downEvent = {
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 0,
+      clientY: 20,
+      currentTarget: { setPointerCapture: vi.fn(), releasePointerCapture: throwingRelease } as unknown as HTMLElement,
+    } as unknown as ReactPointerEvent<HTMLElement>;
+
+    act(() => {
+      result.current.handleProps(1).onPointerDown(downEvent);
+    });
+    act(() => {
+      result.current.handleProps(1).onPointerMove(fakePointerEvent(180, 20));
+    });
+
+    expect(() =>
+      act(() => {
+        result.current.handleProps(1).onPointerUp(fakePointerEvent(180, 20));
+      }),
+    ).not.toThrow();
+    expect(throwingRelease).toHaveBeenCalled();
+    // The drop still resolved despite the throwing release.
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(onDrop).toHaveBeenCalledWith(1, 2);
+    // And the gesture is fully reset, not left dangling.
+    expect(result.current.draggingId).toBeNull();
+  });
 });
 
 /**

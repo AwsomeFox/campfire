@@ -18,6 +18,26 @@ import { afterCombatantIdForDrop } from '../combatantReorder';
 /** Pixels of pointer travel before a press on the handle commits to a drag. */
 const DRAG_START_SLOP_PX = 6;
 
+/**
+ * `releasePointerCapture` can throw `NotFoundError` when the browser already released
+ * capture itself — one way that happens is the SAME mid-gesture `enabled` flip the
+ * issue #2084 finding 4 effect below exists to recover from: the handle element
+ * unmounting releases capture as a side effect, and then this call, made moments later
+ * against a `pointerId` the browser no longer considers captured, throws. Every call
+ * site here must go through this wrapper — a throw from a bare `releasePointerCapture`
+ * call would abort the surrounding handler BEFORE it reaches `reset()`, leaving
+ * `gestureRef` populated on exactly the path meant to clear it (issue #2095 review).
+ */
+function safeReleasePointerCapture(target: HTMLElement, pointerId: number): void {
+  try {
+    target.releasePointerCapture?.(pointerId);
+  } catch {
+    // Already released (or never captured) — nothing left to clean up here. The
+    // caller's own `reset()` (never skipped, never gated on this succeeding) is what
+    // actually matters.
+  }
+}
+
 type Axis = 'x' | 'y';
 
 type Gesture = {
@@ -123,7 +143,11 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     if (enabled) return;
     const gesture = gestureRef.current;
     if (!gesture) return;
-    gesture.captureTarget.releasePointerCapture?.(gesture.pointerId);
+    // Order matters (issue #2095 review): the release attempt goes through the
+    // never-throwing wrapper, and `reset()` runs unconditionally after it — NOT inside
+    // a `try` whose `catch` might be the only path back to it. A throwing release must
+    // never prevent the state clear this effect exists to guarantee.
+    safeReleasePointerCapture(gesture.captureTarget, gesture.pointerId);
     reset();
   }, [enabled, reset]);
 
@@ -158,7 +182,11 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     (e: ReactPointerEvent<HTMLElement>) => {
       const gesture = gestureRef.current;
       if (!gesture || gesture.pointerId !== e.pointerId) return;
-      gesture.captureTarget.releasePointerCapture?.(e.pointerId);
+      // issue #2095 review: same never-throwing wrapper as the enabled-transition
+      // effect above — an already-released capture (e.g. this pointerup arriving after
+      // the browser released capture on its own) must not stop the drop resolution or
+      // `reset()` below from running.
+      safeReleasePointerCapture(gesture.captureTarget, e.pointerId);
       const resolvedOver = overRef.current;
       if (gesture.moved && resolvedOver) {
         const afterId = afterCombatantIdForDrop(orderedIds, gesture.combatantId, resolvedOver.id, resolvedOver.after);
@@ -173,7 +201,7 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     (e: ReactPointerEvent<HTMLElement>) => {
       const gesture = gestureRef.current;
       if (!gesture || gesture.pointerId !== e.pointerId) return;
-      gesture.captureTarget.releasePointerCapture?.(e.pointerId);
+      safeReleasePointerCapture(gesture.captureTarget, e.pointerId);
       reset();
     },
     [reset],

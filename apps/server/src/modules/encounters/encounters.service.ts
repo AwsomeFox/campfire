@@ -7078,13 +7078,39 @@ export class EncountersService {
       // while `preparing`, where most rows have no rolled initiative yet and the stamped
       // index encoded add order, not a DM decision.
       //
-      // The narrower rule: stamp only the moved combatant and the OTHER rows it actually
-      // crossed that land in its own (possibly just-reassigned) initiative tie group.
-      // `oldIdx`/`insertAt` bound the span of `withoutMoved` this move passed over; within
-      // that span, only same-initiative rows are relevant to a tiebreak comparison at all
-      // (`sortCombatants` never calls into `manualOrder` for two different initiative
-      // values — it decides those numerically first). A tie group nobody dragged into
-      // stays entirely null and keeps falling through to the adapter.
+      // The narrower rule: stamp only rows that share the moved combatant's landing
+      // (possibly just-reassigned) initiative value — its FULL tie group as it exists in
+      // the newly computed order, not merely the ones the drag's own start/end positions
+      // happened to span. A tie group nobody dragged into stays entirely null and keeps
+      // falling through to the adapter, since only same-initiative rows are relevant to a
+      // tiebreak comparison at all (`sortCombatants` never calls into `manualOrder` for
+      // two different initiative values — it decides those numerically first).
+      //
+      // Issue #2095 review (Devin + Codex, same root cause, independent repros): an
+      // earlier version stamped only the moved combatant plus whichever OTHER tie-group
+      // members its start/end positions physically crossed — but #2088's
+      // stamped-before-unstamped total-order rule (relanded in this same PR, see
+      // `sortCombatants`) makes ANY stamped row sort ahead of ANY unstamped one within a
+      // tie, with no regard for whether that row was crossed. A partial stamp therefore
+      // does not merely fail to help the untouched members — it ACTIVELY sinks them below
+      // the touched ones, an order the DM never asked for:
+      //
+      //   running A(20), W/X/Y/Z all tied at 14; drag Z to just after X. Crossing only
+      //   spans Y, so the old code stamped {Z, Y} and left W/X null — sorting to
+      //   A, Z, Y, W, X instead of the requested A, W, X, Z, Y.
+      //
+      // Smaller and nastier: a tied [A, B, C], no-op move of B to right after A crosses
+      // NOBODY (insertAt already equals B's old position) — the old code still stamped
+      // only B, and a stamped B alone now sorts ahead of unstamped A and C: a no-op drag
+      // silently reorders its own tie group.
+      //
+      // Stamping the WHOLE landing group, using each member's index in this SAME
+      // `orderedIds` pass, also closes a second issue both reviewers noted: `manualOrder`
+      // is an absolute index into `orderedIds`, so a stamp from an EARLIER drag lives in a
+      // different index space than one from this drag. A partial stamp could leave part of
+      // a tie group holding stale indices from a prior operation while the rest got fresh
+      // ones, risking duplicate or inverted values within one group. Every member of the
+      // group is (re)stamped together here, in one consistent space, every time.
       //
       // Deliberately skipped altogether when the moved combatant's landing initiative is
       // null (unrolled): `sortCombatants` decides an unrolled tie by `sortOrder` alone
@@ -7096,10 +7122,7 @@ export class EncountersService {
       const manualOrderIds = new Set<number>();
       if (finalInitiative !== null) {
         manualOrderIds.add(combatantId);
-        const oldIdx = sorted.findIndex((c) => c.id === combatantId);
-        const lo = Math.min(oldIdx, insertAt);
-        const hi = Math.max(oldIdx, insertAt);
-        for (const c of withoutMoved.slice(lo, hi)) {
+        for (const c of withoutMoved) {
           if (c.initiative === finalInitiative) manualOrderIds.add(c.id);
         }
       }
