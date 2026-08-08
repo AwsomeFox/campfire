@@ -887,6 +887,58 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(after.body.equippedAction).not.toBeNull();
   });
 
+  it('resending an identical NON-NULL profile is also a no-op', async () => {
+    const server = ctx.app.getHttpServer();
+    // The case the first attempt at this comparison missed entirely: the incoming profile is
+    // serialized for storage while the persisted one has already been parsed back into an
+    // object, so a strict comparison was unequal for every input and cleared unconditionally.
+    const profile = {
+      slug: 'e2e-resend-hack',
+      label: 'E2E Resend Hack',
+      mechanicsSummary: 'A homebrew hack resent unchanged by a full-object client, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const camp = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Resend Profile', ruleSystem: profile.slug, customMechanicsProfile: profile });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Resender', level: 5, stats: { STR: 16 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory`)
+      .set(dm)
+      .send({ name: 'Ichor Lash', ownerType: 'character', characterId: char.body.id });
+    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'resend-slot' });
+    await request(server)
+      .patch(`/api/v1/inventory/${item.body.id}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Lash', kind: 'melee', toHit: '+3', damage: 'd8 ichor', targetAc: '', notes: '' } });
+
+    // Resent unchanged, with the keys in a DIFFERENT order — an identical profile can
+    // serialize two ways, so the comparison has to be canonical, not textual.
+    const reordered = Object.fromEntries(Object.entries(profile).reverse());
+    const noOp = await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ name: 'Resend Profile Renamed', ruleSystem: profile.slug, customMechanicsProfile: reordered });
+    expect(noOp.status).toBe(200);
+
+    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
+    expect(after.body.equippedActionSource).toBe('manual');
+    expect(after.body.equippedAction).not.toBeNull();
+  });
+
   it('an identical concurrent rename does not clear the action the other one derived', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();

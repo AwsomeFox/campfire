@@ -28,13 +28,15 @@ export const DICE_MAX_MODIFIER_ABS = 999;
 /**
  * One `NdM` term with an optional `+K`/`-K` modifier — the shape a damage formula takes.
  *
- * Digit limits mirror `DiceExprPattern` exactly (index.ts): count 1-2 digits, sides 1-3,
- * modifier 1-3. Review (chatgpt-codex-connector P2): bounding only the parsed NUMBERS let
+ * Digit limits mirror `DiceExprPattern` exactly (index.ts): count 1-2 digits and OPTIONAL,
+ * sides 1-3, modifier 1-3. The count is optional because the roller reads a bare `d6` as one
+ * die (chatgpt-codex-connector P2) — requiring it degraded compendium and homebrew damage
+ * written that way to a text-only action even though it rolls perfectly well. Review (chatgpt-codex-connector P2): bounding only the parsed NUMBERS let
  * `001d6` through — its count is 1, but the roller's own grammar rejects three count digits,
  * so it produced a resolvable spec that threw at roll time. Checking the grammar AND the
  * bounds is what makes "rollable" mean rollable.
  */
-const SIMPLE_DAMAGE_EXPRESSION = /^(\d{1,2})d(\d{1,3})(?:\s*([+-])\s*(\d{1,3}))?$/i;
+const SIMPLE_DAMAGE_EXPRESSION = /^(\d{1,2})?d(\d{1,3})(?:\s*([+-])\s*(\d{1,3}))?$/i;
 
 /**
  * Whether `expr` is a single die term (plus optional flat modifier) the roller will accept.
@@ -47,7 +49,8 @@ const SIMPLE_DAMAGE_EXPRESSION = /^(\d{1,2})d(\d{1,3})(?:\s*([+-])\s*(\d{1,3}))?
 export function isRollableDamageExpression(expr: string): boolean {
   const match = expr.trim().replace(/\s+/g, '').match(SIMPLE_DAMAGE_EXPRESSION);
   if (!match) return false;
-  const count = Number(match[1]);
+  // An omitted count is one die, matching `parseCompoundDiceExpr`.
+  const count = match[1] === undefined ? 1 : Number(match[1]);
   const sides = Number(match[2]);
   if (!Number.isInteger(count) || count < 1 || count > DICE_MAX_COUNT) return false;
   if (!DICE_ALLOWED_SIDES.has(sides)) return false;

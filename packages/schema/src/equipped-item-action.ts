@@ -313,11 +313,16 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
     // single modifier), so the whole string lands in `DamagePart.formula` with `flat: 0`, and
     // 5e's double-dice critical rule then re-rolls both flats instead of adding them once.
     // One combined modifier keeps the dice/flat split the resolver's crit maths depends on.
-    const diceMatch = profile.damageDice.replace(/\s+/g, '').match(/^(\d+d\d+)(?:([+-])(\d+))?$/i);
+    // Count optional — a bare `d6` is one die, as the roller reads it.
+    const diceMatch = profile.damageDice.replace(/\s+/g, '').match(/^(\d{0,2}d\d{1,3})(?:([+-])(\d{1,3}))?$/i);
     if (!diceMatch) {
       return textOnlyAction(name, 'Equipped weapon — its damage could not be read; fill it in.', profile.damageDice);
     }
-    const baseDice = diceMatch[1];
+    // Normalized to an explicit count. `damagePartsFrom` (combatant-statblock.ts) splits
+    // dice from flat modifier with its own `\d+d\d+` pattern, so a bare `d6+3` would land
+    // WHOLE in `DamagePart.formula` with `flat: 0` — and 5e's double-dice crit rule would
+    // then re-roll the +3. Accept the shorthand on the way in, emit the canonical form.
+    const baseDice = diceMatch[1].replace(/^d/i, '1d');
     const weaponFlat = diceMatch[2] ? (diceMatch[2] === '-' ? -1 : 1) * Number(diceMatch[3]) : 0;
     const totalFlat = weaponFlat + abilityMod;
     const damageExpression =
@@ -428,7 +433,8 @@ export function rebuildEditedActionSpec(
   const bonusMatch = edited.toHit.trim().match(/^([+-]?\d+)$/);
   const bonus = bonusMatch ? Number(bonusMatch[1]) : null;
   // `damage` is the human-facing "1d8+3 slashing" line: dice first, type as the remainder.
-  const damageMatch = edited.damage.trim().match(/^(\d+d\d+(?:\s*[+-]\s*\d+)?)\s+(.+)$/i);
+  // Count optional here too, so a hand-typed `d6 slashing` is accepted exactly as `1d6` is.
+  const damageMatch = edited.damage.trim().match(/^(\d{0,2}d\d{1,3}(?:\s*[+-]\s*\d{1,3})?)\s+(.+)$/i);
   const damageType = damageMatch ? damageMatch[2].trim().toLowerCase() : '';
   // Same roller check as the derivation: a hand-typed "21d6 slashing" must become a text-only
   // action, not a resolvable spec that throws the first time someone attacks with it.
@@ -451,7 +457,9 @@ export function rebuildEditedActionSpec(
       {
         name: edited.name,
         attackBonus: bonus,
-        damage: [{ expression: damageMatch[1].replace(/\s+/g, ''), type: damageType }],
+        // Same normalization as the derivation: an explicit count so the expander can split
+      // dice from modifier. The human's own `damage` text is preserved as typed.
+      damage: [{ expression: damageMatch[1].replace(/\s+/g, '').replace(/^d/i, '1d'), type: damageType }],
         desc: edited.notes,
       },
       'attack',

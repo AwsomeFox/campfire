@@ -437,6 +437,35 @@ const characterConditionWriteSetForImport = (row: Rec): { conditions: string; co
   return sheetConditionWriteSetFromInstances(readConditionInstances(instancesText, '[]'));
 };
 
+/**
+ * Stable, key-sorted JSON for value comparison (issue #2097 review). Two objects that are
+ * equal but were built in different key orders — a client's PATCH body versus a row parsed
+ * back out of storage — must compare equal, which plain `JSON.stringify` does not guarantee.
+ */
+function canonicalJson(value: unknown): string {
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === 'object') {
+      return Object.fromEntries(
+        Object.keys(node as Record<string, unknown>)
+          .sort()
+          .map((key) => [key, walk((node as Record<string, unknown>)[key])]),
+      );
+    }
+    return node;
+  };
+  return JSON.stringify(walk(value) ?? null);
+}
+
+/** Parse JSON without throwing — a malformed stored value compares as null rather than crashing. */
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function toDomain(row: typeof campaigns.$inferSelect): Campaign {
   return {
     id: row.id,
@@ -987,16 +1016,26 @@ export class CampaignsService {
      * adapter — so a system switch has to drop them or 5e numbers keep being rolled under the
      * new mechanics.
      *
-     * Compared by EFFECTIVE VALUE, not field presence (chatgpt-codex-connector P2): a
-     * full-object REST or MCP client resends `customMechanicsProfile` unchanged on every
-     * update, and treating that as a change would erase every generated weapon action during
-     * an otherwise no-op PATCH. Serialized both sides so an equal-but-not-identical object
-     * compares equal.
+     * Compared by EFFECTIVE VALUE, not field presence: a full-object REST or MCP client
+     * resends `customMechanicsProfile` unchanged on every update, and treating that as a
+     * change would erase every generated weapon action during an otherwise no-op PATCH.
+     *
+     * Both sides go through `canonicalJson` (chatgpt-codex-connector P2, twice). The first
+     * attempt compared `nextCustomMechanicsProfile` — a JSON STRING, serialized for storage —
+     * against `existing.customMechanicsProfile`, which `toDomain` has already parsed into an
+     * OBJECT, so the comparison was unequal for every input and cleared unconditionally. A
+     * plain `JSON.stringify` on both sides would still be wrong: the incoming object's key
+     * order is the client's, the stored one's is whatever was serialized before, so an
+     * identical profile can serialize two different ways. Canonical (key-sorted) form is what
+     * makes "unchanged" mean unchanged.
      */
+    const nextProfileCanonical =
+      nextCustomMechanicsProfile === undefined
+        ? undefined
+        : canonicalJson(nextCustomMechanicsProfile ? (safeJson(nextCustomMechanicsProfile) ?? null) : null);
     const mechanicsChanged =
       (campaignInput.ruleSystem !== undefined && campaignInput.ruleSystem !== existing.ruleSystem) ||
-      (nextCustomMechanicsProfile !== undefined &&
-        (nextCustomMechanicsProfile ?? null) !== (existing.customMechanicsProfile ?? null));
+      (nextProfileCanonical !== undefined && nextProfileCanonical !== canonicalJson(existing.customMechanicsProfile ?? null));
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of

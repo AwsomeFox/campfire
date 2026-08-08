@@ -214,6 +214,23 @@ describe('deriveEquippedItemAction (#2097)', () => {
       expect(isResolvableSpec(ok!.spec)).toBe(true);
     });
 
+    it('accepts a bare `d6`, which the roller reads as one die', () => {
+      // Review (chatgpt-codex-connector P2): `DiceExprPattern` and `parseCompoundDiceExpr`
+      // both treat an omitted count as 1, so requiring it degraded perfectly rollable
+      // compendium and homebrew damage to a text-only action.
+      const action = deriveEquippedItemAction({
+        itemName: 'Homebrew Dirk',
+        data: open5eWeapon({ damageDice: 'd6', damageType: 'Piercing' }),
+        character: fighter,
+        adapter: dnd5e,
+      })!;
+      expect(isResolvableSpec(action.spec)).toBe(true);
+      // Folded with the wielder's +3 exactly as `1d6` would be — and normalized to an
+      // explicit count, so the expander splits dice from modifier and a crit cannot re-roll
+      // the +3.
+      expect(action.spec?.outcomes?.hit?.damage?.[0]).toMatchObject({ formula: '1d6', flat: 3, type: 'piercing' });
+    });
+
     it('produces a text-only action when the damage dice are not a dice expression', () => {
       // Open5e serves the SRD Net's damage_dice as the string "0".
       const action = deriveEquippedItemAction({
@@ -467,6 +484,16 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
         rebuildEditedActionSpec(CharacterAction.parse({ ...derived, ...patch, spec: undefined }), 'dnd5e', DND5E_DAMAGE_TYPES),
       ).not.toThrow();
     }
+  });
+
+  it('accepts an edited bare `d6 slashing`', () => {
+    const out = rebuildEditedActionSpec(
+      CharacterAction.parse({ ...derived, toHit: '+4', damage: 'd6 slashing', spec: undefined }),
+      'dnd5e',
+      DND5E_DAMAGE_TYPES,
+    );
+    expect(out.spec).toBeDefined();
+    expect(out.spec?.attack?.bonus).toBe('+4');
   });
 
   it('refuses to build a spec from edited dice the roller would reject', () => {
