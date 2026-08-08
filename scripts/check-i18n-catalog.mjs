@@ -223,6 +223,10 @@ function checkHardcodedSurfaces() {
   return errors;
 }
 
+// A bare identifier / dotted member-access chain with no internal whitespace, e.g. `api` or
+// `api.post` — the shape of a call target or return-type name, never real prose.
+const IDENTIFIER_CHAIN_RE = /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/;
+
 /**
  * Scans JSX source code for hardcoded user-facing plain text strings in text nodes (issue #1940).
  * Excludes attributes (data-testid, className, aria-*), numbers, dice notation (1d8+4, d20), punctuation, and t() calls.
@@ -240,6 +244,19 @@ export function extractJsxTextNodes(src) {
     if (/^[\d\s\-_.,/\\()!?:;+|#%&*=<>'"✓✗ℹ️—–…]+$/.test(text)) continue;
     if (/^\d*d\d+([+-]\d+)?$/i.test(text)) continue;
     if (!/[a-zA-Z]{2,}/.test(text)) continue;
+    // Issue #2106: this regex has no real JSX awareness, so a concise arrow whose body (or
+    // return-type annotation) is immediately followed by a generic type argument — e.g.
+    // `=> api.post<Foo>(...)` or `=> Promise<void>` — bookends the SAME shape this loop is
+    // looking for: the `>` that closes `=>` and the `<` that opens the generic look exactly like
+    // a JSX tag's `>text<`, and the "text" in between (`api.post`, `Promise`) is a bare
+    // identifier/member-access chain that passes the letter-count filter above. Gate narrowly on
+    // that: the character immediately before this match's `>` is a literal `=` (i.e. this `>` is
+    // the second half of `=>`, not a JSX tag close — a JSX tag's closing `>` can never be
+    // immediately preceded by a bare `=` in valid TSX, since an attribute needs `="value"` or
+    // `={expr}` before it, never a dangling `=`) AND the captured text is nothing but such a
+    // chain (no spaces, punctuation, or anything else prose would contain). This does not make
+    // the scanner JSX-aware in general — it only rejects this one reported shape.
+    if (src[match.index - 1] === '=' && IDENTIFIER_CHAIN_RE.test(text)) continue;
     matches.push(text);
   }
   return matches;
