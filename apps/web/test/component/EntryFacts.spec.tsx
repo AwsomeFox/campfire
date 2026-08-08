@@ -64,6 +64,19 @@ describe('EntryFacts', () => {
     expect(screen.queryByText('Traits', { selector: 'dt' })).toBeNull();
   });
 
+  test('keeps dt/dd as direct children of the dl so the term/definition semantics survive', () => {
+    // They must be direct children to sit on the dl's two grid tracks. Doing that with a
+    // per-pair wrapper + `display: contents` lays out the same but is known to drop the
+    // wrapped elements from the accessibility tree in Safari/VoiceOver.
+    const { container } = render(<EntryFacts data={AUTOTARGET_RIFLE} />);
+    const list = container.querySelector('dl')!;
+    for (const child of Array.from(list.children)) {
+      expect(['DT', 'DD']).toContain(child.tagName);
+      expect((child as HTMLElement).style.display).not.toBe('contents');
+    }
+    expect(list.querySelectorAll(':scope > dt').length).toBe(list.querySelectorAll(':scope > dd').length);
+  });
+
   test('orders the stats a reader scans first ahead of the long tail', () => {
     render(<EntryFacts data={AUTOTARGET_RIFLE} />);
     const labels = screen.getAllByRole('term').map((el) => el.textContent);

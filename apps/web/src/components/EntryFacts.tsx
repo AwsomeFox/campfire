@@ -14,7 +14,7 @@
  * `dataJson` is shown; anything absent is skipped. Only the label text, ordering, and
  * value formatting are curated.
  */
-import { useId } from 'react';
+import { Fragment, useId } from 'react';
 
 export interface EntryFact {
   key: string;
@@ -297,11 +297,18 @@ export function EntryFacts({
             minWidth: 0,
           }}
         >
+          {/* A Fragment, not a wrapper element: `dt`/`dd` must be DIRECT children of the
+              `dl` to sit on its two grid tracks. Wrapping each pair in a `div` and giving
+              it `display: contents` lays out identically, but that declaration is known to
+              drop the wrapped elements from the accessibility tree in some browser/AT
+              combinations (Safari/VoiceOver) — which would cost this list the term/definition
+              semantics it exists to carry. A Fragment renders no DOM node at all, so there
+              is nothing to strip semantics from. */}
           {facts.map((fact) => (
-            <div key={fact.key} style={{ display: 'contents' }}>
+            <Fragment key={fact.key}>
               <dt style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{fact.label}</dt>
               <dd style={{ margin: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{fact.value}</dd>
-            </div>
+            </Fragment>
           ))}
         </dl>
       )}
