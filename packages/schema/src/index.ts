@@ -309,10 +309,12 @@ export type Campaign = z.infer<typeof Campaign>;
  * append-only, so reactivating (back to active) and re-archiving keeps the full
  * history; the latest row is the current provenance shown in the archived banner/settings.
  *
- * `actorUserId` is the durable install-local id; `actorName` is a display-name
- * snapshot captured at transition time (a later rename does not rewrite history).
- * `reason` is DM operational text and must NOT be shown to players; the banner uses
- * only actor + status + time for the player-visible line.
+ * `actorUserId` is the durable install-local id (the same key
+ * UsersService.synchronizeRetainedAttributionTx matches on); `actorName` is a
+ * display-name snapshot captured at transition time, relabeled on account rename
+ * and pseudonymized on deletion. `reason` is DM operational text and must NOT be
+ * shown to players; the banner uses only actor + status + time for the
+ * player-visible line.
  */
 export const CampaignStatusTransition = z.object({
   id: Id,

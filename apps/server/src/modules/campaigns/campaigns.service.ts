@@ -877,7 +877,11 @@ export class CampaignsService {
     const cleanReason = (reason ?? '').trim().slice(0, 500);
     await this.db.insert(campaignStatusTransitions).values({
       campaignId: id,
-      actorUserId: auditActor(user).slice(0, 120),
+      // Issue #846 review: durable user id (NOT auditActor, which yields 'token:<name>' for
+      // PAT callers) so UsersService.synchronizeRetainedAttributionTx can match this row on
+      // account rename/delete and relabel the actorName snapshot. The audit_log entry below
+      // keeps the audit-actor convention (token:<name>) like every other audit row.
+      actorUserId: user.id.slice(0, 120),
       actorName: (user.name ?? '').slice(0, 200),
       fromStatus,
       toStatus,

@@ -40,6 +40,7 @@ import {
   notificationDigestQueue,
   sessionShares,
   castSessions,
+  campaignStatusTransitions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
@@ -215,6 +216,13 @@ export class UsersService {
     tx.update(tableSafetyHolds).set({ releasedBy: nextLabel }).where(eq(tableSafetyHolds.releasedByUserId, stableUserId)).run();
     tx.update(sessionShares).set({ createdBy: nextLabel }).where(eq(sessionShares.createdByUserId, stableUserId)).run();
     tx.update(castSessions).set({ createdBy: nextLabel }).where(eq(castSessions.createdByUserId, stableUserId)).run();
+    // Issue #846: campaign lifecycle-status provenance carries an actor display-name snapshot
+    // keyed by the durable user id (see recordStatusTransition), so an account rename relabels
+    // it and a deletion pseudonymizes it — same lifecycle as every other *_userId/*_name pair.
+    tx.update(campaignStatusTransitions)
+      .set({ actorName: nextLabel })
+      .where(eq(campaignStatusTransitions.actorUserId, stableUserId))
+      .run();
     // encounter_events.actorId is a numeric combatant id. Token-batch operators
     // instead retain their durable user id in performedByJson.
     tx.update(encounterEvents)
