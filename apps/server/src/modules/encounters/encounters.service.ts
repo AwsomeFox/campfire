@@ -929,6 +929,87 @@ export class EncountersService {
   }
 
   /**
+   * Shared invariant checks for `adjustCombatantResource`'s per-entry mutation (issue #1998).
+   * The character-linked branch (resource on the CHARACTER row) and the statblock branch
+   * (resource on the COMBATANT row's `statblockJson`) each apply this to BOTH resource kinds
+   * they support (a named resource, and a spell slot) — four call sites, one shared code path.
+   * Issue #1909 review turned up three separate defects with the exact same shape across three
+   * consecutive rounds: a guard added to one of the two branches and not its structural twin
+   * (findings 11, 12, 13). Routing all four call sites through this one function means an
+   * omitted guard is now a visible asymmetry in the diff (a call site not updated) rather than
+   * a silent absence a reviewer has to notice by diffing the two branches against each other.
+   *
+   * Checks, in order: the entry exists (and, for spell slots only, has a positive `max` — a
+   * `{max: 0}` slot means "no slots at this level" the same as no entry at all); `used`/`max`
+   * are both integers (an unvalidated legacy/imported row can hold a non-numeric value, which
+   * would otherwise make every bounds comparison below silently false in both directions and
+   * persist `used: NaN` → `null`); the optional `expectedUsed` CAS against the FRESH value;
+   * and the resulting bounds. Returns the original `entry` (never mutated) alongside the
+   * computed next `used` — deliberately NOT applying the delta itself, since the two branches
+   * apply it differently (the character branch mutates the parsed JSON object it owns in
+   * place; the statblock branch spreads a fresh `{...entry, used: nextUsed}` to avoid
+   * disturbing the other fields of the Zod-parsed object it must merge back selectively — see
+   * that branch's own comment on why).
+   */
+  private assertAdjustableResourceEntry<T extends { used: number; max: number }>(
+    entry: T | undefined,
+    opts: {
+      /** True for spell slots — a `{max: 0}` (or absent) level counts as "no such slot". Named resources have no such convention: an existing entry always counts, regardless of `max`. */
+      requirePositiveMax: boolean;
+      existenceMessage: string;
+      /** e.g. "Spell slot entry for level 3" / "Resource 'rage' entry" — prefixes " is malformed (used/max must be integers)". */
+      malformedLabel: string;
+      /** e.g. "Level 3 spell slot" / "Resource 'rage'" — prefixes " changed since last read...". */
+      staleLabel: string;
+      /** e.g. "Spell slot adjustment" / "Resource 'rage' adjustment" — prefixes " would exceed bounds...". */
+      boundsLabel: string;
+      delta: number;
+      expectedUsed: number | undefined;
+    },
+  ): { entry: T; nextUsed: number } {
+    if (!entry || (opts.requirePositiveMax && entry.max <= 0)) {
+      throw new BadRequestException(opts.existenceMessage);
+    }
+    if (!Number.isInteger(entry.used) || !Number.isInteger(entry.max)) {
+      throw new BadRequestException(`${opts.malformedLabel} is malformed (used/max must be integers)`);
+    }
+    if (opts.expectedUsed !== undefined && opts.expectedUsed !== entry.used) {
+      throw new ConflictException({
+        code: 'STALE_WRITE',
+        message: `${opts.staleLabel} changed since last read (expected used ${opts.expectedUsed}, now ${entry.used})`,
+        expectedUsed: opts.expectedUsed,
+        currentUsed: entry.used,
+      });
+    }
+    const nextUsed = entry.used + opts.delta;
+    if (nextUsed < 0 || nextUsed > entry.max) {
+      throw new BadRequestException(`${opts.boundsLabel} would exceed bounds [0, ${entry.max}] (resulting used: ${nextUsed})`);
+    }
+    return { entry, nextUsed };
+  }
+
+  /**
+   * Shared TOCTOU guard for `adjustCombatantResource`'s in-transaction combatant re-read
+   * (issue #1998). The row must still exist AND still belong to the SAME encounter this
+   * request named — not just any encounter. Issue #1909 review, Devin's twelfth finding: the
+   * character branch re-verified `freshCombatant.encounterId === encounterId` here; the
+   * statblock branch did not, so a combatant moved to another encounter inside the read/
+   * transaction window kept its row and its statblock, passed every remaining guard, and was
+   * written against an encounter the request was never scoped to. One call site per branch so
+   * a future omission is a visible asymmetry rather than an absent check.
+   */
+  private assertFreshCombatantInEncounter<T extends { encounterId: number }>(
+    fresh: T | undefined,
+    encounterId: number,
+    combatantId: number,
+  ): T {
+    if (!fresh || fresh.encounterId !== encounterId) {
+      throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+    }
+    return fresh;
+  }
+
+  /**
    * Reject a write against an ended or trashed encounter (issues #163, #470). Combatant mutations
    * were the first gap: per-combatant writes never checked status, so after a fight any
    * owning player or DM could keep editing the historical record and every combatant HP
@@ -9974,10 +10055,11 @@ export class EncountersService {
           // encounter read, so this mirrors the established sibling shape. `row` (used below
           // for the event detail and the idempotency claim's stored response body) is
           // reassigned to this fresh row so a name change in the same window isn't lost.
-          const freshCombatant = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
-          if (!freshCombatant || freshCombatant.encounterId !== encounterId) {
-            throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
-          }
+          const freshCombatant = this.assertFreshCombatantInEncounter(
+            tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0],
+            encounterId,
+            combatantId,
+          );
           row = freshCombatant;
           const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
           if (!character) throw new NotFoundException(`No such character ${characterId}`);
@@ -9985,50 +10067,20 @@ export class EncountersService {
           if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
             const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
             const levelKey = String(patch.spellLevel);
-            const slot = slots[levelKey];
-            if (!slot || slot.max <= 0) {
-              throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
-            }
-            // Issue #1909 review (Devin, thirteenth finding): the statblock branch got this
-            // malformed-entry guard and its character twin did not — the same
-            // one-of-two-symmetric-branches omission as the twelfth finding's missing
-            // `encounterId` check, in this same method. `character.spellSlots` is read with a
-            // bare `fromJsonText` carrying a CLAIMED type and no runtime validation, so a
-            // legacy/imported row can hold a non-numeric `used`/`max`. The check just above
-            // does NOT catch it: `'three' <= 0` is false, so a string `max` sails through.
-            // Then every NaN comparison is false, so `nextUsed < 0 || nextUsed > slot.max`
-            // passes in BOTH directions and persists `used: NaN`, which serializes to `null`
-            // and leaves the tracker unusable — the exact contradiction of the "never a
-            // silent clamp" contract this PR's own REST and MCP docs state for both
-            // branches. Placed before the CAS below so a malformed entry reports what is
-            // actually wrong instead of a misleading STALE_WRITE.
-            if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
-              throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
-            }
-            // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
-            // ("set this slot's used to N") converted to a relative delta against whatever
-            // `used` the caller last rendered. The transactional fresh-row read above
-            // prevents the whole-blob lost-update this endpoint replaced, but does nothing
-            // to stop a SECOND caller's delta — computed against the SAME stale baseline —
-            // from landing on top of a first caller's fresh result (two clicks of "set to
-            // 1" from a shared used:0 baseline would otherwise commit used:1 then used:2).
-            // `expectedUsed` is optional (a purely relative caller, e.g. an AI DM's
-            // "restore 2 charges", never sends it) but when present is checked against the
-            // FRESH `slot.used` read just above, inside this same transaction — the same
-            // per-value CAS shape as `expectedUpdatedAt` elsewhere, scoped to one resource
-            // instead of the whole sheet/statblock.
-            if (patch.expectedUsed !== undefined && patch.expectedUsed !== slot.used) {
-              throw new ConflictException({
-                code: 'STALE_WRITE',
-                message: `Level ${patch.spellLevel} spell slot changed since last read (expected used ${patch.expectedUsed}, now ${slot.used})`,
-                expectedUsed: patch.expectedUsed,
-                currentUsed: slot.used,
-              });
-            }
-            const nextUsed = slot.used + delta;
-            if (nextUsed < 0 || nextUsed > slot.max) {
-              throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
-            }
+            // Issue #1998: existence, integer used/max, the expectedUsed CAS, and bounds are
+            // all enforced through the ONE shared helper both this branch and the statblock
+            // branch's identical spell-slot path call — see the helper's own doc comment for
+            // why (issue #1909 review findings 11-13 were three rounds of exactly this guard
+            // drifting between the two branches).
+            const { entry: slot, nextUsed } = this.assertAdjustableResourceEntry(slots[levelKey], {
+              requirePositiveMax: true,
+              existenceMessage: `No spell slots at level ${patch.spellLevel}`,
+              malformedLabel: `Spell slot entry for level ${patch.spellLevel}`,
+              staleLabel: `Level ${patch.spellLevel} spell slot`,
+              boundsLabel: 'Spell slot adjustment',
+              delta,
+              expectedUsed: patch.expectedUsed,
+            });
             slot.used = nextUsed;
             slots[levelKey] = slot;
             // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
@@ -10056,33 +10108,19 @@ export class EncountersService {
             // this method (see the statblock branch's identical fix below) — create-on-
             // demand is a real feature someone could want, but it must be an explicit,
             // named capability, not an accident of `??`.
-            const res = resources[patch.key];
-            if (!res) {
-              throw new BadRequestException(`No such resource '${patch.key}'`);
-            }
-            // Issue #1909 review (Devin, thirteenth finding): character-branch counterpart to
-            // the statblock branch's identical guard. `character.resources` gets the same
-            // unvalidated `fromJsonText` treatment as `spellSlots` above, and here there is
-            // no prior check at all to lean on — a missing `used` reaches the arithmetic
-            // directly. A string `max` additionally disables the upper bound outright, since
-            // `nextUsed > 'three'` is false for any number.
-            if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
-              throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
-            }
-            // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
-            // spell-slot branch above.
-            if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
-              throw new ConflictException({
-                code: 'STALE_WRITE',
-                message: `Resource '${patch.key}' changed since last read (expected used ${patch.expectedUsed}, now ${res.used})`,
-                expectedUsed: patch.expectedUsed,
-                currentUsed: res.used,
-              });
-            }
-            const nextUsed = res.used + delta;
-            if (nextUsed < 0 || nextUsed > res.max) {
-              throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
-            }
+            // Issue #1998: same shared helper as the spell-slot path above — see its doc
+            // comment. `requirePositiveMax: false` matches this branch's pre-existing
+            // convention that a named resource's existence alone (not its `max`) decides
+            // whether the key is known.
+            const { entry: res, nextUsed } = this.assertAdjustableResourceEntry(resources[patch.key], {
+              requirePositiveMax: false,
+              existenceMessage: `No such resource '${patch.key}'`,
+              malformedLabel: `Resource '${patch.key}' entry`,
+              staleLabel: `Resource '${patch.key}'`,
+              boundsLabel: `Resource '${patch.key}' adjustment`,
+              delta,
+              expectedUsed: patch.expectedUsed,
+            });
             res.used = nextUsed;
             resources[patch.key] = res;
             tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
@@ -10168,10 +10206,11 @@ export class EncountersService {
           // this window would have been written through unscoped. Both branches were added
           // in this PR for the identical TOCTOU concern; the asymmetry was an oversight, not
           // a decision.
-          const fresh = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
-          if (!fresh || fresh.encounterId !== encounterId) {
-            throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
-          }
+          const fresh = this.assertFreshCombatantInEncounter(
+            tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0],
+            encounterId,
+            combatantId,
+          );
           if (!fresh.statblockJson) {
             throw new BadRequestException('This combatant has no inline statblock resources');
           }
@@ -10193,50 +10232,26 @@ export class EncountersService {
 
           if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
             const levelKey = String(patch.spellLevel);
-            const slot = statblock.spellSlots[levelKey] as { max: number; used: number } | undefined;
-            if (!slot || slot.max <= 0) {
-              throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
-            }
-            // Issue #1909 review (Codex P2): `CombatantStatblock.spellSlots`/`.resources`
-            // are `z.record(..., z.any())` — no per-entry shape enforcement — so a stored
-            // entry can be malformed (`{max: 3}` with no `used`, or `{}` entirely). Without
-            // this check, `slot.used + delta` below would be `NaN`, and `NaN < 0 || NaN >
-            // slot.max` is FALSE either way (every NaN comparison is false), so the
-            // overspend/over-restore guard would silently pass and persist `used: NaN` —
-            // which serializes to `null` and leaves the tracker unusable — directly
-            // contradicting this endpoint's documented contract that overspend/
-            // over-restore is always a typed 400, never a silent clamp (or, worse here, a
-            // silent corruption). A non-numeric `max` would also disable the upper bound
-            // entirely (`nextUsed > undefined` is always false). Validate numerically
-            // BEFORE computing the delta so a malformed entry 400s, naming it, instead of
-            // writing garbage.
-            if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
-              throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
-            }
-            // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
-            // ("set this slot's used to N") converted to a relative delta against whatever
-            // `used` the caller last rendered. The transactional fresh-row read above
-            // prevents the whole-blob lost-update this endpoint replaced, but does nothing
-            // to stop a SECOND caller's delta — computed against the SAME stale baseline —
-            // from landing on top of a first caller's fresh result (two clicks of "set to
-            // 1" from a shared used:0 baseline would otherwise commit used:1 then used:2).
-            // `expectedUsed` is optional (a purely relative caller, e.g. an AI DM's
-            // "restore 2 charges", never sends it) but when present is checked against the
-            // FRESH `slot.used` read just above, inside this same transaction — the same
-            // per-value CAS shape as `expectedUpdatedAt` elsewhere, scoped to one resource
-            // instead of the whole encounter.
-            if (patch.expectedUsed !== undefined && patch.expectedUsed !== slot.used) {
-              throw new ConflictException({
-                code: 'STALE_WRITE',
-                message: `Level ${patch.spellLevel} spell slot changed since last read (expected used ${patch.expectedUsed}, now ${slot.used})`,
+            // Issue #1998: `CombatantStatblock.spellSlots`/`.resources` are
+            // `z.record(..., z.any())` — no per-entry shape enforcement — so a stored entry
+            // can be malformed (`{max: 3}` with no `used`, or `{}` entirely). Existence,
+            // integer used/max, the expectedUsed CAS, and bounds are all enforced through the
+            // ONE shared helper both this branch and the character branch's identical
+            // spell-slot path call — see the helper's own doc comment for why (issue #1909
+            // review findings 11-13 were three rounds of exactly this guard drifting between
+            // the two branches).
+            const { entry: slot, nextUsed } = this.assertAdjustableResourceEntry(
+              statblock.spellSlots[levelKey] as { max: number; used: number } | undefined,
+              {
+                requirePositiveMax: true,
+                existenceMessage: `No spell slots at level ${patch.spellLevel}`,
+                malformedLabel: `Spell slot entry for level ${patch.spellLevel}`,
+                staleLabel: `Level ${patch.spellLevel} spell slot`,
+                boundsLabel: 'Spell slot adjustment',
+                delta,
                 expectedUsed: patch.expectedUsed,
-                currentUsed: slot.used,
-              });
-            }
-            const nextUsed = slot.used + delta;
-            if (nextUsed < 0 || nextUsed > slot.max) {
-              throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
-            }
+              },
+            );
             statblock.spellSlots[levelKey] = { ...slot, used: nextUsed };
             // Issue #1909 review (Devin P2): merge only the TOUCHED level back into the
             // ORIGINAL raw `rawStatblock.spellSlots`, not the re-parsed `statblock` as a
@@ -10253,30 +10268,22 @@ export class EncountersService {
             // synthesized-`{max: 1, used: 0, ...}`-on-missing-key fallback, silently
             // creating a brand-new resource on a typo or a hallucinated AI-driver key
             // instead of 400ing the way the spell-slot path above already does.
-            const res = statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined;
-            if (!res) {
-              throw new BadRequestException(`No such resource '${patch.key}'`);
-            }
-            // Issue #1909 review (Codex P2): same malformed-entry guard as the spell-slot
-            // branch above — an EXISTING stored entry is not schema-enforced and can carry
-            // a non-numeric `used`/`max`.
-            if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
-              throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
-            }
-            // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
-            // spell-slot branch above.
-            if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
-              throw new ConflictException({
-                code: 'STALE_WRITE',
-                message: `Resource '${patch.key}' changed since last read (expected used ${patch.expectedUsed}, now ${res.used})`,
+            // Issue #1998: same shared helper as the spell-slot path above — see its doc
+            // comment. `requirePositiveMax: false` matches this branch's pre-existing
+            // convention (and the character branch's identical one) that a named resource's
+            // existence alone, not its `max`, decides whether the key is known.
+            const { entry: res, nextUsed } = this.assertAdjustableResourceEntry(
+              statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined,
+              {
+                requirePositiveMax: false,
+                existenceMessage: `No such resource '${patch.key}'`,
+                malformedLabel: `Resource '${patch.key}' entry`,
+                staleLabel: `Resource '${patch.key}'`,
+                boundsLabel: `Resource '${patch.key}' adjustment`,
+                delta,
                 expectedUsed: patch.expectedUsed,
-                currentUsed: res.used,
-              });
-            }
-            const nextUsed = res.used + delta;
-            if (nextUsed < 0 || nextUsed > res.max) {
-              throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
-            }
+              },
+            );
             statblock.resources[patch.key] = { ...res, used: nextUsed };
             // Issue #1909 review (Devin P2): same merge-only-the-touched-entry rationale as
             // the spell-slot branch above.
