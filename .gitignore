@@ -19,3 +19,16 @@ data/
 /.claude/worktrees/
 # Internal agent-tooling state, not project content (issue #1662 review: Devin).
 .cursor/pr-babysit-state.json
+
+# /design-sync: staged converter scripts, build output, and machine-local state.
+/.ds-sync/
+/ds-bundle/
+/.design-sync/.cache/
+/.design-sync/learnings/
+/.design-sync/node_modules
+/.design-sync/.component-map.json
+/apps/web/.ds-entry.tsx
+/apps/web/.ds-types/
+/apps/web/index.d.ts
+/apps/web/.ds-i18n.ts
+/.design-sync/preview-surface.d.ts
