@@ -15,9 +15,17 @@ import { AddItemForm, CompendiumItemPickerModal, ItemSection } from '../inventor
 export function CharacterInventorySection({
   campaignId,
   character,
+  onInventoryChanged,
 }: {
   campaignId: number;
   character: Character;
+  /**
+   * Called after any mutation this section made lands (add, edit, qty, equip/unequip).
+   * The character sheet reads the same pack separately to surface the actions equipped
+   * gear grants, and that copy would otherwise go stale the moment an item is equipped
+   * here — the action would stay missing (or stay rollable) until a full page reload.
+   */
+  onInventoryChanged?: () => void;
 }) {
   const { t } = useTranslation();
   const { me } = useAuth();
@@ -51,6 +59,12 @@ export function CharacterInventorySection({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Reload this section AND tell the sheet, so both views of the pack move together.
+  const reload = useCallback(() => {
+    void load();
+    onInventoryChanged?.();
+  }, [load, onInventoryChanged]);
 
   const ownsCharacter = useCallback(
     (characterId: number | null) => {
@@ -119,7 +133,7 @@ export function CharacterInventorySection({
               onCancel={() => setAdding(false)}
               onCreated={() => {
                 setAdding(false);
-                void load();
+                reload();
               }}
             />
           )}
@@ -132,7 +146,7 @@ export function CharacterInventorySection({
               onClose={() => setShowCompendiumPicker(false)}
               onCreated={() => {
                 setShowCompendiumPicker(false);
-                void load();
+                reload();
               }}
             />
           )}
@@ -149,7 +163,7 @@ export function CharacterInventorySection({
               characters={characters}
               writableOwners={writableOwners}
               canEditItem={canEditItem}
-              onChanged={() => void load()}
+              onChanged={reload}
               partyStashTitle={character.name}
               embedded
             />

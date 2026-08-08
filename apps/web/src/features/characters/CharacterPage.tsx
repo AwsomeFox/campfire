@@ -265,21 +265,19 @@ export default function CharacterPage() {
     };
   }, [cid]);
 
-  useEffect(() => {
+  const loadPack = useCallback(async () => {
     if (!Number.isFinite(cid) || !Number.isFinite(id)) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const list = await api.get<InventoryItem[]>(`${API}/campaigns/${cid}/inventory`);
-        if (!cancelled) setPackItems(list.filter((item) => item.ownerType === 'character' && item.characterId === id));
-      } catch {
-        if (!cancelled) setPackItems([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const list = await api.get<InventoryItem[]>(`${API}/campaigns/${cid}/inventory`);
+      setPackItems(list.filter((item) => item.ownerType === 'character' && item.characterId === id));
+    } catch {
+      setPackItems([]);
+    }
   }, [cid, id]);
+
+  useEffect(() => {
+    void loadPack();
+  }, [loadPack]);
 
   function ownerLabel(ownerUserId: string | null): string {
     if (!ownerUserId) return 'DM-managed';
@@ -642,7 +640,13 @@ export default function CharacterPage() {
                 className="cf-sheet-section"
               >
                 <Card>
-                  <CharacterInventorySection campaignId={cid} character={character} />
+                  {/* Equipping from here changes what the Actions card can offer, so the
+                      sheet's own copy of the pack is re-read alongside this section's. */}
+                  <CharacterInventorySection
+                    campaignId={cid}
+                    character={character}
+                    onInventoryChanged={() => void loadPack()}
+                  />
                 </Card>
               </section>
 
@@ -1622,10 +1626,18 @@ function CharacterVitalsRail({
 }
 
 /**
- * The template's 2×2 vitals tiles: defense, initiative, speed, proficiency. Initiative is
- * a catalog check like any other, so it rolls from here through the same server-resolved
- * path Skills/Saves use; the rest are read-only readouts of sheet fields (edited in
- * "Edit sheet"). Starfinder's EAC/KAC pair replaces the single defense tile when set.
+ * The template's 2×2 vitals tiles. Initiative is a catalog check like any other, so it
+ * rolls from here through the same server-resolved path Skills/Saves use; the rest are
+ * read-only readouts of sheet fields (edited in "Edit sheet"). Starfinder's EAC/KAC pair
+ * replaces the single defense tile when set.
+ *
+ * The template's fourth tile is 5e's proficiency bonus, and this shows LEVEL instead. A
+ * single level-derived proficiency number is a 5e concept: PF2e's proficiency is level
+ * plus a per-rank bonus, and Starforged/Open Legend have none at all, so a tile driven by
+ * `profBonus` would state a plausible wrong number on every non-5e sheet. No adapter
+ * exposes a global proficiency value to read instead, and none is invented here — the
+ * per-check bonus is already visible, honestly and per system, in each catalog check's
+ * own breakdown (see `formatCheckBreakdown` in the Skills and Saving throws cards).
  */
 function VitalsBlock({
   character,
@@ -1698,8 +1710,8 @@ function VitalsBlock({
           <p className={tileValue}>{character.speed ?? '—'}</p>
         </div>
         <div className={tile}>
-          <p className={tileLabel}>Proficiency</p>
-          <p className={tileValue}>{signed(profBonus(character.level))}</p>
+          <p className={tileLabel}>Level</p>
+          <p className={tileValue}>{character.level}</p>
         </div>
       </div>
       <p className="text-[11px] text-secondary cf-print-hide">

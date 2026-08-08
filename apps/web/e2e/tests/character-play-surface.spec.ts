@@ -134,4 +134,53 @@ test.describe('character sheet play surface', () => {
       await ctx.dispose();
     }
   });
+
+  /**
+   * Regression (Codex review on #2115): the sheet reads the pack separately from the
+   * embedded inventory section, so unequipping in Build left the granted action still
+   * rollable in Play until a full page reload. The two views must move together.
+   */
+  test('unequipping in Build locks the gear action in Play without a reload', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+
+    const characterRes = await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Gear Refresh Test', className: 'Fighter', level: 3 },
+    });
+    expect(characterRes.ok()).toBeTruthy();
+    const characterId = (await characterRes.json()).id as number;
+
+    try {
+      const itemRes = await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+        data: { name: 'Sunblade', qty: 1, ownerType: 'character', characterId },
+      });
+      const itemId = (await itemRes.json()).id as number;
+      const equipped = await ctx.patch(`/api/v1/inventory/${itemId}`, {
+        data: {
+          equipped: true,
+          equipSlot: 'main hand',
+          equippedAction: { name: 'Sunblade Strike', kind: 'melee', toHit: '+7', damage: '1d8+3', notes: '', targetAc: '' },
+        },
+      });
+      expect(equipped.ok()).toBeTruthy();
+
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=play`);
+      const gear = page.getByTestId('character-granted-actions');
+      await expect(gear.getByRole('button', { name: /to hit \+7/ })).toBeVisible();
+
+      await page.getByRole('tab', { name: /Build & profile/ }).click();
+      const unequip = page.getByTestId('character-inventory').getByRole('button', { name: 'Unequip Sunblade' });
+      await expect(unequip).toBeVisible();
+      await unequip.click();
+
+      // Same page, no navigation: the Play action must already reflect the unequip.
+      await page.getByRole('tab', { name: /^Play/ }).click();
+      await expect(gear.getByText('Equip Sunblade to use this action.')).toBeVisible();
+      await expect(gear.getByRole('button', { name: /to hit \+7/ })).toHaveCount(0);
+    } finally {
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
 });
