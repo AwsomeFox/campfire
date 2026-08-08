@@ -60,6 +60,7 @@ import {
   type RollCheckDefinition,
   checkCatalogForAdapter,
   checkRollExpr,
+  hasInitiativeRollForAdapter,
   initiativeModelForAdapter,
   sortCheckCatalog,
   formatCheckBreakdown,
@@ -489,7 +490,7 @@ export default function CharacterPage() {
           adapter={adapter}
           canEdit={canEdit}
           onChange={load}
-          onUpdated={setCharacter}
+          onTempHp={(hpTemp) => setCharacter((prev) => (prev ? { ...prev, hpTemp } : prev))}
           onError={setActionError}
           roller={roller}
           leveledConditionTrack={leveledConditionTrack}
@@ -1414,7 +1415,14 @@ function AbilityScoresCard({
   canRoll: boolean;
 }) {
   const abilityFields = useMemo(() => abilityFieldsForCharacter(adapter, character), [adapter, character]);
+  // A system with its OWN attribute roll cannot be represented by the neutral catalog's
+  // `1d20 + modifier`: Open Legend rolls an exploding attribute dice pool (score 5 is
+  // 1d20 + 2d6, not 1d20+5), and the server resolves that same neutral definition, so a
+  // button here would persist a materially wrong result to the shared log. Those scores
+  // stay read-only until the catalog can express the adapter's native roll.
+  const nativeAttributeRoll = typeof adapter.attributeDicePool === 'function';
   const abilityChecks = useMemo(() => {
+    if (nativeAttributeRoll) return new Map<string, RollCheckDefinition>();
     const catalog = checkCatalogForAdapter(adapter, character).filter((c) => c.category === 'ability');
     const byAbility = new Map<string, RollCheckDefinition>();
     for (const def of catalog) {
@@ -1422,7 +1430,7 @@ function AbilityScoresCard({
       if (!byAbility.has(key)) byAbility.set(key, def);
     }
     return byAbility;
-  }, [adapter, character]);
+  }, [adapter, character, nativeAttributeRoll]);
 
   return (
     <Card className="space-y-3">
@@ -1494,7 +1502,7 @@ function CharacterVitalsRail({
   adapter,
   canEdit,
   onChange,
-  onUpdated,
+  onTempHp,
   onError,
   roller,
   leveledConditionTrack,
@@ -1506,19 +1514,21 @@ function CharacterVitalsRail({
   canEdit: boolean;
   /** Reloads the sheet. Returns a promise so TempHpControl can await it — see its note. */
   onChange: () => void | Promise<void>;
-  /** Applies an authoritative character straight from a write's own response. */
-  onUpdated: (next: Character) => void;
+  /** Applies an authoritative `hpTemp` from a write's own response — that field only. */
+  onTempHp: (hpTemp: number) => void;
   onError: (msg: string | null) => void;
   roller: Roller;
   leveledConditionTrack: LeveledConditionTrack | null | undefined;
   defenseLabel: string;
   defenseTitle: string;
 }) {
-  // Initiative is not a per-character stat in a group-initiative system (Swords &
-  // Wizardry, Labyrinth Lord, OSE roll one d6 per SIDE), yet the neutral catalog still
-  // carries an entry. Offering a personal roll there would contradict both the adapter and
-  // the encounter's own group flow, so the tile is omitted rather than shown as unknown.
-  const showInitiative = initiativeModelForAdapter(adapter).mode !== 'group';
+  // The neutral catalog carries an initiative entry for every system, including two that
+  // have no personal initiative roll to offer: a GROUP-initiative system (Swords & Wizardry,
+  // Labyrinth Lord, OSE roll one d6 per SIDE) and a system with no initiative roll at all
+  // (Starforged — its d6 exists only to satisfy the roller seam, which is why this asks the
+  // adapter rather than reading `initiativeDie`). The tile is omitted for both.
+  const showInitiative =
+    hasInitiativeRollForAdapter(adapter) && initiativeModelForAdapter(adapter).mode !== 'group';
   const initiative = useMemo(() => {
     const def = checkCatalogForAdapter(adapter, character).find((c) => c.category === 'initiative') ?? null;
     if (!def) return null;
@@ -1592,7 +1602,7 @@ function CharacterVitalsRail({
           {canEdit && (
             <div className="space-y-2 cf-print-hide">
               <HpEditor character={character} onChange={onChange} onError={onError} />
-              <TempHpControl character={character} onUpdated={onUpdated} onChange={onChange} onError={onError} />
+              <TempHpControl character={character} onTempHp={onTempHp} onChange={onChange} onError={onError} />
               <RestControls character={character} onChange={onChange} onError={onError} adapter={adapter} />
             </div>
           )}
@@ -1759,16 +1769,21 @@ function VitalsBlock({
  *
  * A `?proposed=true`-style 202 (a proposal, not a write) has no `hpTemp`, so anything that
  * is not a character falls back to the refresh instead of being trusted.
+ *
+ * Only `hpTemp` is taken from that response, never the whole character: the sheet's other
+ * controls stay enabled while this request is in flight, so a condition or HP change that
+ * lands first would be reverted by this older snapshot arriving late — and a later
+ * array-based edit (actions, conditions, resources) would then build on the stale copy.
  */
 function TempHpControl({
   character,
-  onUpdated,
+  onTempHp,
   onChange,
   onError,
 }: {
   character: Character;
-  /** Applies the authoritative post-write character straight from the PATCH response. */
-  onUpdated: (next: Character) => void;
+  /** Applies the authoritative `hpTemp` from the PATCH response — that field only. */
+  onTempHp: (hpTemp: number) => void;
   /** Fallback refresh, awaited, for a response that is not a character. */
   onChange: () => void | Promise<void>;
   onError: (msg: string | null) => void;
@@ -1782,7 +1797,7 @@ function TempHpControl({
     onError(null);
     try {
       const updated = await api.patch<Character>(`${API}/characters/${character.id}`, { hpTemp: next });
-      if (updated && typeof updated.hpTemp === 'number') onUpdated(updated);
+      if (updated && typeof updated.hpTemp === 'number') onTempHp(updated.hpTemp);
       else await onChange();
       announce(`${character.name} temporary hit points ${next}`);
     } catch (err) {

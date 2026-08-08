@@ -4303,6 +4303,15 @@ export function initiativeModelForAdapter(adapter: Pick<RuleSystemAdapter, 'init
   return adapter.initiativeModel ?? DEFAULT_INITIATIVE_MODEL;
 }
 
+/**
+ * Whether a system rolls initiative at all — see {@link RuleSystemAdapter.hasInitiativeRoll}.
+ * Omission means yes, so every existing adapter keeps its current behaviour and only a system
+ * that explicitly has no initiative roll opts out.
+ */
+export function hasInitiativeRollForAdapter(adapter?: Pick<RuleSystemAdapter, 'hasInitiativeRoll'> | null): boolean {
+  return adapter?.hasInitiativeRoll !== false;
+}
+
 // ---------- adapter-defined grid distance rules (issue #467) ----------
 // Square grids default to Euclidean straight-line ruler distance; hex grids use
 // cube/axial hex steps. 5e optionally counts every other diagonal as 2 squares.
@@ -4596,6 +4605,20 @@ export interface RuleSystemAdapter {
    * 5e sets this to true; systems without 5e death saves set it to false or omit it.
    */
   readonly hasDeathSaves?: boolean;
+  /**
+   * OPTIONAL — whether this system rolls initiative AT ALL. Default true.
+   *
+   * Distinct from {@link initiativeModel}, which answers "individual or group" for a system
+   * that HAS one. `initiativeDie` cannot answer this: the generic roller seam requires a die
+   * from every adapter, so a system with no initiative roll (Ironsworn: Starforged, a PbtA
+   * game with no turn-order roll) still reports one — its d6 action die — purely to satisfy
+   * that seam. Reading the die, or treating "not group" as "individual", therefore offers a
+   * personal initiative roll on a table that has none. Set this false to say so explicitly.
+   *
+   * Read through {@link hasInitiativeRollForAdapter} so an adapter that omits it keeps the
+   * true default, exactly as {@link hasDeathSaves} works.
+   */
+  readonly hasInitiativeRoll?: boolean;
   /**
    * OPTIONAL — whether this system endorses "half or more of the party succeeds" as a group-check
    * convention (issue #1943). The group-check board's X/N tally is universal, but the advisory

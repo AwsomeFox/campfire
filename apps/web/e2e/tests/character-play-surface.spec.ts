@@ -186,6 +186,35 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): Open Legend's attribute roll is an exploding dice
+   * pool (score 5 is 1d20 + 2d6), which the neutral catalog cannot express — it supplies
+   * `1d20 + modifier`, and the SERVER resolves that same definition, so a button here would
+   * persist a materially wrong result to the shared log.
+   */
+  test('a system with its own attribute roll gets read-only scores, not a wrong d20', async ({ page, baseURL }) => {
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const campaign = await (await ctx.post('/api/v1/campaigns', { data: { name: 'Open Legend Table', ruleSystem: 'open-legend' } })).json();
+
+    try {
+      const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaign.id}/characters`, {
+        data: { name: 'Rolls A Pool', className: '', level: 3, stats: { AGI: 5, MIG: 4 } },
+      })).json()).id as number;
+
+      await page.goto(`/c/${campaign.id}/characters/${characterId}?tab=play`);
+      const abilities = page.locator('#character-section-abilities');
+      await expect(abilities).toBeVisible();
+      // The scores are readable...
+      await expect(abilities.getByText('Agility', { exact: true })).toBeVisible();
+      // ...and nothing offers to roll them as a d20 check.
+      await expect(abilities.getByRole('button')).toHaveCount(0);
+    } finally {
+      await ctx.delete(`/api/v1/campaigns/${campaign.id}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Codex review on #2115): Swords & Wizardry, Labyrinth Lord and OSE roll one
    * d6 per SIDE, but the neutral catalog still carries an initiative entry. A per-character
    * initiative tile there contradicts both the adapter and the encounter's group flow.

@@ -119,6 +119,10 @@ export const StarforgedAdapter: RuleSystemAdapter = {
   },
   // No d20 initiative in Starforged. The seam still needs a die for the generic roller; the
   // d6 action die is the honest narrative choice — anything but the 5e d20.
+  // Starforged has NO initiative roll (see the header note): this die exists only because
+  // the generic roller seam requires one. `hasInitiativeRoll: false` is what surfaces that
+  // to callers, so nothing offers a personal turn-order roll this game does not have.
+  hasInitiativeRoll: false,
   initiativeDie: 6,
   // No levels. Advancement is via legacy tracks, so there is no hard character-level cap;
   // Infinity means a `level >= maxLevel` check never blocks (issue #535), like Open Legend / OSR.

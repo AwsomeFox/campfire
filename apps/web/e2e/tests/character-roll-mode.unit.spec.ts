@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { Dnd5eAdapter, StarforgedAdapter, hasInitiativeRollForAdapter } from '@campfire/schema';
 import { ROLL_MODES, rollModeOptions, rollModeSummary, resolveRollMode, rollModeForClick, type RollMode } from '../../src/features/characters/rollMode';
 
 /**
@@ -125,5 +126,25 @@ test.describe('rollModeForClick — the chooser is the default, one click can ov
     const chosen: RollMode = 'advantage';
     rollModeForClick('disadvantage', chosen, plainClick);
     expect(rollModeForClick('normal', chosen, plainClick)).toBe('advantage');
+  });
+});
+
+/**
+ * Codex review on #2115 — a system can have no initiative roll at all. `initiativeDie`
+ * cannot express that (the generic roller seam requires a die from every adapter, so
+ * Starforged reports its d6 action die), and "not group" is not the same as "individual".
+ */
+test.describe('hasInitiativeRollForAdapter — omission means yes, opting out is explicit', () => {
+  test('an adapter that says nothing keeps an initiative roll', () => {
+    expect(hasInitiativeRollForAdapter(Dnd5eAdapter)).toBe(true);
+    expect(hasInitiativeRollForAdapter({})).toBe(true);
+    expect(hasInitiativeRollForAdapter(null)).toBe(true);
+    expect(hasInitiativeRollForAdapter(undefined)).toBe(true);
+  });
+
+  test('Starforged has none, and still reports a die for the roller seam', () => {
+    expect(hasInitiativeRollForAdapter(StarforgedAdapter)).toBe(false);
+    // The die is a seam artifact, which is exactly why reading it cannot answer the question.
+    expect(StarforgedAdapter.initiativeDie).toBe(6);
   });
 });
