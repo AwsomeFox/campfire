@@ -25,7 +25,10 @@ test.describe('Character print view owner control hiding (#1761)', () => {
 
     // Roll mode choosers and status indicators
     expect(code).toContain('cf-roll-mode-status cf-print-hide');
-    expect(code).toContain('<div className="cf-print-hide">\n        <RollModeChooser');
+    // Both roll-mode choosers (saving throws, actions) now render inside a conditional —
+    // they are hidden entirely for a system that cannot honour advantage, or an action list
+    // with nothing to attack with — so the wrapper sits one level deeper than it used to.
+    expect(code).toContain('<div className="cf-print-hide">\n          <RollModeChooser');
 
     // Save & skill proficiency toggle buttons
     expect(code).toContain('className="cf-target-44 absolute top-0.5 right-0.5 cf-print-hide"');

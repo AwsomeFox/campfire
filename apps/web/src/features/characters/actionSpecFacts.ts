@@ -128,8 +128,65 @@ const OUTCOME_LABELS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
+ * One typed damage component as text: "2d6 fire", "1d8+3 slashing", "5 fire".
+ *
+ * `DamagePart` keeps dice in `formula` and the modifier in `flat` (that split is what lets
+ * a system apply its own critical rule), so both halves are recombined here for display.
+ */
+function damagePartText(part: { formula: string; flat: number; type: string }): string {
+  const dice = part.formula.trim();
+  const flat = part.flat;
+  const amount = dice
+    ? `${dice}${flat > 0 ? `+${flat}` : flat < 0 ? `${flat}` : ''}`
+    : flat !== 0
+      ? String(flat)
+      : '';
+  if (!amount) return '';
+  return part.type ? `${amount} ${part.type}` : amount;
+}
+
+/**
+ * Player-safe consequence lines for one outcome branch, in reading order: the authored
+ * prose first, then what the branch mechanically does, then the conditions it applies.
+ *
+ * Every consequence field `OutcomeBranch` defines is covered, not just `text`. A branch can
+ * express itself purely mechanically — healing, temp HP, damage, save-for-half — and
+ * healing and temp HP have no top-level `CharacterAction` field to fall back on, so reading
+ * only `text` made a healing action's entire result invisible on the sheet.
+ */
+function branchLines(branch: {
+  text: string;
+  damage: ReadonlyArray<{ formula: string; flat: number; type: string }>;
+  halfDamage: boolean;
+  healing: string;
+  tempHp: string;
+  effects: ReadonlyArray<{ text: string; condition: string; rounds: number | null; saveEnds: boolean; ongoingDamage: number }>;
+}): string[] {
+  const lines: string[] = [];
+  if (branch.text) lines.push(branch.text);
+
+  const damage = (branch.damage ?? []).map(damagePartText).filter(Boolean);
+  if (damage.length > 0) lines.push(`${damage.join(' + ')} damage`);
+  // Save-for-half with no damage of its own halves the failure branch's — say so either way.
+  if (branch.halfDamage) lines.push(damage.length > 0 ? 'Half damage on a success' : 'Half damage');
+  if (branch.healing.trim()) lines.push(`Heals ${branch.healing.trim()}`);
+  if (branch.tempHp.trim()) lines.push(`${branch.tempHp.trim()} temporary hit points`);
+
+  for (const effect of branch.effects ?? []) {
+    const name = effect.text || effect.condition;
+    const rounds = effect.rounds != null ? ` (${effect.rounds} round${effect.rounds === 1 ? '' : 's'})` : '';
+    const ends = effect.saveEnds ? ', save ends' : '';
+    const ongoing = effect.ongoingDamage > 0 ? `${effect.ongoingDamage} ongoing damage` : '';
+    if (name) lines.push(`${name}${rounds}${ends}${ongoing ? ` · ${ongoing}` : ''}`);
+    else if (ongoing) lines.push(`${ongoing}${rounds}${ends}`);
+  }
+  return lines;
+}
+
+/**
  * Player-safe effect lines from the spec's outcome branches — the template's "Effects"
- * list. Only branch prose and applied-condition phrasing, never hidden monster numbers.
+ * list. Branch prose, mechanical consequences, and applied conditions; never hidden
+ * monster numbers.
  *
  * Grouped BY BRANCH rather than flattened: a save's `success` and `failure` consequences
  * are mutually exclusive, and one unlabelled list reads as though both apply. Lines are
@@ -144,15 +201,7 @@ export function actionSpecEffects(spec: ActionSpec | undefined | null): ActionEf
   for (const [outcome, label] of OUTCOME_LABELS) {
     const branch = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
     if (!branch) continue;
-    const lines: string[] = [];
-    if (branch.text) lines.push(branch.text);
-    for (const effect of branch.effects ?? []) {
-      const line = effect.text || effect.condition;
-      if (!line) continue;
-      const rounds = effect.rounds != null ? ` (${effect.rounds} round${effect.rounds === 1 ? '' : 's'})` : '';
-      lines.push(`${line}${rounds}${effect.saveEnds ? ', save ends' : ''}`);
-    }
-    const unique = [...new Set(lines)];
+    const unique = [...new Set(branchLines(branch))];
     if (unique.length > 0) groups.push({ outcome, label, lines: unique });
   }
   return groups;

@@ -1422,7 +1422,11 @@ function AbilityScoresCard({
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
         {abilityFields.map(({ key, label }) => {
           const score = abilityScore(character, key);
-          const def = abilityChecks.get(key.toUpperCase()) ?? null;
+          // An unset score is NOT a 10. The catalog defaults a missing stat to 10 (see
+          // `readAbilityScore`), so trusting `def.modifier` here would print "— / +0" and
+          // roll a check for a score the sheet never had. A draft ability stays read-only
+          // until someone actually fills it in.
+          const def = score === null ? null : abilityChecks.get(key.toUpperCase()) ?? null;
           const mod = def ? def.modifier : score === null ? null : adapter.abilityModifier(score);
           const body = (
             <>
@@ -1449,7 +1453,7 @@ function AbilityScoresCard({
                   void roller.rollCheck(
                     character.id,
                     def.id,
-                    toCheckRollMode(m),
+                    toCheckRollMode(def.supportsAdvantage ? m : 'normal'),
                   )
                 }
                 disabled={roller.rolling}
@@ -1675,7 +1679,7 @@ function VitalsBlock({
                 void roller.rollCheck(
                   character.id,
                   initiative.id,
-                  toCheckRollMode(m),
+                  toCheckRollMode(initiative.supportsAdvantage ? m : 'normal'),
                 )
               }
               disabled={roller.rolling}
@@ -1831,6 +1835,9 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
   const saves = useMemo(() => catalog.filter((c) => c.category === 'save'), [catalog]);
+  // A system whose saves are not roll-two-keep (PF2e) gets no chooser: offering one would
+  // promise an advantage the server correctly refuses to roll.
+  const supportsAdvantage = useMemo(() => saves.some((c) => c.supportsAdvantage), [saves]);
 
   async function toggle(k: Ability) {
     if (!canEdit || busy) return;
@@ -1856,18 +1863,22 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
       <div className="flex items-center gap-2 flex-wrap">
         <h2 id={`${characterSheetSectionId('saves')}-heading`} className="card-kicker mb-0">Saving throws</h2>
         <span className="text-[11px] text-secondary">proficiency {signed(pb)}</span>
-        <span className="ml-auto cf-roll-mode-status cf-print-hide" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
-          {rollModeSummary(mode)}
-        </span>
+        {supportsAdvantage && (
+          <span className="ml-auto cf-roll-mode-status cf-print-hide" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
+            {rollModeSummary(mode)}
+          </span>
+        )}
       </div>
-      <div className="cf-print-hide">
-        <RollModeChooser
-          value={mode}
-          onChange={setMode}
-          disabled={roller.rolling}
-          aria-label="Saving throw roll mode"
-        />
-      </div>
+      {supportsAdvantage && (
+        <div className="cf-print-hide">
+          <RollModeChooser
+            value={mode}
+            onChange={setMode}
+            disabled={roller.rolling}
+            aria-label="Saving throw roll mode"
+          />
+        </div>
+      )}
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
         {saves.map((def) => {
           const k = (def.ability ?? def.id.replace('save:', '')) as Ability;
@@ -1878,7 +1889,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
             <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
               <RollContextMenu
                 className="w-full h-full block"
-                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(rollModeForClick(m, mode)))}
+                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(def.supportsAdvantage ? rollModeForClick(m, mode) : 'normal'))}
                 disabled={roller.rolling}
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
                 title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}]`}
@@ -2005,7 +2016,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
               )}
               <RollContextMenu
                 className="flex-1 flex items-center gap-1.5 min-w-0"
-                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(m))}
+                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(def.supportsAdvantage ? m : 'normal'))}
                 disabled={roller.rolling}
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
                 title={`Roll ${name} (${signed(mod)}) [${breakdownStr}]`}
@@ -2399,29 +2410,41 @@ function ActionsCard({
                   </button>
                   {item.equipped ? (
                     (granted.toHit || granted.damage) && (
+                      // A value with no dice in it is still the item's real number, so it
+                      // reads as text rather than vanishing — same as a sheet action's row.
                       <div className="flex gap-2 flex-wrap items-center mt-1">
-                        {attackExpr && (
-                          <RollChip
-                            label={`to hit ${granted.toHit}`}
-                            title={`Roll ${granted.name} attack (${attackExpr})`}
-                            disabled={roller.rolling}
-                            onClick={(m) => {
-                              const resolved = rollModeForClick(m, mode);
-                              void roller.roll(
-                                toHitExpr(granted.toHit, resolved === 'advantage' ? 'adv' : resolved === 'disadvantage' ? 'dis' : 'flat')!,
-                                `${character.name} · ${granted.name} to hit${resolved !== 'normal' ? ` (${resolved})` : ''}`,
-                              );
-                            }}
-                          />
-                        )}
-                        {dmgExpr && (
-                          <RollChip
-                            label={granted.damage}
-                            title={`Roll ${granted.name} damage (${dmgExpr})`}
-                            disabled={roller.rolling}
-                            onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${granted.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
-                          />
-                        )}
+                        {granted.toHit &&
+                          (attackExpr ? (
+                            <RollChip
+                              label={`to hit ${granted.toHit}`}
+                              title={`Roll ${granted.name} attack (${attackExpr})`}
+                              disabled={roller.rolling}
+                              onClick={(m) => {
+                                const resolved = rollModeForClick(m, mode);
+                                void roller.roll(
+                                  toHitExpr(granted.toHit, resolved === 'advantage' ? 'adv' : resolved === 'disadvantage' ? 'dis' : 'flat')!,
+                                  `${character.name} · ${granted.name} to hit${resolved !== 'normal' ? ` (${resolved})` : ''}`,
+                                );
+                              }}
+                            />
+                          ) : (
+                            <span className="text-xs text-slate-400" title="Not a rollable to-hit value — edit the item's action and use +5, -1, or 1d20+5">
+                              to hit {granted.toHit} (not rollable)
+                            </span>
+                          ))}
+                        {granted.damage &&
+                          (dmgExpr ? (
+                            <RollChip
+                              label={granted.damage}
+                              title={`Roll ${granted.name} damage (${dmgExpr})`}
+                              disabled={roller.rolling}
+                              onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${granted.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
+                            />
+                          ) : (
+                            <span className="text-xs text-slate-400" title="Flat or unparseable damage — no dice to roll">
+                              {granted.damage} (flat)
+                            </span>
+                          ))}
                       </div>
                     )
                   ) : (

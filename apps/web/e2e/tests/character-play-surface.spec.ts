@@ -34,24 +34,34 @@ test.describe('character sheet play surface', () => {
     await expect(rail.getByRole('heading', { name: 'Hit points & Defenses' })).toBeVisible();
   });
 
-  test('an ability score rolls a catalog check server-side', async ({ page }) => {
-    const { campaignId, navigation } = seed();
-    await page.goto(`/c/${campaignId}/characters/${navigation.characterId}`);
+  test('an ability score rolls a catalog check server-side', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    // Needs real scores: an ability the sheet never had is deliberately not rollable
+    // (see the draft-sheet test below), and the seeded character has no stats at all.
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Rolls Its Abilities', className: 'Ranger', level: 3, stats: { STR: 10, DEX: 16, CON: 12, INT: 12, WIS: 14, CHA: 10 } },
+    })).json()).id as number;
 
-    const dex = page.getByRole('button', { name: /^Roll DEX check/ });
-    await expect(dex).toBeVisible();
+    try {
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=play`);
+      const dex = page.getByRole('button', { name: /^Roll DEX check/ });
+      await expect(dex).toBeVisible();
 
-    // The sheet must not roll this itself: the modifier and the die both come from
-    // POST /characters/:id/checks/roll, the same endpoint Skills and Saves use.
-    const rolled = page.waitForResponse(
-      (res) =>
-        res.url().includes(`/api/v1/characters/${navigation.characterId}/checks/roll`) &&
-        res.request().method() === 'POST',
-    );
-    await dex.click();
-    const response = await rolled;
-    expect(response.ok()).toBeTruthy();
-    expect(JSON.parse(response.request().postData() ?? '{}')).toMatchObject({ checkId: 'ability:DEX' });
+      // The sheet must not roll this itself: the modifier and the die both come from
+      // POST /characters/:id/checks/roll, the same endpoint Skills and Saves use.
+      const rolled = page.waitForResponse(
+        (res) => res.url().includes(`/api/v1/characters/${characterId}/checks/roll`) && res.request().method() === 'POST',
+      );
+      await dex.click();
+      const response = await rolled;
+      expect(response.ok()).toBeTruthy();
+      expect(JSON.parse(response.request().postData() ?? '{}')).toMatchObject({ checkId: 'ability:DEX' });
+    } finally {
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
   });
 
   test('temp HP is a separate pool, patched on the character', async ({ page }) => {
@@ -129,6 +139,72 @@ test.describe('character sheet play surface', () => {
       await expect(gear.getByText('Flame Tongue Strike')).toBeVisible();
       await expect(gear.getByText('Equip Flame Tongue Shortsword to use this action.')).toBeVisible();
       await expect(gear.getByRole('button', { name: /to hit \+6/ })).toHaveCount(0);
+    } finally {
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
+   * Regression (Codex review on #2115): an unset ability score is NOT a 10. The catalog
+   * defaults a missing stat to 10, so trusting its modifier printed "— / +0" on a draft
+   * sheet and let the player roll a check for a score they never set.
+   */
+  test('an ability with no score set is shown as unknown, not rolled as a 10', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    // DEX set, STR never filled in — a partially completed sheet.
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Half Filled Sheet', className: 'Bard', level: 1, stats: { DEX: 14 } },
+    })).json()).id as number;
+
+    try {
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=play`);
+      const abilities = page.locator('#character-section-abilities');
+      await expect(abilities).toBeVisible();
+
+      // The filled one rolls.
+      await expect(abilities.getByRole('button', { name: /^Roll DEX check/ })).toBeVisible();
+      // The unset one is inert, and never claims a modifier it does not have.
+      await expect(abilities.getByRole('button', { name: /^Roll STR check/ })).toHaveCount(0);
+      const str = abilities.locator('div').filter({ hasText: /^STR/ }).last();
+      await expect(str).not.toContainText('+0');
+    } finally {
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
+   * Regression (Codex review on #2115): an item's action can carry flat damage ("5 fire"),
+   * which `damageExpr` returns null for because there are no dice. A truthiness check on
+   * the expression hid the value entirely, where a sheet action keeps it as plain text.
+   */
+  test('a gear action with flat damage still shows the number', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Carries A Torch', className: 'Rogue', level: 2 },
+    })).json()).id as number;
+
+    try {
+      const itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+        data: { name: 'Everburning Torch', qty: 1, ownerType: 'character', characterId },
+      })).json()).id as number;
+      await ctx.patch(`/api/v1/inventory/${itemId}`, {
+        data: {
+          equipped: true,
+          equipSlot: 'off hand',
+          equippedAction: { name: 'Torch Jab', kind: 'melee', toHit: '', damage: '5 fire', targetAc: '', notes: '' },
+        },
+      });
+
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=play`);
+      const gear = page.getByTestId('character-granted-actions');
+      await expect(gear.getByText('Torch Jab')).toBeVisible();
+      await expect(gear.getByText('5 fire (flat)')).toBeVisible();
     } finally {
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();

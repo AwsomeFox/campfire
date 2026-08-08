@@ -151,8 +151,53 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     ]);
   });
 
-  test('a branch that carries no player-safe prose contributes no group', () => {
+  /**
+   * A branch can state its whole effect mechanically. Reading only `text` dropped those
+   * branches entirely — and healing / temp HP have no top-level CharacterAction field to
+   * fall back on, so a healing action's actual result went completely unshown.
+   */
+  test('a damage-only branch is described, not dropped', () => {
     const spec = ActionSpec.parse({ outcomes: { hit: { damage: [{ formula: '1d8', flat: 3, type: 'slashing' }] } } });
+    expect(actionSpecEffects(spec)).toEqual([
+      { outcome: 'hit', label: 'On a hit', lines: ['1d8+3 slashing damage'] },
+    ]);
+  });
+
+  test('flat and multi-type damage read as authored', () => {
+    const spec = ActionSpec.parse({
+      outcomes: { hit: { damage: [{ formula: '2d6', flat: 0, type: 'fire' }, { formula: '', flat: 5, type: 'cold' }] } },
+    });
+    expect(actionSpecEffects(spec)[0].lines).toEqual(['2d6 fire + 5 cold damage']);
+  });
+
+  test('healing and temp HP are shown — they have no sheet field to fall back on', () => {
+    const spec = ActionSpec.parse({ outcomes: { hit: { healing: '2d8+3', tempHp: '5' } } });
+    expect(actionSpecEffects(spec)[0].lines).toEqual(['Heals 2d8+3', '5 temporary hit points']);
+  });
+
+  test('save-for-half is stated even when the branch carries no damage of its own', () => {
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      outcomes: {
+        failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }] },
+        success: { halfDamage: true },
+      },
+    });
+    expect(actionSpecEffects(spec)).toEqual([
+      { outcome: 'success', label: 'On a success', lines: ['Half damage'] },
+      { outcome: 'failure', label: 'On a failure', lines: ['8d6 fire damage'] },
+    ]);
+  });
+
+  test('ongoing damage rides with the condition it belongs to', () => {
+    const spec = ActionSpec.parse({
+      outcomes: { hit: { effects: [{ condition: 'Burning', rounds: 3, ongoingDamage: 5 }] } },
+    });
+    expect(actionSpecEffects(spec)[0].lines).toEqual(['Burning (3 rounds) · 5 ongoing damage']);
+  });
+
+  test('a branch that truly says nothing still contributes no group', () => {
+    const spec = ActionSpec.parse({ outcomes: { miss: {} } });
     expect(actionSpecEffects(spec)).toEqual([]);
   });
 
