@@ -1653,6 +1653,7 @@ export const CombatantRow = memo(function CombatantRow({
                 disabled
                 showTemplateHp={false}
                 ruleSystem={ruleSystem}
+                customMechanicsProfile={customMechanicsProfile}
               />
             </details>
           )}
