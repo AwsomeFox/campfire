@@ -5,7 +5,7 @@
   "description": "Self-hosted, AI-operable D&D campaign tracker",
   "license": "MIT",
   "engines": {
-    "node": ">=22.14"
+    "node": "^22.14 || >=23.6"
   },
   "workspaces": [
     "apps/*",

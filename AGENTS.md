@@ -46,12 +46,18 @@ subtree.
 
 ## Commands
 
-Prerequisites are Node 22.14 or newer and npm workspaces. The floor is 22.14
-rather than 22.0 because better-sqlite3 ships prebuilt Node-API 10 binaries and
-Node added Node-API 10 in 22.14.0. Below that the failure is silent, not a clean
-error: 13.x has no install script, so `npm ci` succeeds, and on Node 22.13.1
-`require('better-sqlite3')` also succeeds — the process then dies with SIGSEGV
-(exit 139, no exception, no message) on the first `new Database()`.
+Prerequisites are npm workspaces and a Node that reports
+`process.versions.napi >= 10` — Node 22.14+, 23.6+, or 24+. The real constraint
+is the Node-API level, not a single floor, which is why `engines.node` is the
+disjoint `^22.14 || >=23.6`: Node added Node-API 10 to the 22 line in 22.14.0
+but to the 23 line only in 23.6.0, so a plain `>=22.14` would wave 23.0–23.5
+through with the same broken behaviour.
+
+Below that level the failure is silent, not a clean error: better-sqlite3 13.x
+ships prebuilt Node-API 10 binaries and has no install script, so `npm ci`
+succeeds, and on Node 22.13.1 `require('better-sqlite3')` also succeeds — the
+process then dies with SIGSEGV (exit 139, no exception, no message) on the first
+`new Database()`.
 
 `build-test (22.x)` pins exactly 22.14.0 so the floor is tested rather than
 asserted, and runs `npm run check:native-addons` there. That check exists

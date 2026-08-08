@@ -14,13 +14,15 @@ website/         This documentation + marketing site
 
 ## Local development
 
-Prereqs: Node ≥ 22.14 and [just](https://github.com/casey/just).
+Prereqs: Node 22.14+, 23.6+, or 24+ and [just](https://github.com/casey/just).
 
-Node 22.14 is a hard floor, not a suggestion: better-sqlite3 ships a Node-API 10
-binary and Node added Node-API 10 in 22.14.0. On 22.0–22.13 the install still
-succeeds and `npm` only warns, then the server dies with a bare segfault the
-first time it opens the database. `npm run check:native-addons` confirms your
-runtime can actually load the native dependencies.
+That version list is the real requirement, not a rounded-up minimum:
+better-sqlite3 ships a Node-API 10 binary, and Node added Node-API 10 in 22.14.0
+and 23.6.0. On an older Node the install still succeeds and `npm` only warns,
+then the server dies with a bare segfault the first time it opens the database.
+`node -p process.versions.napi` should print `10` or higher, and
+`npm run check:native-addons` confirms your runtime can actually load the native
+dependencies.
 
 ```bash
 just setup     # install all workspaces
