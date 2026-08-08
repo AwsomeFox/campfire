@@ -3590,8 +3590,14 @@ export default function RunSessionPage() {
   // callback recreated inline in the roster `.map()` below (`(el) => setCombatantRowRef(c.id,
   // el)`) would be a fresh function identity every render and defeat the memo for that prop
   // alone. `setCombatantRowRef` itself is already a stable (`[]` deps) top-level callback, so
-  // the per-combatant-id binding below can be cached forever once built — no invalidation
-  // needed, since the thing it closes over never changes identity.
+  // a cached per-combatant-id binding can never become *wrong* — the thing it closes over
+  // never changes identity.
+  //
+  // It can still make the cache *grow*. `RunSessionPage` is reused across encounters, so with
+  // no reset every combatant id the session has ever shown would accumulate here for the life
+  // of the page. Correct-forever and bounded are separate properties, and only the first
+  // follows from the stable closure; the effect below clears both maps on `eid`, matching the
+  // other per-encounter resets in this file.
   const combatantRowRefCallbacks = useRef(new Map<number, (el: HTMLElement | null) => void>());
   const getCombatantRowRef = useCallback(
     (combatantId: number) => {
@@ -3653,6 +3659,20 @@ export default function RunSessionPage() {
     },
     [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks, riskyBlocked],
   );
+  // Drop the previous encounter's cached ref bindings on switch, so the cache stays bounded
+  // across a long session.
+  //
+  // ONLY the callback cache. Clearing `combatantRowRefs` here too is actively wrong (#2083
+  // review): with the target encounter already in the React Query cache, `encounter` is
+  // non-null in the same render `eid` changes, so rows mount and attach their refs during that
+  // commit — and this passive effect, running afterwards, would drop refs for rows that are
+  // still mounted. React does not re-invoke a ref until its identity changes, so those entries
+  // would stay missing until the next render and the turn auto-scroll would silently fall back
+  // to a `querySelector`. React already clears that map on unmount by invoking each ref with
+  // null, so the belt-and-braces line was not harmless.
+  useEffect(() => {
+    combatantRowRefCallbacks.current.clear();
+  }, [eid]);
   const autoScrollSkipped = useRef(false);
   // `RunSessionPage` is reused across encounters; reset the first-load latch so
   // each new encounter starts with the header controls visible.
