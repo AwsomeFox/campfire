@@ -38,6 +38,7 @@
 import { z } from 'zod';
 import { CharacterAction } from './character-action';
 import { expandRawStatblockAction } from './combatant-statblock';
+import { isRollableDamageExpression } from './dice-bounds';
 
 /**
  * The 5e-shaped subset of a rule-system adapter this module needs. Declared structurally (the
@@ -82,12 +83,11 @@ interface WeaponProfile {
   finesse: boolean;
 }
 
-/**
- * The dice shapes the resolver can actually roll — the same grammar `damagePartsFrom` splits in
- * combatant-statblock.ts. Anything else (Open5e's `"0"` for the Net, a homebrew "2d7+1d4", an
- * empty string) is treated as unusable, which routes the item to a text-only action.
- */
-const DICE_EXPRESSION = /^\d+d\d+(?:\s*[+-]\s*\d+)?$/i;
+// Review (chatgpt-codex-connector P2): this used to be a local regex, which accepted shapes
+// the ROLLER rejects — `21d6` (over the 20-dice cap) and `1d3` (not a polyhedral face) both
+// look like dice and both throw when rolled. A spec built on one degraded not to a text-only
+// action but to an error mid-combat. `isRollableDamageExpression` asks the roller's own
+// bounds, so "resolvable" now means the same thing here as it does at roll time.
 
 /** `DamagePart.type` is capped at 24 chars; a longer value would throw inside `ActionSpec.parse`. */
 const MAX_DAMAGE_TYPE_LENGTH = 24;
@@ -191,7 +191,7 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
   const profile = weaponProfileFrom(input.data);
   if (!profile) return null;
 
-  const diceUsable = DICE_EXPRESSION.test(profile.damageDice.replace(/\s+/g, ''));
+  const diceUsable = isRollableDamageExpression(profile.damageDice);
   const typeUsable = profile.damageType.length > 0 && profile.damageType.length <= MAX_DAMAGE_TYPE_LENGTH;
 
   try {
@@ -297,7 +297,15 @@ export function rebuildEditedActionSpec(edited: CharacterAction, ruleSystem = ''
   // `damage` is the human-facing "1d8+3 slashing" line: dice first, type as the remainder.
   const damageMatch = edited.damage.trim().match(/^(\d+d\d+(?:\s*[+-]\s*\d+)?)\s+(.+)$/i);
   const damageType = damageMatch ? damageMatch[2].trim().toLowerCase() : '';
-  if (!bonusMatch || !damageMatch || !damageType || damageType.length > MAX_DAMAGE_TYPE_LENGTH) {
+  // Same roller check as the derivation: a hand-typed "21d6 slashing" must become a text-only
+  // action, not a resolvable spec that throws the first time someone attacks with it.
+  if (
+    !bonusMatch ||
+    !damageMatch ||
+    !isRollableDamageExpression(damageMatch[1]) ||
+    !damageType ||
+    damageType.length > MAX_DAMAGE_TYPE_LENGTH
+  ) {
     return CharacterAction.parse({ ...edited, spec: undefined });
   }
 

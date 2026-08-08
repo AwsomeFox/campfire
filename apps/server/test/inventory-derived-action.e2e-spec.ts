@@ -295,6 +295,19 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(restored.body.equippedActionSource).toBeNull();
   });
 
+  it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
+    const server = ctx.app.getHttpServer();
+    const stashed = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .set(dm)
+      .send({ name: 'Stashed Blade', ownerType: 'party' });
+    const rejected = await request(server)
+      .patch(`/api/v1/inventory/${stashed.body.id}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Nope', kind: '', toHit: '+1', damage: '', targetAc: '', notes: '' } });
+    expect(rejected.status).toBe(400);
+  });
+
   it('a reader who is neither DM nor owner sees neither the derived action nor its provenance', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
