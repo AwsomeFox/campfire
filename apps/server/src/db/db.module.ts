@@ -368,9 +368,12 @@ function migrateUsersTableForTableAudio1920(sqlite: Database.Database): void {
   // a guess at the Node 24 `Statement::~Statement()` abort seen on #2050, and it never
   // moved the failure rate. The current explanation is the dependency, not statement
   // lifetime: better-sqlite3 11.10.0 predates Node 24 and declares no support for it,
-  // and it embeds raw V8 (`node::ObjectWrap`) rather than Node-API, so it carries no
-  // cross-major ABI guarantee. The pragma form is kept here only because it is the
-  // narrower call. Most migrations in this file still use the `prepare` form.
+  // and it embedded raw V8 (`node::ObjectWrap`) rather than Node-API, so its `Statement`
+  // finalizers ran as V8 weak callbacks with no entered context and it carried no
+  // cross-major ABI guarantee. The 13.x line moved those objects to
+  // `Napi::ObjectWrap`, which the Node-API runtime finalizes with a valid `env`. The
+  // pragma form is kept here only because it is the narrower call. Most migrations in
+  // this file still use the `prepare` form.
   const columns = sqlite.pragma('table_info(users)') as Array<{ name: string }>;
   if (columns.length === 0) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
   if (columns.some((c) => c.name === 'table_audio')) return;
