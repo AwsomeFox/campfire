@@ -480,12 +480,11 @@ export function sortCombatants(
     // DM manual-reorder override (issue #1923 review finding 1): a running encounter's
     // adapter tiebreak (e.g. 5e's initModDescThenSortOrderAsc) compares initMod BEFORE
     // sortOrder, so a plain sortOrder rewrite from a drag is silently discarded whenever
-    // the tied combatants have different initMod. reorderCombatant stamps manualOrder on
-    // every combatant in the roster when it runs against a running encounter; consult it
-    // here ONLY when both sides have a value, so a tie where neither (or only one) side
-    // was ever manually reordered still falls through to the adapter's own rule
-    // unchanged. Deliberately checked before breakTie, not inside it — this is roster
-    // state the adapter itself never sees.
+    // the tied combatants have different initMod. `reorderCombatant` stamps manualOrder
+    // on the moved combatant and the specific same-tie-group rows it crossed (issue
+    // #2084 finding 1 — NOT every combatant in the roster, which is what let one drag
+    // disable the adapter tiebreak for the whole encounter). Deliberately checked before
+    // breakTie, not inside it — this is roster state the adapter itself never sees.
     // `?? null`, NOT `!== null`. The Zod schema defaults this to null, so anything parsed
     // through it is null-or-number — but a Combatant assembled without going through the
     // parser (`{...} as Combatant` fixtures, and any future hand-built row) leaves the field
@@ -495,7 +494,29 @@ export function sortCombatants(
     // pre-existing adapter-tiebreak tests (#2074 review round 2).
     const aManual = a.manualOrder ?? null;
     const bManual = b.manualOrder ?? null;
-    if (aManual !== null && bManual !== null) return aManual - bManual;
+    // A stamped row always precedes an unstamped one, rather than the two being compared
+    // by the adapter (#2074 review round 3 / relanded as #2088). Consulting manualOrder
+    // ONLY when both sides carry it is not merely a gap — it makes the comparator
+    // NON-TRANSITIVE as soon as a tie mixes stamped and unstamped rows, because different
+    // pairs in the same group get decided by different rules. At initiative 14 with the 5e
+    // adapter:
+    //
+    //   A(manualOrder 0, initMod 1), B(manualOrder 1, initMod 3), C(unstamped, initMod 2)
+    //   A < B by manualOrder, B < C by initMod, C < A by initMod  →  a cycle.
+    //
+    // `Array.prototype.sort` with a cyclic comparator returns an implementation-defined
+    // order, and `sortCombatants` also derives `turnIndex`, so the DM would see a tie
+    // group reshuffle between refreshes. Ordering stamped-before-unstamped makes the whole
+    // group compare on one key and restores a total order. This stays load-bearing under
+    // the narrower per-tie-group stamp above (issue #2084): unlike the old "stamp
+    // everyone" scheme, a single drag now routinely leaves SOME members of an otherwise
+    // untouched tie group stamped (the crossed ones) and others not — exactly the mix this
+    // rule exists to make transitive.
+    if (aManual !== null || bManual !== null) {
+      if (aManual === null) return 1;
+      if (bManual === null) return -1;
+      if (aManual !== bManual) return aManual - bManual;
+    }
     return breakTie(a, b);
   });
 }

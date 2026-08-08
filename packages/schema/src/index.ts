@@ -10740,17 +10740,33 @@ export const Combatant = z.object({
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
-  // DM manual-reorder override (issue #1923 review finding 1). Set on EVERY combatant in
-  // the roster (not just the moved one) whenever `reorderCombatant` runs against a
-  // running encounter, to the combatant's index in the newly computed order. Null until
-  // the first manual reorder on a running encounter (and for legacy rows). This exists
-  // because a running encounter's `sortCombatants` orders by initiative, and an adapter's
-  // `initiativeTiebreak` (e.g. 5e's `initModDescThenSortOrderAsc`) compares `initMod`
-  // BEFORE `sortOrder` — a pure `sortOrder` rewrite is silently discarded by the adapter
-  // tiebreak whenever the tied combatants have different `initMod` (different DEX).
-  // `sortCombatants` consults this ahead of the adapter tiebreak, but only when BOTH
-  // combatants in the comparison have a non-null value, so an unrelated tie (one or both
-  // never manually reordered) still falls through to the adapter's own rule untouched.
+  // DM manual-reorder override (issue #1923 review finding 1; narrowed by #2084 finding
+  // 1). This exists because a running encounter's `sortCombatants` orders by initiative,
+  // and an adapter's `initiativeTiebreak` (e.g. 5e's `initModDescThenSortOrderAsc`)
+  // compares `initMod` BEFORE `sortOrder` — a pure `sortOrder` rewrite is silently
+  // discarded by the adapter tiebreak whenever the tied combatants have different
+  // `initMod` (different DEX).
+  //
+  // Set by `reorderCombatant` on the moved combatant and the OTHER rows it actually
+  // crossed that share its (possibly newly-assigned) initiative value — never the whole
+  // roster. An earlier version stamped every combatant on every drag, which meant one
+  // reorder disabled `adapter.initiativeTiebreak` for the entire encounter, including
+  // ties the DM never touched; while `preparing` (before most rows have a rolled
+  // initiative) that also meant the stamp encoded add order rather than DM intent. A tie
+  // group nobody dragged into stays entirely null so it keeps falling through to the
+  // adapter. Never stamped for a null-initiative row — an unrolled tie is decided by
+  // `sortOrder` alone (see `sortCombatants`'s own null/null branch and the `preparing`
+  // sort), so a stamp there would outlive the roll and could wrongly decide a REAL tie
+  // later by insertion order instead of the adapter.
+  //
+  // Cleared back to null whenever a combatant's OWN `initiative` value changes outside
+  // this same reorder (a DM PATCH, or an overwrite re-roll) — the tie it was placed in no
+  // longer exists once its number moves.
+  //
+  // `sortCombatants` consults this ahead of the adapter tiebreak whenever EITHER side has
+  // a value: a stamped row always precedes an unstamped one, which keeps the comparator a
+  // total order when a tie mixes stamped and unstamped rows (see that function's own
+  // comment for the non-transitive cycle this prevents).
   manualOrder: z.number().int().nullable().default(null),
   // Battle-map token position (issue #39): 0–100 percent overlay on the encounter's
   // map image, mirroring location.mapX/mapY. null = not yet placed on the map.
