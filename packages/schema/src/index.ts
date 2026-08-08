@@ -10741,23 +10741,32 @@ export const Combatant = z.object({
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
   // DM manual-reorder override (issue #1923 review finding 1; narrowed by #2084 finding
-  // 1). This exists because a running encounter's `sortCombatants` orders by initiative,
-  // and an adapter's `initiativeTiebreak` (e.g. 5e's `initModDescThenSortOrderAsc`)
-  // compares `initMod` BEFORE `sortOrder` — a pure `sortOrder` rewrite is silently
-  // discarded by the adapter tiebreak whenever the tied combatants have different
-  // `initMod` (different DEX).
+  // 1; corrected to whole-tie-group scope by #2095 review — Devin, Codex, and Copilot
+  // independently). This exists because a running encounter's `sortCombatants` orders by
+  // initiative, and an adapter's `initiativeTiebreak` (e.g. 5e's
+  // `initModDescThenSortOrderAsc`) compares `initMod` BEFORE `sortOrder` — a pure
+  // `sortOrder` rewrite is silently discarded by the adapter tiebreak whenever the tied
+  // combatants have different `initMod` (different DEX).
   //
-  // Set by `reorderCombatant` on the moved combatant and the OTHER rows it actually
-  // crossed that share its (possibly newly-assigned) initiative value — never the whole
-  // roster. An earlier version stamped every combatant on every drag, which meant one
-  // reorder disabled `adapter.initiativeTiebreak` for the entire encounter, including
-  // ties the DM never touched; while `preparing` (before most rows have a rolled
-  // initiative) that also meant the stamp encoded add order rather than DM intent. A tie
-  // group nobody dragged into stays entirely null so it keeps falling through to the
-  // adapter. Never stamped for a null-initiative row — an unrolled tie is decided by
-  // `sortOrder` alone (see `sortCombatants`'s own null/null branch and the `preparing`
-  // sort), so a stamp there would outlive the roll and could wrongly decide a REAL tie
-  // later by insertion order instead of the adapter.
+  // Set by `reorderCombatant` on EVERY row that shares the moved combatant's landing
+  // (possibly just-reassigned) initiative value — its full tie group as it exists in the
+  // newly computed order, all in one consistent `orderedIds` index space from that same
+  // pass — never the whole roster, and NOT merely the rows the drag's own start/end
+  // positions happened to cross. An earlier version stamped every combatant on every
+  // drag, which meant one reorder disabled `adapter.initiativeTiebreak` for the entire
+  // encounter, including ties the DM never touched; while `preparing` (before most rows
+  // have a rolled initiative) that also meant the stamp encoded add order rather than DM
+  // intent. A narrower revision then stamped only the moved combatant plus whichever
+  // OTHER tie-group members the drag physically crossed — but `sortCombatants` puts ANY
+  // stamped row ahead of ANY unstamped one within a tie (see below), with no regard for
+  // whether that specific row was crossed, so a partial stamp did not merely fail to help
+  // the untouched members — it actively sank them below the touched ones, an order the DM
+  // never asked for. Stamping the WHOLE landing group closes that: a tie group nobody
+  // dragged into stays entirely null so it keeps falling through to the adapter. Never
+  // stamped for a null-initiative row — an unrolled tie is decided by `sortOrder` alone
+  // (see `sortCombatants`'s own null/null branch and the `preparing` sort), so a stamp
+  // there would outlive the roll and could wrongly decide a REAL tie later by insertion
+  // order instead of the adapter.
   //
   // Cleared back to null whenever a combatant's OWN `initiative` value changes outside
   // this same reorder (a DM PATCH, or an overwrite re-roll) — the tie it was placed in no

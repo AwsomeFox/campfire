@@ -6964,9 +6964,10 @@ export class EncountersService {
    * crosses initiative values sets the moved combatant's `initiative` to a value between
    * its NEW neighbors — so the manual placement survives a later resort — and clears the
    * now-stale `initiativeBreakdown` (#1476: this must never fabricate a breakdown for a
-   * manually-assigned value). `manualOrder` is stamped only for the moved combatant and
-   * whichever OTHER rows it actually crossed within its own tie group (issue #2084
-   * finding 1) — see that field's own doc comment in @campfire/schema.
+   * manually-assigned value). `manualOrder` is stamped for every row sharing the moved
+   * combatant's landing initiative — its whole tie group, not the roster and not just the
+   * rows the drag physically crossed (issue #2084 finding 1, corrected to whole-group
+   * scope by issue #2095 review) — see that field's own doc comment in @campfire/schema.
    *
    * `expectedTurnVersion` CAS: 409s when it no longer matches the encounter's current
    * `turnVersion` (bumped on every turn advance) — a drag issued against a roster the DM
@@ -7086,7 +7087,8 @@ export class EncountersService {
       // tiebreak comparison at all (`sortCombatants` never calls into `manualOrder` for
       // two different initiative values — it decides those numerically first).
       //
-      // Issue #2095 review (Devin + Codex, same root cause, independent repros): an
+      // Issue #2095 review (Devin, Codex, and Copilot, same root cause, three independent
+      // repros): an
       // earlier version stamped only the moved combatant plus whichever OTHER tie-group
       // members its start/end positions physically crossed — but #2088's
       // stamped-before-unstamped total-order rule (relanded in this same PR, see

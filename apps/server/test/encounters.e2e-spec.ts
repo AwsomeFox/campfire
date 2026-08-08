@@ -10744,13 +10744,13 @@ describe('encounters — issue #2084: manualOrder records only the DM\'s crossed
   });
 
   /**
-   * Issue #2095 review (Devin 🔴 + Codex P1, same root cause, independent repros):
-   * partial (crossed-only) stamping is incompatible with the stamped-before-unstamped
-   * total-order rule. `sortCombatants` puts ANY stamped row ahead of ANY unstamped one
-   * within a tie, with no regard for whether that specific row was physically crossed —
-   * so stamping only the crossed subset doesn't just fail to help the untouched
-   * members, it actively sinks them below the touched ones. The fix stamps the WHOLE
-   * landing tie group.
+   * Issue #2095 review (Devin 🔴, Codex P1, and Copilot — same root cause, three
+   * independent repros): partial (crossed-only) stamping is incompatible with the
+   * stamped-before-unstamped total-order rule. `sortCombatants` puts ANY stamped row
+   * ahead of ANY unstamped one within a tie, with no regard for whether that specific
+   * row was physically crossed — so stamping only the crossed subset doesn't just fail
+   * to help the untouched members, it actively sinks them below the touched ones. The
+   * fix stamps the WHOLE landing tie group.
    */
   it("a tie group of 4+ where the moved row lands in the MIDDLE: the whole group is stamped and holds the DM's exact requested order (finding 1, Devin's repro)", async () => {
     await endAnyRunning();
