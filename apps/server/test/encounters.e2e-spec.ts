@@ -3352,6 +3352,96 @@ describe('encounters — issue #469: reject Start when there are zero combatants
   });
 });
 
+describe('encounters — issue #2091: emptying a RUNNING encounter must not wedge the live-fight slot (e2e)', () => {
+  let ctx: TestAppContext;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('next-turn on an emptied running encounter is rejected and names the recovery, and following that recovery frees the campaign live-fight slot', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Wedge Campaign' })).body.id;
+
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Wedge', hidden: false });
+    const encounterId = created.body.id as number;
+
+    // Issue #2091 repro script: add monsters, roll initiative, start.
+    await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Rat', hpMax: 3, count: 2 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    const startRes = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(startRes.status).toBe(201);
+    expect(startRes.body.status).toBe('running');
+
+    // Delete EVERY combatant, including the last one — the party PC is auto-added on
+    // create, so the roster includes it too (the issue's "clearing a mis-built roster"
+    // scenario). Removing the last combatant of a running encounter is deliberately left
+    // alone by this fix: it is the same operation two pre-existing tests rely on for the
+    // combatant-removal undo window and a death-save-replay-then-end flow, so this cannot
+    // become a 400 without breaking already-shipped recovery workflows.
+    const rosterGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const roster = rosterGet.body.combatants as Array<{ id: number }>;
+    expect(roster.length).toBeGreaterThan(0);
+    for (const c of roster) {
+      const del = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${c.id}`).set(dm);
+      expect(del.status).toBe(200);
+    }
+    const afterDelete = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(afterDelete.body.status).toBe('running');
+    expect((afterDelete.body.combatants as unknown[]).length).toBe(0);
+    const roundBefore = afterDelete.body.round as number;
+
+    // The actual fix: next-turn on the now-empty running encounter must not report
+    // success and bump the round (issue #2091's exact reported symptom) — it must
+    // refuse, and its message must name the recovery.
+    const nextTurnRes = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(nextTurnRes.status).toBe(400);
+    expect(nextTurnRes.body.message).toMatch(/no combatants/i);
+    expect(nextTurnRes.body.message).toMatch(/end the encounter/i);
+
+    // Nothing was silently changed: the round did not advance.
+    const afterNextTurn = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(afterNextTurn.body.status).toBe('running');
+    expect(afterNextTurn.body.round).toBe(roundBefore);
+
+    // A different encounter cannot start while Wedge still holds the campaign's
+    // live-fight slot — this is the bug's actual symptom, reproduced.
+    const otherBeforeEnd = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Other Fight', hidden: false });
+    const otherId = otherBeforeEnd.body.id as number;
+    await request(server)
+      .post(`/api/v1/encounters/${otherId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Wolf', hpMax: 10 });
+    await request(server).post(`/api/v1/encounters/${otherId}/roll-initiative`).set(dm);
+    const blockedStart = await request(server).post(`/api/v1/encounters/${otherId}/start`).set(dm);
+    expect(blockedStart.status).toBe(409);
+    expect(blockedStart.body.code).toBe('ENCOUNTER_ALREADY_RUNNING');
+
+    // The recovery named by next-turn's error — end the encounter — actually frees the
+    // campaign's live-fight slot: this is the assertion that fails for the right reason,
+    // not merely that some delete/next-turn call returned a particular status code.
+    const endRes = await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
+    expect(endRes.status).toBe(201);
+    expect(endRes.body.status).toBe('ended');
+
+    const otherStart = await request(server).post(`/api/v1/encounters/${otherId}/start`).set(dm);
+    expect(otherStart.status).toBe(201);
+  });
+});
+
 describe('encounters — issue #50: character/combatant HP stay in sync (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;

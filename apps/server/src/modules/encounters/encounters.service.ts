@@ -7575,6 +7575,22 @@ export class EncountersService {
         }
 
         const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+        if (rows.length === 0) {
+          // Issue #2091: removeCombatant deliberately still permits emptying a RUNNING
+          // encounter's roster (including its last combatant) — two pre-existing flows
+          // depend on that: the 30-second combatant-removal undo window, and a death-save
+          // replay that removes its subject and only later calls /end. Guarding the delete
+          // itself would break both. Instead, the invariant is enforced HERE, at the only
+          // place emptying the roster actually harmed the DM: next-turn/end-turn (this
+          // function backs both) must never silently report success and advance the round
+          // on a fight with nobody in it — that silent "success" is what let the campaign's
+          // one-live-fight slot (issue #744) stay wedged with no discoverable way out. The
+          // message names the actual recovery so the DM's very next action tells them what
+          // to do, rather than leaving them to rediscover it via a 409 on a different fight.
+          throw new BadRequestException(
+            'This encounter has no combatants — end the encounter instead of advancing an empty fight.',
+          );
+        }
         const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
         const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
         const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
