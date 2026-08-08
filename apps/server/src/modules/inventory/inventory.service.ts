@@ -1,10 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterAction, CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
-import type { Treasury, Role } from '@campfire/schema';
+import { CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
+import type { HomebrewMechanicsProfile, Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
+import { fromJsonText } from '../../common/json';
+import { campaigns, inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
 import { buildCompendiumRef, buildCompendiumSnapshot, compendiumRefKey, computeRuleEntryContentHash } from '../campaigns/compendium-import';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
@@ -52,10 +53,20 @@ export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
  *  - campaign clone and campaign import's party-fallback branch in `CampaignsService`
  *    (the source character wasn't copied/mapped, so there is no new owner to ask).
  */
-export const CLEARED_EQUIP_STATE: { readonly equipped: false; readonly equipSlot: null; readonly equippedAction: null } = {
+export const CLEARED_EQUIP_STATE: {
+  readonly equipped: false;
+  readonly equipSlot: null;
+  readonly equippedAction: null;
+  readonly equippedActionSource: null;
+} = {
   equipped: false,
   equipSlot: null,
   equippedAction: null,
+  // Issue #2097: the provenance travels with the action it describes. Clearing the action
+  // but keeping `equippedActionSource` would leave a row claiming an origin for something
+  // that no longer exists, and — worse — a stale 'manual' would then block the new owner's
+  // item from ever deriving one.
+  equippedActionSource: null,
 };
 
 /**
@@ -148,6 +159,9 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     equipped: row.equipped,
     equipSlot: row.equipSlot ?? null,
     equippedAction: parsedAction?.success ? parsedAction.data : null,
+    equippedActionSource: EquippedActionSource.safeParse(row.equippedActionSource).success
+      ? EquippedActionSource.parse(row.equippedActionSource)
+      : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
@@ -239,6 +253,68 @@ export class InventoryService {
    * that character's owning player. Party-stash items are never redacted — `equipped`
    * can never be true there, and the shared stash has never been private.
    */
+  /**
+   * Build the action an item grants while equipped, from its compendium data (issue #2097).
+   * Returns null whenever nothing can be derived — not a weapon, no compendium provenance,
+   * or a character that has vanished — and never throws: this runs on the equip path, and a
+   * malformed compendium row must not be able to fail the equip itself.
+   *
+   * Reads the LIVE rule entry's data when the item is still linked, falling back to the
+   * snapshot captured at acquire time. Both are the same shape; the snapshot is what a
+   * detached or since-uninstalled item still has, and using it keeps derivation working
+   * for an item whose pack was removed.
+   */
+  private async deriveActionForEquip(
+    existing: typeof inventoryItems.$inferSelect,
+    characterId: number,
+  ): Promise<CharacterAction | null> {
+    try {
+      const character = await this.db
+        .select({ stats: characters.stats, level: characters.level })
+        .from(characters)
+        .where(eq(characters.id, characterId))
+        .get();
+      if (!character) return null;
+
+      let data: unknown = null;
+      if (existing.ruleEntryId != null) {
+        const entry = await this.db
+          .select({ dataJson: ruleEntries.dataJson })
+          .from(ruleEntries)
+          .where(eq(ruleEntries.id, existing.ruleEntryId))
+          .get();
+        if (entry?.dataJson) data = safeJson(entry.dataJson);
+      }
+      if (data == null && existing.compendiumSnapshot) {
+        const snapshot = sanitizeCompendiumSnapshot(safeJson(existing.compendiumSnapshot));
+        if (snapshot?.dataJson) data = safeJson(snapshot.dataJson);
+      }
+      if (data == null) return null;
+
+      const campaign = await this.db
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+        .from(campaigns)
+        .where(eq(campaigns.id, existing.campaignId))
+        .get();
+      const adapter = ruleSystemAdapter(
+        campaign?.ruleSystem ?? '',
+        fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+      );
+
+      return deriveEquippedItemAction({
+        itemName: existing.name,
+        data,
+        character: { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level },
+        adapter,
+      });
+    } catch {
+      // Equipping is the user's action; deriving is a convenience on top of it. A failure
+      // here leaves the item equipped with no granted action — recoverable by hand — rather
+      // than failing a write the caller did ask for.
+      return null;
+    }
+  }
+
   /** Fail-closed redaction of `equippedAction` for a single, already-resolved owner. */
   private redactEquippedActionForOwner(
     item: InventoryItem,
@@ -248,9 +324,15 @@ export class InventoryService {
   ): InventoryItem {
     if (role === 'dm') return item;
     if (item.equippedAction == null) return item;
-    if (item.ownerType !== 'character' || item.characterId == null) return { ...item, equippedAction: null };
+    // Issue #2097: `equippedActionSource` is nulled alongside the action it describes. A
+    // surviving 'derived'/'manual' on a redacted row would announce that this character HAS
+    // a granted action — the exact fact the redaction exists to withhold — and would do it
+    // for free, without the reader needing to see a single number.
+    if (item.ownerType !== 'character' || item.characterId == null) {
+      return { ...item, equippedAction: null, equippedActionSource: null };
+    }
     if (ownerUserId != null && ownerUserId === user.id) return item;
-    return { ...item, equippedAction: null };
+    return { ...item, equippedAction: null, equippedActionSource: null };
   }
 
   private async redactEquippedActions(items: InventoryItem[], user: RequestUser, role: Role): Promise<InventoryItem[]> {
@@ -274,9 +356,12 @@ export class InventoryService {
       if (item.equippedAction == null) return item;
       // Party-stash items should never carry an equippedAction, and a character-owned item
       // without a resolvable owner is treated as fail-closed rather than fail-open.
-      if (item.ownerType !== 'character' || item.characterId == null) return { ...item, equippedAction: null };
+      // `equippedActionSource` goes with it — see redactEquippedActionForOwner.
+      if (item.ownerType !== 'character' || item.characterId == null) {
+        return { ...item, equippedAction: null, equippedActionSource: null };
+      }
       if (ownerById.get(item.characterId) === user.id) return item;
-      return { ...item, equippedAction: null };
+      return { ...item, equippedAction: null, equippedActionSource: null };
     });
   }
 
@@ -608,6 +693,28 @@ export class InventoryService {
           )?.ownerUserId
         : undefined;
 
+    // Issue #2097: when this PATCH equips a compendium-linked item that has no action yet,
+    // build one from its compendium data so an equipped weapon is actually usable in a
+    // fight. Resolved HERE, before the transaction, for the same reason the owner ids above
+    // are: it needs the owning character's stats/level and the campaign's rule adapter, and
+    // the write below is a synchronous better-sqlite3 transaction that cannot await.
+    //
+    // Equip time rather than acquire time, deliberately: acquire may target the party stash,
+    // where an action would be both meaningless and a secrecy problem (a stash item's action
+    // is never redaction-checked), and only at equip time is the wielder — and therefore the
+    // ability modifiers the attack depends on — known at all.
+    //
+    // `moved` counts as "no action yet" even when the row currently has one: the
+    // ownership-change rule (see CLEARED_EQUIP_STATE) discards the old owner's action
+    // unconditionally, because it was private to them. Once it is gone there is nothing to
+    // overwrite, and a character who hands their sword to someone who equips it should end
+    // up in the same state as one who acquired it themselves — not holding an equipped
+    // weapon that grants nothing.
+    const derivedOnEquip =
+      nextEquipped && finalOwnerType === 'character' && input.equippedAction === undefined && (moved || !existing.equippedAction)
+        ? await this.deriveActionForEquip(existing, finalCharacterId as number)
+        : null;
+
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
     // retries observe a single committed apply (issue #782).
@@ -739,6 +846,15 @@ export class InventoryService {
         }
         if (input.equippedAction !== undefined) {
           update.equippedAction = input.equippedAction ? JSON.stringify(input.equippedAction) : null;
+          // Issue #2097: ANY caller-supplied action is a human's, so the row becomes
+          // 'manual' and derivation will never regenerate over it again — that promise is
+          // what makes the editor safe to use. Clearing the action clears the provenance
+          // with it (nothing left to describe), which also re-opens the row to derivation:
+          // "delete the action, re-equip" is the deliberate way back to a fresh derivation.
+          update.equippedActionSource = input.equippedAction ? EquippedActionSource.enum.manual : null;
+        } else if (derivedOnEquip) {
+          update.equippedAction = JSON.stringify(derivedOnEquip);
+          update.equippedActionSource = EquippedActionSource.enum.derived;
         } else if (moved) {
           // Issue #1326 review (coordinator): THE ownership-change clearing rule —
           // equipped, equipSlot, and equippedAction reset together, atomically, unless
@@ -751,6 +867,7 @@ export class InventoryService {
           // every other owner-changing path (bulk move_inventory_owner + its undo, clone,
           // import) treats as the base "off" state for this triple.
           update.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
+          update.equippedActionSource = CLEARED_EQUIP_STATE.equippedActionSource;
         }
         if (equipWillChange) {
           if (nextEquipped) {
