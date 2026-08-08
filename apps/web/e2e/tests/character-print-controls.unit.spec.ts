@@ -43,7 +43,7 @@ test.describe('Character print view owner control hiding (#1761)', () => {
     expect(code).toContain('className="flex gap-2 flex-wrap items-end cf-print-hide"');
 
     // Portrait upload & story edit
-    expect(code).toContain('<div className="cf-print-hide">\n                    <ImageUpload');
+    expect(code).toContain('<div className="cf-print-hide">\n                        <ImageUpload');
     expect(code).toContain('className="text-[length:var(--type-label)] text-secondary cf-print-hide"');
     expect(code).toContain('className="space-y-2 cf-print-editor"');
     expect(code).toContain('className="space-y-2 cf-print-only"');
