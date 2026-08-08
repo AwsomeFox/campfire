@@ -218,6 +218,25 @@ export class CampaignsController {
     return this.campaigns.getOrThrow(id);
   }
 
+  @Get(':id/status-transitions')
+  @ApiOperation({
+    summary: 'List lifecycle-status transitions (issue #846)',
+    description:
+      "Requires campaign membership. Returns the campaign's status-change provenance (actor, time, from→to, optional reason), newest first. " +
+      "The `reason` is DM operational text and is redacted (empty) for non-DM callers — players see only who changed the status, when, and the from→to pair.",
+  })
+  @ApiResponse({ status: 200, description: 'Status transitions, newest first.' })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  async listStatusTransitions(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, id);
+    const transitions = await this.campaigns.listStatusTransitions(id);
+    // Issue #846: the reason is DM-only. Players see actor + status + time only.
+    if (role !== 'dm') {
+      return transitions.map(({ reason: _reason, ...rest }) => ({ ...rest, reason: '' }));
+    }
+    return transitions;
+  }
+
   @Patch(':id')
   @ApiOperation({
     summary: 'Update a campaign',

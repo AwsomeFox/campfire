@@ -614,6 +614,35 @@ describe('me/preferences (e2e)', () => {
     expect(patchRes.body.textSize).toBe('default');
   });
 
+  it('tableAudio defaults to off on /me (issue #1920)', async () => {
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.tableAudio).toBe('off');
+  });
+
+  it('setting tableAudio low -> /me reflects it', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ tableAudio: 'low' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.tableAudio).toBe('low');
+
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.tableAudio).toBe('low');
+    // Previously-set timeFormat is untouched by an unrelated tableAudio-only update.
+    expect(meRes.body.user.timeFormat).toBe('system');
+  });
+
+  it('invalid tableAudio -> 400', async () => {
+    const res = await agent.patch('/api/v1/me/preferences').send({ tableAudio: 'deafening' });
+    expect(res.status).toBe(400);
+  });
+
+  it('setting tableAudio back to off clears the override', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ tableAudio: 'off' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.tableAudio).toBe('off');
+  });
+
   it('unauthenticated PATCH /me/preferences -> 401', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).patch('/api/v1/me/preferences').send({ displayName: 'Nope' });

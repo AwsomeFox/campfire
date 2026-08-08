@@ -70,6 +70,7 @@ function toDomain(row: typeof users.$inferSelect): User {
     animateOthersRolls: row.animateOthersRolls ?? true,
     canCreateCampaigns: row.canCreateCampaigns ?? false,
     colorVisionAssist: row.colorVisionAssist ?? false,
+    tableAudio: (row.tableAudio ?? 'off') as User['tableAudio'],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -465,6 +466,7 @@ export class UsersService {
       if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
       if (input.animateOthersRolls !== undefined) update.animateOthersRolls = input.animateOthersRolls;
       if (input.colorVisionAssist !== undefined) update.colorVisionAssist = input.colorVisionAssist;
+      if (input.tableAudio !== undefined) update.tableAudio = input.tableAudio;
 
       const row = tx.update(users).set(update).where(eq(users.id, id)).returning().get();
       if (input.displayName !== undefined && input.displayName !== existing.displayName) {

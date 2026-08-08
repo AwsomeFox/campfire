@@ -25,6 +25,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type {
   CampaignSummary,
   CastSafetyState,
@@ -221,6 +222,7 @@ async function castRequest<T>(token: string, path: string, init?: RequestInit & 
 }
 
 export default function PlayerDisplayPage() {
+  const { t } = useTranslation();
   const { campaignId, token: castToken } = useParams<{ campaignId: string; token?: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
@@ -495,14 +497,16 @@ export default function PlayerDisplayPage() {
   const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null; label?: string | null }) => {
     const key = ++mapPingSeq.current;
     // Issue #1937: mirrors RunSessionPage's announcement — a labeled (intent) ping
-    // includes the intent, a plain tap keeps the original wording.
-    if (ping.senderName && ping.label) {
-      announce(`${ping.senderName} pings: ${ping.label}`);
-    } else if (ping.senderName) {
-      announce(`${ping.senderName} pinged the map`);
-    } else {
-      announce('A map ping arrived');
-    }
+    // includes the intent, a plain tap keeps the original wording. Issue #2048: this
+    // composes exactly as BattleMap's visible ping log does — same two keys, same
+    // `unknownSender` fallback — so the announcement a screen-reader user hears is the
+    // sentence that is on screen, in one language.
+    const senderName = ping.senderName || t('encounters.map.ping.log.unknownSender');
+    announce(
+      ping.label
+        ? t('encounters.map.ping.log.labeled', { name: senderName, label: ping.label })
+        : t('encounters.map.ping.log.plain', { name: senderName }),
+    );
     setMapPings((prev) => {
       const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);
@@ -510,7 +514,7 @@ export default function PlayerDisplayPage() {
     window.setTimeout(() => {
       setMapPings((prev) => prev.filter((p) => p.key !== key));
     }, 10000);
-  }, [announce]);
+  }, [announce, t]);
 
   const dismissMapPing = useCallback((key: number) => {
     setMapPings((prev) => prev.filter((p) => p.key !== key));

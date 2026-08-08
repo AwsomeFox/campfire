@@ -480,14 +480,17 @@ export function sortCombatants(
     // DM manual-reorder override (issue #1923 review finding 1): a running encounter's
     // adapter tiebreak (e.g. 5e's initModDescThenSortOrderAsc) compares initMod BEFORE
     // sortOrder, so a plain sortOrder rewrite from a drag is silently discarded whenever
-    // the tied combatants have different initMod. reorderCombatant stamps manualOrder on
-    // every combatant in the roster when it runs against a running encounter; consult it
-    // here whenever EITHER side has a value: two stamped rows compare by position, a stamped
-    // row precedes an unstamped one, and only a tie where NEITHER side was ever manually
-    // reordered falls through to the adapter's own rule unchanged. (An earlier version
-    // consulted it only when BOTH sides had a value — see the transitivity note below for
-    // why that was not merely narrower but actually cyclic.) Deliberately checked before breakTie, not inside it — this is roster
-    // state the adapter itself never sees.
+    // the tied combatants have different initMod. `reorderCombatant` stamps manualOrder
+    // on every row that shares the moved combatant's landing initiative — its whole tie
+    // group as it exists in the newly computed order (issue #2084 finding 1 — NOT every
+    // combatant in the roster, which is what let one drag disable the adapter tiebreak
+    // for the whole encounter). NOT merely the rows the drag physically crossed either
+    // (issue #2095 review, Devin/Codex/Copilot independently): this comparator puts ANY
+    // stamped row ahead of ANY unstamped one within a tie regardless of whether it was
+    // crossed, so a partial (crossed-only) stamp actively sank the untouched tie-group
+    // members below the touched ones instead of merely failing to help them. Deliberately
+    // checked before breakTie, not inside it — this is roster state the adapter itself
+    // never sees.
     // `?? null`, NOT `!== null`. The Zod schema defaults this to null, so anything parsed
     // through it is null-or-number — but a Combatant assembled without going through the
     // parser (`{...} as Combatant` fixtures, and any future hand-built row) leaves the field
@@ -498,10 +501,11 @@ export function sortCombatants(
     const aManual = a.manualOrder ?? null;
     const bManual = b.manualOrder ?? null;
     // A stamped row always precedes an unstamped one, rather than the two being compared
-    // by the adapter (#2074 review round 3). Consulting manualOrder ONLY when both sides
-    // carry it is not merely a gap — it makes the comparator NON-TRANSITIVE as soon as a
-    // tie mixes stamped and unstamped rows, because different pairs in the same group get
-    // decided by different rules. At initiative 14 with the 5e adapter:
+    // by the adapter (#2074 review round 3 / relanded as #2088). Consulting manualOrder
+    // ONLY when both sides carry it is not merely a gap — it makes the comparator
+    // NON-TRANSITIVE as soon as a tie mixes stamped and unstamped rows, because different
+    // pairs in the same group get decided by different rules. At initiative 14 with the 5e
+    // adapter:
     //
     //   A(manualOrder 0, initMod 1), B(manualOrder 1, initMod 3), C(unstamped, initMod 2)
     //   A < B by manualOrder, B < C by initMod, C < A by initMod  →  a cycle.
@@ -509,9 +513,17 @@ export function sortCombatants(
     // `Array.prototype.sort` with a cyclic comparator returns an implementation-defined
     // order, and `sortCombatants` also derives `turnIndex`, so the DM would see a tie
     // group reshuffle between refreshes. Ordering stamped-before-unstamped makes the whole
-    // group compare on one key and restores a total order: a combatant added after a
-    // manual reorder joins the END of its tie group, deterministically, and the DM can
-    // drag it wherever they want (which stamps it, and every other row, immediately).
+    // group compare on one key and restores a total order. This stays load-bearing under
+    // the per-tie-group stamp above (issue #2084): `reorderCombatant` itself now always
+    // stamps a whole landing group together in one pass (issue #2095 review), so a SINGLE
+    // reorder never itself splits a group into stamped/unstamped halves — but a mix is
+    // still reachable ACROSS operations. A later combatant can land on an already-stamped
+    // group's value without going through a reorder at all — a direct `initiative` PATCH,
+    // an overwrite re-roll, or the bulk late-joiner fill — and none of those stamp
+    // anything, so the new arrival is unstamped against an already-stamped group. Ordering
+    // stamped-before-unstamped keeps that mix transitive too: the DM's established
+    // relative order among the stamped members holds, and the new, never-placed arrival
+    // falls in after them rather than the comparator cycling.
     if (aManual !== null || bManual !== null) {
       if (aManual === null) return 1;
       if (bManual === null) return -1;

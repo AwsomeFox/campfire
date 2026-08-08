@@ -1,4 +1,5 @@
 import {
+  CombatantStatblock,
   Dnd5eAdapter,
   defaultCombatantStatblock,
   effectiveActionUsesMax,
@@ -12,6 +13,32 @@ describe('combatant statblock expansion (issue #425)', () => {
     const block = defaultCombatantStatblock();
     expect(block.actions.length).toBeGreaterThan(0);
     expect(isResolvableSpec(block.actions[0].spec)).toBe(true);
+  });
+
+  // Issue #2080: a homebrew monster's HP must round-trip through the statblock,
+  // and a statblock persisted BEFORE this field existed (no "hp" key at all —
+  // every campaign-library row on disk pre-#2080) must still parse.
+  describe('hp field (issue #2080)', () => {
+    it('parses an explicit numeric hp', () => {
+      const block = CombatantStatblock.parse({ ac: 15, hp: 60, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: '' });
+      expect(block.hp).toBe(60);
+    });
+
+    it('parses an explicit null hp as null (genuinely unknown)', () => {
+      const block = CombatantStatblock.parse({ ac: 15, hp: null, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: '' });
+      expect(block.hp).toBeNull();
+    });
+
+    it('backward compat: a statblock with NO "hp" key at all (pre-#2080 data) parses to hp: null, not a validation error', () => {
+      const legacy = { ac: 15, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: '' };
+      expect('hp' in legacy).toBe(false);
+      const block = CombatantStatblock.parse(legacy);
+      expect(block.hp).toBeNull();
+    });
+
+    it('a freshly-defaulted manual statblock has hp: null (unknown until the DM states one)', () => {
+      expect(defaultCombatantStatblock().hp).toBeNull();
+    });
   });
 
   it('expands attack_bonus actions into resolver-ready specs', () => {

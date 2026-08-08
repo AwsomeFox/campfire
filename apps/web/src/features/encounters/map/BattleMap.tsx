@@ -632,7 +632,32 @@ export const BattleMap = memo(function BattleMap({
   // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
   // as the DM drags. Every consumer below reads geometry through this (and its px form),
   // and — because it derives purely from encounter state — every viewport renders it the same.
-  const baseCalibration = useMemo(() => resolveGridCalibration(encounter), [encounter]);
+  // Keyed on the SIX grid fields `resolveGridCalibration` actually reads, not on `encounter`
+  // (issue #1917 stage 2, review round 2). React Query hands back a new encounter object on
+  // every refetch, SSE-driven invalidation and optimistic `setQueryData`, so an `[encounter]`
+  // dependency recomputed this on every HP tick — and since `calibration` → `calibrationPx` →
+  // `hexCells` all chain off it, two of `GridOverlay`'s props were reference-different every
+  // time. Its `memo()` comparator is shallow, so it re-rendered exactly as it had before being
+  // extracted: the containment this stage exists to deliver was not happening at all. These
+  // six are primitives, so the memo now holds while the grid geometry itself is unchanged.
+  const calGridSize = encounter.gridSize;
+  const calGridCellHeight = encounter.gridCellHeight;
+  const calGridOffsetX = encounter.gridOffsetX;
+  const calGridOffsetY = encounter.gridOffsetY;
+  const calGridRotation = encounter.gridRotation;
+  const calGridOpacity = encounter.gridOpacity;
+  const baseCalibration = useMemo(
+    () =>
+      resolveGridCalibration({
+        gridSize: calGridSize,
+        gridCellHeight: calGridCellHeight,
+        gridOffsetX: calGridOffsetX,
+        gridOffsetY: calGridOffsetY,
+        gridRotation: calGridRotation,
+        gridOpacity: calGridOpacity,
+      }),
+    [calGridSize, calGridCellHeight, calGridOffsetX, calGridOffsetY, calGridRotation, calGridOpacity],
+  );
   const calibration = useMemo<GridCalibration | null>(() => {
     if (!baseCalibration || !calibrateDrag || !mapRect) return baseCalibration;
     const w = mapRect.width;
@@ -3340,11 +3365,14 @@ export const BattleMap = memo(function BattleMap({
               <div className="absolute top-2 left-2 flex flex-col gap-1 z-20 pointer-events-none" style={{ maxWidth: 200 }}>
                 {pings.slice().reverse().map((p) => {
                   const intentIcon = pingIntentIconForLabel(p.label);
+                  const senderName = p.senderName || t('encounters.map.ping.log.unknownSender');
                   return (
                     <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
                       <span className="truncate mr-2 font-medium flex items-center gap-1">
                         {intentIcon && <GameIcon slug={intentIcon} size={UI_ICON_SIZE.xs} />}
-                        {p.senderName || 'Someone'} {p.label ? `pings: ${p.label}` : 'pinged'}
+                        {p.label
+                          ? t('encounters.map.ping.log.labeled', { name: senderName, label: p.label })
+                          : t('encounters.map.ping.log.plain', { name: senderName })}
                       </span>
                       <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
                         <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />

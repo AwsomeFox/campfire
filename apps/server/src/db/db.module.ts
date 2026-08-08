@@ -357,6 +357,31 @@ function migrateUsersTableForColorVisionAssist1942(sqlite: Database.Database): v
 }
 
 /**
+ * Migration for DBs created before table audio & haptics (issue #1920):
+ * `users.table_audio` didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN,
+ * modeled on migrateUsersTableForColorVisionAssist1942 above.
+ */
+function migrateUsersTableForTableAudio1920(sqlite: Database.Database): void {
+  // `sqlite.pragma(...)` rather than `prepare('PRAGMA table_info(users)').all()`, and
+  // `.exec` for the existence probe rather than `prepare(...).get()`: both avoid leaving
+  // a better-sqlite3 `Statement` alive for the process to destruct at teardown. That was
+  // a guess at the Node 24 `Statement::~Statement()` abort seen on #2050, and it never
+  // moved the failure rate. The current explanation is the dependency, not statement
+  // lifetime: better-sqlite3 11.10.0 predates Node 24 and declares no support for it,
+  // and it embedded raw V8 (`node::ObjectWrap`) rather than Node-API, so its `Statement`
+  // finalizers ran as V8 weak callbacks with no entered context and it carried no
+  // cross-major ABI guarantee. The 13.x line moved those objects to
+  // `Napi::ObjectWrap`, which the Node-API runtime finalizes with a valid `env`. The
+  // pragma form is kept here only because it is the narrower call. Most migrations in
+  // this file still use the `prepare` form.
+  const columns = sqlite.pragma('table_info(users)') as Array<{ name: string }>;
+  if (columns.length === 0) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+  if (columns.some((c) => c.name === 'table_audio')) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN table_audio TEXT NOT NULL DEFAULT 'off'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -1453,6 +1478,31 @@ function migrateEncountersTableForMonsterHpDisplay1925(sqlite: Database.Database
   if (columns.some((c) => c.name === 'monster_hp_display')) return;
 
   sqlite.exec("ALTER TABLE encounters ADD COLUMN monster_hp_display TEXT NOT NULL DEFAULT 'band'");
+}
+
+/**
+ * Issue #846: create the append-only `campaign_status_transitions` provenance table.
+ * CREATE TABLE / INDEX IF NOT EXISTS, so it is a no-op on a fresh DB (BOOTSTRAP_SQL
+ * already declares it) and idempotent on upgraded DBs. Column/index names mirror the
+ * drizzle schema and BOOTSTRAP_SQL exactly so the fresh-DB and upgraded-DB shapes
+ * cannot drift.
+ */
+function migrateCampaignStatusTransitions846(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_status_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      actor_user_id TEXT NOT NULL,
+      actor_name TEXT NOT NULL,
+      from_status TEXT NOT NULL,
+      to_status TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec(
+    'CREATE INDEX IF NOT EXISTS idx_campaign_status_transitions_campaign ON campaign_status_transitions(campaign_id, created_at)',
+  );
 }
 
 /** Boss-fight turn scheduling — lair slot at initiative 20 (issue #618). */
@@ -2984,6 +3034,41 @@ function migrateCombatantsTableForManualOrder1923(sqlite: Database.Database): vo
   if (!hasTable) return;
   const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
   if (!columns.some((c) => c.name === 'manual_order')) sqlite.exec('ALTER TABLE combatants ADD COLUMN manual_order INTEGER');
+}
+
+/**
+ * Issue #2095 review — upgrade compatibility for #2074/#2084's manual_order history.
+ * #2074 (merged before #2084's narrower-stamping fix) stamped `manual_order` on EVERY
+ * combatant in a roster on every drag. Any encounter a DM had already reordered under
+ * that code has EVERY row's `manual_order` non-null in the database right now — not
+ * because the DM placed each one, but as an incidental side effect of the old
+ * whole-roster write. #2084's narrower stamping only ever touches rows in a moved
+ * combatant's landing tie group on a FUTURE reorder; it never retroactively cleans up
+ * rows a PAST whole-roster stamp already wrote. `sortCombatants` still prioritizes any
+ * stamped row over any unstamped one within a tie (issue #2088/#2095's total-order
+ * rule), so those legacy stamps keep freezing untouched tie groups at their old
+ * whole-roster order and keep `adapter.initiativeTiebreak` from ever running again for
+ * them — the exact defect #2084 exists to fix, still live for every user who already
+ * hit it before upgrading. AGENTS.md requires preserving upgrade compatibility, so this
+ * is part of the fix, not a follow-up.
+ *
+ * Clears EVERY existing `manual_order` value rather than trying to recompute a narrower
+ * one in place. There is no way to distinguish, from the stored data alone, which row
+ * (if any) in a stamped roster reflects a genuine DM decision versus incidental
+ * whole-roster copying — the old code wrote every row identically regardless of
+ * whether the DM ever looked at it, so a from-scratch reconstruction has no real intent
+ * signal to recover. Clearing is simple, self-healing (the next drag on that encounter
+ * re-stamps correctly under the fixed narrower rule — see reorderCombatant), and,
+ * unlike any in-place narrowing heuristic, guaranteed not to preserve incidental noise
+ * as if it were intent. The cost — discarding some genuinely DM-set orders alongside
+ * the noise — is unavoidable given the old code could not distinguish them either.
+ */
+function migrateCombatantsTableClearLegacyManualOrder2095(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'manual_order')) return; // pre-#1923 DB — nothing to clear.
+  sqlite.exec('UPDATE combatants SET manual_order = NULL WHERE manual_order IS NOT NULL');
 }
 
 /** Issue #425: campaign-scoped homebrew monster library for clone/edit/reuse. */
@@ -5330,12 +5415,19 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0169_check_requests_group_id_1943', run: migrateCheckRequestsTableForGroupId1943 },
   { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
   { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
+  // #1925 landed on main taking 0171; this branch takes 0172 as the centrally claimed ordinal.
+  { name: '0172_users_table_audio_1920', run: migrateUsersTableForTableAudio1920 },
   { name: '0173_action_uses_tracking_1921', run: migrateActionUsesTracking1921 },
   // 0172/0173 are CENTRALLY CLAIMED by other in-flight branches (#2050 table audio/haptics
   // holds 0172; #1921 monster recharge abilities holds 0173 — see that branch's "chore(db):
   // renumber the action-uses migration to 0173" commit). Confirmed free across every
   // claude/codex/work/port/feat/fix remote branch at the time this was taken.
   { name: '0174_combatants_manual_order_1923', run: migrateCombatantsTableForManualOrder1923 },
+  // #846 campaign status provenance — renumbered to 0175 (0172-0174 taken on main by #2050/#1921/#1923).
+  { name: '0175_campaign_status_transitions_846', run: migrateCampaignStatusTransitions846 },
+  // 0176 confirmed free on main and every claude/codex/work/port/feat/fix remote branch
+  // at the time this was taken (see the same caveat on 0174 above).
+  { name: '0176_combatants_clear_legacy_manual_order_2095', run: migrateCombatantsTableClearLegacyManualOrder2095 },
 ];
 
 /**

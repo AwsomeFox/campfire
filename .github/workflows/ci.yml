@@ -118,9 +118,19 @@ jobs:
       - run: npm run typecheck
 
   # Node 22 (older supported LTS) compatibility gate. Rebuilds schema + server +
-  # web on 22.x to catch version-specific compile/build breaks. Server tests run
-  # on 24.x in the unit-only `coverage` job and sharded `server-tests` job, so
-  # they are intentionally NOT duplicated here.
+  # web to catch version-specific compile/build breaks. Server tests run on 24.x
+  # in the unit-only `coverage` job and sharded `server-tests` job, so they are
+  # intentionally NOT duplicated here.
+  #
+  # Pinned to 22.14.0 — the exact floor in root `engines.node` — rather than
+  # `22.x`. better-sqlite3 ships a Node-API 10 binary and Node added Node-API 10
+  # in 22.14.0. Below that the failure is silent: `npm ci` succeeds (13.x has no
+  # install script), `require('better-sqlite3')` succeeds too, and the process
+  # dies with SIGSEGV — exit 139, no exception, no message — on the first
+  # `new Database()`. `22.x` resolves to current 22 and would never catch a floor
+  # that has drifted below what a native dependency actually needs; this pin
+  # makes the declared floor tested instead of asserted. Bump it in lockstep with
+  # `engines.node` whenever a dependency raises the real minimum.
   build-test-22:
     name: build-test (22.x)
     runs-on: ubuntu-latest
@@ -128,7 +138,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.x'
+          node-version: '22.14.0'
           cache: npm
       - name: Restore node_modules
         id: modcache
@@ -138,10 +148,16 @@ jobs:
             node_modules
             apps/*/node_modules
             packages/*/node_modules
-          key: node-modules-22x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-22.14.0-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
+      # The build above is tsc + a Vite bundle and loads no native binding, so on
+      # its own it cannot detect an addon that is unloadable at the declared
+      # floor. This opens a SQLite database and encodes an image, which is what
+      # actually segfaults on a Node below better-sqlite3's Node-API level.
+      - name: Native addons load on the declared floor
+        run: npm run check:native-addons
       - name: Compatibility build (schema + server + web)
         run: npm run build
       # Issue #569: `test:pwa` is exactly `vite-build-strict.mjs &&

@@ -190,6 +190,34 @@ const FEATS = [
   { key: 'srd_grappler', name: 'Grappler', desc: 'You have developed the skills necessary to hold your own in close-quarters grappling.', prerequisite: 'Strength 13 or higher', has_prerequisite: true, benefits: [{ desc: 'You have advantage on attack rolls against a creature you are grappling.' }, { desc: 'You can use your action to try to pin a creature grappled by you.' }], type: 'GENERAL', document: DOCUMENT },
 ];
 
+// Mundane weapons from /v2/weapons/ (issue #2096). These rows carry NO `desc` — the live
+// endpoint serves pure structured data — and nest each property as
+// { property: { name, type, desc }, detail } where `detail` holds the per-weapon
+// particulars (Versatile's two-handed die, Thrown's range). `type: 'Mastery'` marks a 2024
+// weapon mastery, a different axis from a physical property like Finesse.
+//
+// The four rows are chosen to cover the shapes the mapper has to survive:
+//  - Longsword: martial melee (range 0/0) with a Versatile `detail` that must be preserved.
+//  - Longbow:   ranged (150/600), two-handed, ammunition.
+//  - Dagger:    simple, Finesse AND Thrown — a MELEE weapon that still reports a real
+//               range (20/60), so range alone can never classify a weapon as ranged.
+//  - Net:       `damage_dice: '0'` — not a dice expression at all, exactly as the live SRD
+//               serves it. Must still import as a normal entry rather than being dropped.
+const WEAPONS = [
+  { key: 'srd-2024_longsword', name: 'Longsword', damage_dice: '1d8', damage_type: { name: 'Slashing', key: 'slashing' }, distance_unit: 'feet', range: 0, long_range: 0, is_simple: false, is_improvised: false, properties: [{ property: { name: 'Versatile', type: null, desc: 'A Versatile weapon can be used with one or two hands.' }, detail: '1d10' }, { property: { name: 'Sap', type: 'Mastery', desc: 'The target has disadvantage on its next attack roll.' }, detail: null }], document: DOCUMENT },
+  { key: 'srd-2024_longbow', name: 'Longbow', damage_dice: '1d8', damage_type: { name: 'Piercing', key: 'piercing' }, distance_unit: 'feet', range: 150, long_range: 600, is_simple: false, is_improvised: false, properties: [{ property: { name: 'Ammunition', type: null, desc: 'You can use a weapon that has the Ammunition property to make a ranged attack.' }, detail: 'Range 150/600; Arrow' }, { property: { name: 'Two-Handed', type: null, desc: 'A Two-Handed weapon requires two hands.' }, detail: null }], document: DOCUMENT },
+  { key: 'srd-2024_dagger', name: 'Dagger', damage_dice: '1d4', damage_type: { name: 'Piercing', key: 'piercing' }, distance_unit: 'feet', range: 20, long_range: 60, is_simple: true, is_improvised: false, properties: [{ property: { name: 'Finesse', type: null, desc: 'A Finesse weapon may use Strength or Dexterity.' }, detail: null }, { property: { name: 'Thrown', type: null, desc: 'A Thrown weapon can be thrown to make a ranged attack.' }, detail: 'Range 20/60' }], document: DOCUMENT },
+  { key: 'srd-2024_net', name: 'Net', damage_dice: '0', damage_type: { name: 'Bludgeoning', key: 'bludgeoning' }, distance_unit: 'feet', range: 5, long_range: 15, is_simple: false, is_improvised: false, properties: [{ property: { name: 'Special (Net)', type: null, desc: 'A Net has special rules.' }, detail: null }], document: DOCUMENT },
+];
+
+// Mundane armour from /v2/armor/ (issue #2096) — also `desc`-less. Chain Mail carries a
+// strength requirement and stealth disadvantage; the Breastplate exercises the capped
+// Dex-modifier shape (ac_add_dexmod true with ac_cap_dexmod 2).
+const ARMOR = [
+  { key: 'srd-2024_chain-mail', name: 'Chain Mail', category: 'heavy', ac_display: '16', ac_base: 16, ac_add_dexmod: false, ac_cap_dexmod: null, grants_stealth_disadvantage: true, strength_score_required: 13, document: DOCUMENT },
+  { key: 'srd-2024_breastplate', name: 'Breastplate', category: 'medium', ac_display: '14 + Dex modifier (max 2)', ac_base: 14, ac_add_dexmod: true, ac_cap_dexmod: 2, grants_stealth_disadvantage: false, strength_score_required: null, document: DOCUMENT },
+];
+
 export async function startFakeOpen5e(): Promise<FakeOpen5e> {
   const app = express();
 
@@ -215,6 +243,8 @@ export async function startFakeOpen5e(): Promise<FakeOpen5e> {
   app.get('/v2/classes/', (_req, res) => res.json(page(CLASSES)));
   app.get('/v2/species/', (_req, res) => res.json(page(SPECIES)));
   app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
+  app.get('/v2/weapons/', (_req, res) => res.json(page(WEAPONS)));
+  app.get('/v2/armor/', (_req, res) => res.json(page(ARMOR)));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -275,6 +305,8 @@ export async function startFakeOpen5eFlaky(): Promise<FakeOpen5eFlaky> {
   app.get('/v2/classes/', (_req, res) => res.json(page(CLASSES)));
   app.get('/v2/species/', (_req, res) => res.json(page(SPECIES)));
   app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
+  app.get('/v2/weapons/', (_req, res) => res.json(page(WEAPONS)));
+  app.get('/v2/armor/', (_req, res) => res.json(page(ARMOR)));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -328,6 +360,8 @@ export async function startFakeOpen5eMultiDoc(): Promise<FakeOpen5e> {
   app.get('/v2/classes/', (_req, res) => res.json(page([])));
   app.get('/v2/species/', (_req, res) => res.json(page([])));
   app.get('/v2/feats/', (_req, res) => res.json(page([])));
+  app.get('/v2/weapons/', (_req, res) => res.json(page([])));
+  app.get('/v2/armor/', (_req, res) => res.json(page([])));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -367,6 +401,8 @@ export async function startFakeOpen5eMixedLicense(): Promise<FakeOpen5e> {
   app.get('/v2/classes/', (_req, res) => res.json(page(CLASSES)));
   app.get('/v2/species/', (_req, res) => res.json(page(SPECIES)));
   app.get('/v2/feats/', (_req, res) => res.json(page(FEATS)));
+  app.get('/v2/weapons/', (_req, res) => res.json(page(WEAPONS)));
+  app.get('/v2/armor/', (_req, res) => res.json(page(ARMOR)));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -428,6 +464,8 @@ export async function startFakeOpen5eWithBadPagination(): Promise<FakeOpen5eWith
   app.get('/v2/classes/', (_req, res) => res.json(page([])));
   app.get('/v2/species/', (_req, res) => res.json(page([])));
   app.get('/v2/feats/', (_req, res) => res.json(page([])));
+  app.get('/v2/weapons/', (_req, res) => res.json(page([])));
+  app.get('/v2/armor/', (_req, res) => res.json(page([])));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));

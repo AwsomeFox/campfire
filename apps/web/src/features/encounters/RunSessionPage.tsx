@@ -938,20 +938,23 @@ export default function RunSessionPage() {
     const key = ++pingSeq.current;
     // Issue #1937: a labeled ping (an intent chosen from the long-press/right-click
     // menu) announces the intent alongside the sender; a plain tap keeps the original
-    // wording unchanged.
-    if (ping.senderName && ping.label) {
-      announce(`${ping.senderName} pings: ${ping.label}`);
-    } else if (ping.senderName) {
-      announce(`${ping.senderName} pinged the map`);
-    } else {
-      announce('A map ping arrived');
-    }
+    // wording unchanged. Issue #2048: this composes exactly as BattleMap's visible ping
+    // log does — same two keys, same `unknownSender` fallback — so the announcement a
+    // screen-reader user hears is the sentence that is on screen, in one language.
+    // Composing the null-sender case separately is what previously left it as a bare
+    // English literal that also silently dropped the intent label.
+    const senderName = ping.senderName || t('encounters.map.ping.log.unknownSender');
+    announce(
+      ping.label
+        ? t('encounters.map.ping.log.labeled', { name: senderName, label: ping.label })
+        : t('encounters.map.ping.log.plain', { name: senderName }),
+    );
     setPings((prev) => {
       const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);
     });
     setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 10000);
-  }, [announce]);
+  }, [announce, t]);
   const dismissPing = useCallback((key: number) => {
     setPings((prev) => prev.filter((p) => p.key !== key));
   }, []);
@@ -3587,8 +3590,14 @@ export default function RunSessionPage() {
   // callback recreated inline in the roster `.map()` below (`(el) => setCombatantRowRef(c.id,
   // el)`) would be a fresh function identity every render and defeat the memo for that prop
   // alone. `setCombatantRowRef` itself is already a stable (`[]` deps) top-level callback, so
-  // the per-combatant-id binding below can be cached forever once built — no invalidation
-  // needed, since the thing it closes over never changes identity.
+  // a cached per-combatant-id binding can never become *wrong* — the thing it closes over
+  // never changes identity.
+  //
+  // It can still make the cache *grow*. `RunSessionPage` is reused across encounters, so with
+  // no reset every combatant id the session has ever shown would accumulate here for the life
+  // of the page. Correct-forever and bounded are separate properties, and only the first
+  // follows from the stable closure; the effect below clears both maps on `eid`, matching the
+  // other per-encounter resets in this file.
   const combatantRowRefCallbacks = useRef(new Map<number, (el: HTMLElement | null) => void>());
   const getCombatantRowRef = useCallback(
     (combatantId: number) => {
@@ -3637,7 +3646,16 @@ export default function RunSessionPage() {
   const rosterDragReorder = useCombatantDragReorder({
     axis: 'y',
     orderedIds: rosterOrderedIds,
-    enabled: canReorderCombatants,
+    // Issue #2084 finding 4: `reconcileBlocks`/`riskyBlocked` were already folded into
+    // `buildReorderControls`' `busy` below (issue #2074 review finding 3), which
+    // withholds `dragHandleProps` on the row — but withholding props off an ELEMENT
+    // THAT STAYS MOUNTED only drops the DOM listeners; it never told this hook a
+    // gesture already in flight had gone stale, so `gestureRef` stayed populated and
+    // every later drag on every row was refused until reload. Folding the same gate
+    // into `enabled` here lets the hook's own enabled-transition effect reset (and
+    // release pointer capture on) an in-progress gesture directly, independent of
+    // whatever the caller's props end up doing with `busy`.
+    enabled: canReorderCombatants && !reconcileBlocks && !riskyBlocked,
     elementsRef: combatantRowRefs,
     onDrop: handleReorderDrop,
   });
@@ -3668,6 +3686,20 @@ export default function RunSessionPage() {
     },
     [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks, riskyBlocked],
   );
+  // Drop the previous encounter's cached ref bindings on switch, so the cache stays bounded
+  // across a long session.
+  //
+  // ONLY the callback cache. Clearing `combatantRowRefs` here too is actively wrong (#2083
+  // review): with the target encounter already in the React Query cache, `encounter` is
+  // non-null in the same render `eid` changes, so rows mount and attach their refs during that
+  // commit — and this passive effect, running afterwards, would drop refs for rows that are
+  // still mounted. React does not re-invoke a ref until its identity changes, so those entries
+  // would stay missing until the next render and the turn auto-scroll would silently fall back
+  // to a `querySelector`. React already clears that map on unmount by invoking each ref with
+  // null, so the belt-and-braces line was not harmless.
+  useEffect(() => {
+    combatantRowRefCallbacks.current.clear();
+  }, [eid]);
   const autoScrollSkipped = useRef(false);
   // `RunSessionPage` is reused across encounters; reset the first-load latch so
   // each new encounter starts with the header controls visible.

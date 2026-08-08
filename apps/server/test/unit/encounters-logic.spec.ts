@@ -175,18 +175,23 @@ describe('encounters — sortCombatants', () => {
         combatant({ id: 2, initiative: 15, initMod: 3, sortOrder: 1 }),
       ];
       // The adapter alone would put 2 first (initMod 3 > 1). A combatant added after the
-      // DM's reorder joins the END of the tie group instead — see the transitivity case.
+      // DM's reorder joins the END of the tie group instead — see the transitivity case
+      // right below for why this is a rule, not a preference.
       expect(sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id)).toEqual([1, 2]);
     });
 
     /**
-     * The reason stamped-before-unstamped is a rule rather than a preference (#2074 review
-     * round 3). Deciding different pairs in one tie group by different rules makes the
-     * comparator non-transitive, and `Array.prototype.sort` then returns an
-     * implementation-defined order — which `sortCombatants` also feeds into `turnIndex`.
+     * Issue #2084's narrower stamp (moved combatant + the same-tie-group rows it actually
+     * crossed, not the whole roster) makes a tie group mixing stamped and unstamped rows
+     * the ORDINARY case rather than a rare one — so the total-order rule below (originally
+     * #2074 review round 3, relanded as #2088) is load-bearing here, not incidental.
+     * Deciding different pairs in one tie group by different rules makes the comparator
+     * non-transitive, and `Array.prototype.sort` then returns an implementation-defined
+     * order — which `sortCombatants` also feeds into `turnIndex`.
      */
     it('a tie mixing stamped and unstamped rows sorts totally, with no cycle and no dependence on input order', () => {
-      // Devin's cycle, exactly: A < B by manualOrder, B < C by initMod, C < A by initMod.
+      // A < B by manualOrder, B < C by initMod, C < A by initMod — a cycle if all three
+      // rules were consulted independently pairwise.
       const a = combatant({ id: 1, initiative: 14, initMod: 1, sortOrder: 0, manualOrder: 0 });
       const b = combatant({ id: 2, initiative: 14, initMod: 3, sortOrder: 1, manualOrder: 1 });
       const c = combatant({ id: 3, initiative: 14, initMod: 2, sortOrder: 2 });
