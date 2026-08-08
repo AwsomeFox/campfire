@@ -198,11 +198,14 @@ export default function CharacterPage() {
   const [trashing, setTrashing] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
   const [markingActive, setMarkingActive] = useState(false);
-  // This character's pack, read only to surface the actions their EQUIPPED gear grants
+  // This character's pack, used to surface the actions their EQUIPPED gear grants
   // (`InventoryItem.equippedAction`, issue #1326/#1791) in the Actions card, as the design
   // template does with its 🎒 chips. Those actions are already usable in an encounter, so a
-  // sheet that omits them hides half of what a geared character can do. Best-effort: a
-  // failed read costs the gear rows, never the sheet.
+  // sheet that omits them hides half of what a geared character can do.
+  //
+  // Published by CharacterInventorySection rather than fetched again here: that section is
+  // mounted for both tabs and already reads `/inventory`, so this is one campaign-inventory
+  // read per sheet, and the Actions card cannot drift from the Inventory list it describes.
   const [packItems, setPackItems] = useState<InventoryItem[]>([]);
   // Shared dice-log roller for click-to-roll saves/skills/attacks (issue #258).
   const roller = useRoller(cid, setActionError);
@@ -264,20 +267,6 @@ export default function CharacterPage() {
       cancelled = true;
     };
   }, [cid]);
-
-  const loadPack = useCallback(async () => {
-    if (!Number.isFinite(cid) || !Number.isFinite(id)) return;
-    try {
-      const list = await api.get<InventoryItem[]>(`${API}/campaigns/${cid}/inventory`);
-      setPackItems(list.filter((item) => item.ownerType === 'character' && item.characterId === id));
-    } catch {
-      setPackItems([]);
-    }
-  }, [cid, id]);
-
-  useEffect(() => {
-    void loadPack();
-  }, [loadPack]);
 
   function ownerLabel(ownerUserId: string | null): string {
     if (!ownerUserId) return 'DM-managed';
@@ -640,12 +629,12 @@ export default function CharacterPage() {
                 className="cf-sheet-section"
               >
                 <Card>
-                  {/* Equipping from here changes what the Actions card can offer, so the
-                      sheet's own copy of the pack is re-read alongside this section's. */}
+                  {/* Equipping here changes what the Actions card can offer, so this
+                      section publishes the pack it fetched straight back to the sheet. */}
                   <CharacterInventorySection
                     campaignId={cid}
                     character={character}
-                    onInventoryChanged={() => void loadPack()}
+                    onPackLoaded={setPackItems}
                   />
                 </Card>
               </section>
@@ -2480,10 +2469,14 @@ function ActionDetails({
   if (facts.length === 0 && effects.length === 0 && !source) return null;
   return (
     <div className="mt-1.5">
+      {/* The visible label is bare "Details" to keep the list scannable, so the name a
+          screen reader announces has to carry the action — otherwise a sheet with eight
+          actions offers eight identically-named buttons in the rotor. */}
       <button
         type="button"
         className="btn btn-ghost btn-xs text-[11px] cf-print-hide"
         aria-expanded={open}
+        aria-label={open ? `Hide details for ${action.name}` : `Show details for ${action.name}`}
         onClick={onToggle}
         style={{ minHeight: 32 }}
       >

@@ -25,10 +25,24 @@ test.describe('actionSpecFacts — states only what the spec carries', () => {
     expect(actionSpecFacts(null)).toEqual([]);
   });
 
-  test('a range the spec never set is omitted rather than rendered empty', () => {
-    const facts = actionSpecFacts(emptySpec());
-    expect(facts.map((f) => f.label)).not.toContain('Range');
-    expect(facts.every((f) => f.value !== '')).toBe(true);
+  test('an all-default spec states nothing at all', () => {
+    // The trap: `cost` and `targets` are the two fields whose schema DEFAULTS are
+    // non-empty ({slot:'action',count:1} / {count:1,allow:'any'}), so a naive reader
+    // renders "1 action, 1 target" for a spec whose author wrote neither.
+    expect(actionSpecFacts(emptySpec())).toEqual([]);
+  });
+
+  test('a real action DOES state its default economy — the default applies to it', () => {
+    const facts = actionSpecFacts(ActionSpec.parse({ mode: 'attack', attack: { bonus: '+5' } }));
+    expect(facts).toContainEqual({ label: 'Cost', value: '1 action' });
+    expect(facts).toContainEqual({ label: 'Targets', value: '1 target' });
+  });
+
+  test('a deliberately non-default cost or targeting reads even without a mode', () => {
+    expect(actionSpecFacts(ActionSpec.parse({ cost: { slot: 'bonus', count: 1 } })))
+      .toContainEqual({ label: 'Cost', value: '1 bonus' });
+    expect(actionSpecFacts(ActionSpec.parse({ targets: { count: 2, allow: 'ally' } })))
+      .toContainEqual({ label: 'Targets', value: '2 targets (ally)' });
   });
 
   test('range and area combine; area alone still reads', () => {
@@ -53,13 +67,13 @@ test.describe('actionSpecFacts — states only what the spec carries', () => {
   });
 
   test('at-will actions have no Uses fact; limited ones name their recharge', () => {
-    expect(actionSpecFacts(ActionSpec.parse({ uses: { max: 0 } })).map((f) => f.label)).not.toContain('Uses');
+    expect(actionSpecFacts(ActionSpec.parse({ mode: 'attack', uses: { max: 0 } })).map((f) => f.label)).not.toContain('Uses');
     expect(actionSpecFacts(ActionSpec.parse({ uses: { max: 3, recharge: 'long-rest' } })))
       .toContainEqual({ label: 'Uses', value: '3 per long-rest' });
   });
 
   test('targeting reads as targets, as an area, or not at all', () => {
-    expect(actionSpecFacts(ActionSpec.parse({ targets: { count: 1 } })))
+    expect(actionSpecFacts(ActionSpec.parse({ mode: 'attack', targets: { count: 1 } })))
       .toContainEqual({ label: 'Targets', value: '1 target' });
     expect(actionSpecFacts(ActionSpec.parse({ targets: { count: 2, allow: 'ally' } })))
       .toContainEqual({ label: 'Targets', value: '2 targets (ally)' });

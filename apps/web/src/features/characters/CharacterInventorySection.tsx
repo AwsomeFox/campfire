@@ -15,17 +15,20 @@ import { AddItemForm, CompendiumItemPickerModal, ItemSection } from '../inventor
 export function CharacterInventorySection({
   campaignId,
   character,
-  onInventoryChanged,
+  onPackLoaded,
 }: {
   campaignId: number;
   character: Character;
   /**
-   * Called after any mutation this section made lands (add, edit, qty, equip/unequip).
-   * The character sheet reads the same pack separately to surface the actions equipped
-   * gear grants, and that copy would otherwise go stale the moment an item is equipped
-   * here — the action would stay missing (or stay rollable) until a full page reload.
+   * Reports this character's pack whenever it loads or changes — on mount and after any
+   * mutation made here (add, edit, qty, equip/unequip).
+   *
+   * The sheet needs the same list to surface the actions equipped gear grants, and this
+   * section is already mounted for both tabs, so it publishes what it fetched rather than
+   * the sheet fetching `/inventory` a second time. One reader, one source: the two views
+   * cannot diverge, and equipping here updates the Actions card with no page reload.
    */
-  onInventoryChanged?: () => void;
+  onPackLoaded?: (items: InventoryItem[]) => void;
 }) {
   const { t } = useTranslation();
   const { me } = useAuth();
@@ -60,12 +63,6 @@ export function CharacterInventorySection({
     void load();
   }, [load]);
 
-  // Reload this section AND tell the sheet, so both views of the pack move together.
-  const reload = useCallback(() => {
-    void load();
-    onInventoryChanged?.();
-  }, [load, onInventoryChanged]);
-
   const ownsCharacter = useCallback(
     (characterId: number | null) => {
       if (characterId == null || myUserId == null) return false;
@@ -92,6 +89,13 @@ export function CharacterInventorySection({
     () => items.filter((i) => i.ownerType === 'character' && i.characterId === character.id),
     [items, character.id],
   );
+
+  // Publish after render rather than from `load`, so every path that changes `items`
+  // reaches the sheet — including ones the shared ItemSection drives. `characterItems`
+  // only gets a new identity when `items` actually changes, so this cannot loop.
+  useEffect(() => {
+    onPackLoaded?.(characterItems);
+  }, [characterItems, onPackLoaded]);
 
   const canManageCharacter =
     canEdit && (isDm || (myUserId != null && character.ownerUserId === myUserId));
@@ -133,7 +137,7 @@ export function CharacterInventorySection({
               onCancel={() => setAdding(false)}
               onCreated={() => {
                 setAdding(false);
-                reload();
+                void load();
               }}
             />
           )}
@@ -146,7 +150,7 @@ export function CharacterInventorySection({
               onClose={() => setShowCompendiumPicker(false)}
               onCreated={() => {
                 setShowCompendiumPicker(false);
-                reload();
+                void load();
               }}
             />
           )}
@@ -163,7 +167,7 @@ export function CharacterInventorySection({
               characters={characters}
               writableOwners={writableOwners}
               canEditItem={canEditItem}
-              onChanged={reload}
+              onChanged={() => void load()}
               partyStashTitle={character.name}
               embedded
             />

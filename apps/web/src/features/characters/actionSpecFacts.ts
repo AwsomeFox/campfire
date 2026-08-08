@@ -11,10 +11,27 @@ import type { ActionSpec } from '@campfire/schema';
 
 export type ActionFact = { readonly label: string; readonly value: string };
 
+/**
+ * Whether the spec describes a real, resolvable action rather than an empty shell.
+ *
+ * This matters for the two facts whose schema DEFAULTS are non-empty — cost
+ * (`{ slot: 'action', count: 1 }`) and targets (`{ count: 1, allow: 'any' }`). Read
+ * literally, those defaults make an all-default spec claim "1 action, 1 target", which is
+ * the module's own contract inverted: a fabricated fact, not a stated one. `mode: 'none'`
+ * is the tell — `inferActionSpecFromText` only ever emits 'attack' or 'save', so a spec
+ * still at 'none' declares no action economy for those defaults to describe.
+ */
+function statesAnAction(spec: ActionSpec): boolean {
+  return spec.mode !== 'none';
+}
+
 /** "1 action", "2 bonus"; '' when the spec declares no action-economy cost. */
 export function actionCostText(spec: ActionSpec): string {
   const { count, slot } = spec.cost;
   if (!slot || count <= 0) return '';
+  // A non-default cost was authored deliberately and reads even on a mode-less spec.
+  const authored = slot !== 'action' || count !== 1;
+  if (!authored && !statesAnAction(spec)) return '';
   return `${count} ${slot}`;
 }
 
@@ -30,6 +47,8 @@ export function actionRangeText(spec: ActionSpec): string {
 export function actionTargetText(spec: ActionSpec): string {
   const { count, allow } = spec.targets;
   if (count === 0) return spec.range.size ? 'Area' : '';
+  const authored = count !== 1 || allow !== 'any';
+  if (!authored && !statesAnAction(spec)) return '';
   const who = allow && allow !== 'any' ? ` (${allow})` : '';
   return `${count} target${count === 1 ? '' : 's'}${who}`;
 }

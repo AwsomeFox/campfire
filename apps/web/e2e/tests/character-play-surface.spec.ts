@@ -136,7 +136,25 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
-   * Regression (Codex review on #2115): the sheet reads the pack separately from the
+   * Regression (Copilot review on #2115): the sheet used to fetch the campaign inventory
+   * a second time to derive gear actions, duplicating the read the embedded inventory
+   * section already makes on mount. One reader, one source.
+   */
+  test('the sheet reads the campaign inventory once', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const reads: string[] = [];
+    page.on('request', (req) => {
+      if (req.method() === 'GET' && /\/api\/v1\/campaigns\/\d+\/inventory(\?|$)/.test(req.url())) reads.push(req.url());
+    });
+
+    await page.goto(`/c/${campaignId}/characters/${navigation.characterId}`);
+    await expect(page.getByTestId('character-inventory')).toBeAttached();
+    await expect(page.getByRole('heading', { name: 'Actions' })).toBeVisible();
+    expect(reads).toHaveLength(1);
+  });
+
+  /**
+   * Regression (Codex review on #2115): the sheet read the pack separately from the
    * embedded inventory section, so unequipping in Build left the granted action still
    * rollable in Play until a full page reload. The two views must move together.
    */
