@@ -23,6 +23,19 @@ export interface EntryFact {
   value: string;
 }
 
+/**
+ * Catalog lookup with an English fallback, threaded through the whole parse.
+ *
+ * It has to reach the FORMATTER, not just the label: a boolean is rendered as a word, so
+ * `shared: true` produced a hardcoded "Yes" baked into `fact.value` before the component
+ * ever saw it. Localizing labels alone left the Arabic view mixing languages within a
+ * single row. Defaults to the English fallback so `parseEntryFacts` stays usable — and
+ * testable — outside a React tree.
+ */
+export type FactTranslate = (key: string, defaultValue: string) => string;
+
+const englishFallback: FactTranslate = (_key, defaultValue) => defaultValue;
+
 export interface ParsedEntryFacts {
   facts: EntryFact[];
   traits: string[];
@@ -92,6 +105,7 @@ const LABEL_OVERRIDES: Record<string, string> = {
   hazardType: 'Hazard Type',
   vehicleType: 'Vehicle Type',
   baseItem: 'Base Item',
+  countAsImpact: 'Counts as Impact',
 };
 
 /**
@@ -167,6 +181,11 @@ function humanizeKey(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
+/** Catalog term for a fact key, falling back to the humanized English for unknown keys. */
+function factLabel(key: string, translate: FactTranslate): string {
+  return translate(`compendium.facts.${key}`, humanizeKey(key));
+}
+
 function signed(n: number): string {
   return n >= 0 ? `+${n}` : String(n);
 }
@@ -206,15 +225,19 @@ function isScalar(v: unknown): v is string | number | boolean {
   return typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
 }
 
-function scalarText(key: string, v: string | number | boolean): string {
-  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+function booleanText(v: boolean, translate: FactTranslate): string {
+  return v ? translate('compendium.factValues.yes', 'Yes') : translate('compendium.factValues.no', 'No');
+}
+
+function scalarText(key: string, v: string | number | boolean, translate: FactTranslate): string {
+  if (typeof v === 'boolean') return booleanText(v, translate);
   if (typeof v === 'number') return SIGNED_KEYS.has(key) ? signed(v) : String(v);
   return v.trim();
 }
 
-function formatValue(key: string, value: unknown): FormattedValue {
+function formatValue(key: string, value: unknown, translate: FactTranslate): FormattedValue {
   if (value === null || value === undefined) return { text: '', lossless: true };
-  if (isScalar(value)) return { text: scalarText(key, value), lossless: true };
+  if (isScalar(value)) return { text: scalarText(key, value, translate), lossless: true };
 
   if (Array.isArray(value)) {
     // A list of scalars reads fine inline; a list of objects does not, and flattening one
@@ -224,7 +247,7 @@ function formatValue(key: string, value: unknown): FormattedValue {
     }
     const text = value
       .filter(isScalar)
-      .map((item) => scalarText(key, item))
+      .map((item) => scalarText(key, item, translate))
       .filter(Boolean)
       .join(', ');
     return { text, lossless: true };
@@ -243,7 +266,8 @@ function formatValue(key: string, value: unknown): FormattedValue {
       .map(([k, v]) => {
         if (typeof v === 'number') return `${k} ${signedMap ? signed(v) : v}`;
         if (typeof v === 'string' && v.trim()) return `${k} ${v.trim()}`;
-        if (typeof v === 'boolean') return `${k} ${v ? 'Yes' : 'No'}`;
+        // Booleans nested inside a scalar map are the same problem one level down.
+        if (typeof v === 'boolean') return `${k} ${booleanText(v, translate)}`;
         return '';
       })
       .filter(Boolean)
@@ -271,7 +295,7 @@ function normalize(data: unknown): Record<string, unknown> | null {
   return null;
 }
 
-export function parseEntryFacts(data: unknown): ParsedEntryFacts | null {
+export function parseEntryFacts(data: unknown, translate: FactTranslate = englishFallback): ParsedEntryFacts | null {
   const d = normalize(data);
   if (!d) return null;
 
@@ -289,13 +313,13 @@ export function parseEntryFacts(data: unknown): ParsedEntryFacts | null {
   const complex: Record<string, unknown> = {};
   for (const [key, raw] of Object.entries(d)) {
     if (HIDDEN_KEYS.has(key) || redundant.has(key)) continue;
-    const { text, lossless } = formatValue(key, raw);
+    const { text, lossless } = formatValue(key, raw, translate);
     if (!lossless) {
       complex[key] = raw;
       continue;
     }
     if (!text) continue;
-    facts.push({ key, label: humanizeKey(key), value: text });
+    facts.push({ key, label: factLabel(key, translate), value: text });
   }
 
   facts.sort((a, b) => {
@@ -328,11 +352,10 @@ export function EntryFacts({
   compact?: boolean;
 }) {
   const { t } = useTranslation();
-  const parsed = parseEntryFacts(data);
+  // One translator for the whole parse: labels AND the words a value renders as.
+  const translate: FactTranslate = (key, defaultValue) => t(key, { defaultValue });
+  const parsed = parseEntryFacts(data, translate);
   const listId = useId();
-  // Catalog first, humanized English only for keys the catalog has never seen. Without
-  // this the translated section heading sat above a list of English terms.
-  const labelFor = (fact: EntryFact) => t(`compendium.facts.${fact.key}`, { defaultValue: fact.label });
   if (!parsed) return null;
   const { facts, traits, complex } = parsed;
   const complexKeys = Object.keys(complex);
@@ -376,7 +399,7 @@ export function EntryFacts({
               is nothing to strip semantics from. */}
           {facts.map((fact) => (
             <Fragment key={fact.key}>
-              <dt style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{labelFor(fact)}</dt>
+              <dt style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{fact.label}</dt>
               <dd style={{ margin: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{fact.value}</dd>
             </Fragment>
           ))}
@@ -388,7 +411,7 @@ export function EntryFacts({
         // component replaced the inventory card's raw-JSON disclosure, so dropping these
         // would have made them unreachable from every surface.
         <details style={{ fontSize: compact ? 11 : 12 }}>
-          <summary>{complexKeys.map((key) => t(`compendium.facts.${key}`, { defaultValue: humanizeKey(key) })).join(', ')}</summary>
+          <summary>{complexKeys.map((key) => factLabel(key, translate)).join(', ')}</summary>
           <pre
             data-testid="entry-facts-raw"
             style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: compact ? 10.5 : 11.5 }}

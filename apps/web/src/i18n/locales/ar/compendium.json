@@ -134,6 +134,10 @@
       "requirements": "الشروط",
       "sectionLabel": "الإحصائيات",
       "traits": "السمات"
+    },
+    "factValues": {
+      "yes": "نعم",
+      "no": "لا"
     }
   }
 }

@@ -134,6 +134,10 @@
       "requirements": "Requirements",
       "sectionLabel": "Statistics",
       "traits": "Traits"
+    },
+    "factValues": {
+      "yes": "Yes",
+      "no": "No"
     }
   }
 }

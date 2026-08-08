@@ -262,6 +262,33 @@ describe('EntryFacts — label localization', () => {
     }
   });
 
+  test('localizes the WORDS a value renders as, not just its label', async () => {
+    const i18n = (await import('../../src/i18n')).default;
+    const previous = i18n.language;
+    try {
+      await i18n.changeLanguage('ar');
+      // Datasworn assets carry `shared`/`countAsImpact`; a boolean renders as a word, so
+      // localizing labels alone left single rows mixing Arabic and English.
+      render(<EntryFacts data={{ shared: true, countAsImpact: false, controls: { battered: false } }} />);
+      expect(factValue('مشترك')).toBe('نعم');
+      expect(factValue('يُحتسب كأثر')).toBe('لا');
+      // …including a boolean nested one level inside a scalar map.
+      expect(factValue('Controls')).toBe('battered لا');
+      expect(screen.queryByText('Yes')).toBeNull();
+      expect(screen.queryByText('No')).toBeNull();
+    } finally {
+      await i18n.changeLanguage(previous);
+    }
+  });
+
+  test('keeps English words when no translator is supplied, so the parser stands alone', () => {
+    const parsed = parseEntryFacts({ shared: true, countAsImpact: false })!;
+    expect(parsed.facts.map((f) => [f.label, f.value])).toEqual([
+      ['Counts as Impact', 'No'],
+      ['Shared', 'Yes'],
+    ]);
+  });
+
   test('falls back to readable English for a key the catalog has never seen', async () => {
     const i18n = (await import('../../src/i18n')).default;
     const previous = i18n.language;
@@ -274,5 +301,25 @@ describe('EntryFacts — label localization', () => {
     } finally {
       await i18n.changeLanguage(previous);
     }
+  });
+});
+
+describe('EntryFacts — the English fallback agrees with the English catalog', () => {
+  test('no curated key renders differently with and without a translator', async () => {
+    // Two label sources exist: the catalog (used whenever a translator is supplied) and
+    // `humanizeKey`/`LABEL_OVERRIDES` (used otherwise). A key where they disagree renders
+    // one way in the app and another in a snapshot or a non-React caller, which is exactly
+    // the sort of drift nobody notices — `countAsImpact` was already doing it
+    // ("Counts as Impact" vs "Count As Impact").
+    const en = (await import('../../src/i18n/locales/en/compendium.json')).default as {
+      compendium: { facts: Record<string, string> };
+    };
+    const mismatches: string[] = [];
+    for (const [key, catalogLabel] of Object.entries(en.compendium.facts)) {
+      if (key === 'sectionLabel' || key === 'traits') continue;
+      const fallback = parseEntryFacts({ [key]: 'x' })!.facts[0].label;
+      if (fallback !== catalogLabel) mismatches.push(`${key}: catalog "${catalogLabel}" vs fallback "${fallback}"`);
+    }
+    expect(mismatches).toEqual([]);
   });
 });
