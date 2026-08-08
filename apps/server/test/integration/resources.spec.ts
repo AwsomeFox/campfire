@@ -2097,7 +2097,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
     // future guard that only checks ONE of the two conditions on one branch still fails a
     // test on that branch's iteration.
     it('a combatant removed between the outer read and the transaction 404s instead of writing to an orphaned row', async () => {
-      const { user, enc, comb } = await seedPaired({ resources: { pool: { max: 3, used: 0 } } });
+      const { user, enc, comb, readEntry } = await seedPaired({ resources: { pool: { max: 3, used: 0 } } });
 
       const original = encountersService.getCombatantRowOrThrow.bind(encountersService);
       const spy = jest.spyOn(encountersService, 'getCombatantRowOrThrow').mockImplementation(async (...args: unknown[]) => {
@@ -2113,6 +2113,17 @@ describe('inline spell slots & character resources (issue #422)', () => {
 
         const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
         expect(events.some((e: any) => e.type === 'resource_changed')).toBe(false);
+
+        // The absent event is NOT sufficient on its own (Copilot review on #2087). The
+        // historical bug on the character branch is "the write still lands on the linked
+        // character sheet even though the combatant row is gone" — a regression that updates
+        // the sheet and merely skips the event would satisfy the assertion above. Only the
+        // character branch can be checked here: the statblock lives ON the combatant row that
+        // this test deletes, so for that branch the row's absence IS the state, and
+        // a re-read would hit a row that no longer exists.
+        if (kind === 'character') {
+          expect(readEntry('resource', 'pool')?.used).toBe(0);
+        }
       } finally {
         spy.mockRestore();
       }
