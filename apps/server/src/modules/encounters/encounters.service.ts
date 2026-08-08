@@ -6954,8 +6954,20 @@ export class EncountersService {
    *
    * `initiative` is only ever touched while the encounter is `running` — `sortCombatants`
    * ignores `initiative` entirely while `preparing` (plain sortOrder ascending), so a
-   * preparing-time reorder is establishing tie-break order for later, not overriding a
-   * rolled value. While running, a move that leaves the moved combatant's own initiative
+   * preparing-time reorder never overrides a rolled value. Whether it also establishes
+   * tie-break order for later depends on whether the moved combatant already has a real
+   * `initiative` at drag time: `manualOrder` is skipped whenever the landing value is
+   * null (see that field's schema doc), which it usually is before `/start` — a
+   * preparing-time drag of two still-unrolled combatants records ONLY `sortOrder`, and
+   * once real values are rolled, a tie between them resolves through the adapter, not
+   * this drag. Only a prep-time reorder among combatants that ALREADY carry a real
+   * `initiative` (set ahead of the roll) establishes real tie-break order. Deciding what
+   * "the DM's ordering intent" even means for combatants that have not rolled yet — which
+   * of them the DM meant relative to which, when the tie groups they will land in do not
+   * exist — is tracked as a follow-up (issue #2102), not attempted here: it is the exact
+   * design question whose rushed first answer (stamping unconditionally during prep)
+   * produced #2084's "encodes add order" defect in the first place. While running, a
+   * move that leaves the moved combatant's own initiative
    * already sitting between its NEW neighbours' values (the ordinary within-a-tie case,
    * e.g. reordering a tied 14, but also a move that happens to land back where the value
    * already belonged) only rewrites `sortOrder` — issue #2084 finding 2: the old

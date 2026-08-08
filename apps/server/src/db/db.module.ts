@@ -3029,6 +3029,41 @@ function migrateCombatantsTableForManualOrder1923(sqlite: Database.Database): vo
   if (!columns.some((c) => c.name === 'manual_order')) sqlite.exec('ALTER TABLE combatants ADD COLUMN manual_order INTEGER');
 }
 
+/**
+ * Issue #2095 review — upgrade compatibility for #2074/#2084's manual_order history.
+ * #2074 (merged before #2084's narrower-stamping fix) stamped `manual_order` on EVERY
+ * combatant in a roster on every drag. Any encounter a DM had already reordered under
+ * that code has EVERY row's `manual_order` non-null in the database right now — not
+ * because the DM placed each one, but as an incidental side effect of the old
+ * whole-roster write. #2084's narrower stamping only ever touches rows in a moved
+ * combatant's landing tie group on a FUTURE reorder; it never retroactively cleans up
+ * rows a PAST whole-roster stamp already wrote. `sortCombatants` still prioritizes any
+ * stamped row over any unstamped one within a tie (issue #2088/#2095's total-order
+ * rule), so those legacy stamps keep freezing untouched tie groups at their old
+ * whole-roster order and keep `adapter.initiativeTiebreak` from ever running again for
+ * them — the exact defect #2084 exists to fix, still live for every user who already
+ * hit it before upgrading. AGENTS.md requires preserving upgrade compatibility, so this
+ * is part of the fix, not a follow-up.
+ *
+ * Clears EVERY existing `manual_order` value rather than trying to recompute a narrower
+ * one in place. There is no way to distinguish, from the stored data alone, which row
+ * (if any) in a stamped roster reflects a genuine DM decision versus incidental
+ * whole-roster copying — the old code wrote every row identically regardless of
+ * whether the DM ever looked at it, so a from-scratch reconstruction has no real intent
+ * signal to recover. Clearing is simple, self-healing (the next drag on that encounter
+ * re-stamps correctly under the fixed narrower rule — see reorderCombatant), and,
+ * unlike any in-place narrowing heuristic, guaranteed not to preserve incidental noise
+ * as if it were intent. The cost — discarding some genuinely DM-set orders alongside
+ * the noise — is unavoidable given the old code could not distinguish them either.
+ */
+function migrateCombatantsTableClearLegacyManualOrder2095(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'manual_order')) return; // pre-#1923 DB — nothing to clear.
+  sqlite.exec('UPDATE combatants SET manual_order = NULL WHERE manual_order IS NOT NULL');
+}
+
 /** Issue #425: campaign-scoped homebrew monster library for clone/edit/reuse. */
 function migrateCampaignLibraryMonstersTable(sqlite: Database.Database): void {
   const hasCampaignsTable = sqlite
@@ -5383,6 +5418,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0174_combatants_manual_order_1923', run: migrateCombatantsTableForManualOrder1923 },
   // #846 campaign status provenance — renumbered to 0175 (0172-0174 taken on main by #2050/#1921/#1923).
   { name: '0175_campaign_status_transitions_846', run: migrateCampaignStatusTransitions846 },
+  // 0176 confirmed free on main and every claude/codex/work/port/feat/fix remote branch
+  // at the time this was taken (see the same caveat on 0174 above).
+  { name: '0176_combatants_clear_legacy_manual_order_2095', run: migrateCombatantsTableClearLegacyManualOrder2095 },
 ];
 
 /**
