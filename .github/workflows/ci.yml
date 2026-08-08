@@ -150,6 +150,12 @@ jobs:
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
+      # The build above is tsc + a Vite bundle and loads no native binding, so on
+      # its own it cannot detect an addon that is unloadable at the declared
+      # floor. This opens a SQLite database and encodes an image, which is what
+      # actually segfaults on a Node below better-sqlite3's Node-API level.
+      - name: Native addons load on the declared floor
+        run: npm run check:native-addons
       - name: Compatibility build (schema + server + web)
         run: npm run build
       # Issue #569: `test:pwa` is exactly `vite-build-strict.mjs &&

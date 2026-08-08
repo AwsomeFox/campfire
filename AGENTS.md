@@ -47,10 +47,18 @@ subtree.
 ## Commands
 
 Prerequisites are Node 22.14 or newer and npm workspaces. The floor is 22.14
-rather than 22.0 because better-sqlite3's bundled binary targets Node-API 10,
-which Node added in 22.14.0 — on 22.0–22.13 the install succeeds and the server
-then fails when it imports the addon. `build-test (22.x)` pins that exact
-version so the declared floor is tested rather than asserted.
+rather than 22.0 because better-sqlite3 ships prebuilt Node-API 10 binaries and
+Node added Node-API 10 in 22.14.0. Below that the failure is silent, not a clean
+error: 13.x has no install script, so `npm ci` succeeds, and on Node 22.13.1
+`require('better-sqlite3')` also succeeds — the process then dies with SIGSEGV
+(exit 139, no exception, no message) on the first `new Database()`.
+
+`build-test (22.x)` pins exactly 22.14.0 so the floor is tested rather than
+asserted, and runs `npm run check:native-addons` there. That check exists
+because building proves nothing here: `npm run build` is `tsc` plus a Vite
+bundle and loads no native binding, so it stays green on a runtime where the
+addons segfault. Bump the pin and `engines.node` together whenever a native
+dependency raises the real minimum.
 
 - Install: `npm ci`
 - Build: `npm run build`
@@ -63,7 +71,7 @@ version so the declared floor is tested rather than asserted.
 - Full local regression: `npm run test:all`
 - Consistency checks:
   `npm run check:version`, `npm run check:mcp-catalog`,
-  `npm run check:i18n`
+  `npm run check:i18n`, `npm run check:native-addons`
 
 Run the smallest relevant checks while iterating. Run all checks affected by the
 final diff before handoff. GitHub's aggregate required check is named `ci`.
