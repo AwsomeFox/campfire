@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { RuleEntry, CustomMechanicsProfile } from '@campfire/schema';
 import { api, API } from '../../../lib/api';
 import { Skeleton } from '../../../components/ui';
-import { StatBlock, hasMonsterStatblock } from '../../../components/StatBlock';
+import { StatBlock, entryRendersMonsterStatblock } from '../../../components/StatBlock';
 import { useDisclosure } from '../../../components/useDisclosure';
 
 /**
@@ -79,7 +79,7 @@ export const CombatantStatblock = memo(function CombatantStatblock({ ruleEntryId
             <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
               Couldn&apos;t load the statblock.
             </p>
-          ) : entry && hasMonsterStatblock(entry.dataJson, ruleSystem, customMechanicsProfile) ? (
+          ) : entry && entryRendersMonsterStatblock(entry.type, entry.dataJson, ruleSystem, customMechanicsProfile) ? (
             <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} customMechanicsProfile={customMechanicsProfile} />
           ) : (
             <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>

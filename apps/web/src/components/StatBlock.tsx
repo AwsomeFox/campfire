@@ -258,6 +258,31 @@ export function hasMonsterStatblock(
 }
 
 /**
+ * Whether a rule ENTRY should render as a creature statblock.
+ *
+ * {@link hasMonsterStatblock} inspects data only, and is deliberately permissive so a
+ * sparse creature still renders. That makes it the wrong question to ask about an entry:
+ * `Pf2eAdapter.mapStatblock` maps generic `traits` onto `creatureType` and `level` onto
+ * `challengeRating`, so ANY PF2e/SF2e row carrying either — every item, spell and feat the
+ * importer produces — satisfies it on a campaign whose `ruleSystem` selects that adapter.
+ * Callers that gated a creature-only view on the data predicate alone therefore swallowed
+ * non-creature entries and hid their own stats.
+ *
+ * The entry's `type` is the authoritative answer and every importer sets it, so require it
+ * here. Hazards, vehicles and gear fall through to the {@link EntryFacts} fact list, which
+ * can show the fields a creature statblock has no slot for (stealth DC, disable check,
+ * price, damage).
+ */
+export function entryRendersMonsterStatblock(
+  entryType: string | null | undefined,
+  data: unknown,
+  ruleSystem?: string | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
+): boolean {
+  return entryType === 'monster' && hasMonsterStatblock(data, ruleSystem, customMechanicsProfile);
+}
+
+/**
  * Snapshot-friendly visible labels for a parsed block (issue #763). Compendium and
  * encounter both render via {@link StatBlock} / {@link parseMonsterStatblock}, so the
  * same helper is the parity check between those surfaces.

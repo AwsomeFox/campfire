@@ -37,7 +37,24 @@ test.describe('non-creature entry stats are rendered wherever an item is read', 
     // Facts render when the entry is NOT a creature statblock. Without the negated guard
     // the branch is dead for the very entries it exists to serve.
     expect(reader).toContain('const showsFacts = !showsStatblock && hasEntryFacts(');
-    expect(rulesLookup).toMatch(/!hasMonsterStatblock\([\s\S]{0,120}?&&\s*hasEntryFacts\(/);
+    expect(rulesLookup).toMatch(/!entryRendersMonsterStatblock\([\s\S]{0,140}?&&\s*hasEntryFacts\(/);
+  });
+
+  test('every statblock gate is the entry-TYPE-aware one, never the bare data predicate', () => {
+    // `hasMonsterStatblock` is data-only, and the PF2e adapter maps generic traits/level
+    // onto creatureType/challengeRating — so on a pf2e or sf2e campaign it answers true for
+    // every item, spell and feat. A surface that gates a creature-only view on it hides the
+    // fact list from exactly the entries that need it. `entryRendersMonsterStatblock`
+    // additionally requires `type === 'monster'`; these surfaces must use only that.
+    const combatantStatblock = readFileSync(
+      resolve(__dirname, '../../src/features/encounters/combat/CombatantStatblock.tsx'),
+      'utf8',
+    );
+    for (const source of [reader, rulesLookup, combatantStatblock]) {
+      expect(source).toContain('entryRendersMonsterStatblock(');
+      // The bare predicate must not appear outside the entry-aware wrapper's own name.
+      expect(source.replace(/entryRendersMonsterStatblock/g, '')).not.toContain('hasMonsterStatblock');
+    }
   });
 
   test('the reader shows "no details" only when there is genuinely nothing to show', () => {

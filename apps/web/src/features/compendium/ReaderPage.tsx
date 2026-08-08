@@ -15,7 +15,7 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import type { Character, RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton, Btn } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
-import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
+import { StatBlock, entryRendersMonsterStatblock } from '../../components/StatBlock';
 import { EntryFacts, hasEntryFacts } from '../../components/EntryFacts';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
@@ -178,7 +178,7 @@ export default function ReaderPage() {
   }
 
   // Both predicates parse `dataJson`; resolve each once rather than per JSX branch.
-  const showsStatblock = hasMonsterStatblock(entry?.dataJson, ruleSystem, customMechanicsProfile);
+  const showsStatblock = entryRendersMonsterStatblock(entry?.type, entry?.dataJson, ruleSystem, customMechanicsProfile);
   const showsFacts = !showsStatblock && hasEntryFacts(entry?.dataJson);
 
   return (

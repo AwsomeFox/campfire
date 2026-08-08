@@ -12,6 +12,7 @@
 import { render, screen, cleanup, within } from '@testing-library/react';
 import { describe, test, expect, afterEach } from 'vitest';
 import { EntryFacts, hasEntryFacts, parseEntryFacts } from '../../src/components/EntryFacts';
+import { entryRendersMonsterStatblock, hasMonsterStatblock } from '../../src/components/StatBlock';
 
 afterEach(() => cleanup());
 
@@ -128,5 +129,52 @@ describe('EntryFacts', () => {
     // end of the list, rather than being silently dropped the way a fixed layout would.
     const parsed = parseEntryFacts({ price: '1 gp', someBrandNewStat: 'wondrous' });
     expect(parsed?.facts.map((f) => f.label)).toEqual(['Price', 'Some Brand New Stat']);
+  });
+});
+
+/**
+ * The gate that decides which of the two structured views an entry gets.
+ *
+ * This is where the fix nearly failed silently. `hasMonsterStatblock` inspects data only,
+ * and `Pf2eAdapter.mapStatblock` maps generic `traits` onto `creatureType` and `level` onto
+ * `challengeRating` — so on a campaign whose ruleSystem selects that adapter, EVERY item,
+ * spell and feat the importer produces satisfies it. Surfaces that gated a creature-only
+ * view on the data predicate alone rendered `showsFacts === false` for exactly the entries
+ * the facts view exists to serve, and only on exactly the campaigns that install these
+ * packs. A default-ruleSystem test cannot see it, which is why these cases pass one.
+ */
+describe('creature-statblock gate vs. non-creature entries', () => {
+  const ITEM = JSON.stringify({ level: 0, price: '1 gp', damage: '1d8 S', traits: ['Versatile'] });
+  const SPELL = JSON.stringify({ rank: 3, traditions: ['Arcane'], range: '500 feet', traits: ['Fire'] });
+  const CREATURE = JSON.stringify({ level: -1, ac: 16, hp: 6, abilityMods: { strength: 0 }, traits: ['Goblin'] });
+
+  for (const ruleSystem of ['pf2e', 'sf2e-srd', 'pf2e-srd']) {
+    test(`ruleSystem "${ruleSystem}": non-creature entries are NOT treated as statblocks`, () => {
+      // The data predicate alone says yes — that is the trap, pinned here so the reason
+      // the type gate exists stays visible.
+      expect(hasMonsterStatblock(ITEM, ruleSystem)).toBe(true);
+      expect(hasMonsterStatblock(SPELL, ruleSystem)).toBe(true);
+
+      // The entry-aware gate says no, so these fall through to the fact list.
+      expect(entryRendersMonsterStatblock('item', ITEM, ruleSystem)).toBe(false);
+      expect(entryRendersMonsterStatblock('spell', SPELL, ruleSystem)).toBe(false);
+      expect(entryRendersMonsterStatblock('feat', ITEM, ruleSystem)).toBe(false);
+      expect(entryRendersMonsterStatblock('hazard', ITEM, ruleSystem)).toBe(false);
+
+      // …and a real creature still gets its statblock.
+      expect(entryRendersMonsterStatblock('monster', CREATURE, ruleSystem)).toBe(true);
+    });
+  }
+
+  test('an entry type with nothing renderable still gets no statblock', () => {
+    expect(entryRendersMonsterStatblock('monster', '{}', 'pf2e')).toBe(false);
+    expect(entryRendersMonsterStatblock(null, CREATURE, 'pf2e')).toBe(false);
+    expect(entryRendersMonsterStatblock(undefined, CREATURE, 'pf2e')).toBe(false);
+  });
+
+  test('the item that tripped it renders its price and damage as facts', () => {
+    render(<EntryFacts data={ITEM} />);
+    expect(factValue('Price')).toBe('1 gp');
+    expect(factValue('Damage')).toBe('1d8 S');
   });
 });
