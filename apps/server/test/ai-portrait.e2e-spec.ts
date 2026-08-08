@@ -2,7 +2,6 @@ import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
-const player = { 'x-dev-role': 'player', 'x-dev-user': 'player-1' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'viewer-1' };
 
 /**
