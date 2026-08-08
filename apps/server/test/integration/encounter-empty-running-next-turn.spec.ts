@@ -12,6 +12,7 @@ import { AttachmentsService } from '../../src/modules/attachments/attachments.se
 import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
+import { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -48,7 +49,13 @@ describe('encounter next-turn/end-turn on an empty RUNNING roster (issue #2091, 
     const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit, events);
-    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any);
+    // A real NotificationsService, not a hand-rolled double (AGENTS.md's test-double
+    // convention, review finding on #2104 from Codex): it depends only on `orm`, which
+    // this build() already has, so there is no cast and no risk of the double silently
+    // drifting from the real class's shape — every other dependency here is already a
+    // real instance for the same reason.
+    const notifications = new NotificationsService(orm);
+    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary, notifications);
     return { orm, encountersService };
   }
 
