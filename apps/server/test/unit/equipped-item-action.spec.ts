@@ -398,6 +398,47 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
     expect(out.spec).toBeUndefined();
   });
 
+  it('degrades an unrepresentable attack bonus instead of throwing', () => {
+    // Review (chatgpt-codex-connector P2): `AttackSpec.bonus` is a 20-char string, and a
+    // schema-valid 20-digit toHit rounds through Number into exponent form that blows that
+    // cap — throwing a ZodError out of the expander, so SAVING the action 500s rather than
+    // degrading to the text-only row this module promises.
+    // 20 chars is the ceiling `CharacterAction.toHit` itself allows, so this is the largest
+    // value that can actually reach the function — a 21-char one is rejected before it does.
+    for (const toHit of ['99999999999999999999', '-9999999999999999999', '1000', '-1000']) {
+      const out = rebuildEditedActionSpec(
+        CharacterAction.parse({ ...derived, toHit, damage: '1d8+4 slashing', spec: undefined }),
+        'dnd5e',
+        DND5E_DAMAGE_TYPES,
+      );
+      expect(out.spec).toBeUndefined();
+      expect(out.toHit).toBe(toHit);
+    }
+    // A tabletop-plausible bonus at the bound still resolves.
+    expect(
+      rebuildEditedActionSpec(
+        CharacterAction.parse({ ...derived, toHit: '+999', damage: '1d8+4 slashing', spec: undefined }),
+        'dnd5e',
+        DND5E_DAMAGE_TYPES,
+      ).spec,
+    ).toBeDefined();
+  });
+
+  it('never throws, whatever the edited fields contain', () => {
+    // The function is TOTAL: every escape hatch leads to a text-only action rather than out
+    // of the function, matching `deriveEquippedItemAction`'s own guard.
+    for (const patch of [
+      { toHit: '+'.repeat(19), damage: '1d8 slashing' },
+      { toHit: '+5', damage: 'x'.repeat(79) },
+      { toHit: '', damage: '' },
+      { toHit: '+0', damage: '1d8+0 slashing' },
+    ]) {
+      expect(() =>
+        rebuildEditedActionSpec(CharacterAction.parse({ ...derived, ...patch, spec: undefined }), 'dnd5e', DND5E_DAMAGE_TYPES),
+      ).not.toThrow();
+    }
+  });
+
   it('refuses to build a spec from edited dice the roller would reject', () => {
     // Same bound as the derivation — a hand-typed "21d6 slashing" must not be marked
     // resolvable and then throw the first time someone attacks with it.

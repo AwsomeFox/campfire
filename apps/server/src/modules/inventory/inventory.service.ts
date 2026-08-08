@@ -594,6 +594,13 @@ export class InventoryService {
       row.equippedActionSource === EquippedActionSource.enum.derived
     ) {
       const ownerId = row.characterId;
+      // The exact revision this derivation reads. Review (chatgpt-codex-connector P2): the
+      // predicate below fences on it, because owner + provenance alone do not say WHICH
+      // revision the pending derivation was computed from. Two refreshes racing — A accepts
+      // revision A, B accepts revision B, B commits first — would otherwise let A's
+      // conditional update still pass every other check and write revision-A mechanics onto
+      // a row whose snapshot now says revision B.
+      const derivedFromSnapshot = row.compendiumSnapshot;
       const regenerated = await this.deriveActionForEquip(row, ownerId, row.name);
       // Review (chatgpt-codex-connector P2) — the same time-of-check/time-of-use race the
       // equip path re-validates against, reached through this endpoint instead. The
@@ -620,6 +627,10 @@ export class InventoryService {
             eq(inventoryItems.equipped, true),
             eq(inventoryItems.characterId, ownerId),
             eq(inventoryItems.equippedActionSource, EquippedActionSource.enum.derived),
+            // …and the row must still hold the revision this derivation actually read.
+            derivedFromSnapshot === null
+              ? isNull(inventoryItems.compendiumSnapshot)
+              : eq(inventoryItems.compendiumSnapshot, derivedFromSnapshot),
           ),
         )
         .returning();

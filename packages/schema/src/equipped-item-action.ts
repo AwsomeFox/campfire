@@ -102,6 +102,18 @@ interface WeaponProfile {
 /** `DamagePart.type` is capped at 24 chars; a longer value would throw inside `ActionSpec.parse`. */
 const MAX_DAMAGE_TYPE_LENGTH = 24;
 
+/**
+ * The largest attack bonus this module will build a spec from (issue #2097 review,
+ * chatgpt-codex-connector P2). `AttackSpec.bonus` is a 20-character string, and a
+ * schema-valid 20-digit `toHit` like `99999999999999999999` survives the regex, then rounds
+ * through `Number` into an exponent-form string that blows that cap — throwing an unhandled
+ * `ZodError` out of the expander, so saving the action 500s instead of degrading to the
+ * text-only row this module promises for input it cannot represent. A tabletop attack bonus
+ * has no business anywhere near this bound; it exists to keep unusable input on the
+ * documented path rather than the error path.
+ */
+const MAX_ATTACK_BONUS_ABS = 999;
+
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
@@ -360,13 +372,16 @@ export function rebuildEditedActionSpec(
   if (edited.spec) return edited;
 
   const bonusMatch = edited.toHit.trim().match(/^([+-]?\d+)$/);
+  const bonus = bonusMatch ? Number(bonusMatch[1]) : null;
   // `damage` is the human-facing "1d8+3 slashing" line: dice first, type as the remainder.
   const damageMatch = edited.damage.trim().match(/^(\d+d\d+(?:\s*[+-]\s*\d+)?)\s+(.+)$/i);
   const damageType = damageMatch ? damageMatch[2].trim().toLowerCase() : '';
   // Same roller check as the derivation: a hand-typed "21d6 slashing" must become a text-only
   // action, not a resolvable spec that throws the first time someone attacks with it.
   if (
-    !bonusMatch ||
+    bonus === null ||
+    !Number.isFinite(bonus) ||
+    Math.abs(bonus) > MAX_ATTACK_BONUS_ABS ||
     !damageMatch ||
     !isRollableDamageExpression(damageMatch[1]) ||
     !damageType ||
@@ -376,16 +391,25 @@ export function rebuildEditedActionSpec(
     return CharacterAction.parse({ ...edited, spec: undefined });
   }
 
-  const rebuilt = expandRawStatblockAction(
-    {
-      name: edited.name,
-      attackBonus: Number(bonusMatch[1]),
-      damage: [{ expression: damageMatch[1].replace(/\s+/g, ''), type: damageType }],
-      desc: edited.notes,
-    },
-    'attack',
-    ruleSystem,
-  );
-  // The expander owns the spec; everything the human typed is theirs and is kept as typed.
-  return CharacterAction.parse({ ...edited, spec: rebuilt.spec });
+  try {
+    const rebuilt = expandRawStatblockAction(
+      {
+        name: edited.name,
+        attackBonus: bonus,
+        damage: [{ expression: damageMatch[1].replace(/\s+/g, ''), type: damageType }],
+        desc: edited.notes,
+      },
+      'attack',
+      ruleSystem,
+    );
+    // The expander owns the spec; everything the human typed is theirs and is kept as typed.
+    return CharacterAction.parse({ ...edited, spec: rebuilt.spec });
+  } catch {
+    // Backstop, matching `deriveEquippedItemAction`'s own guard: this module is TOTAL, and
+    // every escape hatch leads to a text-only action rather than out of the function. The
+    // explicit bounds above are what this path is expected to be — a `ZodError` reaching
+    // here means the expander grew a constraint this function does not yet know about, and
+    // an unfinished-looking action beats a 500 on save.
+    return CharacterAction.parse({ ...edited, spec: undefined });
+  }
 }

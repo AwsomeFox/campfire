@@ -465,6 +465,45 @@ describe('derived equipped-item actions (issue #2097)', () => {
     }
   });
 
+  it('after a refresh, the persisted action always matches the persisted revision', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'revision-slot' });
+
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+
+      // The invariant the update's snapshot fence exists to hold: the action a row grants is
+      // derived from the revision that row actually accepted. Without the fence a racing
+      // refresh could leave these two disagreeing — revision B's snapshot beside revision A's
+      // mechanics — which no reader could detect from the row itself.
+      const persisted = JSON.parse(refreshed.body.compendiumSnapshot.dataJson);
+      expect(persisted.damageDice).toBe('2d6');
+      expect(refreshed.body.equippedAction.damage).toContain('2d6');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
+  it('an unrepresentable attack bonus is rejected as unresolvable, not as a server error', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'bonus-slot' });
+
+    // A REST/MCP caller can send a schema-valid 20-character bonus; it used to reach the
+    // statblock expander and throw a ZodError, 500ing the save.
+    const saved = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Huge', kind: 'melee', toHit: '99999999999999999999', damage: '1d8+4 slashing', targetAc: '', notes: '' } });
+    expect(saved.status).toBe(200);
+    expect(saved.body.equippedActionSource).toBe('manual');
+    expect(saved.body.equippedAction.toHit).toBe('99999999999999999999');
+    expect(saved.body.equippedAction.spec).toBeUndefined();
+  });
+
   it("honours a homebrew campaign's own mechanics when validating an edited action", async () => {
     const server = ctx.app.getHttpServer();
     // Review (chatgpt-codex-connector P2): resolving the adapter from the `ruleSystem` slug
