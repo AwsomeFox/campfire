@@ -3954,6 +3954,15 @@ export interface RulePackSourceMeta {
    * candidate is dead/unusable. For an api system: the base the importer actually pulls from.
    */
   candidateSourceUrl: string | null;
+  /**
+   * The `rule_packs.slug` (or slugs — 'osr' installs several retroclone variants) this
+   * source's importer writes to `campaign.ruleSystem` when installed (issue #2081). Attached
+   * after `RULE_PACK_SOURCE_META` below, once the per-system `*_PACK_SLUG` constants exist —
+   * see the assignment block right before {@link isImporterOnlyRuleSystemSlug}. Left
+   * `undefined` here, not a hardcoded slug, so there is exactly one place each source's slug
+   * is declared.
+   */
+  packSlug?: string | readonly string[];
 }
 
 /**
@@ -6128,6 +6137,48 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) {
 }
 
 /**
+ * Attach each source's installed pack slug(s) to `RULE_PACK_SOURCE_META` (issue #2081), now
+ * that the per-system `*_PACK_SLUG` constants exist — `RULE_PACK_SOURCE_META` itself is
+ * declared much earlier in this file (the install-validation code above needs it), before
+ * most of these constants are. Mutating the already-exported object in place, rather than
+ * redeclaring it here, keeps a single object identity: every import of
+ * `RULE_PACK_SOURCE_META` resolves only after this module finishes evaluating, so callers
+ * always see the complete entries.
+ *
+ * 'archmage' and 'cepheus' have no schema-side `*_PACK_SLUG` export — their importers live
+ * in apps/server (ARCHMAGE_PACK_SLUG in archmage-importer.ts, CEPHEUS_PACK_SLUG in
+ * cepheus-importer.ts), which this package cannot import from — so those two are literals,
+ * pinned to the importers' actual constants by
+ * apps/server/test/unit/importer-only-rule-system.spec.ts. 'other' has no pack slug of its
+ * own: RulesService routes it to the Open5e importer (see enqueueInstall/installFromSource),
+ * so it installs under DND5E_PACK_SLUG too.
+ */
+RULE_PACK_SOURCE_META.open5e.packSlug = DND5E_PACK_SLUG;
+RULE_PACK_SOURCE_META.pf2e.packSlug = PF2E_PACK_SLUG;
+RULE_PACK_SOURCE_META.sf2e.packSlug = SF2E_PACK_SLUG;
+RULE_PACK_SOURCE_META['open-legend'].packSlug = OPEN_LEGEND_PACK_SLUG;
+RULE_PACK_SOURCE_META.pf1e.packSlug = PF1E_PACK_SLUG;
+RULE_PACK_SOURCE_META.starfinder.packSlug = STARFINDER_ADAPTER_ID;
+RULE_PACK_SOURCE_META.archmage.packSlug = 'archmage-srd';
+RULE_PACK_SOURCE_META.osr.packSlug = OSR_RULE_SYSTEM_SLUGS;
+RULE_PACK_SOURCE_META.cepheus.packSlug = 'cepheus-srd';
+RULE_PACK_SOURCE_META.datasworn.packSlug = STARFORGED_PACK_SLUG;
+RULE_PACK_SOURCE_META.other.packSlug = DND5E_PACK_SLUG;
+
+/**
+ * Every pack slug a REGISTERED rule-system source (the table above) actually installs
+ * under (issue #2081). Deliberately NOT "every installed `rule_packs` row" — that set is
+ * unbounded (uploads and homebrew installs carry arbitrary slugs) and is exactly what made
+ * the original guard here reject every homebrew/uploaded pack, not just importer-only ones.
+ * This set is bounded to the handful of slugs the registry above actually declares.
+ */
+const IMPORTER_INSTALLED_PACK_SLUGS: ReadonlySet<string> = new Set(
+  Object.values(RULE_PACK_SOURCE_META).flatMap((meta) =>
+    Array.isArray(meta.packSlug) ? meta.packSlug : meta.packSlug ? [meta.packSlug] : [],
+  ),
+);
+
+/**
  * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
  * (or ''); it is matched against the adapter registry and falls back to the 5e adapter
  * for anything unrecognized — so every existing campaign keeps 5e behavior. The default
@@ -6163,6 +6214,63 @@ export function ruleSystemAdapter(
  */
 export function isRegisteredRuleSystemSlug(ruleSystem: string): boolean {
   return Object.prototype.hasOwnProperty.call(ADAPTERS, ruleSystem);
+}
+
+/**
+ * Whether `ruleSystem` names an "importer-only" rule pack (issue #2081): a pack that a
+ * REGISTERED rule-system source installed (`ruleSystem` is a member of
+ * {@link IMPORTER_INSTALLED_PACK_SLUGS}, derived from `RULE_PACK_SOURCE_META` above) but
+ * which has no entry in {@link ADAPTERS}. Cepheus Engine (2D6 sci-fi) is the current
+ * example — it ships a full importer (`cepheus` install source, `cepheus-srd` pack slug)
+ * but no combat adapter, so without this guard a campaign that selects it silently
+ * inherits the unknown-slug 5e fallback (d20 initiative, 5e ability modifiers on 2D6 UPP
+ * scores, 5e conditions/action economy/death saves, `maxLevel: 20`, a 5e XP band) instead
+ * of failing loudly.
+ *
+ * `isInstalledPack` (the caller's own `rule_packs.slug` lookup; this module has no DB
+ * access, so it cannot determine that fact itself) still gates the check — a slug that
+ * merely COINCIDES with a known importer's pack slug but names no actual installed row is
+ * not flagged.
+ *
+ * A first version of this guard (issue #2081's original PR) was
+ * `isInstalledPack && !isRegisteredRuleSystemSlug(ruleSystem)` — "installed, and no
+ * adapter" — with no reference to which installer put the pack there. That is a materially
+ * larger set than "importer-only": every user-uploaded and homebrew pack is also installed
+ * and also has no `ADAPTERS` entry (arbitrary slugs like `dnd-homebrew-srd` were never
+ * going to be in a fixed adapter registry), so that version rejected uploaded/homebrew
+ * packs identically to Cepheus — breaking `apps/web/e2e/global-setup.ts`'s
+ * `e2e-open5e-actions` fixture and `ai-dm-stuck.e2e-spec.ts`'s uploaded `dnd-homebrew-srd`
+ * campaign in CI before it could reach `main`. `isRegisteredRuleSystemSlug` alone answers
+ * "does this slug have an adapter", not "did an importer install this slug" — the two
+ * questions were conflated.
+ *
+ * The `IMPORTER_INSTALLED_PACK_SLUGS` membership check closes that gap: it is bounded to
+ * the small set of slugs `RULE_PACK_SOURCE_META` actually declares, so an arbitrary
+ * upload/homebrew/test-fixture slug is never a member and is therefore never flagged,
+ * regardless of `isInstalledPack`. The predicate is still NOT `ruleSystem === 'cepheus-srd'`
+ * or any other string literal naming Cepheus — it stays derived from the registry, so a
+ * future importer that (a) is added to `RULE_PACK_SOURCE_META` with a `packSlug` and
+ * (b) ships without a matching `ADAPTERS` entry is caught the same way, by definition, not
+ * by editing this function. The trade-off is explicit and deliberately fails closed: an
+ * importer that forgets to declare its `packSlug` in step (a) is simply not blocked here
+ * (same as any other unrecognized slug), rather than the reverse failure mode of blocking
+ * real user content.
+ *
+ * An arbitrary/unknown/homebrew slug that names NO installed pack is unaffected
+ * (`isInstalledPack` is false) — that is the long-standing, deliberate "every existing
+ * campaign keeps 5e behavior" default {@link ruleSystemAdapter} documents, not a bug this
+ * issue is about. A homebrew slug backed by its own `customMechanicsProfile` never reaches
+ * this predicate at all — the server's `validateRuleSystem` short-circuits on a
+ * `customMechanicsProfile` before ever doing the installed-pack lookup this predicate needs.
+ *
+ * Empty `ruleSystem` (the "no rule system picked" sentinel, `''`) always returns false
+ * regardless of `isInstalledPack` — no `rule_packs` row can have an empty slug, so a true
+ * `isInstalledPack` paired with `''` cannot occur from a real lookup, and the function stays
+ * safe to call without first checking `ruleSystem` for truthiness.
+ */
+export function isImporterOnlyRuleSystemSlug(ruleSystem: string, isInstalledPack: boolean): boolean {
+  if (!ruleSystem) return false;
+  return isInstalledPack && IMPORTER_INSTALLED_PACK_SLUGS.has(ruleSystem) && !isRegisteredRuleSystemSlug(ruleSystem);
 }
 
 /**
