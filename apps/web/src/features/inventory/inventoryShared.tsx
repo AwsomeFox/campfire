@@ -26,6 +26,7 @@ import { useFormattingLocale, formatNumber } from '../../lib/format';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 import { useDialog } from '../../components/useDialog';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
+import { EntryFacts, hasEntryFacts } from '../../components/EntryFacts';
 
 /** Add-item quantity bounds (issue #459). */
 export const ITEM_QTY_MIN = 0;
@@ -318,8 +319,14 @@ export function ItemRow({
             <span className="tag tag-neutral">{committed.compendiumState.replace('_', ' ')}</span>
             {committed.compendiumSnapshot && <>
               <span className="ml-1">{committed.compendiumSnapshot.source || committed.compendiumRef?.packSlug}{committed.compendiumSnapshot.license ? ` · ${committed.compendiumSnapshot.license}` : ''}</span>
-              {committed.compendiumSnapshot.body && <details><summary>Source details</summary><Markdown className="!text-[12px]">{committed.compendiumSnapshot.body}</Markdown></details>}
-              {committed.compendiumSnapshot.dataJson && <details><summary>Item data</summary><pre className="text-xs whitespace-pre-wrap">{committed.compendiumSnapshot.dataJson}</pre></details>}
+              {/* The item's own stats — price, bulk, damage, AC — read straight off the
+                  snapshot. Shown OPEN and formatted: they used to sit collapsed behind
+                  "Item data" as a raw JSON string, which is the stat line a player needs
+                  most while the item is equipped. */}
+              {hasEntryFacts(committed.compendiumSnapshot.dataJson) && (
+                <EntryFacts data={committed.compendiumSnapshot.dataJson} compact label={t('inventory.compendium.statsLabel')} />
+              )}
+              {committed.compendiumSnapshot.body && <details><summary>{t('inventory.compendium.sourceDetails')}</summary><Markdown className="!text-[12px]">{committed.compendiumSnapshot.body}</Markdown></details>}
               {committed.ruleEntryId != null && committed.compendiumState !== 'detached' && <a className="ml-1 underline" href={`/c/${committed.campaignId}/compendium/${committed.ruleEntryId}`}>Open in Compendium</a>}
               {committed.compendiumSnapshot.sourceUrl && <a className="ml-1 underline" href={committed.compendiumSnapshot.sourceUrl} target="_blank" rel="noreferrer">Source ↗</a>}
             </>}
@@ -915,6 +922,11 @@ export function CompendiumItemPickerModal({
 
         {selectedEntry && (
           <div className="pt-3 border-t border-[var(--color-neutral-800)] space-y-3">
+            {/* Stats for the highlighted row, so the choice is made on damage/price/bulk
+                rather than on the name alone. */}
+            {hasEntryFacts(selectedEntry.dataJson) && (
+              <EntryFacts data={selectedEntry.dataJson} compact label={t('inventory.compendium.statsLabel')} />
+            )}
             {duplicatePrompt ? (
               <div className="p-3 rounded bg-[var(--color-neutral-800)] space-y-2">
                 <p className="text-xs font-semibold text-amber-400">{t('inventory.duplicateConfirmTitle')}</p>

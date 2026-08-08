@@ -25,6 +25,18 @@ import type { RuleEntryType } from '@campfire/schema';
  * `speed`, `size`, `rarity`, `trait` (array), `source` (book label), `text`/`markdown`
  * (rules prose), and a `license` string. Pagination is `from`/`size` against `total.value`.
  *
+ * TWO SHAPE TRAPS THIS FILE EXISTS TO SURVIVE (both silently emptied imported entries):
+ *   1. Printed mechanics are indexed TWICE — a sortable number (`price: 22500`,
+ *      `range: 500`, `bulk: 1`) plus the printed string under `<field>_raw`
+ *      (`price_raw: "225 gp"`). Read the number as a string and you get '' — which is
+ *      exactly how every imported item lost its price. Always go through `displayOf`.
+ *   2. Scalars are frequently single-element ARRAYS (`size: ['Gargantuan']`,
+ *      `source: ['Player Core']`, `attribute: ['Intelligence']`). Always go through
+ *      `asScalarString`/`asStringArray`, never bare `asString`.
+ * The fake source in test/fake-pf2e.ts reproduces both shapes on purpose — it previously
+ * used the convenient shape instead, which is why the unit suite stayed green while the
+ * live import dropped price, range, duration, size, and every weapon/armor stat.
+ *
  * NOTE ON LIVE INGEST: a full AoN pull is thousands of documents per section and runs via
  * the normal install-job path (issue #20), exactly like the Open5e importer's bulk pull —
  * it is intentionally NOT bundled into the repo. Tests prove the mapping against a small
@@ -45,9 +57,12 @@ export const SF2E_DEFAULT_LICENSE = 'ORC / OGL';
 // Mirrors the Open5e importer's caps/timeouts (see open5e-importer.ts for the rationale):
 // large sections (creatures/spells/equipment run into the thousands) are page-fetched under
 // a hard per-section entry cap and a page cap so one install can't pull unbounded data.
-export const MAX_ENTRIES_PER_SECTION = 3000;
+// The cap sits above the largest live section (PF2e `type:item` is ~11.1k rows) so a normal
+// install is COMPLETE: at the old 3000 it silently kept 27% of PF2e gear, which is why a
+// player looking up a plain longsword found nothing.
+export const MAX_ENTRIES_PER_SECTION = 15000;
 const PAGE_SIZE = 500;
-const MAX_PAGES_PER_SECTION = 50;
+const MAX_PAGES_PER_SECTION = 60;
 const FETCH_TIMEOUT_MS = 30_000;
 const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 
@@ -176,6 +191,8 @@ export interface Pf2eSectionResult {
 interface AonHit {
   _id?: unknown;
   _source?: Record<string, unknown>;
+  /** Sort cursor echoed back per hit; the tail value drives `search_after` paging. */
+  sort?: unknown[];
 }
 interface AonPage {
   hits?: { total?: { value?: number } | number; hits?: AonHit[] };
@@ -188,12 +205,72 @@ function asString(v: unknown): string {
 }
 
 function asStringArray(v: unknown): string[] {
+  if (typeof v === 'string') return asString(v).trim() ? [asString(v).trim()] : [];
   if (!Array.isArray(v)) return [];
-  return v.map((x) => asString(x)).filter(Boolean);
+  return v.map((x) => (typeof x === 'number' ? String(x) : asString(x).trim())).filter(Boolean);
+}
+
+/**
+ * A scalar AoN field that may arrive wrapped in a single-element array. `size`, `source`,
+ * `attribute`, `domain` and friends are all list-typed in the live index even when they
+ * hold one value — reading them with asString() yields '' and silently drops the field
+ * (this is why every imported creature had `size: null`).
+ */
+function asScalarString(v: unknown): string {
+  if (Array.isArray(v)) return asStringArray(v)[0] ?? '';
+  if (typeof v === 'number') return String(v);
+  return asString(v).trim();
+}
+
+/**
+ * AoN publishes most printed mechanics TWICE: a normalised number for sorting/filtering
+ * (`price: 22500`, `range: 500`, `bulk: 1`) and the printed display string under
+ * `<field>_raw` (`price_raw: "225 gp"`, `range_raw: "500 feet"`, `bulk_raw: "L"`). The
+ * display string is the one a rules reader needs — and the numeric twin is what the
+ * mappers used to read through asString(), which returns '' for a number, so price,
+ * range, duration and area were dropped from EVERY imported row. Prefer `_raw`, fall back
+ * to the plain field (stringifying a number) so rows that only carry one of the pair work.
+ */
+function displayOf(src: Record<string, unknown>, key: string): string | null {
+  const raw = asScalarString(src[`${key}_raw`]);
+  if (raw) return raw;
+  return asScalarString(src[key]) || null;
+}
+
+/** Numeric map (`skill_mod: {athletics: 31}`, `resistance: {cold: 15}`), or null when empty. */
+function numericMap(v: unknown): Record<string, number> | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const out: Record<string, number> = {};
+  for (const [k, raw] of Object.entries(v as Record<string, unknown>)) {
+    const n = num(raw);
+    if (n !== null) out[k] = n;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Drop absent facts so `dataJson` carries only what the source actually published. The
+ * compendium renders these as a fact list, and a wall of `null`s reads as broken data
+ * rather than as "this row has no price".
+ */
+function facts(o: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) {
+    if (v === null || v === undefined || v === '') continue;
+    if (Array.isArray(v) && v.length === 0) continue;
+    if (typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0) continue;
+    out[k] = v;
+  }
+  return out;
 }
 
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/** Join the mechanical bits of a summary line, falling back through prose then body. */
+function summaryLine(bits: Array<string | null>, src: Record<string, unknown>): string {
+  return truncate(bits.filter(Boolean).join(' · ') || proseOf(src) || bodyOf(src), 300);
 }
 
 /** Slugify a name to a stable per-pack key (AoN `_id` is used when present, else the name). */
@@ -210,9 +287,30 @@ function slugOf(src: Record<string, unknown>, name: string): string {
   return slugify(name) || name;
 }
 
+/**
+ * AoN's flattened `text` keeps one piece of its own page markup: a `<title level="…"
+ * right="Item 6+" …>` header (the only pseudo-tag that survives flattening — verified
+ * across every indexed type). Rendered as markdown it shows up as literal angle-bracket
+ * noise at the top of the entry, so strip it and collapse the blank lines it leaves.
+ */
+const AON_TITLE_TAG = /<\/?title\b[^>]*>/gi;
+
 /** Rules prose, preferring the plain-text `text` over `markdown` (both are OGC); art/images ignored. */
 function bodyOf(src: Record<string, unknown>): string {
-  return asString(src.text) || asString(src.markdown) || asString(src.description) || asString(src.desc);
+  const raw = asString(src.text) || asString(src.markdown) || asString(src.description) || asString(src.desc);
+  return raw.replace(AON_TITLE_TAG, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
+ * AoN's own one-line blurb for the row. Much better reading than the flattened statblock
+ * text when an entry has no mechanical summary bits — except on SF2e gear, where the
+ * index fills the field with a placeholder note instead of leaving it empty.
+ */
+const AON_MISSING_DESCRIPTION = /nethys note: there is no description/i;
+
+function proseOf(src: Record<string, unknown>): string {
+  const summary = asString(src.summary).trim();
+  return summary && !AON_MISSING_DESCRIPTION.test(summary) ? summary : '';
 }
 
 /** Reported license (OGL legacy / ORC remaster). Falls back to the pack default license. */
@@ -245,6 +343,12 @@ function traitsOf(src: Record<string, unknown>): string[] {
   return asStringArray(src.trait ?? src.traits);
 }
 
+/** Rarity is a lowercase token in the index ('uncommon'); title-case it for display. */
+function rarityOf(src: Record<string, unknown>): string | null {
+  const rarity = asScalarString(src.rarity);
+  return rarity ? rarity.charAt(0).toUpperCase() + rarity.slice(1) : null;
+}
+
 function abilityModsOf(src: Record<string, unknown>): Record<string, number> | null {
   const keys = ['strength', 'dexterity', 'constitution', 'intelligence', 'wisdom', 'charisma'];
   const out: Record<string, number> = {};
@@ -256,7 +360,13 @@ function abilityModsOf(src: Record<string, unknown>): Record<string, number> | n
 }
 
 function num(v: unknown): number | null {
-  return typeof v === 'number' ? v : null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  // Some rows carry a numeric string ('2' for hands/reload); accept those too.
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
 }
 
 function parseActionItem(item: unknown): Record<string, unknown> | null {
@@ -305,31 +415,61 @@ function actionsOf(src: Record<string, unknown>): Record<string, unknown>[] {
   return result;
 }
 
+/**
+ * AoN indexes a creature's named abilities and strikes as a flat list of NAMES only
+ * (`creature_ability: ['Shortwave', 'fist +10']`) — the prose for each lives in the
+ * statblock text, not in its own field. Surface the names as name-only statblock entries
+ * so the combat card lists what the creature can do; the body still carries the rules text.
+ */
+function creatureAbilitiesOf(src: Record<string, unknown>): Record<string, unknown>[] {
+  return asStringArray(src.creature_ability).map((name) => ({ name, desc: '' }));
+}
+
+/** Fortitude/Reflex/Will, shared by creatures, hazards, and vehicles. */
+function savesOf(src: Record<string, unknown>): Record<string, number> | null {
+  return numericMap({ fortitude: src.fortitude_save, reflex: src.reflex_save, will: src.will_save });
+}
+
 function mapCreature(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const traits = traitsOf(src);
   const level = num(src.level);
-  const rarity = asString(src.rarity);
+  const rarity = rarityOf(src);
+  const size = asScalarString(src.size);
+  // Live AoN has no per-action documents for creatures; `actionsOf` still covers dumps
+  // that DO carry structured actions, and `creature_ability` supplies the named list.
   const actions = actionsOf(src);
   return {
     slug: slugOf(src, name),
     name,
     type: 'monster',
-    summary: truncate([level !== null ? `Level ${level}` : null, asString(src.size), rarity, traits.slice(0, 3).join(', ')].filter(Boolean).join(' · '), 300),
+    summary: summaryLine([level !== null ? `Level ${level}` : null, size || null, rarity, traits.slice(0, 3).join(', ') || null], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({
-      level,
-      ac: num(src.ac),
-      hp: num(src.hp),
-      perception: num(src.perception),
-      abilityMods: abilityModsOf(src),
-      saves: { fortitude: num(src.fortitude_save), reflex: num(src.reflex_save), will: num(src.will_save) },
-      speed: src.speed ?? null,
-      size: asString(src.size) || null,
-      rarity: rarity || null,
-      traits,
-      actions,
-    }),
+    dataJson: JSON.stringify(
+      facts({
+        level,
+        ac: num(src.ac),
+        hp: num(src.hp),
+        hardness: num(src.hardness),
+        perception: num(src.perception),
+        abilityMods: abilityModsOf(src),
+        saves: savesOf(src),
+        skills: numericMap(src.skill_mod),
+        speed: src.speed ?? null,
+        size: size || null,
+        rarity,
+        alignment: asScalarString(src.alignment) || null,
+        creatureFamily: asScalarString(src.creature_family) || null,
+        languages: asStringArray(src.language),
+        immunities: asStringArray(src.immunity),
+        resistances: numericMap(src.resistance),
+        weaknesses: numericMap(src.weakness),
+        items: asStringArray(src.item),
+        traits,
+        specialAbilities: creatureAbilitiesOf(src),
+        actions,
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -343,16 +483,31 @@ function mapSpell(src: Record<string, unknown>, defaultLicense?: string): Import
     slug: slugOf(src, name),
     name,
     type: 'spell',
-    summary: truncate([rank !== null ? `Rank ${rank}` : null, traditions.join('/'), traitsOf(src).slice(0, 3).join(', ')].filter(Boolean).join(' · '), 300),
+    summary: summaryLine([rank !== null ? `Rank ${rank}` : null, traditions.join('/') || null, traitsOf(src).slice(0, 3).join(', ') || null], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({
-      rank,
-      traditions,
-      cast: src.cast ?? src.actions ?? null,
-      range: asString(src.range) || null,
-      duration: asString(src.duration) || null,
-      traits: traitsOf(src),
-    }),
+    dataJson: JSON.stringify(
+      facts({
+        rank,
+        traditions,
+        // `actions` on a spell row is the cast time label ('Two Actions'), not a list.
+        cast: asScalarString(src.cast ?? src.actions) || null,
+        components: asStringArray(src.component),
+        range: displayOf(src, 'range'),
+        area: displayOf(src, 'area'),
+        duration: displayOf(src, 'duration'),
+        targets: asScalarString(src.target) || null,
+        savingThrow: asScalarString(src.saving_throw) || null,
+        defense: asScalarString(src.defense) || null,
+        cost: asScalarString(src.cost) || null,
+        trigger: asScalarString(src.trigger) || null,
+        requirement: asScalarString(src.requirement) || null,
+        heightenLevels: asStringArray(src.heighten_level),
+        school: asScalarString(src.school) || null,
+        spellType: asScalarString(src.spell_type) || null,
+        rarity: rarityOf(src),
+        traits: traitsOf(src),
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -360,21 +515,62 @@ function mapSpell(src: Record<string, unknown>, defaultLicense?: string): Import
 
 function mapEquipment(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
-  const price = asString(src.price);
+  const level = num(src.level);
+  const price = displayOf(src, 'price');
+  // `item_category` is the printed shelf ('Weapons', 'Staves', 'Ammunition'); `category`
+  // is the coarse index bucket ('weapon', 'equipment'). Prefer the printed one.
+  const itemCategory = asScalarString(src.item_category);
+  const category = asScalarString(src.category);
   return {
     slug: slugOf(src, name),
     name,
     type: 'item',
-    summary: truncate([asString(src.category), src.level !== undefined ? `Item ${num(src.level)}` : null, price].filter(Boolean).join(' · '), 300),
+    summary: summaryLine([itemCategory || category || null, level !== null ? `Item ${level}` : null, price], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({
-      level: num(src.level),
-      price: price || null,
-      bulk: src.bulk ?? null,
-      category: asString(src.category) || null,
-      rarity: asString(src.rarity) || null,
-      traits: traitsOf(src),
-    }),
+    dataJson: JSON.stringify(
+      facts({
+        level,
+        price,
+        bulk: displayOf(src, 'bulk'),
+        category: category || null,
+        itemCategory: itemCategory || null,
+        itemSubcategory: asScalarString(src.item_subcategory) || null,
+        rarity: rarityOf(src),
+        usage: asScalarString(src.usage) || null,
+        hands: asScalarString(src.hands) || null,
+        activate: asScalarString(src.actions) || null,
+        duration: displayOf(src, 'duration'),
+        onset: displayOf(src, 'onset'),
+        savingThrow: asScalarString(src.saving_throw) || null,
+        access: asScalarString(src.access) || null,
+        baseItem: asScalarString(src.base_item) || null,
+        // Weapon block — the stats a player actually needs at the table.
+        damage: asScalarString(src.damage) || null,
+        damageType: asStringArray(src.damage_type),
+        weaponCategory: asScalarString(src.weapon_category) || null,
+        weaponGroup: asScalarString(src.weapon_group) || null,
+        weaponType: asScalarString(src.weapon_type) || null,
+        range: displayOf(src, 'range'),
+        reload: displayOf(src, 'reload'),
+        ammunition: asScalarString(src.ammunition) || null,
+        expend: num(src.expend),
+        upgrades: num(src.upgrades),
+        grade: asScalarString(src.grade) || null,
+        // Armor block.
+        ac: num(src.ac),
+        dexCap: num(src.dex_cap),
+        checkPenalty: num(src.check_penalty),
+        speedPenalty: num(src.speed_penalty),
+        strength: num(src.strength),
+        armorCategory: asScalarString(src.armor_category) || null,
+        armorGroup: asScalarString(src.armor_group) || null,
+        // Item bonuses (skill items, consumables).
+        skill: asStringArray(src.skill),
+        itemBonus: num(src.item_bonus_value),
+        itemBonusNote: asScalarString(src.item_bonus_note) || null,
+        traits: traitsOf(src),
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -383,14 +579,28 @@ function mapEquipment(src: Record<string, unknown>, defaultLicense?: string): Im
 function mapFeat(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const level = num(src.level);
-  const prereq = asString(src.prerequisite);
+  const prereq = asScalarString(src.prerequisite);
   return {
     slug: slugOf(src, name),
     name,
     type: 'feat',
-    summary: truncate([level !== null ? `Feat ${level}` : null, prereq ? `Prereq: ${prereq}` : null].filter(Boolean).join(' · ') || bodyOf(src), 300),
+    summary: summaryLine([level !== null ? `Feat ${level}` : null, prereq ? `Prereq: ${prereq}` : null], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({ level, prerequisite: prereq || null, traits: traitsOf(src) }),
+    dataJson: JSON.stringify(
+      facts({
+        level,
+        prerequisite: prereq || null,
+        activate: asScalarString(src.actions) || null,
+        trigger: asScalarString(src.trigger) || null,
+        requirement: asScalarString(src.requirement) || null,
+        frequency: asScalarString(src.frequency) || null,
+        cost: asScalarString(src.cost) || null,
+        access: asScalarString(src.access) || null,
+        archetype: asScalarString(src.archetype) || null,
+        rarity: rarityOf(src),
+        traits: traitsOf(src),
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -398,13 +608,28 @@ function mapFeat(src: Record<string, unknown>, defaultLicense?: string): Importe
 
 function mapAncestry(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
+  const hp = num(src.hp);
+  const size = asScalarString(src.size);
   return {
     slug: slugOf(src, name),
     name,
     type: 'race',
-    summary: truncate([src.hp !== undefined ? `HP ${num(src.hp)}` : null, asString(src.size), traitsOf(src).slice(0, 3).join(', ')].filter(Boolean).join(' · ') || bodyOf(src), 300),
+    summary: summaryLine([hp !== null ? `HP ${hp}` : null, size || null, traitsOf(src).slice(0, 3).join(', ') || null], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({ hp: num(src.hp), size: asString(src.size) || null, speed: src.speed ?? null, traits: traitsOf(src) }),
+    dataJson: JSON.stringify(
+      facts({
+        hp,
+        size: size || null,
+        speed: src.speed ?? null,
+        // Remaster vocabulary: ancestries grant attribute boosts/flaws (legacy: ability).
+        attributeBoosts: asStringArray(src.attribute ?? src.ability_boost),
+        attributeFlaws: asStringArray(src.attribute_flaw ?? src.ability_flaw),
+        languages: asStringArray(src.language),
+        vision: asScalarString(src.vision) || null,
+        rarity: rarityOf(src),
+        traits: traitsOf(src),
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -413,13 +638,29 @@ function mapAncestry(src: Record<string, unknown>, defaultLicense?: string): Imp
 function mapClass(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const keyAbility = asStringArray(src.attribute ?? src.key_ability);
+  const hp = num(src.hp);
   return {
     slug: slugOf(src, name),
     name,
     type: 'class',
-    summary: truncate([src.hp !== undefined ? `HP ${num(src.hp)}/level` : null, keyAbility.length ? `key ${keyAbility.join('/')}` : null].filter(Boolean).join(' · ') || bodyOf(src), 300),
+    summary: summaryLine([hp !== null ? `HP ${hp}/level` : null, keyAbility.length ? `key ${keyAbility.join('/')}` : null], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({ hpPerLevel: num(src.hp), keyAbility, traits: traitsOf(src) }),
+    dataJson: JSON.stringify(
+      facts({
+        hpPerLevel: hp,
+        keyAbility,
+        perceptionProficiency: asScalarString(src.perception_proficiency) || null,
+        fortitudeProficiency: asScalarString(src.fortitude_proficiency) || null,
+        reflexProficiency: asScalarString(src.reflex_proficiency) || null,
+        willProficiency: asScalarString(src.will_proficiency) || null,
+        attackProficiency: asStringArray(src.attack_proficiency),
+        defenseProficiency: asStringArray(src.defense_proficiency),
+        skillProficiency: asStringArray(src.skill_proficiency),
+        tradition: asStringArray(src.tradition),
+        rarity: rarityOf(src),
+        traits: traitsOf(src),
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -427,13 +668,25 @@ function mapClass(src: Record<string, unknown>, defaultLicense?: string): Import
 
 function mapBackground(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
+  const skills = asStringArray(src.skill);
   return {
     slug: slugOf(src, name),
     name,
     type: 'feat',
-    summary: truncate(bodyOf(src), 300),
+    summary: summaryLine([skills.length ? skills.join(', ') : null, ...asStringArray(src.feat).slice(0, 1)], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({ kind: 'background', traits: traitsOf(src) }),
+    dataJson: JSON.stringify(
+      facts({
+        kind: 'background',
+        attributeBoosts: asStringArray(src.attribute ?? src.ability_boost),
+        skills,
+        feats: asStringArray(src.feat),
+        region: asScalarString(src.region) || null,
+        prerequisite: asScalarString(src.prerequisite) || null,
+        rarity: rarityOf(src),
+        traits: traitsOf(src),
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -441,13 +694,17 @@ function mapBackground(src: Record<string, unknown>, defaultLicense?: string): I
 
 function mapCondition(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
+  // No rarity here even though the index carries one: rarity gates what a character may
+  // acquire, and a condition is not acquired. It would be a "Rarity: Common" row on every
+  // condition page and nothing else.
+  const data = facts({ traits: traitsOf(src) });
   return {
     slug: slugOf(src, name),
     name,
     type: 'condition',
-    summary: truncate(bodyOf(src), 300),
+    summary: summaryLine([], src),
     body: bodyOf(src),
-    dataJson: null,
+    dataJson: Object.keys(data).length > 0 ? JSON.stringify(data) : null,
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -455,18 +712,37 @@ function mapCondition(src: Record<string, unknown>, defaultLicense?: string): Im
 
 function mapVehicle(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
-  const body = bodyOf(src);
   const level = num(src.level);
-  const ac = num(src.ac);
-  const hp = num(src.hp);
-
+  const price = displayOf(src, 'price');
+  const size = asScalarString(src.size);
   return {
     slug: slugOf(src, name),
     name,
     type: 'item',
-    summary: truncate(body, 300) || 'Vehicle',
-    body,
-    dataJson: JSON.stringify({ category: 'vehicle', level, ac, hp }),
+    summary: summaryLine(['Vehicle', level !== null ? `Level ${level}` : null, price], src),
+    body: bodyOf(src),
+    dataJson: JSON.stringify(
+      facts({
+        category: 'vehicle',
+        level,
+        price,
+        size: size || null,
+        vehicleType: asScalarString(src.vehicle_type) || null,
+        ac: num(src.ac),
+        hp: num(src.hp),
+        hardness: num(src.hardness),
+        saves: savesOf(src),
+        speed: src.speed ?? null,
+        space: asScalarString(src.space) || null,
+        crew: asScalarString(src.crew) || null,
+        passengers: displayOf(src, 'passengers'),
+        pilotingCheck: asScalarString(src.piloting_check) || null,
+        collision: asScalarString(src.collision) || null,
+        immunities: asStringArray(src.immunity),
+        rarity: rarityOf(src),
+        traits: traitsOf(src),
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -475,25 +751,79 @@ function mapVehicle(src: Record<string, unknown>, defaultLicense?: string): Impo
 function mapHazard(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
   const name = asString(src.name);
   const level = num(src.level);
-  const complexity = asString(src.complexity);
+  const complexity = asScalarString(src.complexity);
   const traits = traitsOf(src);
   return {
     slug: slugOf(src, name),
     name,
     type: 'hazard',
-    summary: truncate([level !== null ? `Level ${level}` : null, complexity, traits.slice(0, 3).join(', ')].filter(Boolean).join(' · ') || bodyOf(src), 300),
+    summary: summaryLine([level !== null ? `Level ${level}` : null, complexity || null, traits.slice(0, 3).join(', ') || null], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({
-      level,
-      ac: num(src.ac),
-      hp: num(src.hp),
-      stealth: num(src.stealth),
-      complexity: complexity || null,
-      disable: src.disable ?? null,
-      traits,
-    }),
+    dataJson: JSON.stringify(
+      facts({
+        level,
+        ac: num(src.ac),
+        hp: num(src.hp),
+        hardness: num(src.hardness),
+        // `stealth` is printed prose ('DC 18 (or 0 if the trapdoor is disabled)'), not a number.
+        stealth: displayOf(src, 'stealth'),
+        complexity: complexity || null,
+        hazardType: asScalarString(src.hazard_type) || null,
+        saves: savesOf(src),
+        disable: asScalarString(src.disable) || null,
+        reset: asScalarString(src.reset) || null,
+        routine: asScalarString(src.routine) || null,
+        immunities: asStringArray(src.immunity),
+        rarity: rarityOf(src),
+        traits,
+      }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
+  };
+}
+
+/**
+ * Per-kind mechanical facts for the reference sections (deity/ritual/plane/curse/disease).
+ * These share one mapper because they share a shape — a name, prose, and a handful of
+ * kind-specific fields — but each kind's fields are its own, and dropping them left the
+ * imported rows as bare prose with no mechanics at all.
+ */
+function referenceFacts(kind: string, src: Record<string, unknown>): Record<string, unknown> {
+  if (kind === 'Deity') {
+    return {
+      alignment: asScalarString(src.alignment) || null,
+      edicts: asScalarString(src.edict) || null,
+      anathema: asScalarString(src.anathema) || null,
+      areaOfConcern: displayOf(src, 'area_of_concern'),
+      domains: asStringArray(src.domain),
+      favoredWeapons: asStringArray(src.favored_weapon),
+      divineFont: asStringArray(src.divine_font),
+      divineSkills: asStringArray(src.skill),
+      sanctification: displayOf(src, 'sanctification'),
+      pantheon: asStringArray(src.pantheon),
+      clericSpells: asStringArray(src.cleric_spell),
+    };
+  }
+  if (kind === 'Ritual') {
+    return {
+      cast: asScalarString(src.cast ?? src.actions) || null,
+      cost: asScalarString(src.cost) || null,
+      primaryCheck: asScalarString(src.primary_check) || null,
+      secondaryCheck: asScalarString(src.secondary_check) || null,
+      secondaryCasters: displayOf(src, 'secondary_casters'),
+      range: displayOf(src, 'range'),
+      area: displayOf(src, 'area'),
+      duration: displayOf(src, 'duration'),
+      targets: asScalarString(src.target) || null,
+      heightenLevels: asStringArray(src.heighten_level),
+    };
+  }
+  // Curses and diseases are afflictions: onset/stages/saving throw carry the mechanics.
+  return {
+    onset: displayOf(src, 'onset'),
+    savingThrow: asScalarString(src.saving_throw) || null,
+    duration: displayOf(src, 'duration'),
   };
 }
 
@@ -510,9 +840,11 @@ function mapReference(
     slug: slugOf(src, name),
     name,
     type,
-    summary: truncate([level !== null ? `${kind} ${level}` : kind, traits.slice(0, 3).join(', ')].filter(Boolean).join(' · ') || bodyOf(src), 300),
+    summary: summaryLine([level !== null ? `${kind} ${level}` : kind, traits.slice(0, 3).join(', ') || null], src),
     body: bodyOf(src),
-    dataJson: JSON.stringify({ kind: kind.toLowerCase(), level, traits }),
+    dataJson: JSON.stringify(
+      facts({ kind: kind.toLowerCase(), level, rarity: rarityOf(src), traits, ...referenceFacts(kind, src) }),
+    ),
     license: licenseOf(src, defaultLicense),
     source: sourceOf(src),
   };
@@ -536,11 +868,16 @@ const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>, default
   diseases: (src, license) => mapReference('condition', 'Disease', src, license),
 };
 
-async function fetchWithTimeout(url: string): Promise<Response> {
+async function fetchWithTimeout(url: string, body: string): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    return await fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } });
+    return await fetch(url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body,
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -557,6 +894,7 @@ function sleep(ms: number): Promise<void> {
  */
 async function fetchPageWithRetry(
   url: string,
+  body: string,
   section: Pf2eSection,
   logger: Pf2eImportLogger,
   systemLabel: string = 'PF2e',
@@ -566,7 +904,7 @@ async function fetchPageWithRetry(
 
   for (let attempt = 0; attempt <= PAGE_RETRY_BACKOFFS_MS.length; attempt++) {
     try {
-      const res = await fetchWithTimeout(url);
+      const res = await fetchWithTimeout(url, body);
       if (res.ok) return res;
       if (res.status >= 500 && res.status < 600) {
         lastRes = res;
@@ -593,15 +931,27 @@ async function fetchPageWithRetry(
   throw lastErr ?? new Error('unknown fetch failure');
 }
 
-function totalOf(page: AonPage): number {
-  const total = page.hits?.total;
-  if (typeof total === 'number') return total;
-  if (total && typeof total === 'object' && typeof total.value === 'number') return total.value;
-  return 0;
+/**
+ * One `_search` request body. Two deliberate choices, both learned from the live index:
+ *
+ *  - `sort: [{_doc: 'asc'}]` + `search_after` instead of `from`/`size`. AoN enforces the
+ *    Elasticsearch default `max_result_window` of 10 000, so `from` paging simply 400s past
+ *    that — and PF2e's `type:item` holds ~11.1k rows. Worse, the default relevance order is
+ *    not a total order, so deep `from` paging over tied scores can repeat and skip rows.
+ *    `_doc` is a stable total order on this single-shard index and has no window limit.
+ *  - a POST body rather than the `q=` URL param, because `search_after` is body-only.
+ */
+function searchBody(aonType: string, searchAfter: unknown[] | null): string {
+  return JSON.stringify({
+    size: PAGE_SIZE,
+    sort: [{ _doc: 'asc' }],
+    query: { query_string: { query: `type:${aonType}` } },
+    ...(searchAfter ? { search_after: searchAfter } : {}),
+  });
 }
 
 /**
- * Fetches and maps one section, paginating the AoN `_search` (`from`/`size`) until the
+ * Fetches and maps one section, paginating the AoN `_search` with `search_after` until the
  * index is exhausted, MAX_ENTRIES_PER_SECTION is hit, or the page cap is reached. Malformed
  * rows are skipped (counted), same-name rows collapse to one canonical entry, and the
  * import count is logged. Network/parse failures surface as a clean BadRequestException.
@@ -616,6 +966,7 @@ export async function fetchPf2eSection(
   const aonType = SECTION_TO_AON_TYPE[section];
   const mapper = SECTION_MAPPER[section];
   const base = baseUrl.replace(/\/$/, '');
+  const url = `${base}/${index}/_search`;
   const logPrefix = `[${systemLabel.toLowerCase()}-importer]`;
   // De-dupe same-name rows to one canonical entry per (name, type): a section is a single
   // type, so a lowercased name is the (name, type) key. First-seen wins (stable order).
@@ -623,23 +974,28 @@ export async function fetchPf2eSection(
   let skippedCount = 0;
   let truncated = false;
   let dedupedCount = 0;
-  let from = 0;
+  let searchAfter: unknown[] | null = null;
   let pagesFetched = 0;
 
-  while (byName.size < MAX_ENTRIES_PER_SECTION) {
-    if (pagesFetched >= MAX_PAGES_PER_SECTION) {
-      logger.warn(`${logPrefix} section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
+  for (;;) {
+    if (byName.size >= MAX_ENTRIES_PER_SECTION) {
+      logger.warn(`${logPrefix} section "${section}": hit entry cap (${MAX_ENTRIES_PER_SECTION}) — stopping`);
       // Truncation, NOT a dropped row: tracked on its own flag so the skip count keeps meaning
       // "rows discarded" while rules.service's manifestIsComplete() still sees that this fetch
-      // may have left entries behind and must not authorise deletion.
+      // may have left entries behind and must not authorise deletion. The entry cap used to
+      // exit the loop silently, so a capped section was reported as a COMPLETE manifest.
+      truncated = true;
+      break;
+    }
+    if (pagesFetched >= MAX_PAGES_PER_SECTION) {
+      logger.warn(`${logPrefix} section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
       truncated = true;
       break;
     }
     pagesFetched += 1;
-    const url = `${base}/${index}/_search?q=${encodeURIComponent(`type:${aonType}`)}&size=${PAGE_SIZE}&from=${from}`;
     let res: Response;
     try {
-      res = await fetchPageWithRetry(url, section, logger, systemLabel);
+      res = await fetchPageWithRetry(url, searchBody(aonType, searchAfter), section, logger, systemLabel);
     } catch (err) {
       throw new BadRequestException(`Failed to fetch ${systemLabel} section "${section}" from ${url}: ${(err as Error).message}`);
     }
@@ -694,10 +1050,19 @@ export async function fetchPf2eSection(
       byName.set(key, entry);
     }
 
-    const total = totalOf(page);
-    from += hits.length;
-    // Stop once we've paged past the reported total (or the server stopped returning rows).
-    if (total > 0 && from >= total) break;
+    // Advance the cursor to the last hit of this page. A page whose final hit carries no
+    // `sort` array cannot be paged past — stop rather than re-request page one forever.
+    const cursor = hits[hits.length - 1]?.sort;
+    if (!Array.isArray(cursor) || cursor.length === 0) {
+      if (hits.length >= PAGE_SIZE) {
+        logger.warn(`${logPrefix} section "${section}": response carries no sort cursor — stopping after ${byName.size} entries`);
+        truncated = true;
+      }
+      break;
+    }
+    searchAfter = cursor;
+    // A short page means the index is exhausted.
+    if (hits.length < PAGE_SIZE) break;
   }
 
   const entries = [...byName.values()];

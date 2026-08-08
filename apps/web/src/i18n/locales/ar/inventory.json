@@ -113,6 +113,10 @@
         "ring2": "الخاتم 2",
         "wondrous": "غرض عجائبي"
       }
+    },
+    "compendium": {
+      "statsLabel": "الإحصائيات",
+      "sourceDetails": "تفاصيل المصدر"
     }
   }
 }
