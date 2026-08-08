@@ -75,7 +75,12 @@ are treated as reservations, so upgrading an in-progress run is safe.
 
 ## Dev setup
 
-Prereqs: **Node ≥ 22**, **[just](https://github.com/casey/just)** (`brew install just`).
+Prereqs: **Node ≥ 22.14**, **[just](https://github.com/casey/just)** (`brew install just`).
+
+Node 22.14 is a hard floor, not a suggestion: better-sqlite3 ships a Node-API 10
+binary and Node added Node-API 10 in 22.14.0. On 22.0–22.13 the install still
+succeeds and `npm` only warns, then the server dies with a bare segfault the
+first time it opens the database.
 
 ```bash
 git clone https://github.com/AwsomeFox/campfire && cd campfire
