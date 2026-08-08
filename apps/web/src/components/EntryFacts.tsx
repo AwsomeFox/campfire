@@ -15,6 +15,7 @@
  * value formatting are curated.
  */
 import { Fragment, useId } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export interface EntryFact {
   key: string;
@@ -40,7 +41,13 @@ export interface ParsedEntryFacts {
  */
 const HIDDEN_KEYS = new Set(['traits', 'kind', 'actions', 'specialAbilities', 'legendaryActions', 'reactions', 'abilityMods']);
 
-/** Labels that a generic camelCase split would get wrong (acronyms, game terms). */
+/**
+ * Fallback labels for a camelCase split that would get the term wrong (acronyms, game
+ * terms). These are only the LAST resort: {@link EntryFacts} resolves every key through
+ * `compendium.facts.<key>` first, so a translated locale shows translated terms. The map
+ * still matters because the importers emit keys faster than the catalog gains entries, and
+ * an unknown key must degrade to readable English rather than a raw `camelCase` token.
+ */
 const LABEL_OVERRIDES: Record<string, string> = {
   ac: 'AC',
   eac: 'EAC',
@@ -313,24 +320,32 @@ export function hasEntryFacts(data: unknown): boolean {
  */
 export function EntryFacts({
   data,
-  label = 'Statistics',
+  label,
   compact = false,
 }: {
   data: unknown;
   label?: string;
   compact?: boolean;
 }) {
+  const { t } = useTranslation();
   const parsed = parseEntryFacts(data);
   const listId = useId();
+  // Catalog first, humanized English only for keys the catalog has never seen. Without
+  // this the translated section heading sat above a list of English terms.
+  const labelFor = (fact: EntryFact) => t(`compendium.facts.${fact.key}`, { defaultValue: fact.label });
   if (!parsed) return null;
   const { facts, traits, complex } = parsed;
   const complexKeys = Object.keys(complex);
   const fontSize = compact ? 11.5 : 13;
 
   return (
-    <section aria-label={label} data-testid="entry-facts" style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+    <section
+      aria-label={label ?? t('compendium.facts.sectionLabel')}
+      data-testid="entry-facts"
+      style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}
+    >
       {traits.length > 0 && (
-        <ul aria-label="Traits" style={{ display: 'flex', flexWrap: 'wrap', gap: 4, margin: 0, padding: 0, listStyle: 'none' }}>
+        <ul aria-label={t('compendium.facts.traits')} style={{ display: 'flex', flexWrap: 'wrap', gap: 4, margin: 0, padding: 0, listStyle: 'none' }}>
           {traits.map((trait) => (
             <li key={trait} className="tag tag-neutral" style={{ fontSize: compact ? 9.5 : 10, maxWidth: '100%', whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
               {trait}
@@ -361,7 +376,7 @@ export function EntryFacts({
               is nothing to strip semantics from. */}
           {facts.map((fact) => (
             <Fragment key={fact.key}>
-              <dt style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{fact.label}</dt>
+              <dt style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{labelFor(fact)}</dt>
               <dd style={{ margin: 0, minWidth: 0, overflowWrap: 'anywhere' }}>{fact.value}</dd>
             </Fragment>
           ))}
@@ -373,7 +388,7 @@ export function EntryFacts({
         // component replaced the inventory card's raw-JSON disclosure, so dropping these
         // would have made them unreachable from every surface.
         <details style={{ fontSize: compact ? 11 : 12 }}>
-          <summary>{complexKeys.map(humanizeKey).join(', ')}</summary>
+          <summary>{complexKeys.map((key) => t(`compendium.facts.${key}`, { defaultValue: humanizeKey(key) })).join(', ')}</summary>
           <pre
             data-testid="entry-facts-raw"
             style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: compact ? 10.5 : 11.5 }}

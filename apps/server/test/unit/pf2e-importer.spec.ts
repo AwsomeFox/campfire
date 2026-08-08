@@ -1,5 +1,12 @@
 import { fetchPf2eSection, fetchSf2eSection, entryTypeForSection, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
-import { startFakePf2e, startFakePf2eDuplicates, startFakePf2eLosesRows, startFakePf2eMixed, type FakePf2e } from '../fake-pf2e';
+import {
+  startFakePf2e,
+  startFakePf2eDuplicates,
+  startFakePf2eLosesRows,
+  startFakePf2eMixed,
+  startFakePf2eNoPit,
+  type FakePf2e,
+} from '../fake-pf2e';
 
 /**
  * Unit tests for the PF2e importer (issue #295) against the fake AoN Elasticsearch source
@@ -397,6 +404,37 @@ describe('pf2e-importer — paging integrity', () => {
     try {
       const { entries } = await fetchPf2eSection(fake.baseUrl, 'conditions', silentLogger);
       expect(entries.map((e) => e.name).sort()).toEqual(['Frightened', 'Prone']);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('never claims completeness for a snapshotless scan, even when every row is accounted for', async () => {
+    // The row count alone cannot prove completeness without a snapshot: one refresh can
+    // skip a row and repeat another, netting to `rowsSeen === reportedTotal` while a real
+    // row was never seen. This fake serves a clean, whole section — nothing skipped,
+    // nothing lost — and it must STILL be treated as incomplete, because `manifestIsComplete`
+    // turns completeness into permission to delete installed entries.
+    const fake = await startFakePf2eNoPit();
+    try {
+      const result = await fetchPf2eSection(fake.baseUrl, 'conditions', silentLogger);
+      expect(result.entries).toHaveLength(2);
+      expect(result.skippedCount).toBe(0);
+      expect(result.truncated).toBe(true);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('a complete scan UNDER a snapshot is allowed to claim completeness', async () => {
+    // The counterpart to the case above: the whole point of opening a PIT is that a clean
+    // scan inside one can be trusted, so pack maintenance still gets to remove stale rows.
+    const fake = await startFakePf2e();
+    try {
+      const result = await fetchPf2eSection(fake.baseUrl, 'conditions', silentLogger);
+      expect(result.entries).toHaveLength(2);
+      expect(result.skippedCount).toBe(0);
+      expect(result.truncated).toBe(false);
     } finally {
       await fake.close();
     }

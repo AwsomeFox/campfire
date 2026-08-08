@@ -658,3 +658,46 @@ export async function startFakePf2eLosesRows({ withPit }: { withPit: boolean }):
     },
   };
 }
+
+/**
+ * Fake AoN that serves a clean, COMPLETE section but offers no point-in-time endpoint —
+ * a mirror, or AoN during a transient error. Nothing is lost here, so the row-count check
+ * has nothing to catch; the importer must still refuse to call the manifest complete,
+ * because without a snapshot a skip-plus-repeat can net to the right row count while a
+ * real row was never seen.
+ */
+export async function startFakePf2eNoPit(): Promise<FakePf2e> {
+  const app = express();
+  app.use(express.json());
+  // Deliberately no mountPit().
+  app.post(['/aon/_search', '/_search'], (req, res) => {
+    if (parseType(req) !== 'condition') {
+      res.json(aonPage([], req));
+      return;
+    }
+    res.json(
+      aonPage(
+        [
+          { id: 'frightened', name: 'Frightened', type: 'Condition', text: 'Gripped by fear.', source: ['Player Core'] },
+          { id: 'prone', name: 'Prone', type: 'Condition', text: 'Lying on the ground.', source: ['Player Core'] },
+        ],
+        req,
+      ),
+    );
+  });
+
+  const server: Server = await new Promise((resolve) => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind fake PF2e server');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    server,
+    close() {
+      return new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    },
+  };
+}

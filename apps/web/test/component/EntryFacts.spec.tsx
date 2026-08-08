@@ -11,6 +11,7 @@
  */
 import { render, screen, cleanup, within } from '@testing-library/react';
 import { describe, test, expect, afterEach } from 'vitest';
+import '../../src/i18n';
 import { EntryFacts, hasEntryFacts, parseEntryFacts } from '../../src/components/EntryFacts';
 import { entryRendersMonsterStatblock, hasMonsterStatblock } from '../../src/components/StatBlock';
 
@@ -240,5 +241,38 @@ describe('EntryFacts — values too structured for a fact line', () => {
     const parsed = parseEntryFacts({ saves: { fortitude: 9, reflex: -1 } })!;
     expect(parsed.complex).toEqual({});
     expect(parsed.facts[0].value).toBe('fortitude +9, reflex -1');
+  });
+});
+
+describe('EntryFacts — label localization', () => {
+  test('resolves known keys through the catalog, not the hardcoded English map', async () => {
+    const i18n = (await import('../../src/i18n')).default;
+    const previous = i18n.language;
+    try {
+      await i18n.changeLanguage('ar');
+      render(<EntryFacts data={{ price: '1 gp', damage: '1d8 S', savingThrow: 'Reflex' }} />);
+      // The section heading was already translated; before this, the terms under it were
+      // not, so an Arabic reader saw an Arabic heading over an English list.
+      expect(screen.getByText('السعر', { selector: 'dt' })).toBeTruthy();
+      expect(screen.getByText('الضرر', { selector: 'dt' })).toBeTruthy();
+      expect(screen.getByText('رمية الإنقاذ', { selector: 'dt' })).toBeTruthy();
+      expect(screen.queryByText('Price', { selector: 'dt' })).toBeNull();
+    } finally {
+      await i18n.changeLanguage(previous);
+    }
+  });
+
+  test('falls back to readable English for a key the catalog has never seen', async () => {
+    const i18n = (await import('../../src/i18n')).default;
+    const previous = i18n.language;
+    try {
+      await i18n.changeLanguage('ar');
+      // Importers emit new fields faster than the catalog gains entries; an unknown key
+      // must degrade to a readable term, never to a raw `camelCase` token or a blank.
+      render(<EntryFacts data={{ someBrandNewStat: 'wondrous' }} />);
+      expect(screen.getByText('Some Brand New Stat', { selector: 'dt' })).toBeTruthy();
+    } finally {
+      await i18n.changeLanguage(previous);
+    }
   });
 });

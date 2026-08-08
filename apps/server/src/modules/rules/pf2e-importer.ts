@@ -1051,6 +1051,9 @@ export async function fetchPf2eSection(
   // A PIT pins one searcher for the whole scan; without it a mid-scan refresh can move the
   // cursor's meaning underneath us. Searching a PIT takes no index in the path.
   let pitId = await openPit(base, index, section, logger, logPrefix);
+  // Captured before the loop: `pitId` is cleared on release, and whether the scan ran under
+  // a snapshot decides whether it may claim completeness at the end.
+  const usedSnapshot = pitId !== null;
   const url = pitId ? `${base}/_search` : `${base}/${index}/_search`;
 
   try {
@@ -1158,6 +1161,20 @@ export async function fetchPf2eSection(
   if (!truncated && reportedTotal > 0 && rowsSeen < reportedTotal) {
     logger.warn(
       `${logPrefix} section "${section}": saw ${rowsSeen} of ${reportedTotal} reported rows — the scan lost rows (index refreshed mid-scan?); marking the manifest incomplete so nothing is removed`,
+    );
+    truncated = true;
+  }
+
+  // …and the row count alone is NOT sufficient without a snapshot. Cursors that cross
+  // independent searchers can skip one row and repeat another in the same refresh, which
+  // nets to `rowsSeen === reportedTotal` while a real row was never seen. Only a fixed
+  // snapshot rules that out, so a scan that could not open one is never allowed to claim
+  // completeness. It still imports everything it found — additions and updates are
+  // unaffected — it just cannot authorise REMOVING an installed entry, which is the one
+  // irreversible thing an incomplete manifest must not be trusted to do.
+  if (!truncated && !usedSnapshot) {
+    logger.warn(
+      `${logPrefix} section "${section}": paged without a point-in-time snapshot, so completeness cannot be proven — importing ${byName.size} entries but marking the manifest incomplete so nothing is removed`,
     );
     truncated = true;
   }
