@@ -124,11 +124,13 @@ jobs:
   #
   # Pinned to 22.14.0 — the exact floor in root `engines.node` — rather than
   # `22.x`. better-sqlite3 ships a Node-API 10 binary and Node added Node-API 10
-  # in 22.14.0, so on 22.0–22.13 `npm ci` succeeds and the server then dies when
-  # it imports the addon. `22.x` resolves to current 22 and would never catch a
-  # floor that has drifted below what a native dependency actually needs; this
-  # pin makes the declared floor tested instead of asserted. Bump it in lockstep
-  # with `engines.node` whenever a dependency raises the real minimum.
+  # in 22.14.0. Below that the failure is silent: `npm ci` succeeds (13.x has no
+  # install script), `require('better-sqlite3')` succeeds too, and the process
+  # dies with SIGSEGV — exit 139, no exception, no message — on the first
+  # `new Database()`. `22.x` resolves to current 22 and would never catch a floor
+  # that has drifted below what a native dependency actually needs; this pin
+  # makes the declared floor tested instead of asserted. Bump it in lockstep with
+  # `engines.node` whenever a dependency raises the real minimum.
   build-test-22:
     name: build-test (22.x)
     runs-on: ubuntu-latest
