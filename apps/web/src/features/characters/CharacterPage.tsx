@@ -1504,10 +1504,16 @@ function CharacterVitalsRail({
   defenseLabel: string;
   defenseTitle: string;
 }) {
-  const initiative = useMemo(
-    () => checkCatalogForAdapter(adapter, character).find((c) => c.category === 'initiative') ?? null,
-    [adapter, character],
-  );
+  const initiative = useMemo(() => {
+    const def = checkCatalogForAdapter(adapter, character).find((c) => c.category === 'initiative') ?? null;
+    if (!def) return null;
+    // Same reason the ability tiles gate on a stored score: the catalog defaults a missing
+    // stat to 10, so a draft sheet would show a plausible initiative and let it be rolled
+    // from a DEX (5e) / WIS (PF2e) the character never had. An adapter whose initiative
+    // depends on no ability at all (`ability: null`) is untouched by this.
+    if (def.ability && abilityScore(character, def.ability) === null) return null;
+    return def;
+  }, [adapter, character]);
   // Only a system that actually models death saves gets the tracker; PF2e (dying/wounded)
   // and the neutral adapters simply show "down" via HP 0 (see hasDeathSavesForAdapter).
   const showDeathSaves =

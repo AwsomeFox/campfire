@@ -154,9 +154,10 @@ test.describe('character sheet play surface', () => {
     const { campaignId } = seed();
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
-    // DEX set, STR never filled in — a partially completed sheet.
+    // STR set, DEX never filled in — a partially completed sheet. DEX is also what 5e
+    // derives initiative from, so this covers the derived tile in the same fixture.
     const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
-      data: { name: 'Half Filled Sheet', className: 'Bard', level: 1, stats: { DEX: 14 } },
+      data: { name: 'Half Filled Sheet', className: 'Bard', level: 1, stats: { STR: 14 } },
     })).json()).id as number;
 
     try {
@@ -165,11 +166,17 @@ test.describe('character sheet play surface', () => {
       await expect(abilities).toBeVisible();
 
       // The filled one rolls.
-      await expect(abilities.getByRole('button', { name: /^Roll DEX check/ })).toBeVisible();
+      await expect(abilities.getByRole('button', { name: /^Roll STR check/ })).toBeVisible();
       // The unset one is inert, and never claims a modifier it does not have.
-      await expect(abilities.getByRole('button', { name: /^Roll STR check/ })).toHaveCount(0);
-      const str = abilities.locator('div').filter({ hasText: /^STR/ }).last();
-      await expect(str).not.toContainText('+0');
+      await expect(abilities.getByRole('button', { name: /^Roll DEX check/ })).toHaveCount(0);
+      const dex = abilities.locator('div').filter({ hasText: /^DEX/ }).last();
+      await expect(dex).not.toContainText('+0');
+
+      // Initiative derives from that same unset DEX, so it must not offer a roll either.
+      const vitals = page.getByTestId('character-vitals');
+      await expect(vitals.getByText('Initiative')).toBeVisible();
+      await expect(vitals.getByRole('button', { name: /^Roll initiative/ })).toHaveCount(0);
+      await expect(vitals).not.toContainText('+0');
     } finally {
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();
