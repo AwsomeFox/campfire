@@ -1,6 +1,7 @@
 import { expect, request, test, type APIRequestContext } from '@playwright/test';
 import { seed, stateFor } from './seed';
 import { CREDS } from '../global-setup';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #1916 — the encounter cockpit's optimistic/conflict layer is what keeps HP and the
@@ -161,8 +162,12 @@ test('a stale player end-turn 409s TURN_ALREADY_ADVANCED after the DM advances f
     });
 
     await playerPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(playerPage, 'party');
     await dmPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(dmPage, 'party');
 
+    // A player's own End turn is the cockpit's Turn tab.
+    await openCockpitTab(playerPage, 'turn');
     const endTurnBtn = playerPage.getByTestId('workspace-end-turn');
     await expect(endTurnBtn).toBeVisible();
     await expect(endTurnBtn).toBeEnabled();
@@ -277,6 +282,7 @@ test('an encounter-level PATCH rejected as STALE_WRITE renders the conflict, rol
     });
 
     await dmPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(dmPage, 'party');
 
     const visibleBar = dmPage.getByTestId('visible-to-players-bar');
     await expect(visibleBar).toBeVisible();
@@ -386,10 +392,12 @@ test('a player-only SSE outage gates the player while the DM keeps acting, and t
       response.url().endsWith(`/api/v1/campaigns/${campaignId}/events`),
     );
     await playerPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(playerPage, 'party');
     await initialStream;
     await expect(playerPage.getByTestId('encounter-sync-chip')).toHaveText('Live');
 
     await dmPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(dmPage, 'party');
     await expect(dmPage.getByTestId('encounter-sync-chip')).toHaveText('Live');
 
     const playerRow = playerPage.getByTestId(`combatant-row-${playerCombatant.id}`);

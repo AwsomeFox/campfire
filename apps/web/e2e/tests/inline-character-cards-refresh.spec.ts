@@ -1,6 +1,7 @@
 import { test, expect, request } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Multi-client sheet → encounter card refresh (issue #421).
@@ -70,6 +71,7 @@ test.describe('inline character cards — live sheet refresh', () => {
       expect((await started.json()).currentCombatantId).toBe(combatantId);
 
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
+      await openCockpitTab(page, 'party');
       await expect(page.getByText('Sheet Sync PC', { exact: false }).first()).toBeVisible();
       // Ability chips render as "STR" + "10 (+0)" inside a button (owned card auto-expands).
       const strChip = page.getByRole('button', { name: /STR\s*10\s*\(\+0\)/i });

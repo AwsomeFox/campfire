@@ -1,6 +1,7 @@
 import { test, expect, request } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #414 — multi-client structured action resolver (real DB + encounter UI).
@@ -92,6 +93,9 @@ test.describe('structured action resolver — multi-client', () => {
       expect((await startRes.json()).currentCombatantId).toBe(actorId);
 
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      // The roster (and with it the inline character card this flow drives) lives in
+      // the cockpit's Party tab.
+      await openCockpitTab(page, 'party');
       await expect(page.getByText('Resolver PC', { exact: false }).first()).toBeVisible();
       await expect(page.getByTestId('action-notes')).toHaveText('Three rays of fire.');
 
@@ -122,6 +126,7 @@ test.describe('structured action resolver — multi-client', () => {
         data: { actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: true },
       });
       await page.reload();
+      await openCockpitTab(page, 'party');
       await expect(page.getByText('Resolver PC', { exact: false }).first()).toBeVisible();
       const afterReload = await dm.get(`/api/v1/encounters/${encounterId}`);
       expect(

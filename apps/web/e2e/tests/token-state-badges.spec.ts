@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 function encounterUrl(): string {
   const { campaignId, encounterId } = seed();
@@ -39,6 +40,8 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await restoreSeedEncounter();
     await placeTokenStateFixture(dm.request);
     await Promise.all([dmPage.goto(encounterUrl()), playerPage.goto(encounterUrl())]);
+    // Roster rows (and their condition chips) are the cockpit's Party tab.
+    await Promise.all([openCockpitTab(dmPage, 'party'), openCockpitTab(playerPage, 'party')]);
 
     const dmBoss = dmPage.getByTestId(`map-token-${bossId}`);
     const playerBoss = playerPage.getByTestId(`map-token-${bossId}`);
@@ -146,6 +149,7 @@ test('40-token map smoke keeps token drag feedback available (#1905)', async ({ 
       expect(placed.ok()).toBeTruthy();
     }
     await page.goto(encounterUrl());
+    await openCockpitTab(page, 'party');
     const tokens = page.locator('[data-testid^="map-token-"][role="button"]');
     await expect(tokens).toHaveCount(combatants.length);
     const token = tokens.first();

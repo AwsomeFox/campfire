@@ -38,52 +38,75 @@ async function createRunningEncounter(page: Page) {
   return { campaignId, encounterId: encounter.id };
 }
 
-test.describe('encounter cockpit layout (issue #669)', () => {
-  test('uses a bounded sticky activity rail at lg and normal flow below it', async ({ page }) => {
+test.describe('encounter cockpit layout', () => {
+  test('is a fixed, non-scrolling shell: map canvas plus a tabbed side panel', async ({ page }) => {
     const fixture = await createRunningEncounter(page);
     try {
-      await page.setViewportSize({ width: 1280, height: 500 });
+      await page.setViewportSize({ width: 1280, height: 800 });
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByRole('heading', { name: 'Cockpit layout drill' })).toBeVisible();
 
-      const cockpit = page.getByTestId('encounter-cockpit');
-      const activity = cockpit.getByRole('complementary', { name: 'Encounter activity' });
-      await expect(activity).toBeVisible();
-      await expect(activity.getByRole('log', { name: 'Combat log' })).toBeVisible();
+      const shell = page.locator('.cf-vtt');
+      const canvas = page.getByTestId('encounter-vtt-canvas');
+      const panel = page.getByTestId('encounter-vtt-panel');
+      await expect(canvas).toBeVisible();
+      await expect(panel).toBeVisible();
 
-      const desktop = await cockpit.evaluate((node) => {
-        const rail = node.querySelector('aside')!;
-        const cockpitStyle = getComputedStyle(node);
-        const railStyle = getComputedStyle(rail);
+      const desktop = await shell.evaluate((node) => {
+        const canvasEl = node.querySelector('[data-testid="encounter-vtt-canvas"]')!;
+        const panelEl = node.querySelector('[data-testid="encounter-vtt-panel"]')!;
+        const shellRect = node.getBoundingClientRect();
         return {
-          columns: cockpitStyle.gridTemplateColumns.trim().split(/\s+/).length,
-          position: railStyle.position,
-          overflowY: railStyle.overflowY,
-          maxHeight: parseFloat(railStyle.maxHeight),
-          viewportHeight: window.innerHeight,
+          position: getComputedStyle(node).position,
+          // The shell owns the viewport and the page itself never scrolls.
+          fillsViewport:
+            Math.round(shellRect.width) === window.innerWidth
+            && Math.round(shellRect.height) === window.innerHeight,
+          documentScrolls: document.documentElement.scrollHeight > window.innerHeight + 1,
+          // Canvas and panel sit side by side, with the panel on the trailing edge.
+          sideBySide:
+            canvasEl.getBoundingClientRect().right <= panelEl.getBoundingClientRect().left + 1,
+          canvasHeight: Math.round(canvasEl.getBoundingClientRect().height),
+          panelWidth: Math.round(panelEl.getBoundingClientRect().width),
         };
       });
-      expect(desktop.columns).toBe(2);
-      expect(desktop.position).toBe('sticky');
-      expect(desktop.overflowY).toBe('auto');
-      expect(desktop.maxHeight).toBeLessThanOrEqual(desktop.viewportHeight);
+      expect(desktop.position).toBe('fixed');
+      expect(desktop.fillsViewport).toBe(true);
+      expect(desktop.documentScrolls).toBe(false);
+      expect(desktop.sideBySide).toBe(true);
+      // Starts at the template's 356px and grows with the viewport (clamped at 460).
+      expect(desktop.panelWidth).toBeGreaterThanOrEqual(356);
+      expect(desktop.panelWidth).toBeLessThanOrEqual(460);
+      // The canvas gets the height left over under the header, not a 16:9 reservation.
+      expect(desktop.canvasHeight).toBeGreaterThan(400);
 
+      // The panel's tabs are the page's sections; only the selected one is mounted.
+      await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true');
+      await expect(page.getByRole('log', { name: 'Combat log' })).toHaveCount(0);
+      await page.getByTestId('encounter-vtt-tab-log').click();
+      await expect(page.getByRole('log', { name: 'Combat log' })).toBeVisible();
+
+      // Collapsing the panel hands the whole canvas to the map, and the reopen tab returns it.
+      await page.getByTestId('encounter-vtt-panel-close').click();
+      await expect(panel).toHaveCount(0);
+      await page.getByTestId('encounter-vtt-panel-open').click();
+      await expect(panel).toBeVisible();
+
+      // Below the two-column width the panel stacks under the canvas rather than
+      // covering it — both stay on screen.
       await page.setViewportSize({ width: 390, height: 844 });
-      const mobile = await cockpit.evaluate((node) => {
-        const rail = node.querySelector('aside')!;
-        const cockpitStyle = getComputedStyle(node);
-        const railStyle = getComputedStyle(rail);
+      const mobile = await shell.evaluate((node) => {
+        const canvasEl = node.querySelector('[data-testid="encounter-vtt-canvas"]')!;
+        const panelEl = node.querySelector('[data-testid="encounter-vtt-panel"]')!;
         return {
-          columns: cockpitStyle.gridTemplateColumns.trim().split(/\s+/).length,
-          position: railStyle.position,
-          overflowY: railStyle.overflowY,
-          maxHeight: railStyle.maxHeight,
+          stacked: canvasEl.getBoundingClientRect().bottom <= panelEl.getBoundingClientRect().top + 1,
+          canvasHeight: Math.round(canvasEl.getBoundingClientRect().height),
+          panelHeight: Math.round(panelEl.getBoundingClientRect().height),
         };
       });
-      expect(mobile.columns).toBe(1);
-      expect(mobile.position).toBe('static');
-      expect(mobile.overflowY).toBe('visible');
-      expect(mobile.maxHeight).toBe('none');
+      expect(mobile.stacked).toBe(true);
+      expect(mobile.canvasHeight).toBeGreaterThan(100);
+      expect(mobile.panelHeight).toBeGreaterThan(100);
     } finally {
       await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       await restoreSeedEncounter(page);

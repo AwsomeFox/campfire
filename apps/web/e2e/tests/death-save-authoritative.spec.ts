@@ -1,6 +1,7 @@
 import { test, expect, request, type APIRequestContext, type Page } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #1462 — a player reaches both death-save controls through the same
@@ -119,6 +120,7 @@ test.describe('authoritative player death saves (#1462)', () => {
         const stub = await stubAuthoritativeResult(page, drill, testCase.outcome);
 
         await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+        await openCockpitTab(page, 'party');
         await expect(page.getByText('Running', { exact: true })).toBeVisible();
         const row = page.getByTestId(`combatant-row-${drill.combatantId}`);
         await expect(row).toContainText(drill.name);

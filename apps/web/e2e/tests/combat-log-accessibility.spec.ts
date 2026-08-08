@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import type { EncounterEvent, EncounterEventType } from '@campfire/schema';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 function mockEvent(id: number, type: EncounterEventType, patch: Partial<EncounterEvent> = {}): EncounterEvent {
   return {
@@ -82,6 +83,8 @@ async function restoreSeedFight(page: Page): Promise<void> {
 async function openEncounter(page: Page, campaignId: number, encounterId: number, heading: string) {
   await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
   await expect(page.getByRole('heading', { name: heading })).toBeVisible();
+  // The cockpit keeps the combat log in the side panel's Log tab.
+  await openCockpitTab(page, 'log');
   await expect(page.getByRole('log', { name: 'Combat log' })).toBeVisible();
 }
 
@@ -439,6 +442,7 @@ test('mobile encounter view announces AI loot/treasury tool activity and keeps t
     .poll(async () => ((await polite.textContent()) ?? '').toLowerCase().includes('the ai dm adjust treasury'))
     .toBe(true);
 
+  await openCockpitTab(page, 'log');
   const combatLog = page.getByRole('log', { name: 'Combat log' });
   await expect(combatLog.getByText(/Granted treasury \(\+25 gp\)/i)).toBeVisible();
 });

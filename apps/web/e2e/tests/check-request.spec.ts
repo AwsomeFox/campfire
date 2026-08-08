@@ -1,5 +1,6 @@
 import { expect, request, test, type APIRequestContext } from '@playwright/test';
 import { seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * DM-initiated check request → player prompt → consequence loop (issue #415), across two real
@@ -64,6 +65,9 @@ test.describe('DM check request loop (#415)', () => {
 
       // --- DM client: request a DEX save via the in-page control -------------------------------
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      // The DM's request-a-check control is table-wide setup, so the cockpit keeps it
+      // in the side panel's Table tab rather than in the turn or roster view.
+      await openCockpitTab(page, 'table');
       const panel = page.getByTestId('request-check-panel');
       await expect(panel).toBeVisible();
       await panel.getByRole('checkbox', { name: 'Test Hero' }).check();
@@ -221,6 +225,9 @@ test.describe('DM check request loop (#415)', () => {
 
       // --- DM sends a whole-party DEX save via the one-tap preset -----------------------------
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      // The DM's request-a-check control is table-wide setup, so the cockpit keeps it
+      // in the side panel's Table tab rather than in the turn or roster view.
+      await openCockpitTab(page, 'table');
       const panel = page.getByTestId('request-check-panel');
       await expect(panel).toBeVisible();
       await panel.getByTestId('check-request-whole-party').click();
