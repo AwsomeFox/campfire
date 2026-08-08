@@ -437,6 +437,34 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(refreshed.body.equippedAction.toHit).toBe('+9');
   });
 
+  it('a refresh regeneration that loses the race writes nothing', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'race-slot' });
+
+    // Stand in for a concurrent writer that authored a manual action between the refresh
+    // endpoint reading the row and its regeneration write landing. The predicate on that
+    // write requires the row to still be `derived`, so the authored action must survive.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      db.update(inventoryItems)
+        .set({
+          equippedAction: JSON.stringify({ name: 'Raced In', kind: 'melee', toHit: '+9', damage: '1d8+5 slashing', targetAc: '', notes: '' }),
+          equippedActionSource: 'manual',
+        })
+        .where(eq(inventoryItems.id, itemId))
+        .run();
+
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+      expect(refreshed.body.equippedActionSource).toBe('manual');
+      expect(refreshed.body.equippedAction.name).toBe('Raced In');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
   it("honours a homebrew campaign's own mechanics when validating an edited action", async () => {
     const server = ctx.app.getHttpServer();
     // Review (chatgpt-codex-connector P2): resolving the adapter from the `ruleSystem` slug

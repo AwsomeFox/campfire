@@ -595,18 +595,47 @@ export class InventoryService {
     ) {
       const ownerId = row.characterId;
       const regenerated = await this.deriveActionForEquip(row, ownerId, row.name);
-      [row] = await this.db
+      // Review (chatgpt-codex-connector P2) — the same time-of-check/time-of-use race the
+      // equip path re-validates against, reached through this endpoint instead. The
+      // derivation above AWAITS, so between reading the row and writing it another request
+      // can author a manual action, or move and re-equip the item onto someone else. An
+      // update keyed on the item id alone would then clobber that authored action, or hand
+      // the new owner an attack computed from the OLD owner's stats.
+      //
+      // So the write carries its own predicate: still equipped, still `derived`, still the
+      // same character. A predicate miss means the world moved on and this regeneration is
+      // stale — drop it silently rather than forcing it through. `update()` gets the same
+      // guarantee from its in-transaction `fresh` recheck; this path has no surrounding
+      // transaction, so the condition rides on the UPDATE itself.
+      const [regeneratedRow] = await this.db
         .update(inventoryItems)
         .set({
           equippedAction: regenerated ? JSON.stringify(regenerated) : null,
           equippedActionSource: regenerated ? EquippedActionSource.enum.derived : null,
           updatedAt: nowIso(),
         })
-        .where(eq(inventoryItems.id, id))
+        .where(
+          and(
+            eq(inventoryItems.id, id),
+            eq(inventoryItems.equipped, true),
+            eq(inventoryItems.characterId, ownerId),
+            eq(inventoryItems.equippedActionSource, EquippedActionSource.enum.derived),
+          ),
+        )
         .returning();
-      // The owner's merged action list changed, so live encounter screens have to hear about
-      // it — same signal `update()`'s equip path emits (issue #1901).
-      this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: ownerId, userId: user.id });
+      if (regeneratedRow) {
+        row = regeneratedRow;
+        // The owner's merged action list changed, so live encounter screens have to hear
+        // about it — same signal `update()`'s equip path emits (issue #1901). Emitted only
+        // when the write actually landed: a predicate miss changed nothing here, and
+        // whichever request DID win emitted its own.
+        this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: ownerId, userId: user.id });
+      } else {
+        // Re-read so the response reflects whatever the winning writer committed rather than
+        // the pre-derivation snapshot this method started from.
+        const [current] = await this.db.select().from(inventoryItems).where(eq(inventoryItems.id, id)).limit(1);
+        if (current) row = current;
+      }
     }
 
     await this.audit.log({
