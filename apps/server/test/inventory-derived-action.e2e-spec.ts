@@ -59,6 +59,35 @@ describe('derived equipped-item actions (issue #2097)', () => {
     await closeTestApp(ctx);
   });
 
+  /** The fake server's Longsword, as the #2096 importer stores it. */
+  const LONGSWORD_DATA = {
+    itemKind: 'weapon',
+    damageDice: '1d8',
+    damageType: 'Slashing',
+    range: 0,
+    longRange: 0,
+    isSimple: false,
+    properties: [{ name: 'Versatile', type: null, detail: '1d10' }],
+  };
+
+  /**
+   * Rewrite the installed rule entry's data. Several specs need to simulate an upstream
+   * change; every one of them restores the fixture afterwards through `restoreLongswordEntry`,
+   * so the suite stays order-independent — an earlier version of this file left the entry
+   * mutated and quietly changed what later specs were testing.
+   */
+  function setLongswordEntryData(data: unknown): void {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(ruleEntries)
+      .set({ dataJson: JSON.stringify(data), updatedAt: new Date().toISOString() })
+      .where(eq(ruleEntries.id, longswordEntryId))
+      .run();
+  }
+
+  function restoreLongswordEntry(): void {
+    setLongswordEntryData(LONGSWORD_DATA);
+  }
+
   async function acquireLongsword(): Promise<number> {
     const server = ctx.app.getHttpServer();
     const acquired = await request(server)
@@ -254,16 +283,15 @@ describe('derived equipped-item actions (issue #2097)', () => {
     // The installed pack's entry changes upstream. `withCompendiumStates` reports the item as
     // linked_updated without persisting it, and adopting the new revision is what the explicit
     // refresh endpoint is for — so equipping must NOT silently pick it up.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(ruleEntries)
-      .set({ dataJson: JSON.stringify({ itemKind: 'weapon', damageDice: '4d12', damageType: 'Force', properties: [] }) })
-      .where(eq(ruleEntries.id, longswordEntryId))
-      .run();
-
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'snapshot-slot' });
-    expect(equipped.status).toBe(200);
-    expect(equipped.body.equippedAction.damage).toContain('1d8+3');
-    expect(equipped.body.equippedAction.damage).not.toContain('4d12');
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '4d12', damageType: 'Force', properties: [] });
+    try {
+      const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'snapshot-slot' });
+      expect(equipped.status).toBe(200);
+      expect(equipped.body.equippedAction.damage).toContain('1d8+3');
+      expect(equipped.body.equippedAction.damage).not.toContain('4d12');
+    } finally {
+      restoreLongswordEntry();
+    }
   });
 
   it('restoring a trashed item to the party stash clears the provenance with the action', async () => {
@@ -371,6 +399,88 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(renamed.status).toBe(200);
     expect(renamed.body.name).toBe('Ancestral Blade');
     expect(renamed.body.equippedAction.name).toBe('Ancestral Blade');
+  });
+
+  it('accepting a compendium refresh regenerates the derived action immediately', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'refresh-slot' });
+    expect(equipped.body.equippedAction.damage).toContain('1d8+3');
+
+    // The pack updates upstream. Equipping still derives from the ACCEPTED snapshot (asserted
+    // elsewhere) — but accepting the refresh is exactly the moment the new revision becomes
+    // this campaign's truth, so the action must follow without waiting for an unequip cycle.
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+      expect(refreshed.body.equippedActionSource).toBe('derived');
+      expect(refreshed.body.equippedAction.damage).toContain('2d6+3');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
+  it('a compendium refresh never regenerates over a manual action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'refresh-manual-slot' });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Hand Written', kind: 'melee', toHit: '+9', damage: '1d8+5 slashing', targetAc: '', notes: '' } });
+
+    const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+    expect([200, 201]).toContain(refreshed.status);
+    expect(refreshed.body.equippedActionSource).toBe('manual');
+    expect(refreshed.body.equippedAction.name).toBe('Hand Written');
+    expect(refreshed.body.equippedAction.toHit).toBe('+9');
+  });
+
+  it("honours a homebrew campaign's own mechanics when validating an edited action", async () => {
+    const server = ctx.app.getHttpServer();
+    // Review (chatgpt-codex-connector P2): resolving the adapter from the `ruleSystem` slug
+    // alone fell back to 5e for a homebrew campaign, so its own damage types were rejected as
+    // "not in the vocabulary" — a vocabulary that campaign never declared.
+    const profile = {
+      slug: 'e2e-ichor-hack',
+      label: 'E2E Ichor Hack',
+      mechanicsSummary: 'A homebrew hack with its own damage vocabulary, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const camp = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Ichor Campaign', ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(camp.status).toBe(201);
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Ichor Wielder', level: 1, stats: { STR: 12 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory`)
+      .set(dm)
+      .send({ name: 'Ichor Lash', ownerType: 'character', characterId: char.body.id });
+    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'lash-slot' });
+
+    const authored = await request(server)
+      .patch(`/api/v1/inventory/${item.body.id}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Lash', kind: 'melee', toHit: '+3', damage: '1d8 ichor', targetAc: '', notes: '' } });
+    expect(authored.status).toBe(200);
+    // The campaign's adapter declares no damage vocabulary, so there is nothing to reject
+    // against and the action stays resolvable.
+    expect(authored.body.equippedAction.spec).toBeDefined();
+    expect(authored.body.equippedAction.damage).toBe('1d8 ichor');
   });
 
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {

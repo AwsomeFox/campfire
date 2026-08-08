@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, rebuildEditedActionSpec, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
-import type { HomebrewMechanicsProfile, Treasury, Role } from '@campfire/schema';
+import type { HomebrewMechanicsProfile, RuleSystemAdapter, Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { fromJsonText } from '../../common/json';
 import { campaigns, inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
@@ -264,6 +264,26 @@ export class InventoryService {
    * detached or since-uninstalled item still has, and using it keeps derivation working
    * for an item whose pack was removed.
    */
+  /**
+   * The campaign's rule adapter, `customMechanicsProfile` included. Review
+   * (chatgpt-codex-connector P2): resolving it from the `ruleSystem` slug alone silently fell
+   * back to 5e for a homebrew campaign, so a perfectly valid custom damage type (`1d8 ichor`)
+   * had its spec stripped on save while the derivation path — which did pass the profile —
+   * accepted it. One helper, so the two paths cannot disagree about what system this campaign
+   * is playing.
+   */
+  private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
+    const campaign = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .get();
+    return ruleSystemAdapter(
+      campaign?.ruleSystem ?? '',
+      fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+    );
+  }
+
   private async deriveActionForEquip(
     existing: typeof inventoryItems.$inferSelect,
     characterId: number,
@@ -306,15 +326,7 @@ export class InventoryService {
       }
       if (data == null) return null;
 
-      const campaign = await this.db
-        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
-        .from(campaigns)
-        .where(eq(campaigns.id, existing.campaignId))
-        .get();
-      const adapter = ruleSystemAdapter(
-        campaign?.ruleSystem ?? '',
-        fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
-      );
+      const adapter = await this.adapterForCampaign(existing.campaignId);
 
       return deriveEquippedItemAction({
         itemName: finalName,
@@ -566,7 +578,37 @@ export class InventoryService {
     const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
     const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
     if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
-    const [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    let [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+
+    // Issue #2097 review (chatgpt-codex-connector P2): accepting an upstream revision is
+    // precisely the moment a DERIVED action becomes stale — the whole point of this endpoint
+    // is that the item now reports the new revision as accepted, so changed damage dice or a
+    // changed type must reach encounter rolls immediately rather than waiting for the owner
+    // to happen to unequip and re-equip. Regenerate from the freshly-accepted snapshot; a
+    // derivation that now yields nothing CLEARS the action, for the same reason it does on
+    // the equip path. `manual` is untouched here as everywhere else.
+    if (
+      row.equipped &&
+      row.ownerType === 'character' &&
+      row.characterId != null &&
+      row.equippedActionSource === EquippedActionSource.enum.derived
+    ) {
+      const ownerId = row.characterId;
+      const regenerated = await this.deriveActionForEquip(row, ownerId, row.name);
+      [row] = await this.db
+        .update(inventoryItems)
+        .set({
+          equippedAction: regenerated ? JSON.stringify(regenerated) : null,
+          equippedActionSource: regenerated ? EquippedActionSource.enum.derived : null,
+          updatedAt: nowIso(),
+        })
+        .where(eq(inventoryItems.id, id))
+        .returning();
+      // The owner's merged action list changed, so live encounter screens have to hear about
+      // it — same signal `update()`'s equip path emits (issue #1901).
+      this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: ownerId, userId: user.id });
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -742,18 +784,12 @@ export class InventoryService {
     // that keeps open encounter cards honest, since no equip field actually changed.
     // Resolved up-front for the same reason as the owner ids: the write below is a synchronous
     // better-sqlite3 transaction, and `rebuildEditedActionSpec` needs the campaign's system.
-    const campaignRuleSystem = input.equippedAction
-      ? (
-          await this.db
-            .select({ ruleSystem: campaigns.ruleSystem })
-            .from(campaigns)
-            .where(eq(campaigns.id, existing.campaignId))
-            .get()
-        )?.ruleSystem ?? ''
-      : '';
-    // The system's canonical damage-type vocabulary, so an edited action is held to the same
-    // standard as a derived one — see `rebuildEditedActionSpec`.
-    const campaignDamageTypes = input.equippedAction ? ruleSystemAdapter(campaignRuleSystem).damageTypes : undefined;
+    // The system's canonical damage-type vocabulary and id, so an edited action is held to the
+    // same standard as a derived one — see `rebuildEditedActionSpec`. Resolved through
+    // `adapterForCampaign` so a homebrew campaign's profile is honoured here too.
+    const editAdapter = input.equippedAction ? await this.adapterForCampaign(existing.campaignId) : null;
+    const campaignRuleSystem = editAdapter?.id ?? '';
+    const campaignDamageTypes = editAdapter?.damageTypes;
 
     // Review (chatgpt-codex-connector P2): "should we derive?" is tracked separately from
     // "what did it produce?". A regeneration that yields NOTHING — the accepted snapshot no
