@@ -4,6 +4,7 @@ import {
   isImporterOnlyRuleSystemSlug,
   isRegisteredRuleSystemSlug,
   PF2E_PACK_SLUG,
+  RULE_PACK_SOURCE_META,
 } from '@campfire/schema';
 
 /**
@@ -35,14 +36,35 @@ describe('isImporterOnlyRuleSystemSlug (issue #2081)', () => {
     }
   });
 
-  it('is registry-derived: a hypothetical future importer shipped without an adapter is caught the same way, with no edit to the guard', () => {
-    // This slug is never mentioned anywhere near isImporterOnlyRuleSystemSlug's implementation.
-    // It stands in for "the next importer added without an ADAPTERS entry" the issue calls
-    // out — the predicate has to catch it purely because it isn't in ADAPTERS, not because
-    // anyone taught the guard its name.
-    const hypotheticalFutureImporterSlug = 'traveller-srd-2d6-hypothetical-future-importer';
-    expect(isRegisteredRuleSystemSlug(hypotheticalFutureImporterSlug)).toBe(false);
-    expect(isImporterOnlyRuleSystemSlug(hypotheticalFutureImporterSlug, true)).toBe(true);
+  // The critical case: a v1 of this guard (`isInstalledPack && !isRegisteredRuleSystemSlug`,
+  // this PR's original push) flagged this too, because it never checked WHICH installer put
+  // the pack there — only "installed" and "no adapter", a set that also contains every
+  // uploaded/homebrew pack. That broke `apps/web/e2e/global-setup.ts`'s `e2e-open5e-actions`
+  // fixture and `ai-dm-stuck.e2e-spec.ts`'s uploaded `dnd-homebrew-srd` campaign in CI. This
+  // is the test that would have caught it before it ever reached a PR.
+  it('does NOT flag a homebrew / uploaded / test-installed pack — the case the original guard missed', () => {
+    for (const slug of ['dnd-homebrew-srd', 'pf-homebrew-srd', 'e2e-open5e-actions', 'some-homebrew-slug']) {
+      expect(isRegisteredRuleSystemSlug(slug)).toBe(false); // no built-in adapter, same as Cepheus
+      expect(isImporterOnlyRuleSystemSlug(slug, true)).toBe(false); // but NOT importer-only — stays selectable
+    }
+  });
+
+  it('is registry-derived, not a `cepheus-srd` special case: every pack slug a registered source declares is flagged exactly when it has no ADAPTERS entry', () => {
+    // Walks RULE_PACK_SOURCE_META itself rather than naming any one source, so this proves
+    // the predicate reads the registry rather than hardcoding Cepheus. Today only 'cepheus'
+    // has no ADAPTERS entry; the assertion is symmetric, so a future source added to the
+    // registry without one would also show up here as `true`, with no edit to this test.
+    let sawAtLeastOneImporterOnlySlug = false;
+    for (const meta of Object.values(RULE_PACK_SOURCE_META)) {
+      const slugs = Array.isArray(meta.packSlug) ? meta.packSlug : meta.packSlug ? [meta.packSlug] : [];
+      for (const slug of slugs) {
+        const hasAdapter = isRegisteredRuleSystemSlug(slug);
+        if (!hasAdapter) sawAtLeastOneImporterOnlySlug = true;
+        expect(isImporterOnlyRuleSystemSlug(slug, true)).toBe(!hasAdapter);
+      }
+    }
+    // Guards against a vacuous pass (e.g. every packSlug getting dropped in a future edit).
+    expect(sawAtLeastOneImporterOnlySlug).toBe(true);
   });
 
   it('empty string is never flagged, installed or not', () => {
