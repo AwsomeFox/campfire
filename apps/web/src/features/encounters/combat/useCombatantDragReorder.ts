@@ -12,7 +12,7 @@
  * RunSessionPage's `combatantRowRefs`) — so this hook owns no element registration of
  * its own and cannot drift out of sync with what is actually rendered.
  */
-import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { afterCombatantIdForDrop } from '../combatantReorder';
 
 /** Pixels of pointer travel before a press on the handle commits to a drag. */
@@ -100,6 +100,33 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     setOver(null);
   }, []);
 
+  // Issue #2084 finding 4: a mid-gesture `enabled` flip must not strand `gestureRef`.
+  // `onPointerDown`'s own `enabled` check only ever gates the START of a NEW gesture —
+  // nothing previously reacted to `enabled` going false while a gesture was already
+  // under way. Two different call sites hit that gap in two different ways: the
+  // roster's `CombatantRow` withholds `handleProps` (via `{...(reorder.busy ? {} :
+  // reorder.dragHandleProps)}`) without unmounting the handle, which drops the
+  // `onPointerUp`/`onPointerCancel` listeners the browser would otherwise fire;
+  // `InitiativeStrip` instead stops RENDERING the handle element outright, which
+  // unmounts those same listeners along with it. Either way `gestureRef.current` is
+  // never cleared, and `onPointerDown`'s `if (!enabled || !e.isPrimary ||
+  // gestureRef.current) return;` then refuses every later drag — for the whole roster
+  // or strip, since this hook has one instance per caller — until a reload.
+  //
+  // Fixed at the SOURCE both call sites share: reset (and release pointer capture)
+  // here, in the hook itself, the moment `enabled` goes false — independent of whether
+  // the caller keeps the handle mounted-but-inert or unmounts it. A gesture can only
+  // exist here if it started while `enabled` was true (that is `onPointerDown`'s own
+  // gate), so no "was this a true→false transition" bookkeeping is needed: if `enabled`
+  // is false and a gesture is still recorded, it must have survived a flip.
+  useEffect(() => {
+    if (enabled) return;
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    gesture.captureTarget.releasePointerCapture?.(gesture.pointerId);
+    reset();
+  }, [enabled, reset]);
+
   const onPointerDown = useCallback(
     (combatantId: number, e: ReactPointerEvent<HTMLElement>) => {
       if (!enabled || !e.isPrimary || gestureRef.current) return;
@@ -162,5 +189,16 @@ export function useCombatantDragReorder<E extends HTMLElement = HTMLElement>({
     [onPointerDown, onPointerMove, onPointerUp, onPointerCancel],
   );
 
-  return { draggingId, overId: over?.id ?? null, overAfter: over?.after ?? false, handleProps };
+  // Issue #2084 finding 3: `handleProps` just above is properly memoized, but the WRAPPER
+  // object returning it was not — a fresh object literal every render gives
+  // `rosterDragReorder` a new identity every render, which invalidates
+  // `buildReorderControls`'s `useCallback` (it is in that hook's dependency array), which
+  // hands every roster row a brand-new `reorder` object, which defeats `CombatantRow`'s
+  // `React.memo` for the ENTIRE roster on every SSE tick, timer tick, and HP feedback
+  // event. `useMemo` here restores the boundary `handleProps`'s own memoization already
+  // intended.
+  return useMemo(
+    () => ({ draggingId, overId: over?.id ?? null, overAfter: over?.after ?? false, handleProps }),
+    [draggingId, over, handleProps],
+  );
 }

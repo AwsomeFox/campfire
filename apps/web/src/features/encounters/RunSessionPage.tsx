@@ -3622,7 +3622,16 @@ export default function RunSessionPage() {
   const rosterDragReorder = useCombatantDragReorder({
     axis: 'y',
     orderedIds: rosterOrderedIds,
-    enabled: canReorderCombatants,
+    // Issue #2084 finding 4: `reconcileBlocks`/`riskyBlocked` were already folded into
+    // `buildReorderControls`' `busy` below (issue #2074 review finding 3), which
+    // withholds `dragHandleProps` on the row — but withholding props off an ELEMENT
+    // THAT STAYS MOUNTED only drops the DOM listeners; it never told this hook a
+    // gesture already in flight had gone stale, so `gestureRef` stayed populated and
+    // every later drag on every row was refused until reload. Folding the same gate
+    // into `enabled` here lets the hook's own enabled-transition effect reset (and
+    // release pointer capture on) an in-progress gesture directly, independent of
+    // whatever the caller's props end up doing with `busy`.
+    enabled: canReorderCombatants && !reconcileBlocks && !riskyBlocked,
     elementsRef: combatantRowRefs,
     onDrop: handleReorderDrop,
   });
