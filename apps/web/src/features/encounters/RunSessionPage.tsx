@@ -39,7 +39,7 @@ import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
 import { FloatingNumbers } from './FloatingNumbers';
 import { diffHpFeedback, hpFeedbackSnapshot, sameHpFeedbackSnapshot, withOptimisticHpFeedbackTargets, type HpFeedbackEvent, type HpFeedbackSnapshot } from './hpFeedback';
 import { hasRestoredTrashedEncounter, isCurrentCombatantUndoEncounter, REMOVE_COMBATANT_CONFIRM_BODY } from './combatantLifecycle';
-import { isAdjacentDuplicateEncounterPatch, observedEncounterPatchRevision, preferNewerEncounterTurn, reconcileEncounterPatchResponse, rollbackEncounterPatchError, type QueuedEncounterPatch } from './encounterPatchQueue';
+import { isAdjacentDuplicateEncounterPatch, observedEncounterPatchRevision, preferNewerEncounterSnapshot, reconcileEncounterPatchResponse, rollbackEncounterPatchError, type QueuedEncounterPatch } from './encounterPatchQueue';
 import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
@@ -2450,7 +2450,7 @@ export default function RunSessionPage() {
     onSuccess: (data) => {
       queryClient.setQueryData(
         queryKeys.encounter(eid),
-        (current: EncounterWithCombatants | undefined) => preferNewerEncounterTurn(
+        (current: EncounterWithCombatants | undefined) => preferNewerEncounterSnapshot(
           current,
           reconcileEncounterPatchResponse(data, pendingEncounterPatches.current.values(), '', eid),
         ),

@@ -5,7 +5,7 @@ import { expect, test } from '@playwright/test';
 import {
   isAdjacentDuplicateEncounterPatch,
   observedEncounterPatchRevision,
-  preferNewerEncounterTurn,
+  preferNewerEncounterSnapshot,
   reconcileEncounterPatchResponse,
   rollbackEncounterPatchError,
   type QueuedEncounterPatch,
@@ -37,14 +37,16 @@ test.describe('encounterPatchQueue unit tests — rollbackEncounterPatchError', 
     expect(reconciled).toEqual({ id: 1, gridScale: 5, name: 'Boss Fight' });
   });
 
-  test('preferNewerEncounterTurn rejects an older keyed replay without blocking a current response', () => {
-    const cached = { id: 1, turnVersion: 12, currentCombatantId: 7 };
-    const replay = { id: 1, turnVersion: 11, currentCombatantId: 6 };
-    const current = { id: 1, turnVersion: 12, currentCombatantId: 8 };
+  test('preferNewerEncounterSnapshot rejects older keyed replays without blocking a current response', () => {
+    const cached = { id: 1, turnVersion: 12, updatedAt: '2026-08-08T12:00:02.000Z', currentCombatantId: 7, hp: 20 };
+    const olderTurnReplay = { id: 1, turnVersion: 11, updatedAt: '2026-08-08T12:00:01.000Z', currentCombatantId: 6, hp: 25 };
+    const olderSameTurnReplay = { id: 1, turnVersion: 12, updatedAt: '2026-08-08T12:00:01.000Z', currentCombatantId: 7, hp: 25 };
+    const current = { id: 1, turnVersion: 12, updatedAt: '2026-08-08T12:00:03.000Z', currentCombatantId: 8, hp: 20 };
 
-    expect(preferNewerEncounterTurn(cached, replay)).toBe(cached);
-    expect(preferNewerEncounterTurn(cached, current)).toBe(current);
-    expect(preferNewerEncounterTurn(undefined, replay)).toBe(replay);
+    expect(preferNewerEncounterSnapshot(cached, olderTurnReplay)).toBe(cached);
+    expect(preferNewerEncounterSnapshot(cached, olderSameTurnReplay)).toBe(cached);
+    expect(preferNewerEncounterSnapshot(cached, current)).toBe(current);
+    expect(preferNewerEncounterSnapshot(undefined, olderTurnReplay)).toBe(olderTurnReplay);
   });
 
   test('rollbackEncounterPatchError restores previous values when failed patch has no overriding pending patch', () => {

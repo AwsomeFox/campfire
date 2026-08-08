@@ -54,15 +54,18 @@ export function reconcileEncounterPatchResponse<T extends object>(
 
 /**
  * A keyed turn mutation may replay the original committed response after another
- * client has already advanced the cached encounter again. `turnVersion` is the
- * server-owned monotonic turn revision, so never replace a later cached turn with
- * an older replay while the settled refetch is still in flight.
+ * client has already changed the cached encounter again. `turnVersion` protects
+ * later turn advances; `updatedAt` protects newer same-turn writes such as HP,
+ * conditions, and token movement. Never replace either with an older replay while
+ * the settled refetch is still in flight.
  */
-export function preferNewerEncounterTurn<T extends { id: number; turnVersion: number }>(
+export function preferNewerEncounterSnapshot<T extends { id: number; turnVersion: number; updatedAt: string }>(
   current: T | undefined,
   updated: T,
 ): T {
-  if (current?.id === updated.id && current.turnVersion > updated.turnVersion) return current;
+  if (current?.id !== updated.id) return updated;
+  if (current.turnVersion > updated.turnVersion) return current;
+  if (current.turnVersion === updated.turnVersion && current.updatedAt > updated.updatedAt) return current;
   return updated;
 }
 
