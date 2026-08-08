@@ -24,12 +24,49 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(detectSseTurnBeat(initial, initial)).toBeNull();
   });
 
-  test('clears a previous encounter baseline and silently updates it from an encounter refetch', () => {
+  test('clears a previous encounter baseline on encounter switch, and only resyncs it from a REST refetch on load or reconnect (issue #2092)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = true;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
     expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
-    expect(source).toMatch(/if \(!encounter \|\| encounter\.id !== eid\) return;[\s\S]*previousTurnBeatRef\.current = \{/);
+    expect(source).toMatch(/if \(!encounter \|\| encounter\.id !== eid\) return;\s*if \(!awaitingTurnBeatResyncRef\.current\) return;\s*awaitingTurnBeatResyncRef\.current = false;[\s\S]*previousTurnBeatRef\.current = \{/);
     expect(source).not.toContain('previousTurnBeatRef.current?.encounterId === eid ||');
+  });
+
+  // Issue #2092: this REST-driven baseline resync used to re-run on EVERY `encounter`
+  // change, including the ordinary refetch that `encounter.updated` triggers alongside
+  // (and always before) the very `encounter.turn_changed` frame that updates the SAME ref
+  // directly. Whichever settled first won the race — a fast local GET could "catch up" to
+  // the new turn before the SSE frame's own handler ran, making `detectTurnBeat` see
+  // `previous === next` and silently drop the takeover/ticker beat. Gating the resync
+  // behind a one-shot ref (consumed on load, re-armed only by reconnect/stream-recovery)
+  // removes the race: an ordinary `encounter.updated`-triggered refetch no longer touches
+  // the baseline at all.
+  test('only re-arms the REST turn-beat baseline resync after a reconnect or stream recovery', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/const awaitingTurnBeatResyncRef = useRef\(true\);/);
+    const reconnectStart = source.indexOf('onReconnect: useCallback');
+    const reconnectBranch = source.slice(reconnectStart, source.indexOf('onStreamRecovery: useCallback', reconnectStart));
+    expect(reconnectBranch).toContain('awaitingTurnBeatResyncRef.current = true;');
+    const recoveryStart = source.indexOf('onStreamRecovery: useCallback');
+    const recoveryBranch = source.slice(recoveryStart, source.indexOf('onStatusChange: useCallback', recoveryStart));
+    expect(recoveryBranch).toContain('awaitingTurnBeatResyncRef.current = true;');
+  });
+
+  // Issue #2092: the Next Turn button re-enables (`headerBusy` tracks only
+  // `nextTurnMut.isPending`) the instant the mutation's own POST resolves — well before
+  // `onSettled`'s invalidate-triggered GET has round-tripped. A second next-turn click in
+  // that window built `expectedCurrentCombatantId` from the still-stale cached
+  // `encounter.currentCombatantId`, so the server's own CAS guard rejected the DM's own very
+  // next legitimate click with 409 TURN_ALREADY_ADVANCED — no `encounter.turn_changed` frame
+  // was ever emitted for the rejected click, which is what actually made the OTHER client's
+  // takeover/ticker look like it "never updated". The mutation response IS the advanced
+  // encounter (same shape as GET) — seed the cache with it synchronously in `onSuccess`.
+  test('seeds the encounter cache with the next-turn response before the button can re-fire (issue #2092)', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const nextTurnMutStart = source.indexOf('const nextTurnMut = useKeyedMutation({');
+    const nextTurnMutBody = source.slice(nextTurnMutStart, source.indexOf('const undoTurnMut', nextTurnMutStart));
+    expect(nextTurnMutBody).toMatch(/api\.post<EncounterWithCombatants>\(`\$\{API\}\/encounters\/\$\{eid\}\/next-turn`/);
+    expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*queryClient\.setQueryData\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) =>\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\) \?\? current,\s*\);\s*\},/);
   });
 
   test('emits an undo edge after a silent refetch baseline advances past a missed frame', () => {

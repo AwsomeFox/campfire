@@ -1388,6 +1388,17 @@ export default function RunSessionPage() {
   const [characterOwnershipRefreshPending, setCharacterOwnershipRefreshPending] = useState(false);
   const turnBeatSequence = useRef(0);
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
+  // One-shot gate for (re)deriving `previousTurnBeatRef` from the REST-fetched
+  // `encounter` row (issue #2092). Starts true so the first load of an encounter
+  // establishes a silent baseline; the reconnect/stream-recovery handlers below
+  // flip it true again to catch up on frames the stream may have missed while
+  // down. It must NOT stay true across an ordinary `encounter.updated`-triggered
+  // refetch: that refetch is paired with (and always precedes) the very
+  // `encounter.turn_changed` frame that updates this same ref directly, and racing
+  // the two — whichever settles first wins — let the REST resync silently
+  // "catch up" to the new turn before its own SSE handler ran, making the edge
+  // look like a no-op and dropping the takeover/ticker beat.
+  const awaitingTurnBeatResyncRef = useRef(true);
   const turnPulseTimerRef = useRef<number | null>(null);
   const ownedTurnFeedbackRef = useRef<number | null>(null);
   // A character.updated frame invalidates the ownership map, but React Query
@@ -1446,6 +1457,7 @@ export default function RunSessionPage() {
 
   useEffect(() => {
     previousTurnBeatRef.current = null;
+    awaitingTurnBeatResyncRef.current = true;
     ownedTurnFeedbackRef.current = null;
     setTurnOwnerFromEvent(null);
     setTurnOwnerPendingCombatantId(null);
@@ -1455,10 +1467,16 @@ export default function RunSessionPage() {
   }, [eid]);
 
   // A loaded encounter is a silent baseline. This prevents opening an already
-  // running encounter (or any ordinary refetch) from replaying a turn-start beat,
-  // while keeping the baseline current if the stream missed an intervening edge.
+  // running encounter from replaying a turn-start beat, and (via
+  // `awaitingTurnBeatResyncRef`, set by the reconnect/stream-recovery handlers
+  // below) keeps the baseline current if the stream missed an intervening edge.
+  // It deliberately does NOT re-run on every ordinary `encounter` refetch — see
+  // the ref's own comment for why that used to race the paired SSE turn edge
+  // (issue #2092).
   useEffect(() => {
     if (!encounter || encounter.id !== eid) return;
+    if (!awaitingTurnBeatResyncRef.current) return;
+    awaitingTurnBeatResyncRef.current = false;
     const current = encounter.currentCombatantId == null
       ? undefined
       : encounter.combatants.find((combatant) => combatant.id === encounter.currentCombatantId);
@@ -1863,6 +1881,11 @@ export default function RunSessionPage() {
       // turn, so without this the controls stay wrongly enabled (or wrongly gated) until
       // useTableSafety's 20s poll happens to land.
       invalidateTableSafety(queryClient, cid);
+      // Issue #2092: a dropped connection may have swallowed an `encounter.turn_changed`
+      // frame outright — re-arm the REST turn-beat baseline resync (see
+      // `awaitingTurnBeatResyncRef`'s own comment) so the catch-up encounter read above
+      // re-derives it.
+      awaitingTurnBeatResyncRef.current = true;
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -1872,6 +1895,7 @@ export default function RunSessionPage() {
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
       invalidateTableSafety(queryClient, cid);
+      awaitingTurnBeatResyncRef.current = true; // issue #2092 — see onReconnect above.
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
@@ -2391,8 +2415,29 @@ export default function RunSessionPage() {
     }: {
       expectedCurrentCombatantId: number | null;
       idempotencyKey: string;
-    }) => api.post(`${API}/encounters/${eid}/next-turn`, { expectedCurrentCombatantId, idempotencyKey }),
+    }) => api.post<EncounterWithCombatants>(`${API}/encounters/${eid}/next-turn`, { expectedCurrentCombatantId, idempotencyKey }),
     onMutate: () => setActionError(null),
+    // Issue #2092: `headerBusy` (gating the Next Turn button) tracks only
+    // `nextTurnMut.isPending`, which clears the instant this POST resolves — well
+    // before `onSettled`'s invalidate-triggered GET has round-tripped. A DM who
+    // clicks Next Turn again inside that window (a real 580ms-apart double-click,
+    // or this issue's own two-context e2e spec) built its `expectedCurrentCombatantId`
+    // from the STILL-STALE cached `encounter.currentCombatantId`, so the server's own
+    // CAS guard rejected the DM's own very next legitimate click with 409
+    // TURN_ALREADY_ADVANCED — the turn never actually advanced a second time, so no
+    // `encounter.turn_changed` frame was ever emitted for it (the failure then SHOWS UP
+    // as "the other client's takeover/ticker never updated", but that client had nothing
+    // to receive). The response body IS the advanced encounter (same shape as GET) —
+    // seed the cache with it immediately, through the same optimistic-patch
+    // reconciliation the regular GET applies, so the next click already sees the turn
+    // that just committed.
+    onSuccess: (data) => {
+      queryClient.setQueryData(
+        queryKeys.encounter(eid),
+        (current: EncounterWithCombatants | undefined) =>
+          reconcileEncounterPatchResponse(data, pendingEncounterPatches.current.values(), '', eid) ?? current,
+      );
+    },
     onError: (err) => {
       if (isAmbiguousOutcome(err)) enterReconciling();
       else reportTurnAdvanceError(err);
