@@ -10,7 +10,7 @@ import { api, API, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Btn, ErrorNote, Skeleton } from '../../components/ui';
-import { AddItemForm, CompendiumItemPickerModal, ItemSection } from '../inventory/inventoryShared';
+import { AddItemForm, CompendiumItemPickerModal, ItemSection, type InventoryItemChange } from '../inventory/inventoryShared';
 
 export function CharacterInventorySection({
   campaignId,
@@ -62,6 +62,27 @@ export function CharacterInventorySection({
   useEffect(() => {
     void load();
   }, [load]);
+
+  /**
+   * Apply what the mutation itself reported, then reconcile with a refetch.
+   *
+   * The refetch alone was not enough: `load()` keeps the previous `items` when its GET
+   * fails, so a successful equip with a failed refresh never reached the sheet — Build
+   * showed the item unequipped (from the card's own state) while Play still offered its
+   * action as rollable. The write's own response cannot go stale that way.
+   */
+  const applyChange = useCallback(
+    (change?: InventoryItemChange) => {
+      if (change && 'updated' in change) {
+        const next = change.updated;
+        setItems((prev) => (prev.some((i) => i.id === next.id) ? prev.map((i) => (i.id === next.id ? next : i)) : [...prev, next]));
+      } else if (change && 'deletedId' in change) {
+        setItems((prev) => prev.filter((i) => i.id !== change.deletedId));
+      }
+      void load();
+    },
+    [load],
+  );
 
   const ownsCharacter = useCallback(
     (characterId: number | null) => {
@@ -167,7 +188,7 @@ export function CharacterInventorySection({
               characters={characters}
               writableOwners={writableOwners}
               canEditItem={canEditItem}
-              onChanged={() => void load()}
+              onChanged={applyChange}
               partyStashTitle={character.name}
               embedded
             />

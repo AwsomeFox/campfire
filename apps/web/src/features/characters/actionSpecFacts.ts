@@ -187,7 +187,14 @@ function branchLines(branch: {
   if (branch.tempHp.trim()) lines.push(`${branch.tempHp.trim()} temporary hit points`);
 
   for (const effect of branch.effects ?? []) {
-    const name = effect.text || effect.condition;
+    // `text` and `condition` are INDEPENDENT: the resolver applies the condition whether or
+    // not prose was written, so "Knocked off balance" must not swallow the fact that the
+    // target is Prone. Prose leads; the vocabulary name follows it when it adds anything.
+    const prose = effect.text.trim();
+    const condition = effect.condition.trim();
+    const name = prose && condition && prose.toLowerCase() !== condition.toLowerCase()
+      ? `${prose} (${condition})`
+      : prose || condition;
     const rounds = effect.rounds != null ? ` (${effect.rounds} round${effect.rounds === 1 ? '' : 's'})` : '';
     const ends = effect.saveEnds ? ', save ends' : '';
     const ongoing = effect.ongoingDamage > 0 ? `${effect.ongoingDamage} ongoing damage` : '';

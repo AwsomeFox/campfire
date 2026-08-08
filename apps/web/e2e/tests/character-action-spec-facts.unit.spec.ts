@@ -203,6 +203,29 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     ]);
   });
 
+  /**
+   * `text` and `condition` are independent fields — the resolver applies the condition
+   * regardless of the prose — so picking one dropped a real mechanical consequence.
+   */
+  test('prose and the condition it applies are both shown', () => {
+    const spec = ActionSpec.parse({
+      outcomes: { hit: { effects: [{ text: 'Knocked off balance', condition: 'Prone' }] } },
+    });
+    expect(actionSpecEffects(spec)[0].lines).toEqual(['Knocked off balance (Prone)']);
+  });
+
+  test('prose that merely restates the condition is not doubled up', () => {
+    const spec = ActionSpec.parse({ outcomes: { hit: { effects: [{ text: 'Prone', condition: 'prone' }] } } });
+    expect(actionSpecEffects(spec)[0].lines).toEqual(['Prone']);
+  });
+
+  test('either field alone still reads', () => {
+    expect(actionSpecEffects(ActionSpec.parse({ outcomes: { hit: { effects: [{ condition: 'Blinded' }] } } }))[0].lines)
+      .toEqual(['Blinded']);
+    expect(actionSpecEffects(ActionSpec.parse({ outcomes: { hit: { effects: [{ text: 'Pushed 10 feet' }] } } }))[0].lines)
+      .toEqual(['Pushed 10 feet']);
+  });
+
   test('ongoing damage rides with the condition it belongs to', () => {
     const spec = ActionSpec.parse({
       outcomes: { hit: { effects: [{ condition: 'Burning', rounds: 3, ongoingDamage: 5 }] } },

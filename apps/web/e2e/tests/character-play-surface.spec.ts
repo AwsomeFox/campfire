@@ -104,12 +104,13 @@ test.describe('character sheet play surface', () => {
     expect(characterRes.ok()).toBeTruthy();
     const characterId = (await characterRes.json()).id as number;
 
+    let itemId: number | null = null;
     try {
       const itemRes = await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
         data: { name: 'Flame Tongue Shortsword', qty: 1, ownerType: 'character', characterId },
       });
       expect(itemRes.ok()).toBeTruthy();
-      const itemId = (await itemRes.json()).id as number;
+      itemId = (await itemRes.json()).id as number;
       const equipped = await ctx.patch(`/api/v1/inventory/${itemId}`, {
         data: {
           equipped: true,
@@ -140,6 +141,9 @@ test.describe('character sheet play surface', () => {
       await expect(gear.getByText('Equip Flame Tongue Shortsword to use this action.')).toBeVisible();
       await expect(gear.getByRole('button', { name: /to hit \+6/ })).toHaveCount(0);
     } finally {
+      // Character delete is a SOFT delete, so its pack survives — remove the item too, or
+      // the shared campaign accumulates "Unassigned" stock the party specs then see.
+      if (itemId != null) await ctx.delete(`/api/v1/inventory/${itemId}`);
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();
     }
@@ -287,8 +291,9 @@ test.describe('character sheet play surface', () => {
       data: { name: 'Carries A Torch', className: 'Rogue', level: 2 },
     })).json()).id as number;
 
+    let itemId: number | null = null;
     try {
-      const itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+      itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
         data: { name: 'Everburning Torch', qty: 1, ownerType: 'character', characterId },
       })).json()).id as number;
       await ctx.patch(`/api/v1/inventory/${itemId}`, {
@@ -304,6 +309,9 @@ test.describe('character sheet play surface', () => {
       await expect(gear.getByText('Torch Jab')).toBeVisible();
       await expect(gear.getByText('5 fire (flat)')).toBeVisible();
     } finally {
+      // Character delete is a SOFT delete, so its pack survives — remove the item too, or
+      // the shared campaign accumulates "Unassigned" stock the party specs then see.
+      if (itemId != null) await ctx.delete(`/api/v1/inventory/${itemId}`);
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();
     }
@@ -377,8 +385,9 @@ test.describe('character sheet play surface', () => {
       data: { name: 'Gear Only Attacker', className: 'Fighter', level: 3 },
     })).json()).id as number;
 
+    let itemId: number | null = null;
     try {
-      const itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+      itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
         data: { name: 'Loaned Warhammer', qty: 1, ownerType: 'character', characterId },
       })).json()).id as number;
       await ctx.patch(`/api/v1/inventory/${itemId}`, {
@@ -417,6 +426,7 @@ test.describe('character sheet play surface', () => {
       // The chooser keeps its selection — the override was for that one roll only.
       await expect(chooser.getByRole('radio', { name: /Advantage/ })).toHaveAttribute('aria-checked', 'true');
     } finally {
+      if (itemId != null) await ctx.delete(`/api/v1/inventory/${itemId}`);
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();
     }
@@ -540,6 +550,64 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): the sheet learns the pack from the inventory
+   * section, which used to republish only after a refetch. A successful unequip whose
+   * follow-up GET failed therefore left Build showing the item stowed while Play still
+   * offered its action as rollable.
+   */
+  test('an unequip still reaches Play when the inventory refetch fails', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Unequips Offline', className: 'Fighter', level: 3 },
+    })).json()).id as number;
+
+    let itemId: number | null = null;
+    try {
+      itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+        data: { name: 'Frost Brand', qty: 1, ownerType: 'character', characterId },
+      })).json()).id as number;
+      await ctx.patch(`/api/v1/inventory/${itemId}`, {
+        data: {
+          equipped: true,
+          equipSlot: 'main hand',
+          equippedAction: { name: 'Frost Brand Strike', kind: 'melee', toHit: '+6', damage: '1d8+2', targetAc: '', notes: '' },
+        },
+      });
+
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=play`);
+      const gear = page.getByTestId('character-granted-actions');
+      await expect(gear.getByRole('button', { name: /to hit \+6/ })).toBeVisible();
+
+      // Every inventory refetch from here on fails; the PATCH itself still succeeds.
+      let unequipped = false;
+      await page.route(`**/api/v1/campaigns/${campaignId}/inventory`, async (route) => {
+        if (route.request().method() === 'GET' && unequipped) return route.abort('failed');
+        return route.fallback();
+      });
+      await page.route(`**/api/v1/inventory/${itemId}`, async (route) => {
+        if (route.request().method() === 'PATCH') unequipped = true;
+        return route.fallback();
+      });
+
+      await page.getByRole('tab', { name: /Build & profile/ }).click();
+      await page.getByTestId('character-inventory').getByRole('button', { name: 'Unequip Frost Brand' }).click();
+
+      // The write's own response must carry the change through, refetch or no refetch.
+      await page.getByRole('tab', { name: /^Play/ }).click();
+      await expect(gear.getByText('Equip Frost Brand to use this action.')).toBeVisible();
+      await expect(gear.getByRole('button', { name: /to hit \+6/ })).toHaveCount(0);
+    } finally {
+      // Character delete is a SOFT delete, so its pack survives — remove the item too, or
+      // the shared campaign accumulates "Unassigned" stock the party specs then see.
+      if (itemId != null) await ctx.delete(`/api/v1/inventory/${itemId}`);
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Copilot review on #2115): the sheet used to fetch the campaign inventory
    * a second time to derive gear actions, duplicating the read the embedded inventory
    * section already makes on mount. One reader, one source.
@@ -574,8 +642,9 @@ test.describe('character sheet play surface', () => {
       data: { name: 'Carries Nothing', className: 'Monk', level: 2 },
     })).json()).id as number;
 
+    let itemId: number | null = null;
     try {
-      const itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+      itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
         data: { name: 'Borrowed Glaive', qty: 1, ownerType: 'character', characterId: armed },
       })).json()).id as number;
       await ctx.patch(`/api/v1/inventory/${itemId}`, {
@@ -596,6 +665,7 @@ test.describe('character sheet play surface', () => {
       await expect(page.getByText('Glaive Sweep')).toHaveCount(0);
       await expect(page.getByTestId('character-granted-actions')).toHaveCount(0);
     } finally {
+      if (itemId != null) await ctx.delete(`/api/v1/inventory/${itemId}`);
       await ctx.delete(`/api/v1/characters/${armed}`);
       await ctx.delete(`/api/v1/characters/${empty}`);
       await ctx.dispose();
@@ -618,11 +688,12 @@ test.describe('character sheet play surface', () => {
     expect(characterRes.ok()).toBeTruthy();
     const characterId = (await characterRes.json()).id as number;
 
+    let itemId: number | null = null;
     try {
       const itemRes = await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
         data: { name: 'Sunblade', qty: 1, ownerType: 'character', characterId },
       });
-      const itemId = (await itemRes.json()).id as number;
+      itemId = (await itemRes.json()).id as number;
       const equipped = await ctx.patch(`/api/v1/inventory/${itemId}`, {
         data: {
           equipped: true,
@@ -646,6 +717,9 @@ test.describe('character sheet play surface', () => {
       await expect(gear.getByText('Equip Sunblade to use this action.')).toBeVisible();
       await expect(gear.getByRole('button', { name: /to hit \+7/ })).toHaveCount(0);
     } finally {
+      // Character delete is a SOFT delete, so its pack survives — remove the item too, or
+      // the shared campaign accumulates "Unassigned" stock the party specs then see.
+      if (itemId != null) await ctx.delete(`/api/v1/inventory/${itemId}`);
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();
     }

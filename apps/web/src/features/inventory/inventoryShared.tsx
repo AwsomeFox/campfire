@@ -39,6 +39,16 @@ export function newIdempotencyKey(): string {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * What a mutation actually did, handed to `onChanged` so a caller does not have to refetch
+ * to learn it. A caller that only refetches may ignore it entirely.
+ *
+ * Without this, a successful equip whose follow-up GET failed left every other view of the
+ * item stale — the card showed the new state from its own `committed`, while a parent that
+ * derives from the fetched list kept the old one (Codex review on #2115).
+ */
+export type InventoryItemChange = { readonly updated: InventoryItem } | { readonly deletedId: number };
+
 export function ItemSection({
   title,
   icon,
@@ -56,7 +66,7 @@ export function ItemSection({
   characters: Pick<PartyCharacter, 'id' | 'name'>[];
   writableOwners: Character[];
   canEditItem: (item: InventoryItem) => boolean;
-  onChanged: () => void;
+  onChanged: (change?: InventoryItemChange) => void;
   partyStashTitle: string;
   /** When true, omit the outer Card wrapper (embedded in another card). */
   embedded?: boolean;
@@ -103,7 +113,7 @@ export function ItemRow({
   editable: boolean;
   characters: Pick<PartyCharacter, 'id' | 'name'>[];
   writableOwners: Character[];
-  onChanged: () => void;
+  onChanged: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -141,7 +151,7 @@ export function ItemRow({
       setCommitted(updated);
       setSlotConflict(null);
       setEquipOpen(false);
-      onChanged();
+      onChanged({ updated });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
         setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? trimmed });
@@ -198,7 +208,7 @@ export function ItemRow({
       setCommitted(updated);
       setSlotConflict(null);
       setEquipOpen(false);
-      onChanged();
+      onChanged({ updated });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
         setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? slotConflict.slot });
@@ -216,7 +226,7 @@ export function ItemRow({
     try {
       const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, { equipped: false });
       setCommitted(updated);
-      onChanged();
+      onChanged({ updated });
     } catch (err) {
       setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
     } finally {
@@ -230,7 +240,7 @@ export function ItemRow({
     try {
       const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, body);
       setCommitted(updated);
-      onChanged();
+      onChanged({ updated });
       return updated;
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
@@ -253,7 +263,7 @@ export function ItemRow({
     setError(null);
     try {
       await api.delete(`${API}/inventory/${committed.id}`);
-      onChanged();
+      onChanged({ deletedId: committed.id });
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.deleteItem' }));
     } finally {
@@ -265,7 +275,7 @@ export function ItemRow({
     setBusy(true); setError(null);
     try {
       const updated = await api.post<InventoryItem>(`${API}/inventory/${committed.id}/compendium/${action}`);
-      setCommitted(updated); onChanged();
+      setCommitted(updated); onChanged({ updated });
     } catch (err) { setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' })); }
     finally { setBusy(false); }
   }
