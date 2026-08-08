@@ -4503,7 +4503,14 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
   it('hides a hidden encounter\'s death save from a non-DM (404) — the player-side restriction', async () => {
     const server = ctx.app.getHttpServer();
     await setDying();
-    const beforeRolls = await deathSaveRolls();
+    // Baseline as the DM, matching the actor the post-attempt assertion queries as. The
+    // `deathSaveRolls()` helper reads as `player`, and comparing a player-derived count
+    // against a DM-derived one silently undercounts the moment any death-save roll is
+    // DM-visible and player-invisible — which, since #2090 tags hidden-encounter rolls with
+    // `encounterId`, is now a state this very suite produces.
+    const beforeRolls = (
+      await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)
+    ).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save');
     expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: true })).status).toBe(200);
     const viewerAttempt = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
@@ -4640,11 +4647,63 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       expect(
         (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
       ).toHaveLength(beforeRolls.length + 1);
+
+      // ...and a non-DM must NOT see it. The dice log is campaign-wide, so permitting this
+      // roll (issue #2090) newly created a way for a hidden fight to announce itself: the row
+      // is labelled with the character's name and carries the death-save result. Asserting
+      // only the DM's feed above would pass whether or not the row leaked — this is the
+      // assertion that distinguishes them, and without `encounterId` on the recorded roll it
+      // fails with the viewer seeing exactly one "Nyx · death save".
+      expect(
+        (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(viewer)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
+      ).toHaveLength(0);
+    } finally {
+      // Unhide and heal in `finally`: an assertion failure above must not strand a hidden
+      // encounter and a dying combatant for every spec that follows.
+      rollSpy.mockRestore();
+      expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false })).status).toBe(200);
+      await setConscious();
+    }
+  });
+
+  it('reveals the DM\'s hidden-encounter death save to players once the encounter is unhidden', async () => {
+    // The companion to the assertion above: `encounterId` on the roll makes the dice log
+    // filter it at READ time, not drop it at write time. So the evidence still exists and
+    // reappears for everyone the moment the DM reveals the fight — which is the behaviour
+    // that distinguishes "tagged and filtered" from "never recorded", and the reason death
+    // saves tag the row instead of skipping the write the way the initiative paths do.
+    const server = ctx.app.getHttpServer();
+    await setDying();
+    // Baseline BEFORE hiding, deliberately. Read-time filtering means hiding the encounter
+    // also conceals every earlier encounter-tagged death save — including the one the
+    // preceding spec committed — so a baseline taken while hidden undercounts, and the
+    // reveal below then surfaces those older rolls too and the delta is not 1. Taking it
+    // while the encounter is visible makes this assertion independent of how many
+    // hidden-encounter rolls happen to precede it.
+    const beforeViewer = (
+      await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(viewer)
+    ).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save').length;
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: true })).status).toBe(200);
+    const service = ctx.app.get(EncountersService);
+    const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    try {
+      expect(
+        (
+          await request(server)
+            .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
+            .set(dm)
+            .send({ idempotencyKey: 'hidden-death-save-then-reveal' })
+        ).status,
+      ).toBe(201);
+      expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false })).status).toBe(200);
+      expect(
+        (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(viewer)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
+      ).toHaveLength(beforeViewer + 1);
     } finally {
       rollSpy.mockRestore();
+      await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false });
+      await setConscious();
     }
-    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false })).status).toBe(200);
-    await setConscious();
   });
 
   it('rolls back every death-save event with its keyed outcome, then writes one death and roll event on retry', async () => {

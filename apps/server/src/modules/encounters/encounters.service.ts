@@ -4632,6 +4632,23 @@ export class EncountersService {
             }
             const result = this.rollDeathSaveD20();
             result.label = `${fresh.name} · death save`;
+            // Issue #1904 secrecy, reachable for the first time via #2090: the dice log is
+            // campaign-wide, and this row is labelled with the character's name. Until #2090
+            // the DM could not roll here at all while the encounter was hidden, so the
+            // missing tag below was masked by a 403; allowing the roll without it published
+            // the name, the death-save result, and the existence of a hidden fight to every
+            // campaign member.
+            //
+            // Both sibling paths — the bulk roll and the per-combatant initiative roll —
+            // already carry this rule, guarding their dice-log write with `if (!fresh.hidden)`
+            // and passing `encounterId`. Death saves cannot simply skip the write the way
+            // those do: #1462 makes the dice row part of the authoritative outcome, committed
+            // or rolled back with the combatant state, and `rollDeathSave` returns that roll
+            // to its caller. So tag it and let `RollsService.listForCampaign`'s read-time
+            // filter drop it for non-DMs. Tagging is also the stronger mechanism: it keeps
+            // covering the row when an encounter is hidden AFTER the roll was persisted,
+            // which a write-time check cannot.
+            result.encounterId = encounterId;
             roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
             // `updateCombatant` applies this server-only face after the hook returns.
             deathSavePatch.deathSaveRoll = result.total;
