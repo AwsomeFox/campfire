@@ -712,6 +712,13 @@ export class InventoryService {
     // is never redaction-checked), and only at equip time is the wielder — and therefore the
     // ability modifiers the attack depends on — known at all.
     //
+    // Review (chatgpt-codex-connector P2): a `derived` action is REGENERATED on a later
+    // equip, not preserved. It is a snapshot of the wielder's ability modifier and
+    // proficiency at the moment it was built, so a character who levels up (or whose STR
+    // changes) would otherwise keep attacking with the old numbers forever — the derivation
+    // is only honest if it tracks the character it was derived from. `manual` is what stays
+    // untouched; that is the promise, and it is the one the editor depends on.
+    //
     // `moved` counts as "no action yet" even when the row currently has one: the
     // ownership-change rule (see CLEARED_EQUIP_STATE) discards the old owner's action
     // unconditionally, because it was private to them. Once it is gone there is nothing to
@@ -740,7 +747,11 @@ export class InventoryService {
         : '';
 
     const derivedOnEquip =
-      equipWillChange && nextEquipped && finalOwnerType === 'character' && input.equippedAction === undefined && (moved || !existing.equippedAction)
+      equipWillChange &&
+      nextEquipped &&
+      finalOwnerType === 'character' &&
+      input.equippedAction === undefined &&
+      (moved || !existing.equippedAction || existing.equippedActionSource === EquippedActionSource.enum.derived)
         ? await this.deriveActionForEquip(existing, finalCharacterId as number)
         : null;
 
@@ -886,16 +897,22 @@ export class InventoryService {
           // 'manual' and derivation will never regenerate over it again — that promise is
           // what makes the editor safe to use. Clearing the action clears the provenance
           // with it (nothing left to describe), which also re-opens the row to derivation:
-          // "delete the action, re-equip" is the deliberate way back to a fresh derivation.
+          // "delete the action, re-equip" is the deliberate way back to a fresh derivation —
+          // and since #2097's review round 3 it is only needed for a MANUAL action, because a
+          // `derived` one regenerates on the next equip on its own.
           update.equippedActionSource = input.equippedAction ? EquippedActionSource.enum.manual : null;
-        } else if (derivedOnEquip && (moved || !fresh.equippedAction)) {
+        } else if (
+          derivedOnEquip &&
+          (moved || !fresh.equippedAction || fresh.equippedActionSource === EquippedActionSource.enum.derived)
+        ) {
           // Review (chatgpt-codex-connector P2) — time-of-check/time-of-use, the same class of
           // race this transaction already re-validates authorization against. `derivedOnEquip`
           // was computed BEFORE the transaction opened (it awaits; better-sqlite3 transactions
           // must be synchronous), reading an action-less row. If a concurrent request authored
           // a manual action in that window, writing the derived one here would overwrite it —
           // breaking the one guarantee that makes the editor worth using. Re-checked against
-          // `fresh`, the row as it exists inside this transaction.
+          // `fresh`, the row as it exists inside this transaction — which still allows
+          // regenerating a `derived` action, since only `manual` is protected.
           //
           // `moved` is exempt because the ownership-change rule discards the old owner's
           // action in this very write regardless of who authored it, so there is nothing left

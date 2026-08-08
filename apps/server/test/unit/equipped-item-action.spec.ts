@@ -117,6 +117,33 @@ describe('deriveEquippedItemAction (#2097)', () => {
       expect(action!.damage).not.toContain('1d4+0');
     });
 
+    it("folds a weapon's own flat modifier into the ability modifier, not after it", () => {
+      // Review (chatgpt-codex-connector P2): a homebrew `1d8+1` plus a +3 wielder must be
+      // `1d8+4`, not `1d8+1+3`. `damagePartsFrom` only splits ONE modifier, so the compound
+      // string would land whole in `formula` with `flat: 0` — and 5e's double-dice crit rule
+      // would then roll both flats twice instead of adding them once.
+      const action = deriveEquippedItemAction({
+        itemName: 'Homebrew Blade +1',
+        data: open5eWeapon({ damageDice: '1d8+1', damageType: 'Slashing' }),
+        character: fighter,
+        adapter: dnd5e,
+      })!;
+      expect(action.spec?.outcomes?.hit?.damage?.[0]).toMatchObject({ formula: '1d8', flat: 4, type: 'slashing' });
+      expect(action.damage).toContain('1d8+4');
+      expect(action.damage).not.toContain('1d8+1+3');
+    });
+
+    it("cancels a weapon's penalty against the wielder's bonus", () => {
+      const action = deriveEquippedItemAction({
+        itemName: 'Cursed Blade',
+        data: open5eWeapon({ damageDice: '1d8-3', damageType: 'Slashing' }),
+        character: fighter, // STR +3
+        adapter: dnd5e,
+      })!;
+      // Net zero — the modifier drops out of the expression entirely.
+      expect(action.spec?.outcomes?.hit?.damage?.[0]).toMatchObject({ formula: '1d8', flat: 0 });
+    });
+
     it('keeps a negative modifier out of the dice formula so a crit cannot double it', () => {
       const action = deriveEquippedItemAction({
         itemName: 'Greatclub',

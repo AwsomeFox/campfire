@@ -295,6 +295,45 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(restored.body.equippedActionSource).toBeNull();
   });
 
+  it('a derived action is regenerated when the wielder changes, but a manual one never is', async () => {
+    const server = ctx.app.getHttpServer();
+    // A character of their own, so levelling them cannot disturb the shared fixture.
+    const grower = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Growing Fighter', level: 4, stats: { STR: 16, DEX: 12 } });
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: grower.body.id, duplicateMode: 'separate' });
+    const itemId = acquired.body.id;
+
+    // Level 4: STR +3, proficiency +2.
+    const first = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
+    expect(first.body.equippedAction.toHit).toBe('+5');
+
+    // Level 5 crosses a proficiency step, and the derivation is a snapshot of the wielder at
+    // the moment it was built — so leaving it alone would keep the character attacking with
+    // level-4 numbers forever.
+    const levelled = await request(server).patch(`/api/v1/characters/${grower.body.id}`).set(dm).send({ level: 5 });
+    expect(levelled.status).toBe(200);
+    expect(levelled.body.level).toBe(5);
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+    const regenerated = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
+    expect(regenerated.body.equippedActionSource).toBe('derived');
+    expect(regenerated.body.equippedAction.toHit).toBe('+6');
+
+    // A manual action is still never regenerated — that promise is what the editor rests on.
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'My Sword', kind: 'melee', toHit: '+2', damage: '1d8+1 slashing', targetAc: '', notes: '' } });
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+    const afterManual = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
+    expect(afterManual.body.equippedActionSource).toBe('manual');
+    expect(afterManual.body.equippedAction.toHit).toBe('+2');
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

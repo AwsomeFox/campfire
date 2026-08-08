@@ -234,10 +234,31 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
     const prof = proficiencyBonus(character.level);
     const toHit = abilityMod + prof;
 
+    // Review (chatgpt-codex-connector P2): a weapon whose accepted dice ALREADY carry a flat
+    // modifier — a homebrew `1d8+1` — must have it folded into the ability modifier, not
+    // appended after it. `1d8+1+3` is a shape `damagePartsFrom` cannot split (it separates a
+    // single modifier), so the whole string lands in `DamagePart.formula` with `flat: 0`, and
+    // 5e's double-dice critical rule then re-rolls both flats instead of adding them once.
+    // One combined modifier keeps the dice/flat split the resolver's crit maths depends on.
+    const diceMatch = profile.damageDice.replace(/\s+/g, '').match(/^(\d+d\d+)(?:([+-])(\d+))?$/i);
+    if (!diceMatch) {
+      return textOnlyAction(name, 'Equipped weapon — its damage could not be read; fill it in.', profile.damageDice);
+    }
+    const baseDice = diceMatch[1];
+    const weaponFlat = diceMatch[2] ? (diceMatch[2] === '-' ? -1 : 1) * Number(diceMatch[3]) : 0;
+    const totalFlat = weaponFlat + abilityMod;
     const damageExpression =
-      abilityMod === 0
-        ? profile.damageDice
-        : `${profile.damageDice}${abilityMod > 0 ? '+' : '-'}${Math.abs(abilityMod)}`;
+      totalFlat === 0 ? baseDice : `${baseDice}${totalFlat > 0 ? '+' : '-'}${Math.abs(totalFlat)}`;
+    // Combining can push the modifier past what the roller accepts even though each half was
+    // fine on its own — text-only rather than a spec that throws at the table.
+    if (!isRollableDamageExpression(damageExpression)) {
+      const known = [profile.damageDice, profile.damageType.toLowerCase()].filter(Boolean).join(' ');
+      return textOnlyAction(
+        name,
+        `Equipped weapon — ${known}. Its damage plus this character's modifier is outside the rollable range; check it.`,
+        known,
+      );
+    }
 
     const signed = (n: number) => `${n >= 0 ? '+' : '-'}${Math.abs(n)}`;
     return expandRawStatblockAction(
