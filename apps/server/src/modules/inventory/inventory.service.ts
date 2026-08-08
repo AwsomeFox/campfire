@@ -5,6 +5,7 @@ import { CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemA
 import type { HomebrewMechanicsProfile, RuleSystemAdapter, Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { fromJsonText } from '../../common/json';
+import { resolveEquippedActionWrite, shouldDeriveEquippedAction, type ActionProvenance } from './equipped-action-decision';
 import { campaigns, inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
 import { buildCompendiumRef, buildCompendiumSnapshot, compendiumRefKey, computeRuleEntryContentHash } from '../campaigns/compendium-import';
 import { nowIso } from '../../common/time';
@@ -656,6 +657,9 @@ export class InventoryService {
             derivedFromSnapshot === null
               ? isNull(inventoryItems.compendiumSnapshot)
               : eq(inventoryItems.compendiumSnapshot, derivedFromSnapshot),
+            // …and the same name the action was titled with, so a concurrent rename's own
+            // regeneration is not overwritten by one carrying the old name.
+            eq(inventoryItems.name, row.name),
             // …and the wielder must still be the one the math was computed from. Expressed as
             // a subquery so it is evaluated by the UPDATE itself rather than in a separate
             // read that could go stale between the check and the write.
@@ -878,11 +882,18 @@ export class InventoryService {
       existing.equipped &&
       existing.equippedActionSource === EquippedActionSource.enum.derived;
 
-    const shouldDeriveOnEquip =
-      (equipTransition || renameOfDerivedAction) &&
-      finalOwnerType === 'character' &&
-      input.equippedAction === undefined &&
-      (moved || !existing.equippedAction || existing.equippedActionSource === EquippedActionSource.enum.derived);
+    // The SAME rule the final decision applies — one definition, so the pre-transaction gate
+    // on the (awaiting, therefore expensive) derivation cannot drift from the write itself.
+    const derivationTrigger = {
+      ownerIsCharacter: finalOwnerType === 'character',
+      moved,
+      equipTransition,
+      renameOfDerivedAction,
+      authoredProvided: input.equippedAction !== undefined,
+      existingHasAction: !!existing.equippedAction,
+      existingProvenance: (existing.equippedActionSource as ActionProvenance | null) ?? null,
+    };
+    const shouldDeriveOnEquip = shouldDeriveEquippedAction(derivationTrigger);
     // EVERY persisted input the derivation reads, captured together and compared wholesale
     // against the transaction's `fresh` row below.
     //
@@ -895,27 +906,39 @@ export class InventoryService {
     // `deriveActionForEquip` means adding it here, and the comparison covers it
     // automatically. `fenceInputs` is the one place that has to stay in step, instead of a
     // condition several lines away that no one thinks to widen.
-    const derivationInputs = (row: typeof inventoryItems.$inferSelect | null) =>
-      row === null
-        ? null
-        : JSON.stringify({
-            characterId: row.characterId,
-            compendiumSnapshot: row.compendiumSnapshot,
-            ruleEntryId: row.ruleEntryId,
-          });
+    // ONE fingerprint covering everything `deriveActionForEquip` reads, computed by the same
+    // function at capture time and at fence time. The character revision is folded in here
+    // too, rather than carried beside the record: two fences meant two lists to keep in step,
+    // and the field this round's review found missing — `name` — was missing because the list
+    // was hand-picked field by field. Anything the derivation consumes belongs in this
+    // object; that is the whole contract, and it lives next to nothing else.
+    const derivationInputs = (
+      row: Pick<typeof inventoryItems.$inferSelect, 'name' | 'characterId' | 'compendiumSnapshot' | 'ruleEntryId'>,
+      characterRevision: string | null,
+    ) =>
+      JSON.stringify({
+        // Read as the action's title (issue #2097 review): a concurrent rename must not leave
+        // an action named A on an item named B.
+        name: row.name,
+        characterId: row.characterId,
+        compendiumSnapshot: row.compendiumSnapshot,
+        ruleEntryId: row.ruleEntryId,
+        // The wielder's stats/level, via their row revision.
+        characterRevision,
+      });
     // Captured from `existing` — the row as it stood when this request read it. `fresh` is
     // read inside the transaction BEFORE this request's own update lands, so comparing the
     // two detects changes made by OTHER writers while this one awaited, and never mistakes
     // this request's own intended move for interference.
-    const derivedFromInputs = derivationInputs(existing);
     const derivation = shouldDeriveOnEquip
       ? await this.deriveActionForEquip(existing, finalCharacterId as number, input.name ?? existing.name)
       : null;
     const derivedOnEquip = derivation?.action ?? null;
-    // The wielder revision the calculation read. Fenced on inside the transaction alongside
-    // the item's own inputs: a character PATCH that commits first (a level-up, a stat change)
-    // must not be overwritten by combat math computed from the character they used to be.
-    const derivedFromCharacterRevision = derivation?.characterRevision ?? null;
+    // Captured from `existing` — the row as this request read it. `fresh` is read inside the
+    // transaction BEFORE this request's own update lands, so comparing the two detects changes
+    // made by OTHER writers while this one awaited, and never mistakes this request's own
+    // rename or move for interference.
+    const derivedFromInputs = derivationInputs(existing, derivation?.characterRevision ?? null);
 
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
@@ -1046,87 +1069,49 @@ export class InventoryService {
           update.ownerType = finalOwnerType;
           update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;
         }
-        if (input.equippedAction !== undefined) {
+        // Issue #2097: what happens to the action pair is decided by
+        // `resolveEquippedActionWrite` — a pure function over the reachable state, swept
+        // exhaustively by its own spec. This block only EXECUTES that decision. Every
+        // condition it used to compute inline (equip transition, rename, concurrent manual
+        // author, input fences, ownership clearing) is now a named field on the state it is
+        // handed, so an unconsidered combination fails a property test instead of surfacing
+        // as a review comment.
+        const freshCharacterRevision =
+          finalCharacterId == null
+            ? null
+            : (tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, finalCharacterId)).get()
+                ?.updatedAt ?? null);
+        const actionWrite = resolveEquippedActionWrite({
+          ...derivationTrigger,
+          authoredIsAction: !!input.equippedAction,
+          freshHasAction: !!fresh.equippedAction,
+          freshProvenance: (fresh.equippedActionSource as ActionProvenance | null) ?? null,
+          // Read for the character the derivation ACTUALLY USED (this request's final owner),
+          // not for `fresh.characterId` — on a move those differ, because `fresh` is read
+          // before this request's own update lands, and comparing them would flag every
+          // legitimate handoff as interference.
+          derivationInputsUnchanged: derivationInputs(fresh, freshCharacterRevision) === derivedFromInputs,
+          derivationProducedAction: derivedOnEquip != null,
+        });
+
+        if (actionWrite.kind === 'authored') {
           // Review (chatgpt-codex-connector P1, Copilot): an authored action's structured
           // `spec` is what the resolver ROLLS; `toHit`/`damage` are only what it shows. A
           // caller that edits the numbers while carrying the old spec through — exactly what
           // the web editor's round-trip did — would display the correction and keep rolling
           // the original. Rebuilt here rather than in the web app so the MCP write path gets
           // the same guarantee. A caller supplying its own spec is trusted and untouched.
-          const authored = input.equippedAction ? rebuildEditedActionSpec(input.equippedAction, campaignRuleSystem, campaignDamageTypes) : null;
-          update.equippedAction = authored ? JSON.stringify(authored) : null;
-          // Issue #2097: ANY caller-supplied action is a human's, so the row becomes
-          // 'manual' and derivation will never regenerate over it again — that promise is
-          // what makes the editor safe to use. Clearing the action clears the provenance
-          // with it (nothing left to describe), which also re-opens the row to derivation:
-          // "delete the action, re-equip" is the deliberate way back to a fresh derivation —
-          // and since #2097's review round 3 it is only needed for a MANUAL action, because a
-          // `derived` one regenerates on the next equip on its own.
-          update.equippedActionSource = input.equippedAction ? EquippedActionSource.enum.manual : null;
-        } else if (
-          shouldDeriveOnEquip &&
-          (moved || !fresh.equippedAction || fresh.equippedActionSource === EquippedActionSource.enum.derived)
-        ) {
-          // Review (chatgpt-codex-connector P2) — time-of-check/time-of-use, the same class of
-          // race this transaction already re-validates authorization against. `derivedOnEquip`
-          // was computed BEFORE the transaction opened (it awaits; better-sqlite3 transactions
-          // must be synchronous), reading an action-less row. If a concurrent request authored
-          // a manual action in that window, writing the derived one here would overwrite it —
-          // breaking the one guarantee that makes the editor worth using. Re-checked against
-          // `fresh`, the row as it exists inside this transaction — which still allows
-          // regenerating a `derived` action, since only `manual` is protected.
-          //
-          // `moved` is exempt because the ownership-change rule discards the old owner's
-          // action in this very write regardless of who authored it, so there is nothing left
-          // to protect — see CLEARED_EQUIP_STATE.
-          // The row must still present the SAME inputs the derivation actually read — same
-          // owner, same accepted revision, same compendium link. `refreshCompendium` can
-          // accept a newer revision while this request awaits (and does not regenerate an
-          // unequipped item, so the fresh row still looks actionless-and-derived), and a
-          // concurrent move can hand the item to a different character — whose action must
-          // not be replaced by one computed from the previous owner's stats and notes.
-          //
-          // Compared as a whole record, so a future input added to the derivation is covered
-          // by construction rather than by remembering to widen a condition.
-          // Read for the character the derivation ACTUALLY USED (this request's final owner),
-          // not for `fresh.characterId` — on a move those differ, because `fresh` is read
-          // before this request's own update lands, and comparing them would flag every
-          // legitimate handoff as interference. The item-input record above is what catches a
-          // CONCURRENT owner change; this catches the wielder's stats moving under us.
-          const freshCharacterRevision =
-            finalCharacterId == null
-              ? null
-              : (tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, finalCharacterId)).get()
-                  ?.updatedAt ?? null);
-          const revisionUnchanged =
-            derivationInputs(fresh) === derivedFromInputs && freshCharacterRevision === derivedFromCharacterRevision;
-          // Review (chatgpt-codex-connector P2): a fence MISS clears rather than skips. The
-          // earlier version returned without touching the action while the transaction went
-          // on to set `equipped = true` — arming revision-A mechanics against a revision-B
-          // snapshot, which is the exact outcome the fence exists to prevent, just reached by
-          // doing nothing instead of by writing. Clearing leaves the item equipped and
-          // granting nothing, which the next equip (or a refresh) regenerates correctly.
-          //
-          // A null derivation clears for the same reason — see `shouldDeriveOnEquip`. Only a
-          // `derived` action, or one `moved` is discarding anyway, ever reaches this branch,
-          // so neither path can erase a human's work.
-          const nextDerived = revisionUnchanged ? derivedOnEquip : null;
-          update.equippedAction = nextDerived ? JSON.stringify(nextDerived) : null;
-          update.equippedActionSource = nextDerived ? EquippedActionSource.enum.derived : null;
-        } else if (moved) {
-          // Issue #1326 review (coordinator): THE ownership-change clearing rule —
-          // equipped, equipSlot, and equippedAction reset together, atomically, unless
-          // THIS SAME write explicitly re-establishes a field for the new owner (handled
-          // by the branch above). Left uncleared, a character's private granted action
-          // would silently follow the item to its new owner: another character who never
-          // chose it, or the public party stash, which is never redaction-checked at all
-          // (see `redactEquippedActions`) — turning a previously-private action visible
-          // campaign-wide the moment ownership changes. Uses the same CLEARED_EQUIP_STATE
-          // every other owner-changing path (bulk move_inventory_owner + its undo, clone,
-          // import) treats as the base "off" state for this triple.
+          const authored = rebuildEditedActionSpec(input.equippedAction!, campaignRuleSystem, campaignDamageTypes);
+          update.equippedAction = JSON.stringify(authored);
+          update.equippedActionSource = EquippedActionSource.enum.manual;
+        } else if (actionWrite.kind === 'derived') {
+          update.equippedAction = JSON.stringify(derivedOnEquip);
+          update.equippedActionSource = EquippedActionSource.enum.derived;
+        } else if (actionWrite.kind === 'clear') {
           update.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
           update.equippedActionSource = CLEARED_EQUIP_STATE.equippedActionSource;
         }
+
         if (equipWillChange) {
           if (nextEquipped) {
             // Slot conflict (issue #1326): reject a second equipped item claiming the same

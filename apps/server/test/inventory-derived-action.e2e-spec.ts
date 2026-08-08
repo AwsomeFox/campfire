@@ -682,6 +682,24 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(again.body.equippedAction.toHit).toBe('+6');
   });
 
+  it('a rename that lands mid-derivation never leaves an action titled with the old name', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'name-race-slot' });
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: null, equipped: false });
+
+    // Stand in for a rename that committed while an equip was mid-derivation: the row's name
+    // moved on, so an action titled with the pre-rename name must not be written onto it.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems).set({ name: 'Renamed Mid-Derivation' }).where(eq(inventoryItems.id, itemId)).run();
+
+    const reEquipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'name-race-slot' });
+    expect(reEquipped.status).toBe(200);
+    expect(reEquipped.body.name).toBe('Renamed Mid-Derivation');
+    // Either it derived under the current name, or it derived nothing — never the old name.
+    expect(reEquipped.body.equippedAction?.name ?? 'Renamed Mid-Derivation').toBe('Renamed Mid-Derivation');
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)
