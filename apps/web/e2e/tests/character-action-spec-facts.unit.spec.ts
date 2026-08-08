@@ -72,6 +72,25 @@ test.describe('actionSpecFacts — states only what the spec carries', () => {
       .toContainEqual({ label: 'Uses', value: '3 per long-rest' });
   });
 
+  /**
+   * A die-roll recharge is a pool of one even at the schema default `max: 0` — that is what
+   * `effectiveActionUsesMax` reads it as, and the encounter holds the action spent until it
+   * recharges. Reading `max` literally made a recharge action look at-will on the sheet.
+   */
+  test('a recharge action with no explicit max is a pool, not at-will', () => {
+    expect(actionSpecFacts(ActionSpec.parse({ uses: { recharge: 'recharge-5-6' } })))
+      .toContainEqual({ label: 'Uses', value: 'Recharge 5–6' });
+    expect(actionSpecFacts(ActionSpec.parse({ uses: { recharge: 'recharge-6' } })))
+      .toContainEqual({ label: 'Uses', value: 'Recharge 6' });
+  });
+
+  test('a REST cadence keeps its own wording rather than being relabelled daily', () => {
+    // describeActionUses renders every non-die-roll pool as "N/Day", which would call a
+    // short-rest ability daily. Only the die-roll branch defers to it.
+    expect(actionSpecFacts(ActionSpec.parse({ uses: { max: 2, recharge: 'short-rest' } })))
+      .toContainEqual({ label: 'Uses', value: '2 per short-rest' });
+  });
+
   test('targeting reads as targets, as an area, or not at all', () => {
     expect(actionSpecFacts(ActionSpec.parse({ mode: 'attack', targets: { count: 1 } })))
       .toContainEqual({ label: 'Targets', value: '1 target' });

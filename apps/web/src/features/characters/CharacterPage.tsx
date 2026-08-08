@@ -2478,37 +2478,38 @@ function ActionDetails({
       >
         {open ? 'Hide details' : 'Details'}
       </button>
-      {open && (
-        <div className="mt-2 pt-2 border-t border-slate-800 space-y-2">
-          {facts.length > 0 && (
-            <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))' }}>
-              {facts.map((fact) => (
-                <div key={fact.label}>
-                  <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{fact.label}</p>
-                  <p className="text-[11px]">{fact.value}</p>
-                </div>
-              ))}
-            </div>
-          )}
-          {effects.length > 0 && (
-            <div className="space-y-1.5">
-              {/* Named per branch: a save's success and failure consequences are mutually
-                  exclusive, and one merged list would read as though both applied. */}
-              {effects.map((group) => (
-                <div key={group.outcome}>
-                  <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{group.label}</p>
-                  <ul className="text-[11px] space-y-0.5 mt-0.5">
-                    {group.lines.map((line) => (
-                      <li key={line}>· {line}</li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          )}
-          {source && <p className="text-[10px] text-muted">{source}</p>}
-        </div>
-      )}
+      {/* Always mounted, so paper carries the facts/effects/source of every structured
+          action. On screen a collapsed panel is hidden; `cf-print-only` reveals it when
+          printing, which the toggle itself (cf-print-hide) could never do. */}
+      <div className={open ? 'mt-2 pt-2 border-t border-slate-800 space-y-2' : 'cf-print-only mt-2 pt-2 border-t border-slate-800 space-y-2'}>
+        {facts.length > 0 && (
+          <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))' }}>
+            {facts.map((fact) => (
+              <div key={fact.label}>
+                <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{fact.label}</p>
+                <p className="text-[11px]">{fact.value}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        {effects.length > 0 && (
+          <div className="space-y-1.5">
+            {/* Named per branch: a save's success and failure consequences are mutually
+                exclusive, and one merged list would read as though both applied. */}
+            {effects.map((group) => (
+              <div key={group.outcome}>
+                <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{group.label}</p>
+                <ul className="text-[11px] space-y-0.5 mt-0.5">
+                  {group.lines.map((line) => (
+                    <li key={line}>· {line}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+        {source && <p className="text-[10px] text-muted">{source}</p>}
+      </div>
     </div>
   );
 }

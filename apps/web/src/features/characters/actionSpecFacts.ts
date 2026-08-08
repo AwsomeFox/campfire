@@ -7,7 +7,7 @@
  * text-only action (no spec) yields an empty list and the sheet shows its notes alone. Kept
  * out of CharacterPage.tsx so the derivation is unit-testable without a rendered sheet.
  */
-import type { ActionSpec } from '@campfire/schema';
+import { describeActionUses, parseRechargeRange, type ActionSpec } from '@campfire/schema';
 
 export type ActionFact = { readonly label: string; readonly value: string };
 
@@ -65,8 +65,21 @@ export function actionSaveText(spec: ActionSpec): string {
   return spec.save.dc.kind === 'fixed' ? `${head} DC ${spec.save.dc.dc}` : head;
 }
 
-/** "3 per long-rest", "3"; '' when the action is at-will. */
+/**
+ * "Recharge 5–6", "3 per long-rest", "3"; '' only when the action really is at-will.
+ *
+ * A DIE-ROLL recharge is a pool even at the schema's default `max: 0` — see
+ * `effectiveActionUsesMax`, which reads that shape as one use held until it recharges — so
+ * the schema's own `describeActionUses` owns that label rather than a formula here
+ * re-deriving it and (previously) hiding a limited action as at-will entirely.
+ *
+ * A REST cadence is deliberately not delegated: `describeActionUses` renders every
+ * non-die-roll pool as "N/Day", which would relabel a short-rest ability as daily. Those
+ * keep the cadence they were authored with. `parseRechargeRange` is the same predicate the
+ * schema splits on, so the two branches cannot disagree about which case is which.
+ */
 export function actionUsesText(spec: ActionSpec): string {
+  if (parseRechargeRange(spec.uses.recharge)) return describeActionUses(spec.uses);
   const { max, recharge } = spec.uses;
   if (max <= 0) return '';
   return recharge ? `${max} per ${recharge}` : `${max}`;

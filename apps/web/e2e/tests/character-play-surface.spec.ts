@@ -136,6 +136,59 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): an action's Details panel was only mounted while
+   * open, and its toggle is `cf-print-hide` — so a sheet printed in its default state
+   * silently dropped every structured action's cost, range, save, effects and source, with
+   * no stylesheet able to bring them back.
+   */
+  test('printing carries action details that were never opened on screen', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: {
+        name: 'Prints Its Details',
+        className: 'Wizard',
+        level: 5,
+        // A structured `spec` is what grows a Details panel (text inference happens in the
+        // sheet's own editor, not on create), so this one is authored explicitly.
+        actions: [{
+          name: 'Scorching Ray',
+          kind: 'spell',
+          toHit: '',
+          damage: '2d6 fire',
+          targetAc: '',
+          notes: '',
+          spec: {
+            mode: 'save',
+            save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+            range: { range: '120 ft' },
+            outcomes: { failure: { text: 'The target is scorched.' } },
+            provenance: { source: 'SRD 5.1', ref: 'Evocation' },
+          },
+        }],
+      },
+    })).json()).id as number;
+
+    try {
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=play`);
+      const details = page.locator('#character-section-actions');
+      // Default state: the panel is collapsed and its contents are not on screen.
+      await expect(details.getByRole('button', { name: 'Show details for Scorching Ray' })).toBeVisible();
+      await expect(details.getByText('DEX save DC 15')).toBeHidden();
+
+      await page.emulateMedia({ media: 'print' });
+      // Same collapsed state, now printing: the details must be on the page.
+      await expect(details.getByText('DEX save DC 15')).toBeVisible();
+      await expect(details.getByRole('button', { name: 'Show details for Scorching Ray' })).toBeHidden();
+      await page.emulateMedia({ media: 'screen' });
+    } finally {
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Codex review on #2115): the roll-mode chooser was gated on
    * `character.actions` alone, so a character whose only attack comes from equipped gear
    * got a rollable chip with no chooser beside it — stuck on Normal unless they happened
