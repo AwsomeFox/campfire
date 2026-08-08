@@ -364,9 +364,16 @@ function migrateUsersTableForColorVisionAssist1942(sqlite: Database.Database): v
 function migrateUsersTableForTableAudio1920(sqlite: Database.Database): void {
   // `sqlite.pragma(...)` rather than `prepare('PRAGMA table_info(users)').all()`, and
   // `.exec` for the existence probe rather than `prepare(...).get()`: both avoid leaving
-  // a better-sqlite3 `Statement` alive for the process to destruct at teardown. Most
-  // migrations in this file still use the `prepare` form; this one is deliberately the
-  // narrow variant while the Node 24 `Statement::~Statement()` abort on #2050 is open.
+  // a better-sqlite3 `Statement` alive for the process to destruct at teardown. That was
+  // a guess at the Node 24 `Statement::~Statement()` abort seen on #2050, and it never
+  // moved the failure rate. The current explanation is the dependency, not statement
+  // lifetime: better-sqlite3 11.10.0 predates Node 24 and declares no support for it,
+  // and it embedded raw V8 (`node::ObjectWrap`) rather than Node-API, so its `Statement`
+  // finalizers ran as V8 weak callbacks with no entered context and it carried no
+  // cross-major ABI guarantee. The 13.x line moved those objects to
+  // `Napi::ObjectWrap`, which the Node-API runtime finalizes with a valid `env`. The
+  // pragma form is kept here only because it is the narrower call. Most migrations in
+  // this file still use the `prepare` form.
   const columns = sqlite.pragma('table_info(users)') as Array<{ name: string }>;
   if (columns.length === 0) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
   if (columns.some((c) => c.name === 'table_audio')) return;
