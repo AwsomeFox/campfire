@@ -4721,7 +4721,17 @@ export class EncountersService {
         // satisfied by a prior claim still returns the stored response as its body, but
         // the winner already broadcast that die — emitting again put the same d20 in the
         // shared dice tray twice, making one death save look like two.
-        if (!replayedPriorClaim) this.rolls.emitDiceRolled?.(replay.roll);
+        // ...and never for a hidden encounter. `dice.rolled` is in
+        // CAMPAIGN_BROADCAST_SAFE_FRAMES, so `projectCampaignEventForRole` returns it to every
+        // role unchanged — including the `encounterId` this PR now tags the roll with. Filtering
+        // the REST feed alone would still have announced "activity in encounter N" over SSE to
+        // every player and viewer. The per-combatant initiative roll already guards its emit the
+        // same way (`if (roll && !freshEncounterRow.hidden)`); this is that rule applied to the
+        // path #2090 newly opened. Re-read the row rather than trusting the pre-transaction
+        // snapshot, so a reveal or hide committed in between is respected.
+        if (!replayedPriorClaim && !(await this.getRowOrThrow(encounterId, true)).hidden) {
+          this.rolls.emitDiceRolled?.(replay.roll);
+        }
         return replay;
       }
       // A null replay here does NOT always mean nothing was persisted. `replayCommittedDeathSave`
@@ -4745,7 +4755,13 @@ export class EncountersService {
           // returns it unredacted whenever `prior.responseRole === role` — redaction there
           // is reserved for the changed-role re-derivation. Redacting here would make the
           // recovery answer differ from the answer the same caller gets on the normal path.
-          this.rolls.emitDiceRolled?.(roll);
+          //
+          // The BROADCAST is a different question from the response body, and gets the same
+          // hidden-encounter guard as the emit above: returning the die to the caller who
+          // rolled it is correct, announcing it to every campaign stream is not.
+          if (!(await this.getRowOrThrow(encounterId, true)).hidden) {
+            this.rolls.emitDiceRolled?.(roll);
+          }
           return { combatant: committed, roll };
         }
       }

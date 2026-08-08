@@ -4636,6 +4636,7 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
     ).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save');
     const service = ctx.app.get(EncountersService);
     const rollSpy = jest.spyOn(service as any, 'rollDeathSaveD20').mockReturnValue({ expr: '1d20', rolls: [10], total: 10 });
+    const emitSpy = jest.spyOn(ctx.app.get(RollsService), 'emitDiceRolled');
     try {
       const dmAttempt = await request(server)
         .post(`/api/v1/encounters/${encounterId}/combatants/${heroCombatantId}/death-save`)
@@ -4657,10 +4658,19 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
       expect(
         (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(viewer)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
       ).toHaveLength(0);
+
+      // ...and no SSE frame either. `dice.rolled` sits in CAMPAIGN_BROADCAST_SAFE_FRAMES, so
+      // `projectCampaignEventForRole` hands it to every role unchanged — including the
+      // `encounterId` this roll now carries. Filtering only the REST feed would still have
+      // announced "activity in encounter N" to every player's and viewer's open stream, which
+      // is the same secret by a slower route. The per-combatant initiative roll already guards
+      // its emit this way; this asserts death saves do too.
+      expect(emitSpy).not.toHaveBeenCalled();
     } finally {
       // Unhide and heal in `finally`: an assertion failure above must not strand a hidden
       // encounter and a dying combatant for every spec that follows.
       rollSpy.mockRestore();
+      emitSpy.mockRestore();
       expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ hidden: false })).status).toBe(200);
       await setConscious();
     }
