@@ -1,8 +1,10 @@
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
+import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { Combatant, DiceRoll, EncounterWithCombatants } from '@campfire/schema';
 import { RequestUser } from '../../src/common/user.types';
 import { encounterOpFingerprint } from '../../src/modules/encounters/encounter-idempotency';
+import { NotFoundException } from '@nestjs/common';
 
 describe('EncountersService — rollCombatantInitiative replay visibility hardening (issue #1962)', () => {
   const playerUser: RequestUser = {
@@ -315,7 +317,7 @@ describe('EncountersService — rollCombatantInitiative replay visibility harden
       redactRollForRole: jest.fn().mockImplementation(async (roll) => roll),
     };
 
-    const attachmentsServiceDouble = {
+    const attachmentsServiceDouble: Pick<AttachmentsService, 'isFogProtectedEncounterMap'> = {
       isFogProtectedEncounterMap: jest.fn().mockResolvedValue(false),
     };
 
@@ -325,7 +327,7 @@ describe('EncountersService — rollCombatantInitiative replay visibility harden
       {} as any,
       rollsDouble as unknown as RollsService,
       {} as any,
-      attachmentsServiceDouble as any,
+      attachmentsServiceDouble as unknown as AttachmentsService,
       {} as any,
       {} as any,
       null as any,
@@ -348,5 +350,81 @@ describe('EncountersService — rollCombatantInitiative replay visibility harden
     // Token coordinates must be redacted in fog for player
     expect(result!.combatant.tokenX).toBeNull();
     expect(result!.combatant.tokenY).toBeNull();
+  });
+
+  it('does not replay a stored player projection if the encounter becomes hidden during the fresh read', async () => {
+    const storedCombatant: Combatant = {
+      id: 42,
+      encounterId: 10,
+      name: 'Stored Hero',
+      kind: 'character',
+      initiative: 10,
+      tokenX: 100,
+      tokenY: 200,
+    } as any;
+
+    const mockTx = {
+      delete: jest.fn().mockReturnValue({
+        where: jest.fn().mockReturnValue({ run: jest.fn() }),
+      }),
+      select: jest.fn().mockReturnValue({
+        from: jest.fn().mockReturnValue({
+          where: jest.fn().mockReturnValue({
+            limit: jest.fn().mockReturnValue({
+              all: jest.fn().mockReturnValue([
+                {
+                  actorId: 'user-player-1',
+                  operation: 'combatant.roll_initiative',
+                  key: 'idem-key-hidden-race',
+                  encounterId: 10,
+                  campaignId: 1,
+                  fingerprint: encounterOpFingerprint({ combatantId: 42, overwrite: true }),
+                  responseRole: 'player',
+                  responseJson: JSON.stringify({ combatant: storedCombatant, roll: null }),
+                  expiresAt: Date.now() + 100000,
+                },
+              ]),
+            }),
+          }),
+        }),
+      }),
+    };
+    const mockDb = {
+      transaction: jest.fn().mockImplementation((cb: (tx: any) => void) => cb(mockTx)),
+      select: mockTx.select,
+    };
+    const rollsDouble: Pick<RollsService, 'redactRollForRole'> = {
+      redactRollForRole: jest.fn().mockImplementation(async (roll) => roll),
+    };
+    const serviceTarget = new EncountersService(
+      mockDb as any,
+      {} as any,
+      {} as any,
+      rollsDouble as unknown as RollsService,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      null as any,
+    );
+
+    jest
+      .spyOn(serviceTarget, 'getRowOrThrow')
+      .mockResolvedValueOnce({ id: 10, campaignId: 1, hidden: false } as any)
+      .mockResolvedValueOnce({ id: 10, campaignId: 1, hidden: true, fog: null, mapAttachmentId: null } as any);
+    jest
+      .spyOn(serviceTarget, 'getWithCombatantsOrThrow')
+      .mockRejectedValue(new NotFoundException('Encounter 10 not found'));
+
+    await expect(
+      serviceTarget.rollCombatantInitiative(
+        10,
+        42,
+        'idem-key-hidden-race',
+        true,
+        playerUser,
+        'player',
+      ),
+    ).rejects.toThrow(NotFoundException);
   });
 });

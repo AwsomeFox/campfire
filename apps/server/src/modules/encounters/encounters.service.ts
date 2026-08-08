@@ -6639,6 +6639,13 @@ export class EncountersService {
   private async redactReplayCombatant(combatant: Combatant, role: Role, encounterId: number): Promise<Combatant> {
     if (role === 'dm') return combatant;
     const freshEncounterForReplay = await this.getRowOrThrow(encounterId, true);
+    // The outer visibility check and the fresh role-filtered replay read are separate
+    // queries. If the encounter becomes hidden between them, the latter throws and lands
+    // in the stored-body fallback below. Re-check entity visibility here so that fallback
+    // cannot turn the race into a disclosure of a now-hidden encounter.
+    if (!isVisibleTo({ hidden: freshEncounterForReplay.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
     const freshSiblingProtects =
       freshEncounterForReplay.mapAttachmentId != null &&
       !fogConcealsPixels(parseFog(freshEncounterForReplay.fog)) &&
