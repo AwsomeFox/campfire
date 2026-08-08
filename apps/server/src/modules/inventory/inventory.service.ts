@@ -53,6 +53,17 @@ export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
  *  - campaign clone and campaign import's party-fallback branch in `CampaignsService`
  *    (the source character wasn't copied/mapped, so there is no new owner to ask).
  */
+/**
+ * What one derivation attempt produced, plus the wielder revision it read (issue #2097
+ * review). `action` is null when nothing could be derived — not a weapon, no compendium data,
+ * or a malformed row. `characterRevision` lets the caller fence the write on the character
+ * data the calculation actually used, the same way it fences on the item's own inputs.
+ */
+interface DerivedActionResult {
+  action: CharacterAction | null;
+  characterRevision: string | null;
+}
+
 export const CLEARED_EQUIP_STATE: {
   readonly equipped: false;
   readonly equipSlot: null;
@@ -294,14 +305,14 @@ export class InventoryService {
      * the old one.
      */
     finalName: string,
-  ): Promise<CharacterAction | null> {
+  ): Promise<DerivedActionResult> {
     try {
       const character = await this.db
-        .select({ stats: characters.stats, level: characters.level })
+        .select({ stats: characters.stats, level: characters.level, updatedAt: characters.updatedAt })
         .from(characters)
         .where(eq(characters.id, characterId))
         .get();
-      if (!character) return null;
+      if (!character) return { action: null, characterRevision: null };
 
       // Review (chatgpt-codex-connector P2): the SNAPSHOT wins, not the live rule entry.
       // The snapshot is the revision this campaign actually accepted at acquire time; when
@@ -330,21 +341,28 @@ export class InventoryService {
           .get();
         if (entry?.dataJson) data = safeJson(entry.dataJson);
       }
-      if (data == null) return null;
+      if (data == null) return { action: null, characterRevision: character.updatedAt };
 
       const adapter = await this.adapterForCampaign(existing.campaignId);
 
-      return deriveEquippedItemAction({
-        itemName: finalName,
-        data,
-        character: { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level },
-        adapter,
-      });
+      return {
+        action: deriveEquippedItemAction({
+          itemName: finalName,
+          data,
+          character: { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level },
+          adapter,
+        }),
+        // Review (chatgpt-codex-connector P2): the wielder's stats and level are derivation
+        // INPUTS just as much as the item's snapshot is, so callers fence on this revision.
+        // A concurrent character PATCH that commits first must not be overwritten by combat
+        // math computed from the level-4 version of a character who is now level 5.
+        characterRevision: character.updatedAt,
+      };
     } catch {
       // Equipping is the user's action; deriving is a convenience on top of it. A failure
       // here leaves the item equipped with no granted action — recoverable by hand — rather
       // than failing a write the caller did ask for.
-      return null;
+      return { action: null, characterRevision: null };
     }
   }
 
@@ -607,7 +625,8 @@ export class InventoryService {
       // conditional update still pass every other check and write revision-A mechanics onto
       // a row whose snapshot now says revision B.
       const derivedFromSnapshot = row.compendiumSnapshot;
-      const regenerated = await this.deriveActionForEquip(row, ownerId, row.name);
+      const regeneration = await this.deriveActionForEquip(row, ownerId, row.name);
+      const regenerated = regeneration.action;
       // Review (chatgpt-codex-connector P2) — the same time-of-check/time-of-use race the
       // equip path re-validates against, reached through this endpoint instead. The
       // derivation above AWAITS, so between reading the row and writing it another request
@@ -637,6 +656,10 @@ export class InventoryService {
             derivedFromSnapshot === null
               ? isNull(inventoryItems.compendiumSnapshot)
               : eq(inventoryItems.compendiumSnapshot, derivedFromSnapshot),
+            // …and the wielder must still be the one the math was computed from. Expressed as
+            // a subquery so it is evaluated by the UPDATE itself rather than in a separate
+            // read that could go stale between the check and the write.
+            sql`(select updated_at from characters where id = ${ownerId}) is ${regeneration.characterRevision === null ? sql`null` : sql`${regeneration.characterRevision}`}`,
           ),
         )
         .returning();
@@ -885,9 +908,14 @@ export class InventoryService {
     // two detects changes made by OTHER writers while this one awaited, and never mistakes
     // this request's own intended move for interference.
     const derivedFromInputs = derivationInputs(existing);
-    const derivedOnEquip = shouldDeriveOnEquip
+    const derivation = shouldDeriveOnEquip
       ? await this.deriveActionForEquip(existing, finalCharacterId as number, input.name ?? existing.name)
       : null;
+    const derivedOnEquip = derivation?.action ?? null;
+    // The wielder revision the calculation read. Fenced on inside the transaction alongside
+    // the item's own inputs: a character PATCH that commits first (a level-up, a stat change)
+    // must not be overwritten by combat math computed from the character they used to be.
+    const derivedFromCharacterRevision = derivation?.characterRevision ?? null;
 
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
@@ -1060,7 +1088,18 @@ export class InventoryService {
           //
           // Compared as a whole record, so a future input added to the derivation is covered
           // by construction rather than by remembering to widen a condition.
-          const revisionUnchanged = derivationInputs(fresh) === derivedFromInputs;
+          // Read for the character the derivation ACTUALLY USED (this request's final owner),
+          // not for `fresh.characterId` — on a move those differ, because `fresh` is read
+          // before this request's own update lands, and comparing them would flag every
+          // legitimate handoff as interference. The item-input record above is what catches a
+          // CONCURRENT owner change; this catches the wielder's stats moving under us.
+          const freshCharacterRevision =
+            finalCharacterId == null
+              ? null
+              : (tx.select({ updatedAt: characters.updatedAt }).from(characters).where(eq(characters.id, finalCharacterId)).get()
+                  ?.updatedAt ?? null);
+          const revisionUnchanged =
+            derivationInputs(fresh) === derivedFromInputs && freshCharacterRevision === derivedFromCharacterRevision;
           // Review (chatgpt-codex-connector P2): a fence MISS clears rather than skips. The
           // earlier version returned without touching the action while the transaction went
           // on to set `equipped = true` — arming revision-A mechanics against a revision-B

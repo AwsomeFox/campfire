@@ -656,6 +656,32 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(renamed.body.equippedAction?.notes ?? '').not.toContain('STR +3');
   });
 
+  it("a derivation computed from the wielder's old stats never overwrites a newer character", async () => {
+    const server = ctx.app.getHttpServer();
+    const grower = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Stat Racer', level: 4, stats: { STR: 16, DEX: 12 } });
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: grower.body.id, duplicateMode: 'separate' });
+    const itemId = acquired.body.id;
+
+    // A normal equip derives from the character as they are now — the fence must not reject
+    // the ordinary case it was added to guard.
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stat-race-slot' });
+    expect(equipped.status).toBe(200);
+    expect(equipped.body.equippedActionSource).toBe('derived');
+    expect(equipped.body.equippedAction.toHit).toBe('+5'); // STR +3, level-4 proficiency +2
+
+    // And a later level-up is picked up on the next equip, still fenced.
+    await request(server).patch(`/api/v1/characters/${grower.body.id}`).set(dm).send({ level: 5 });
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+    const again = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stat-race-slot' });
+    expect(again.body.equippedAction.toHit).toBe('+6');
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)
