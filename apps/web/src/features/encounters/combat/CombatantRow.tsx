@@ -1630,6 +1630,7 @@ export const CombatantRow = memo(function CombatantRow({
             <CombatantStatblockEditor
               value={statblockDraftState.draft}
               onChange={(next) => dispatchStatblockDraft({ type: 'edit', statblock: next })}
+              showTemplateHp={false}
               ruleSystem={ruleSystem}
               customMechanicsProfile={customMechanicsProfile}
             />
@@ -1646,7 +1647,13 @@ export const CombatantRow = memo(function CombatantRow({
           (combatant.kind === 'monster' || combatant.kind === 'npc') && (
             <details className="mt-2" data-combatant-detail data-testid={`combatant-statblock-revealed-${combatant.id}`}>
               <summary className="text-xs text-muted cursor-pointer">{t('encounters.statblock.revealedSummary')}</summary>
-              <CombatantStatblockEditor value={combatant.statblock} onChange={() => {}} disabled ruleSystem={ruleSystem} />
+              <CombatantStatblockEditor
+                value={combatant.statblock}
+                onChange={() => {}}
+                disabled
+                showTemplateHp={false}
+                ruleSystem={ruleSystem}
+              />
             </details>
           )}
         {/* Character card (in-encounter sheet): a player sees only their own combat stats,

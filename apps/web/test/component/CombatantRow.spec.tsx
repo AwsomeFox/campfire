@@ -12,10 +12,10 @@
  * real row + the real HpBar underneath it and asserts on what appears in the
  * DOM for each combination of (colorVisionAssist, isCurrentTurn).
  */
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, test, expect, vi, afterEach, beforeAll } from 'vitest';
-import { Character } from '@campfire/schema';
+import { Character, defaultCombatantStatblock } from '@campfire/schema';
 import type { Combatant } from '@campfire/schema';
 import { MemoryRouter } from 'react-router-dom';
 import '../../src/i18n';
@@ -169,6 +169,33 @@ describe('CombatantRow colorVisionAssist gates (issue #1942, harness issue #2025
   test('HpBar renders no danger glyph when colorVisionAssist is off, even at low HP', () => {
     renderRow({ colorVisionAssist: false });
     expect(screen.queryByTestId('hp-tone-glyph')).toBeNull();
+  });
+});
+
+describe('CombatantRow statblock template HP visibility (issue #2093)', () => {
+  const statblock = { ...defaultCombatantStatblock(), hp: 37, actions: [] };
+
+  test('the editable inline statblock hides template HP because the live row owns Max HP', () => {
+    renderRow({
+      canEditIdentity: true,
+      combatant: baseCombatant({ statblock }),
+    });
+
+    fireEvent.click(screen.getByText('Edit statblock'));
+    const editor = within(screen.getByTestId('combatant-statblock-editor'));
+    expect(editor.queryByText('Max HP')).toBeNull();
+    expect(editor.queryByDisplayValue('37')).toBeNull();
+  });
+
+  test('the revealed read-only inline statblock also hides the duplicate template HP', () => {
+    renderRow({
+      combatant: baseCombatant({ statblock, statblockRevealed: true }),
+    });
+
+    fireEvent.click(screen.getByText('Statblock (revealed to players)'));
+    const editor = within(screen.getByTestId('combatant-statblock-editor'));
+    expect(editor.queryByText('Max HP')).toBeNull();
+    expect(editor.queryByDisplayValue('37')).toBeNull();
   });
 });
 

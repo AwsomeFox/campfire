@@ -89,6 +89,14 @@ function libraryPanel() {
 }
 
 describe('AddCombatantPanel Library tab HP affordance (issue #2080 regression)', () => {
+  test('the Manual tab still exposes template Max HP for a not-yet-live combatant (issue #2093)', () => {
+    getMock.mockResolvedValue([]);
+    renderPanel();
+
+    const editor = within(screen.getByTestId('combatant-statblock-editor'));
+    expect(editor.getByText('Max HP')).toBeTruthy();
+  });
+
   test('a legacy library entry (no stored HP) cannot be added with a click alone — no POST fires', async () => {
     getMock.mockResolvedValue([legacyLibraryEntry()]);
     renderPanel();
