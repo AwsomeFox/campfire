@@ -860,9 +860,31 @@ export class InventoryService {
       finalOwnerType === 'character' &&
       input.equippedAction === undefined &&
       (moved || !existing.equippedAction || existing.equippedActionSource === EquippedActionSource.enum.derived);
-    // The revision the derivation reads, fenced on inside the transaction below — see the
-    // matching fence in `refreshCompendium`.
-    const derivedFromSnapshot = existing.compendiumSnapshot;
+    // EVERY persisted input the derivation reads, captured together and compared wholesale
+    // against the transaction's `fresh` row below.
+    //
+    // Reviews found this fence incomplete three times running — first no fence at all, then
+    // one covering provenance but not the revision, then one covering the revision but not
+    // the owner (a DM rename can derive from character A, yield, and resume after a
+    // concurrent move has equipped the item on character B, overwriting B's action with A's
+    // modifiers AND A's private derivation notes). Each fix added one more `&&`. So the
+    // predicate is now a RECORD rather than a list of clauses: adding an input to
+    // `deriveActionForEquip` means adding it here, and the comparison covers it
+    // automatically. `fenceInputs` is the one place that has to stay in step, instead of a
+    // condition several lines away that no one thinks to widen.
+    const derivationInputs = (row: typeof inventoryItems.$inferSelect | null) =>
+      row === null
+        ? null
+        : JSON.stringify({
+            characterId: row.characterId,
+            compendiumSnapshot: row.compendiumSnapshot,
+            ruleEntryId: row.ruleEntryId,
+          });
+    // Captured from `existing` — the row as it stood when this request read it. `fresh` is
+    // read inside the transaction BEFORE this request's own update lands, so comparing the
+    // two detects changes made by OTHER writers while this one awaited, and never mistakes
+    // this request's own intended move for interference.
+    const derivedFromInputs = derivationInputs(existing);
     const derivedOnEquip = shouldDeriveOnEquip
       ? await this.deriveActionForEquip(existing, finalCharacterId as number, input.name ?? existing.name)
       : null;
@@ -1029,12 +1051,16 @@ export class InventoryService {
           // `moved` is exempt because the ownership-change rule discards the old owner's
           // action in this very write regardless of who authored it, so there is nothing left
           // to protect — see CLEARED_EQUIP_STATE.
-          // The row must still hold the revision the derivation actually read.
-          // `refreshCompendium` can accept a newer one while this request awaits — and when
-          // the item is unequipped at that moment, refresh performs no regeneration of its
-          // own, so the fresh row still looks actionless-and-derived and every other check
-          // here passes. Same fence, same reasoning, as the refresh path's.
-          const revisionUnchanged = fresh.compendiumSnapshot === derivedFromSnapshot;
+          // The row must still present the SAME inputs the derivation actually read — same
+          // owner, same accepted revision, same compendium link. `refreshCompendium` can
+          // accept a newer revision while this request awaits (and does not regenerate an
+          // unequipped item, so the fresh row still looks actionless-and-derived), and a
+          // concurrent move can hand the item to a different character — whose action must
+          // not be replaced by one computed from the previous owner's stats and notes.
+          //
+          // Compared as a whole record, so a future input added to the derivation is covered
+          // by construction rather than by remembering to widen a condition.
+          const revisionUnchanged = derivationInputs(fresh) === derivedFromInputs;
           // Review (chatgpt-codex-connector P2): a fence MISS clears rather than skips. The
           // earlier version returned without touching the action while the transaction went
           // on to set `equipped = true` — arming revision-A mechanics against a revision-B

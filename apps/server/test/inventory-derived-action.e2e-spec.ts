@@ -627,6 +627,35 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(reEquipped.body.equippedAction?.damage ?? '').not.toContain('1d8');
   });
 
+  it("a rename whose owner changed underneath it never lands the old owner's action", async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'owner-race-slot' });
+
+    // Stand in for a concurrent move+equip that landed while a DM rename was mid-derivation:
+    // the row is now owned by someone else, with THEIR derived action on it. The rename's
+    // pending derivation was computed from the previous owner's stats and carries that
+    // owner's private breakdown in its notes — it must not overwrite the new owner's.
+    const other = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Race Recipient', level: 1, stats: { STR: 8, DEX: 8 } });
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems)
+      .set({
+        characterId: other.body.id,
+        equippedAction: JSON.stringify({ name: 'Theirs', kind: 'melee', toHit: '+1', damage: '1d8-1 slashing', targetAc: '', notes: 'their own' }),
+        equippedActionSource: 'derived',
+      })
+      .where(eq(inventoryItems.id, itemId))
+      .run();
+
+    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Renamed Mid-Race' });
+    expect(renamed.status).toBe(200);
+    // The stale derivation is discarded rather than written over the new owner's row.
+    expect(renamed.body.equippedAction?.notes ?? '').not.toContain('STR +3');
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)
