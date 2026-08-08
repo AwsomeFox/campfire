@@ -1,18 +1,23 @@
 import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { and, desc, eq, gt, inArray, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
+  // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
+  // the turn tick, the same pure math the resolver uses so this service can never decide a
+  // pool recharges differently than an apply/reject message described it.
+  parseRechargeRange,
+  effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
-import { fromJsonText, toJsonText } from '../../common/json';
+import { deepJsonEqual, fromJsonText, toJsonText } from '../../common/json';
 import { CharactersService } from '../characters/characters.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { QuestsService } from '../quests/quests.service';
@@ -20,7 +25,7 @@ import { StorylinesService } from '../storylines/storylines.service';
 import { TimelineService } from '../timeline/timeline.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { conditionWriteSetFromInstances, legacyConditionInstance as sharedLegacyConditionInstance, parseConditionInstancesText, readConditionInstances, sheetConditionWriteSetFromInstances } from '../../common/conditions';
-import { fogConcealsPixels, parseFogState } from '../../common/fog';
+import { fogConcealsPixels, parseFogState, persistedFogConcealsPixels } from '../../common/fog';
 import { rollDice, rollInitiative, rollOpenLegendActionDice } from '../../common/dice';
 import { foldForSearch, foldedIncludes, matchesSearchQuery } from '../../common/text-search';
 import { RollsService } from '../rolls/rolls.service';
@@ -46,10 +51,12 @@ import {
   generateEncounterGroup,
   hpBandFor,
   initialEncounterTurnState,
+  movementSlotMax,
   redactEncounterEventsForViewer,
   resetLegendaryUsage,
   resetTurnStateForStart,
   retreatEncounterTurn,
+  rollRechargeAtTurnStart,
   sortCombatants,
   sortEncountersForList,
   concentrationCheckForDamage,
@@ -57,6 +64,7 @@ import {
   tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
   turnIndexFor,
+  undoActionUsesRecharge,
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
 import {
@@ -64,7 +72,7 @@ import {
   buildEncounterAftermathRecapDraft,
   suggestedXpFromDifficulty,
 } from './encounter-aftermath.logic';
-import type { CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
+import type { ActionUsesMap, ActionUsesRechargeDelta, CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
@@ -74,6 +82,7 @@ import {
   backfillEncounterOpResponse,
   encounterOpFingerprint,
   EncounterOpRaceMarker,
+  findExactPriorEncounterOp,
   findPriorEncounterOp,
   readEncounterOpAfterRace,
   recordEncounterOp,
@@ -86,12 +95,23 @@ type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
 type EncounterPreviewInput = z.infer<typeof EncounterPreviewRequest>;
 type EncounterCommitInput = z.infer<typeof EncounterCommit>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
+type AoeTemplateUpdateInput = z.infer<typeof AoeTemplateUpdate>;
+const MAX_PLAYER_DECLARED_AOE_TEMPLATES = 10;
 type EncounterEscalationUpdateInput = z.infer<typeof EncounterEscalationUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 /** Server-only field: public REST/MCP schemas deliberately cannot supply a death-save face. */
-type CombatantInternalUpdateInput = CombatantUpdateInput & { deathSaveRoll?: number; expectedUpdatedAt?: string };
+type CombatantInternalUpdateInput = CombatantUpdateInput & {
+  deathSaveRoll?: number;
+  expectedUpdatedAt?: string;
+  /** Issue #1992: content-based CAS for the `statblock` field only. The `statblock` write
+   * is rejected with 409 when the row's CURRENTLY STORED statblock no longer deep-equals
+   * this value. An hp/condition/position write to this same combatant does not change the
+   * stored statblock, so it cannot trip this guard — only a genuine concurrent `statblock`
+   * write can. Ignored unless `statblock` is also present in the same patch. */
+  expectedStatblock?: CombatantStatblock;
+};
 type CombatantTransactionHook = (
   tx: SyncDb,
   fresh: typeof combatants.$inferSelect,
@@ -113,6 +133,10 @@ type TurnTickCombatantDelta = {
   conditionExpired: ConditionInstance[];
   effectTicks: TurnTickedEffect[];
   effectExpired: ActiveEffect[];
+  /** Issue #1921: recharge rolls that cleared a spent action on this combatant's turn
+   *  start — empty for the 'ending' side, which never rolls recharge. Lets undoTurn put
+   *  a recharged action back to "spent" without re-deriving it from the current spec. */
+  actionUsesRecharged?: ActionUsesRechargeDelta[];
 };
 type TurnTickDelta = {
   ending?: TurnTickCombatantDelta;
@@ -236,13 +260,26 @@ function parseFog(text: string | null): FogState | null {
 
 /**
  * Parse the stored AoE-templates JSON back into an AoeTemplate[] (issue #238). Same defensive
- * degrade-to-empty as parseFog: corrupt/legacy text or an entry that no longer validates is
- * dropped rather than failing the whole encounter read — templates are a display aid.
+ * degrade-to-empty as parseFog: corrupt/legacy text or any invalid entry makes the stored
+ * list unreadable rather than failing the whole encounter read — templates are a display aid.
  */
 function parseAoe(text: string | null): AoeTemplateType[] {
   if (text == null) return [];
   const parsed = zod.array(AoeTemplate).safeParse(fromJsonText<unknown>(text, null));
   return parsed.success ? parsed.data : [];
+}
+
+/**
+ * Scoped AoE writes must never persist parseAoe's read-time degraded value: doing so
+ * could turn one malformed saved entry into a destructive rewrite of the whole list.
+ */
+function parseAoeForScopedWrite(text: string | null): AoeTemplateType[] {
+  if (text == null) return [];
+  const parsed = zod.array(AoeTemplate).safeParse(fromJsonText<unknown>(text, null));
+  if (!parsed.success) {
+    throw new ConflictException('Encounter AoE templates contain invalid saved data and must be repaired before they can be changed');
+  }
+  return parsed.data;
 }
 
 function parseCombatantStatblock(text: string | null): CombatantStatblock | null {
@@ -393,6 +430,8 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     escalationDieHistory: parseEscalationHistory(row.escalationDieHistory),
     turnIndex: row.turnIndex,
     currentCombatantId: row.currentCombatantId,
+    // Issue #1923: the reorder CAS token. Not a secret — every role reads the same value.
+    turnVersion: row.turnVersion,
     turnPhase: (row.turnPhase as EncounterTurnPhase) ?? 'combatant',
     lairResumeCombatantId: row.lairResumeCombatantId ?? null,
     locationId: row.locationId,
@@ -415,7 +454,15 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     fog: parseFog(row.fog),
     aoe: parseAoe(row.aoe),
     hidden: row.hidden,
+    // Monster-HP display dial (issue #1925). Readable by every viewer — DM and player
+    // alike — so a player's client knows whether to expect a number, a band, or
+    // neither; the mode itself leaks nothing about any combatant's HP.
+    monsterHpDisplay: (row.monsterHpDisplay as MonsterHpDisplay) ?? 'band',
     endedAt: row.endedAt,
+    // Turn timer (issue #1935) — server-stamped only; exposed for every role (never a secret)
+    // so the DM header, PlayerVitalsHeader, and PlayerDisplayPage compute the same elapsed time.
+    turnStartedAt: row.turnStartedAt ?? null,
+    turnTimerSeconds: row.turnTimerSeconds ?? 0,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -442,6 +489,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     rpMax: row.rpMax ?? 0,
     eac: row.eac ?? null,
     kac: row.kac ?? null,
+    speed: row.speed ?? null,
     hpTemp: row.hpTemp,
     hpBand: null,
     deathState: row.deathState as Combatant['deathState'],
@@ -450,6 +498,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditions: fromJsonText<string[]>(row.conditions, []),
     ruleEntryId: row.ruleEntryId,
     sortOrder: row.sortOrder,
+    manualOrder: row.manualOrder ?? null,
     tokenX: row.tokenX,
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
@@ -460,6 +509,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditionInstances: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
     legendaryActions: null,
     statblock: parseCombatantStatblock(row.statblockJson),
+    statblockRevealed: row.statblockRevealed,
   };
 }
 
@@ -700,27 +750,57 @@ function deathSaveRollEventDetail(
  * monster AND npc combatants we replace hpCurrent/hpMax with a coarse status band and
  * null the exact numbers. Character combatants keep exact HP for everyone: party HP
  * is shared table knowledge and a player already sees their own character sheet.
+ *
+ * Issue #1925: the encounter's `monsterHpDisplay` dial controls how much of that is
+ * withheld. `band` (default) is the behaviour above, unchanged. `exact` ships the real
+ * hpCurrent/hpMax/hpTemp/sp/rp to non-DMs too (unrevealed statblocks and
+ * pendingConcentrationChecks stay stripped — separate secrecy concerns, issue #425/#606).
+ * A revealed statblock follows the same HP mode for its template `hp` field. `hidden` ships
+ * neither the numbers NOR the band — except a combatant at 0 HP still reports
+ * `hpBand: 'down'` in every mode, so the table always knows who dropped. This is the
+ * SOLE server-side choke point for the mode; there is no client-side hiding anywhere
+ * downstream of this function.
  */
-function redactMonsterHp(c: Combatant): Combatant {
+function redactMonsterHp(c: Combatant, mode: MonsterHpDisplay): Combatant {
   if (c.kind !== 'monster' && c.kind !== 'npc') return c;
   // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
-  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43).
+  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43),
+  // UNLESS the DM has explicitly revealed this combatant's statblock (issue #1926) —
+  // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
+  // never carries the field until the DM turns it on. HP banding itself is entirely
+  // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
+  // A revealed statblock can carry the same exact template HP used to seed hpMax
+  // (issue #2080). Strip that field in band/hidden modes too; otherwise REST and
+  // MCP callers could recover the number even though hpMax itself is null (issue #2093).
   // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
   // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
+  let visibleStatblock = c.statblockRevealed ? c.statblock : null;
+  if (mode !== 'exact' && visibleStatblock) {
+    visibleStatblock = { ...visibleStatblock, hp: null };
+  }
   const redacted: Combatant = {
     ...c,
-    statblock: null,
+    statblock: visibleStatblock,
     turnState: {
       ...c.turnState,
       pendingConcentrationChecks: [],
     },
   };
   if (redacted.hpCurrent === null || redacted.hpMax === null) return redacted;
+  const band = hpBandFor(redacted.hpCurrent, redacted.hpMax);
+  if (mode === 'exact') {
+    // Real numbers ship as-is; the band rides along too (harmless — it's derivable from
+    // the numbers already present) so a 0-HP monster still reports 'down' consistently
+    // with the other two modes.
+    return { ...redacted, hpBand: band };
+  }
   // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
   // temp-HP buffed monster doesn't leak numbers through the redaction.
   return {
     ...redacted,
-    hpBand: hpBandFor(redacted.hpCurrent, redacted.hpMax),
+    // 'hidden' withholds the band too, EXCEPT 'down' — the table must always know who
+    // dropped, in every mode.
+    hpBand: mode === 'hidden' && band !== 'down' ? null : band,
     hpCurrent: null,
     hpMax: null,
     spCurrent: null,
@@ -1016,8 +1096,12 @@ export class EncountersService {
    * as before. Adding a second rule system is a new adapter in the registry, not edits here.
    */
   private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
-    const [row] = await this.db.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
-    return ruleSystemAdapter(row?.ruleSystem);
+    const [row] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return ruleSystemAdapter(row?.ruleSystem, fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null));
   }
 
   /** Statblock-derived damage defences for direct tracker damage (issue #605). */
@@ -1355,7 +1439,7 @@ export class EncountersService {
     }
 
     const combatantRows = await this.listCombatantRows(encounterId);
-    const linkedNpcIds = combatantRows.map((c) => c.npcId).filter((n): n is number => n !== null);
+    const linkedNpcIds = [...new Set(combatantRows.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((n): n is number => n !== null)))];
     const hiddenNpcIds = new Set<number>();
     if (linkedNpcIds.length > 0) {
       const hiddenRows = await this.db
@@ -1366,7 +1450,7 @@ export class EncountersService {
     }
     return redactEncounterEventsForViewer(
       events,
-      combatantRows.map((c) => ({ id: c.id, name: c.name, npcId: c.npcId })),
+      combatantRows.map((c) => ({ id: c.id, name: c.name, npcId: c.npcId, npcIdentitySourceId: c.npcIdentitySourceId })),
       hiddenNpcIds,
     );
   }
@@ -1663,8 +1747,14 @@ export class EncountersService {
    * gets monster HP replaced with a coarse band. Omit it (or pass `dm`) only for
    * DM-facing returns — the DM always sees exact HP.
    */
-  async getWithCombatantsOrThrow(id: number, viewerRole?: Role, viewerUserId?: string): Promise<EncounterWithCombatants> {
-    const row = await this.getRowOrThrow(id);
+  // Issue #1909 review (Devin, tenth finding): `includeDeleted` defaults to `false` —
+  // identical default to `getRowOrThrow`'s own — so every EXISTING caller (roughly two
+  // dozen across this service plus the controller/cast/export/scribe/MCP-tools call
+  // sites) is completely unaffected; only a caller that explicitly opts in (currently
+  // just `adjustCombatantResource`'s role-mismatch keyed-replay fallback, below) can ever
+  // see a soft-deleted (trashed) encounter's projection through this method.
+  async getWithCombatantsOrThrow(id: number, viewerRole?: Role, viewerUserId?: string, includeDeleted = false): Promise<EncounterWithCombatants> {
+    const row = await this.getRowOrThrow(id, includeDeleted);
     // Entity-level secrecy (issue #262): a hidden encounter (DM prep) must be
     // indistinguishable from a nonexistent one for a non-DM — 404 (not 403), so its
     // very existence + roster aren't leaked. Mirrors QuestsService.getOrThrow. undefined
@@ -1687,13 +1777,14 @@ export class EncountersService {
       // The disposition snapshot preserves encounter-time enemy allegiance for
       // server-side difficulty/XP calculation. It is DM-only: campaign-authored
       // values may reveal a hidden NPC's allegiance to players.
-      list = list.map((c) => ({ ...redactMonsterHp(c), npcDispositionSnapshot: null }));
+      const monsterHpDisplay = (row.monsterHpDisplay ?? 'band') as MonsterHpDisplay;
+      list = list.map((c) => ({ ...redactMonsterHp(c, monsterHpDisplay), npcDispositionSnapshot: null }));
       // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant
       // linked to a HIDDEN NPC still leaked that NPC's identity to non-DMs via `npcId` + the
       // borrowed name. Hidden NPCs are dropped wholesale from every other non-DM surface, so
       // here we sever the identity link (null npcId) and mask the name — the token still shows
       // in initiative (its position matters to play) but not who it is.
-      const linkedNpcIds = list.map((c) => c.npcId).filter((n): n is number => n !== null);
+      const linkedNpcIds = [...new Set(combatantRows.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((n): n is number => n !== null)))];
       if (linkedNpcIds.length > 0) {
         const hiddenRows = await this.db
           .select({ id: npcs.id })
@@ -1701,9 +1792,12 @@ export class EncountersService {
           .where(and(inArray(npcs.id, linkedNpcIds), eq(npcs.hidden, true)));
         const hiddenIds = new Set(hiddenRows.map((r) => r.id));
         if (hiddenIds.size > 0) {
-          list = list.map((c) =>
-            c.npcId !== null && hiddenIds.has(c.npcId) ? { ...c, npcId: null, name: UNKNOWN_COMBATANT_LABEL } : c,
-          );
+          list = list.map((c) => {
+            const source = combatantRows.find((row) => row.id === c.id);
+            return source && [source.npcId, source.npcIdentitySourceId].some((id) => id !== null && hiddenIds.has(id))
+              ? { ...c, npcId: null, name: UNKNOWN_COMBATANT_LABEL }
+              : c;
+          });
         }
       }
       // Fog of war (issue #40 / #463): withhold the position of any token in an
@@ -1746,23 +1840,9 @@ export class EncountersService {
     // (and render above the fog overlay client-side). Filter server-side for non-DMs using
     // the same concealment rules as token redaction; player-declared templates stay visible
     // to their owner via declaredByUserId.
-    let aoe = withLinks.aoe ?? [];
-    if (viewerRole !== undefined && viewerRole !== 'dm') {
-      const fog = parseFog(row.fog);
-      const invalidFog = row.fog !== null && fog === null;
-      const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
-      const siblingProtects =
-        !invalidFog &&
-        !ownFogConceals &&
-        row.mapAttachmentId != null &&
-        (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
-      if (invalidFog || siblingProtects) {
-        const concealAll: FogState = { enabled: true, revealed: [] };
-        aoe = filterAoeTemplatesForViewer(aoe, concealAll, { viewerUserId });
-      } else if (fog?.enabled) {
-        aoe = filterAoeTemplatesForViewer(aoe, fog, { viewerUserId });
-      }
-    }
+    const aoe = viewerRole !== undefined && viewerRole !== 'dm'
+      ? this.filterAoeTemplatesForViewer(this.db, row, withLinks.aoe ?? [], viewerUserId)
+      : withLinks.aoe ?? [];
     return {
       ...withLinks,
       aoe,
@@ -2021,10 +2101,30 @@ export class EncountersService {
       changedPredicates.push(sql`${encounters.fog} IS NOT ${fog}`);
     }
     // Shared AoE templates (issue #238). Stored as JSON text; an empty array clears them.
-    if (input.aoe !== undefined && !isDeepStrictEqual(input.aoe, aoeBaseline)) {
-      const aoe = toJsonText(input.aoe);
-      set.aoe = aoe;
-      changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
+    if (input.aoe !== undefined) {
+      let aoeBaselineForAttribution = aoeBaseline;
+      if (encounterRow.aoe && aoeBaseline.length === 0 && !resetApplied) {
+        try {
+          const raw = JSON.parse(encounterRow.aoe);
+          if (Array.isArray(raw)) {
+            aoeBaselineForAttribution = raw.filter(
+              (item): item is AoeTemplate => item != null && typeof item === 'object' && typeof item.id === 'string',
+            );
+          }
+        } catch {
+          // ignore parsing error fallback
+        }
+      }
+      const previousById = new Map(aoeBaselineForAttribution.map((template) => [template.id, template]));
+      const aoeInput = input.aoe.map((template) => ({
+        ...template,
+        declaredByUserId: previousById.get(template.id)?.declaredByUserId ?? null,
+      }));
+      if (!isDeepStrictEqual(aoeInput, aoeBaseline)) {
+        const aoe = toJsonText(aoeInput);
+        set.aoe = aoe;
+        changedPredicates.push(sql`${encounters.aoe} IS NOT ${aoe}`);
+      }
     }
     // Entity-level secrecy (issue #262) — DM-only (this whole endpoint requires dm). true
     // hides the encounter's roster + difficulty from non-DM reads; the DM reveals by
@@ -2032,6 +2132,20 @@ export class EncountersService {
     if (input.hidden !== undefined && input.hidden !== encounterRow.hidden) {
       set.hidden = input.hidden;
       changedPredicates.push(sql`${encounters.hidden} IS NOT ${input.hidden ? 1 : 0}`);
+    }
+    // Monster-HP display dial (issue #1925) — DM-only (this whole endpoint requires dm).
+    // Mid-fight switches propagate to non-DM viewers on their next read/SSE refetch.
+    if (input.monsterHpDisplay !== undefined && input.monsterHpDisplay !== (encounterRow.monsterHpDisplay ?? 'band')) {
+      set.monsterHpDisplay = input.monsterHpDisplay;
+      changedPredicates.push(sql`${encounters.monsterHpDisplay} IS NOT ${input.monsterHpDisplay}`);
+    }
+    // Turn timer pacing limit (issue #1935) — dm only, like the rest of this endpoint.
+    // `turnStartedAt` is deliberately absent from EncounterUpdate/EncounterUpdateDto (strict
+    // schema), so it can never reach here at all — it is stamped only by the turn-transition
+    // methods themselves (start/advanceCurrentTurn/undoTurn/reopen), never via PATCH.
+    if (input.turnTimerSeconds !== undefined && input.turnTimerSeconds !== (encounterRow.turnTimerSeconds ?? 0)) {
+      set.turnTimerSeconds = input.turnTimerSeconds;
+      changedPredicates.push(sql`${encounters.turnTimerSeconds} IS NOT ${input.turnTimerSeconds}`);
     }
 
     if (changedPredicates.length === 0) {
@@ -2179,6 +2293,254 @@ export class EncountersService {
   }
 
   /**
+   * Enforce the role and secrecy rules shared by the player-addressable AoE write
+   * routes. This deliberately runs inside the transaction before the campaign
+   * lifecycle recheck, so a hidden encounter stays non-enumerating even after
+   * archive; the lifecycle check still runs transactionally before any write.
+   */
+  private assertAoeTemplateWriteAccess(encounter: typeof encounters.$inferSelect, role: Role): void {
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounter.id} not found`);
+    }
+    if (!roleAtLeast(role, 'player')) {
+      throw new ForbiddenException('Viewers may not declare or modify AoE templates.');
+    }
+  }
+
+  /**
+   * The server's one fail-closed AoE visibility computation. Reads and scoped
+   * writes must agree: invalid fog and a sibling encounter that still protects
+   * a reused map both conceal every non-owned template.
+   */
+  private filterAoeTemplatesForViewer(
+    db: SyncDb,
+    encounter: typeof encounters.$inferSelect,
+    aoe: readonly AoeTemplateType[],
+    viewerUserId: string | undefined,
+  ): AoeTemplateType[] {
+    const fog = parseFog(encounter.fog);
+    const invalidFog = encounter.fog !== null && fog === null;
+    const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
+    const siblingProtects =
+      !invalidFog &&
+      !ownFogConceals &&
+      encounter.mapAttachmentId != null &&
+      db
+        .select({ fog: encounters.fog })
+        .from(encounters)
+        .where(and(
+          eq(encounters.mapAttachmentId, encounter.mapAttachmentId),
+          eq(encounters.campaignId, encounter.campaignId),
+          isNotNull(encounters.fog),
+        ))
+        .all()
+        .some((row) => persistedFogConcealsPixels(row.fog));
+    if (invalidFog || siblingProtects) {
+      return filterAoeTemplatesForViewer(aoe, { enabled: true, revealed: [] }, { viewerUserId });
+    }
+    return filterAoeTemplatesForViewer(aoe, fog, { viewerUserId });
+  }
+
+  /**
+   * Create one player- or DM-declared AoE template (issue #1913). Attribution is
+   * stamped from the authenticated caller rather than accepted from the request.
+   */
+  async declareAoeTemplate(
+    encounterId: number,
+    input: unknown,
+    user: RequestUser,
+    role: Role,
+    /** REST stays create-only; MCP exposes explicit create/update operations. */
+    operation: 'create' | 'update' = 'create',
+  ): Promise<AoeTemplateType> {
+    // REST and MCP creations are complete; MCP updates deliberately permit a
+    // partial payload. Keep raw key presence so
+    // schema defaults cannot overwrite fields the caller did not intend to change.
+    const rawInput = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const createTemplate = operation === 'update' ? undefined : AoeTemplateDeclare.parse(input);
+    const templateId = createTemplate?.id ?? AoeTemplate.shape.id.parse(rawInput.id);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+    let declared: AoeTemplateType | undefined;
+    let action: 'encounter.aoe.declare' | 'encounter.aoe.update' = 'encounter.aoe.declare';
+    let changed = false;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseAoeForScopedWrite(fresh.aoe);
+      const existingIndex = current.findIndex((candidate) => candidate.id === templateId);
+      if (existingIndex >= 0) {
+        const existing = current[existingIndex];
+        if (role !== 'dm' && !this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).some((candidate) => candidate.id === templateId)) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
+        if (operation === 'create') throw new ConflictException(`AoE template ${templateId} already exists`);
+        if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+          throw new ForbiddenException('Players may modify only their own AoE templates.');
+        }
+        // MCP upserts may omit defaulted fields such as angle/color; merge only raw
+        // caller-supplied keys so a move cannot reset the existing template's intent.
+        const supplied = Object.fromEntries(
+          Object.entries(rawInput).filter(([key, value]) => key !== 'id' && key !== 'declaredByUserId' && value !== undefined),
+        );
+        declared = AoeTemplate.parse({ ...existing, ...supplied, declaredByUserId: existing.declaredByUserId });
+        if (isDeepStrictEqual(declared, existing)) {
+          emittedEncounter = fresh;
+          return;
+        }
+        current[existingIndex] = declared;
+        action = 'encounter.aoe.update';
+      } else {
+        if (operation === 'update') throw new NotFoundException(`AoE template ${templateId} not found`);
+        if (current.length >= 50) {
+          throw new ConflictException('An encounter may have at most 50 AoE templates');
+        }
+        if (role !== 'dm' && current.filter((template) => template.declaredByUserId === user.id).length >= MAX_PLAYER_DECLARED_AOE_TEMPLATES) {
+          throw new ConflictException(`A player may declare at most ${MAX_PLAYER_DECLARED_AOE_TEMPLATES} AoE templates per encounter`);
+        }
+        declared = { ...(createTemplate ?? AoeTemplateDeclare.parse(input)), declaredByUserId: role === 'dm' ? null : user.id };
+        current.push(declared);
+      }
+      tx.update(encounters)
+        .set({ aoe: toJsonText(current), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+      changed = true;
+    });
+
+    if (changed) {
+      const encounter = emittedEncounter!;
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action,
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounter.campaignId,
+        detail: declared!.id,
+      });
+      this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    }
+    return declared!;
+  }
+
+  /** Update an AoE template while preserving the server-owned declarer identity. */
+  async updateAoeTemplate(
+    encounterId: number,
+    templateId: string,
+    input: AoeTemplateUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<AoeTemplateType> {
+    AoeTemplate.shape.id.parse(templateId);
+    const patch = AoeTemplateUpdate.parse(input);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+    let updated: AoeTemplateType | undefined;
+    let changed = false;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseAoeForScopedWrite(fresh.aoe);
+      const index = current.findIndex((candidate) => candidate.id === templateId);
+      if (index < 0) throw new NotFoundException(`AoE template ${templateId} not found`);
+      const existing = current[index];
+      if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+        if (this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).length === 0) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
+        throw new ForbiddenException('Players may modify only their own AoE templates.');
+      }
+
+      // `AoeTemplateUpdate` cannot include id or declarer. Re-parse the joined
+      // value so the persisted array always retains the full AoeTemplate invariant.
+      updated = AoeTemplate.parse({ ...existing, ...patch, declaredByUserId: existing.declaredByUserId });
+      if (isDeepStrictEqual(updated, existing)) {
+        emittedEncounter = fresh;
+        return;
+      }
+      current[index] = updated;
+      tx.update(encounters)
+        .set({ aoe: toJsonText(current), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+      changed = true;
+    });
+
+    if (changed) {
+      const encounter = emittedEncounter!;
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.aoe.update',
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounter.campaignId,
+        detail: templateId,
+      });
+      this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    }
+    return updated!;
+  }
+
+  /** Remove an AoE template under the same secrecy, lifecycle, and ownership gates. */
+  async removeAoeTemplate(
+    encounterId: number,
+    templateId: string,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ ok: true }> {
+    AoeTemplate.shape.id.parse(templateId);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertAoeTemplateWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseAoeForScopedWrite(fresh.aoe);
+      const existing = current.find((candidate) => candidate.id === templateId);
+      if (!existing) throw new NotFoundException(`AoE template ${templateId} not found`);
+      if (role !== 'dm' && existing.declaredByUserId !== user.id) {
+        if (this.filterAoeTemplatesForViewer(tx, fresh, [existing], user.id).length === 0) {
+          throw new NotFoundException(`AoE template ${templateId} not found`);
+        }
+        throw new ForbiddenException('Players may remove only their own AoE templates.');
+      }
+      tx.update(encounters)
+        .set({ aoe: toJsonText(current.filter((candidate) => candidate.id !== templateId)), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+    });
+
+    const encounter = emittedEncounter!;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aoe.remove',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounter.campaignId,
+      detail: templateId,
+    });
+    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    return { ok: true };
+  }
+
+  /**
    * Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a
    * combatant (issue #115 — non-active PCs are skipped).
    *
@@ -2261,6 +2623,11 @@ export class EncountersService {
             deathState: character.deathState,
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
+            // Issue #1910: same add-time speed snapshot as the single-combatant
+            // addCombatant() path — without it, an auto-added party member's movement
+            // max would resolve through the character's LIVE speed on every read
+            // instead of freezing at the value the sheet had when the fight started.
+            speed: character.speed,
             // Issue #466: stamp the sheet CAS token at open so a later re-end can detect
             // intervening sheet edits made while the encounter was ended.
             sheetSyncedUpdatedAt: character.updatedAt,
@@ -2330,12 +2697,15 @@ export class EncountersService {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
     const [campaignRow] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, encounterRow.campaignId))
       .limit(1);
     const ruleSystem = campaignRow?.ruleSystem ?? null;
-    const adapter = ruleSystemAdapter(ruleSystem);
+    const adapter = ruleSystemAdapter(
+      ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(campaignRow?.customMechanicsProfile, null),
+    );
     const combatantRows = await this.listCombatantRows(encounterId);
 
     // Party levels: from each character-combatant's linked character sheet.
@@ -2355,8 +2725,8 @@ export class EncountersService {
     // Enemy CRs: monsters plus NPCs whose captured/current campaign disposition is
     // hostile. A non-DM must not learn a hidden NPC's allegiance or statblock through
     // this aggregate, so hidden (and unlinked) NPC combatants fail closed for that view.
-    const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && c.npcId !== null);
-    const npcIds = npcCombatants.map((c) => c.npcId as number);
+    const npcCombatants = combatantRows.filter((c) => c.kind === 'npc' && (c.npcId !== null || c.npcIdentitySourceId !== null));
+    const npcIds = [...new Set(npcCombatants.flatMap((c) => [c.npcId, c.npcIdentitySourceId].filter((id): id is number => id !== null)))];
     const hostileNpcIds = new Set<number>();
     const hiddenNpcIds = new Set<number>();
     if (npcIds.length > 0) {
@@ -2372,12 +2742,14 @@ export class EncountersService {
     const dmView = viewerRole === undefined || viewerRole === 'dm';
     const enemyCombatants = combatantRows.filter((c) => {
       if (c.kind === 'monster') return true;
-      if (c.kind !== 'npc' || (!dmView && (c.npcId === null || hiddenNpcIds.has(c.npcId)))) return false;
+      const npcIdentityId = c.npcIdentitySourceId ?? c.npcId;
+      const hasHiddenNpcIdentity = [c.npcId, c.npcIdentitySourceId].some((id) => id !== null && hiddenNpcIds.has(id));
+      if (c.kind !== 'npc' || (!dmView && (npcIdentityId === null || hasHiddenNpcIdentity))) return false;
       // Preparation is still authored world state: show the NPC's live
       // disposition until start() captures historical allegiance for play.
       const disposition = encounterRow.status === 'preparing'
-        ? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '')
-        : c.npcDispositionSnapshot ?? (c.npcId !== null && hostileNpcIds.has(c.npcId) ? 'hostile' : '');
+        ? (npcIdentityId !== null && hostileNpcIds.has(npcIdentityId) ? 'hostile' : '')
+        : c.npcDispositionSnapshot ?? (npcIdentityId !== null && hostileNpcIds.has(npcIdentityId) ? 'hostile' : '');
       return disposition.trim().toLowerCase() === 'hostile';
     });
     // An enemy combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
@@ -2934,6 +3306,7 @@ export class EncountersService {
   private async loadMonsterCandidates(
     adapter: RuleSystemAdapter,
     filters: EncounterGenerateInput['filters'],
+    campaignId: number,
   ): Promise<GeneratorCandidate[]> {
     // Optional single-pack scoping: resolve the slug to a pack id, or short-circuit to no
     // candidates if the slug isn't installed (mirrors RulesService.search's pack filter).
@@ -2946,8 +3319,22 @@ export class EncountersService {
 
     const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
     const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
-    const where = packId !== undefined ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)) : and(typeWhere, isNull(ruleEntries.campaignId));
-    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
+    // Issue #1927: campaign homebrew (a rule_entries row with a non-null campaignId) is now a
+    // candidate alongside globally installed pack entries, using the same
+    // or(isNull(campaignId), eq(campaignId, ...)) idiom already used at commit/defenses/
+    // difficulty/add-combatant/aftermath — plus isNull(archivedAt) so soft-archived homebrew
+    // never generates. `packSlug` (below) narrows ONLY the global half: homebrew rows always
+    // live under a dedicated internal pack id (RulesService.homebrewPackId()), never under a
+    // real installed pack's id, so an explicit pack filter naturally excludes homebrew without
+    // extra logic — packSlug stays pack-only, unchanged from before this issue.
+    const where =
+      packId !== undefined
+        ? and(typeWhere, isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId))
+        : and(typeWhere, or(isNull(ruleEntries.campaignId), and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt))));
+    const rows = await this.db
+      .select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson, campaignId: ruleEntries.campaignId })
+      .from(ruleEntries)
+      .where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
     const envNeedle = filters?.environment?.trim().toLowerCase();
@@ -2984,6 +3371,7 @@ export class EncountersService {
         cr,
         xp: typeof data.xp === 'number' && data.xp > 0 ? data.xp : typeof data.experience === 'number' && data.experience > 0 ? data.experience : crToXp(cr),
         hpMax: adapter.monsterHitPoints(data),
+        source: row.campaignId != null ? 'homebrew' : 'pack',
       });
     }
     return candidates;
@@ -3001,15 +3389,23 @@ export class EncountersService {
    * (the encounter doesn't exist until commit).
    */
   async generateEncounter(campaignId: number, input: EncounterGenerateInput, _viewerRole?: Role): Promise<EncounterSuggestion> {
-    const adapter = await this.adapterForCampaign(campaignId);
+    // Issue #1928 review (Copilot #1981): fetch the campaign's ruleSystem slug ONCE and derive
+    // the adapter from it locally — `ruleSystemAdapter` is pure — rather than calling both
+    // `adapterForCampaign` (which re-reads `campaigns.ruleSystem` itself) and
+    // `ruleSystemForCampaign`, which would run the same SELECT twice on this hot path.
+    const { ruleSystem, customMechanicsProfile } = await this.ruleSystemForCampaign(campaignId);
+    const adapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
-    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters, campaignId);
 
     // Mint a seed when the caller didn't supply one, so the result is reproducible: the
     // returned seed round-trips back through `seed` to rebuild the identical group.
     const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
     const maxCount = input.count ?? 12;
 
+    // The 5e-shaped budget math still SELECTS the roster (issue #1928 is about honesty of
+    // the REPORTED band, not a new selection heuristic — a non-5e system has no other budget
+    // math to size a roster with, so `difficulty` target param stays accepted as a heuristic).
     const result = generateEncounterGroup({
       partyLevels,
       targetBand: input.difficulty,
@@ -3019,14 +3415,41 @@ export class EncountersService {
       seed,
     });
 
+    // Issue #1928: report difficulty exactly like preview does — the adapter-owned estimate,
+    // not the raw 5e math the selection heuristic used internally. A non-5e campaign gets an
+    // explicit `unsupported` status here instead of a confident 5e band presented as fact.
+    const reported = estimateEncounterDifficultyForRuleSystem(ruleSystem, {
+      partyLevels,
+      monsterChallengeRatings: result.picks.flatMap((p) => Array.from({ length: p.count }, () => p.cr)),
+    });
+
     return {
-      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, entryType: p.entryType ?? 'monster', cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
+      combatants: result.picks.map((p) => ({
+        ruleEntryId: p.ruleEntryId,
+        name: p.name,
+        entryType: p.entryType ?? 'monster',
+        cr: p.cr,
+        xp: p.xp,
+        hpMax: p.hpMax,
+        count: p.count,
+        source: p.source ?? 'pack',
+      })),
       targetBand: input.difficulty,
-      difficulty: result.difficulty,
+      difficulty: reported,
+      // Codex review (#1981): `reported.adjustedXp` is 0 for an `unsupported` status
+      // (unsupportedEncounterDifficulty always zeroes it) — reporting that as `totalXp` would
+      // be a FALSE zero sitting next to positive per-combatant `xp` values in the same payload,
+      // not an honest absence. `result.difficulty` is the selection heuristic's OWN adjusted-XP
+      // total (real and positive for a non-empty roster on every system, since it is what
+      // actually sized this roster) — byte-identical to `reported.adjustedXp` for 5e/empty-slug
+      // (same formula, same inputs), and the pre-#1928 value for every system. `difficulty` /
+      // `difficultySupport` still honestly flag a non-5e total as heuristic; `totalXp` itself
+      // must never contradict the positive `combatants[].xp` beside it.
       totalXp: result.difficulty.adjustedXp,
       shape: result.shape,
       seed: result.seed,
       matchedBand: result.matchedBand,
+      difficultySupport: encounterDifficultySupported(ruleSystem) ? 'supported' : 'heuristic',
     };
   }
 
@@ -3079,14 +3502,22 @@ export class EncountersService {
   // supplies candidates from the compendium, resolves statblocks, and owns persistence.
   // ---------------------------------------------------------------------------
 
-  /** Look up a campaign's rule system slug (for adapter-owned difficulty + support status). */
-  private async ruleSystemForCampaign(campaignId: number): Promise<string | null> {
+  /**
+   * Look up a campaign's rule system slug (for adapter-owned difficulty + support status)
+   * alongside its persisted homebrew mechanics profile (issue #1502), in the one SELECT.
+   */
+  private async ruleSystemForCampaign(
+    campaignId: number,
+  ): Promise<{ ruleSystem: string | null; customMechanicsProfile: HomebrewMechanicsProfile | null }> {
     const [row] = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem })
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1);
-    return row?.ruleSystem ?? null;
+    return {
+      ruleSystem: row?.ruleSystem ?? null,
+      customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null),
+    };
   }
 
   /**
@@ -3194,10 +3625,14 @@ export class EncountersService {
    * NOTHING — any member (or AI) may preview; committing is the separate write path.
    */
   async previewEncounter(campaignId: number, input: EncounterPreviewInput, _viewerRole?: Role): Promise<EncounterPreview> {
+    // #1502: resolve through the campaign's persisted homebrew profile, not the slug alone.
+    // main added this call site while this branch was converting every adapter lookup to the
+    // profile-aware path; a slug-only `ruleSystemAdapter` here would silently give a homebrew
+    // campaign 5e's monster/difficulty maths for generated encounters.
     const adapter = await this.adapterForCampaign(campaignId);
-    const ruleSystem = await this.ruleSystemForCampaign(campaignId);
+    const { ruleSystem } = await this.ruleSystemForCampaign(campaignId);
     const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
-    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters, campaignId);
     const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
     const maxCount = input.count ?? 12;
 
@@ -3233,7 +3668,13 @@ export class EncountersService {
     const pickedIds = [...new Set(result.picks.map((p) => p.ruleEntryId))];
     const dataById = new Map<number, Record<string, unknown>>();
     if (pickedIds.length > 0) {
-      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(inArray(ruleEntries.id, pickedIds), isNull(ruleEntries.campaignId)));
+      // Issue #1927: picks may now include the campaign's own homebrew, so this must resolve
+      // statblocks for BOTH scopes (same widen as loadMonsterCandidates above), not just global
+      // pack entries — otherwise a homebrew pick's inspection card would silently come back empty.
+      const rows = await this.db
+        .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+        .from(ruleEntries)
+        .where(and(inArray(ruleEntries.id, pickedIds), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))));
       for (const r of rows) dataById.set(r.id, fromJsonText<Record<string, unknown>>(r.dataJson, {}));
     }
 
@@ -3256,6 +3697,7 @@ export class EncountersService {
         pinned: slotPlan.pinned,
         seed: slotPlan.seed,
         inspection: this.buildCreatureInspection(adapter, data, cr, xp, hpMax),
+        source: pick?.source ?? 'pack',
       };
     });
 
@@ -3267,13 +3709,22 @@ export class EncountersService {
       targetBand: input.difficulty,
       difficulty: reported,
       explanation,
-      totalXp: reported.adjustedXp,
+      // Codex review (#1981, generateEncounter): same fix applies here — `reported.adjustedXp`
+      // is always 0 when `status:'unsupported'`, which would contradict the positive
+      // per-slot `xp` values in `roster` for a non-5e system. `result.difficulty` is the
+      // roster-selection heuristic's own adjusted-XP total (byte-identical to
+      // `reported.adjustedXp` for 5e/empty-slug, real and positive for a non-empty roster on
+      // every system). This also corrects the SAME pre-existing zeroing in `previewEncounter`
+      // (predates #1928 — `reported.adjustedXp` was already used here), not just the copy
+      // #1928 introduced in `generateEncounter`.
+      totalXp: result.difficulty.adjustedXp,
       shape: result.shape,
       seed: result.seed,
       matchedBand: result.matchedBand,
       party: partyLevels,
       warnings,
       fallbacks,
+      difficultySupport: encounterDifficultySupported(ruleSystem) ? 'supported' : 'heuristic',
     };
   }
 
@@ -3460,6 +3911,10 @@ export class EncountersService {
             deathState: character.deathState,
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
+            // Issue #1910: same add-time speed snapshot as addCombatant()/create() —
+            // otherwise a party member auto-added by the generator resolves through
+            // the character's LIVE speed instead of freezing at fight-start.
+            speed: character.speed,
             sheetSyncedUpdatedAt: character.updatedAt,
             // #1047: carry the sheet's structured copy in too. No translation needed —
             // a sheet instance already has the round-scoped fields null, so it enters as an
@@ -3597,6 +4052,8 @@ export class EncountersService {
    *  - kind='character' + characterId -> pull from the character row
    *  - kind='monster' + ruleEntryId -> try name + hit points from rule_entries.dataJson,
    *    falling back to whatever the caller explicitly provided
+   *  - libraryMonsterId -> hp only, from the saved statblock's template HP
+   *    (CombatantStatblock.hp), when that entry has one stored (issue #2080)
    *  - otherwise the caller must provide name + hpMax directly
    * Throws 400 if, after resolution, we still don't have a name or an hpMax.
    */
@@ -3610,7 +4067,7 @@ export class EncountersService {
     let initMod = input.initMod ?? 0;
     let initBreakdown = manualInitiativeBreakdown(adapter, initMod);
     const initModel = initiativeModelForAdapter(adapter);
-    const initiativeGroup =
+    let initiativeGroup =
       input.initiativeGroup !== undefined
         ? input.initiativeGroup
         : initModel.mode === 'group'
@@ -3637,6 +4094,7 @@ export class EncountersService {
     let ruleEntryId: number | null = null;
     let characterId: number | null = null;
     let npcId: number | null = null;
+    let npcIdentitySourceId: number | null = null;
     let npcDispositionSnapshot: string | null = null;
     let spCurrent = 0;
     let spMax = 0;
@@ -3644,7 +4102,64 @@ export class EncountersService {
     let rpMax = 0;
     let eac: number | null = null;
     let kac: number | null = null;
+    // Issue #1910: add-time snapshot of the linked character's speed, same convention
+    // as eac/kac/the HP-model fields below — stays null for monster/npc combatants.
+    let speed: number | null = null;
     let statblockJson: string | null = null;
+    let tokenSize = input.tokenSize ?? 'medium';
+    let duplicateRuleEntryId: number | undefined;
+    let duplicateStatblockJson: string | null = null;
+    let replacesSourceRuleEntry = false;
+
+    if (input.duplicateOfCombatantId !== undefined) {
+      const [source] = await this.db
+        .select()
+        .from(combatants)
+        .where(and(eq(combatants.id, input.duplicateOfCombatantId), eq(combatants.encounterId, encounterId)))
+        .limit(1);
+      if (!source || (source.kind !== 'monster' && source.kind !== 'npc')) {
+        throw new BadRequestException('Duplicate source must be a monster or NPC in this encounter');
+      }
+      if (input.kind !== source.kind) {
+        throw new BadRequestException('Duplicate kind must match its source combatant');
+      }
+      if (input.npcId !== undefined || input.characterId !== undefined) {
+        throw new BadRequestException('Duplicate inputs cannot set a combatant identity');
+      }
+      name ??= source.name;
+      replacesSourceRuleEntry = input.ruleEntryId !== undefined && input.ruleEntryId !== source.ruleEntryId;
+      if (!replacesSourceRuleEntry) hpMax ??= source.hpMax ?? undefined;
+      if (input.initMod === undefined) {
+        initMod = source.initMod;
+      }
+      const sourceInitBreakdown = parseInitiativeBreakdown(source.initiativeBreakdown);
+      if (sourceInitBreakdown) {
+        const terms = initiativeTermsForModifier(sourceInitBreakdown, initMod);
+        initBreakdown = CombatantInitiativeBreakdown.parse({
+          die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
+          roll: null,
+          modifier: initMod,
+          total: null,
+          terms,
+          formula: initiativeFormula(adapter.initiativeDie > 0 ? adapter.initiativeDie : 20, terms),
+        });
+      }
+      if (input.initiativeGroup === undefined) initiativeGroup = source.initiativeGroup;
+      if (input.tokenSize === undefined) tokenSize = source.tokenSize as TokenSize;
+      duplicateRuleEntryId = source.ruleEntryId ?? undefined;
+      duplicateStatblockJson = source.statblockJson;
+      npcIdentitySourceId = source.npcIdentitySourceId ?? source.npcId;
+      npcDispositionSnapshot = source.npcDispositionSnapshot;
+      // A duplicate starts fresh, but it must retain the source's configured defenses
+      // and pool capacities. In particular, manual Starfinder combatants do not have a
+      // rule entry from which EAC/KAC, stamina, or resolve can be re-derived.
+      eac = source.eac;
+      kac = source.kac;
+      spMax = source.spMax;
+      spCurrent = source.spMax;
+      rpMax = source.rpMax;
+      rpCurrent = source.rpMax;
+    }
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
     // it as the default name. HP/initiative still come from a linked statblock
@@ -3739,18 +4254,20 @@ export class EncountersService {
       rpMax = character.rpMax;
       eac = character.eac;
       kac = character.kac;
+      speed = character.speed;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
         initBreakdown = characterInitiativeBreakdown(adapter, stats, character.level);
         initMod = initBreakdown.modifier;
       }
-    } else if (input.ruleEntryId !== undefined) {
+    } else if (input.ruleEntryId !== undefined || duplicateRuleEntryId !== undefined) {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
       // real rule_entries row — 400 rather than silently dropping it and inserting a
       // combatant with a dangling reference.
-      const [entry] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, input.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
+      const requestedRuleEntryId = input.ruleEntryId ?? duplicateRuleEntryId!;
+      const [entry] = await this.db.select().from(ruleEntries).where(and(eq(ruleEntries.id, requestedRuleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       if (!entry) {
-        throw new BadRequestException(`Rule entry ${input.ruleEntryId} not found`);
+        throw new BadRequestException(`Rule entry ${requestedRuleEntryId} not found`);
       }
       ruleEntryId = entry.id;
       name = name ?? entry.name;
@@ -3763,21 +4280,21 @@ export class EncountersService {
         hpMax = hp ?? 0;
       }
       const mapped = adapter.mapStatblock(data) as StarfinderStatblockData;
-      if (mapped.stamina != null && typeof mapped.stamina === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.stamina != null && typeof mapped.stamina === 'number') {
         spMax = mapped.stamina;
         spCurrent = mapped.stamina;
       }
-      if (mapped.resolve != null && typeof mapped.resolve === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.resolve != null && typeof mapped.resolve === 'number') {
         rpMax = mapped.resolve;
         rpCurrent = mapped.resolve;
       }
-      if (mapped.eac != null && typeof mapped.eac === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.eac != null && typeof mapped.eac === 'number') {
         eac = mapped.eac;
       }
-      if (mapped.kac != null && typeof mapped.kac === 'number') {
+      if ((input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry) && mapped.kac != null && typeof mapped.kac === 'number') {
         kac = mapped.kac;
       }
-      if (input.initMod === undefined) {
+      if (input.initMod === undefined && (input.duplicateOfCombatantId === undefined || replacesSourceRuleEntry)) {
         // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
         // attributes) are not score-converted a second time (issue #767).
         const mapped = adapter.mapStatblock(data);
@@ -3802,6 +4319,24 @@ export class EncountersService {
       }
     }
 
+    // Issue #2080: a campaign-library monster's statblock carries its own template
+    // Max HP (CombatantStatblock.hp) once the DM has saved one. Fetch it BEFORE the
+    // "hpMax must be resolved" check below so an add-from-library caller (REST, MCP,
+    // or the web UI) that omits hpMax gets that saved value instead of tripping the
+    // generic "provide hpMax explicitly" error — this is the "seeds hpMax from it"
+    // half of the fix. An explicit caller-supplied hpMax always wins (e.g. re-statting
+    // one copy tougher). A library entry with no stored HP (statblock.hp === null —
+    // either it predates this field, or the DM never typed one) intentionally falls
+    // through to the SAME explicit-hpMax requirement every other unresolvable-HP path
+    // already enforces below: never silently invented, which was the literal #2080 bug.
+    let libraryMonster: CampaignLibraryMonster | null = null;
+    if (input.libraryMonsterId !== undefined) {
+      libraryMonster = await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId);
+      if (hpMax === undefined && libraryMonster.statblock.hp != null) {
+        hpMax = libraryMonster.statblock.hp;
+      }
+    }
+
     if (!name) {
       throw new BadRequestException('Unable to resolve a name for this combatant — provide "name" explicitly');
     }
@@ -3815,10 +4350,12 @@ export class EncountersService {
 
     // Issue #425: inline homebrew statblock or campaign-library snapshot.
     if (input.libraryMonsterId !== undefined) {
-      const lib = await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId);
+      const lib = libraryMonster ?? (await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId));
       statblockJson = toJsonText(lib.statblock);
     } else if (input.statblock !== undefined) {
       statblockJson = toJsonText(CombatantStatblock.parse(input.statblock));
+    } else if (duplicateStatblockJson !== null && input.ruleEntryId === undefined) {
+      statblockJson = duplicateStatblockJson;
     } else if (
       input.kind === 'monster' &&
       characterId === null &&
@@ -3881,6 +4418,7 @@ export class EncountersService {
             rpMax,
             eac,
             kac,
+            speed,
             // Issue #711: only a character combatant carries the persistent
             // death/temp-HP slice in; monsters/NPCs default to alive/temp-less
             // (the Combatant schema defaults handle the unset monster case).
@@ -3898,6 +4436,8 @@ export class EncountersService {
             conditions: characterId !== null ? characterConditions : '[]',
             conditionInstances: characterId !== null ? characterConditionInstances : null,
             ruleEntryId,
+            npcIdentitySourceId,
+            tokenSize,
             statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })
@@ -3984,7 +4524,11 @@ export class EncountersService {
       campaignId: encounter.campaignId,
       fingerprint: encounterOpFingerprint(operationFingerprint),
     };
+    // Set by `replayCombatant` below when updateCombatant finds a prior claim for this
+    // key — i.e. this invocation did not perform the write and must not re-broadcast.
+    let replayedPriorClaim = false;
     const replayResponse = (response: unknown): { combatant: Combatant; roll: DiceRoll } | null => {
+      if (!response || typeof response !== 'object') return null;
       const candidate = response as Partial<{ combatant: Combatant; roll: DiceRoll }>;
       return candidate.combatant && candidate.roll ? { combatant: candidate.combatant, roll: candidate.roll } : null;
     };
@@ -3993,22 +4537,34 @@ export class EncountersService {
     // removed or the campaign became read-only. The controller/MCP tool has already
     // checked current campaign membership and role; this lookup performs no domain
     // write and is keyed to that authorized actor, encounter, and target.
-    const replayCommittedDeathSave = (): { combatant: Combatant; roll: DiceRoll } | null => {
-      let replay: { combatant: Combatant; roll: DiceRoll } | null = null;
-      this.db.transaction((tx) => {
-        const prior = findPriorEncounterOp(tx, deathSaveClaim, Date.now());
-        replay = prior ? replayResponse(prior.response) : null;
-      });
-      return replay;
+    const replayCommittedDeathSave = async (): Promise<{ combatant: Combatant; roll: DiceRoll } | null> => {
+      const prior = this.db.transaction((tx) => findPriorEncounterOp(tx, deathSaveClaim, Date.now()));
+      if (!prior) return null;
+      const parsed = replayResponse(prior.response);
+      if (!parsed) return null;
+      if (prior.responseRole === role) return parsed;
+      // Best-effort re-derivation for a changed role: a failure here (e.g. the encounter
+      // became hidden to the caller between the preflight and the replay) must not mask the
+      // real rejection reason in `rollDeathSave`'s catch handler.
+      try {
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const found = snapshot.combatants.find((c) => c.id === combatantId);
+        if (!found) return null;
+        const roll = (await this.rolls.redactRollForRole(parsed.roll, role))!;
+        return { combatant: found, roll };
+      } catch {
+        return null;
+      }
     };
-    const earlyReplay = replayCommittedDeathSave();
+    const earlyReplay = await replayCommittedDeathSave();
     if (earlyReplay) return earlyReplay;
 
     try {
-      // Fresh death saves retain the normal archive protection. Recheck inside the
-      // write transaction below as well, so an archive racing this request cannot
-      // admit a new result after the preflight succeeds.
-      await this.assertCampaignWritableForFreshDeathSave(encounter.campaignId);
+      // Reject an already archived/trashed campaign before any further work, so an
+      // ended encounter does not mask the 403 (issue #1759). `updateCombatant` repeats
+      // the canonical in-transaction check, so a race that trashes the campaign after
+      // this preflight still cannot admit a new result.
+      this.assertCampaignWritableInTx(this.db, encounter.campaignId);
       const adapter = await this.adapterForCampaign(encounter.campaignId);
       if (!hasDeathSavesForAdapter(adapter)) {
         throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
@@ -4027,9 +4583,8 @@ export class EncountersService {
       }
 
       let roll: DiceRoll | null = null;
-      let replayed: { combatant: Combatant; roll: DiceRoll } | null = null;
       const deathSavePatch: CombatantInternalUpdateInput = { deathSaveRoll: 0, idempotencyKey };
-      const updated = await this.updateCombatant(
+      await this.updateCombatant(
         encounterId,
         combatantId,
         deathSavePatch,
@@ -4041,7 +4596,6 @@ export class EncountersService {
           // target, not that random face, so the same intent replays before any new RNG work.
           operationFingerprint,
           beforeWriteInTransaction: (tx, fresh, freshEncounter) => {
-            this.assertCampaignWritableForFreshDeathSave(encounter.campaignId, tx);
             this.assertDeathSavesSupportedForCampaign(encounter.campaignId, tx);
             if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
               throw new NotFoundException(`Encounter ${encounterId} not found`);
@@ -4119,22 +4673,80 @@ export class EncountersService {
           deathSaveEventsInTransaction: true,
           operationResponse: (committed) => ({ combatant: committed, roll: roll! }),
           replayCombatant: (response) => {
-            replayed = replayResponse(response);
-            return replayed?.combatant ?? null;
+            // `replayCombatant` is invoked ONLY when a prior claim for this key already
+            // exists — both on the in-transaction prior-claim path and after the
+            // EncounterOpRaceMarker. Either way another invocation owns the committed roll
+            // and has already broadcast it, so this one must not emit again. Recording the
+            // fact here rather than inferring it from `roll` being set: `roll` is assigned
+            // in beforeWriteInTransaction and SURVIVES the rolled-back race-loser
+            // transaction, which is exactly why it is not a usable signal (see the null-body
+            // replay finding earlier on this PR).
+            replayedPriorClaim = true;
+            return replayResponse(response)?.combatant ?? null;
           },
         },
       );
-      if (replayed) return replayed;
-      if (roll === null) throw new Error('Death-save dice roll was not persisted');
-      const persistedRoll = roll as DiceRoll;
-
-      return { combatant: updated, roll: persistedRoll };
+      // `roll` may be the loser's discarded die if `updateCombatant` lost a same-key
+      // race, so the authoritative response is always the stored replay.
+      const replay = await replayCommittedDeathSave();
+      if (replay) {
+        // Emit only when THIS invocation actually committed the roll. A retry that was
+        // satisfied by a prior claim still returns the stored response as its body, but
+        // the winner already broadcast that die — emitting again put the same d20 in the
+        // shared dice tray twice, making one death save look like two.
+        if (!replayedPriorClaim) this.rolls.emitDiceRolled?.(replay.roll);
+        return replay;
+      }
+      // A null replay here does NOT always mean nothing was persisted. `replayCommittedDeathSave`
+      // also returns null when a claim exists whose stored body was never backfilled — the exact
+      // window that produced the null-body dereference fixed earlier on this PR. That fix covered
+      // the case where a PRIOR invocation owned the claim; this is its twin, where THIS invocation
+      // committed the roll and its own body is the one missing. Left as a bare throw, a successful
+      // write answered 500, and every retry re-found the same bodiless claim and 500'd again — a
+      // committed death save the caller could never see.
+      //
+      // The re-derivation is gated on `!replayedPriorClaim`, which is precisely the condition under
+      // which `roll` is trustworthy: `replayCombatant` fires whenever a prior claim exists, so if it
+      // did not fire, this invocation is the writer and `roll` is its own committed die rather than
+      // a race-loser's discarded one. That is the same distinction the emit guard above depends on.
+      if (!replayedPriorClaim && roll != null) {
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const committed = snapshot.combatants.find((c) => c.id === combatantId);
+        if (committed) {
+          // `roll` is returned as-is, NOT redacted. This reconstructs the body that
+          // `operationResponse` would have stored for THIS role, and the stored-body path
+          // returns it unredacted whenever `prior.responseRole === role` — redaction there
+          // is reserved for the changed-role re-derivation. Redacting here would make the
+          // recovery answer differ from the answer the same caller gets on the normal path.
+          this.rolls.emitDiceRolled?.(roll);
+          return { combatant: committed, roll };
+        }
+      }
+      // The remaining case is a PRIOR invocation's claim whose stored body is missing — the
+      // other half of the twin above, and it cannot be answered the same way. The recovery
+      // above works only because `roll` is this invocation's own committed die; on the
+      // prior-claim path the winner's die was never handed to us, and this repo has no
+      // per-encounter/per-combatant roll lookup to recover it from (`RollsService` exposes
+      // only `listForCampaign`). Inventing a face to fill the response would be strictly
+      // worse than failing: it would put a d20 in the dice record that nobody ever rolled,
+      // in a subsystem whose entire purpose is being the evidence of what was rolled.
+      //
+      // So the failure stands — but as a deterministic, client-actionable one rather than a
+      // bare `Error` surfacing as a 500 the client can only retry into forever. The write
+      // DID land, so the combatant state is authoritative and a re-read recovers everything
+      // except the die face. A 409 with a code says exactly that; the previous 500 said
+      // "server broken, try again", which was both wrong and unactionable.
+      throw new ConflictException({
+        code: 'DEATH_SAVE_RESULT_UNAVAILABLE',
+        message:
+          'The death save was applied, but its dice record is unavailable — reload the encounter for the authoritative combatant state. Retrying this request will not recover the roll.',
+      });
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but
       // before a mutable-row preflight (for example, before another DM removes the
       // combatant). Recheck the stored outcome before surfacing that later 404/409 so
       // an ambiguous retry still recovers the committed authoritative result.
-      const lateReplay = replayCommittedDeathSave();
+      const lateReplay = await replayCommittedDeathSave();
       if (lateReplay) return lateReplay;
       throw err;
     }
@@ -4145,40 +4757,17 @@ export class EncountersService {
     return rollDice('1d20');
   }
 
-  private async assertCampaignWritableForFreshDeathSave(campaignId: number): Promise<void>;
-  private assertCampaignWritableForFreshDeathSave(campaignId: number, tx: SyncDb): void;
-  private assertCampaignWritableForFreshDeathSave(campaignId: number, tx?: SyncDb): Promise<void> | void {
-    if (tx) {
-      const [campaign] = tx
-        .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
-        .from(campaigns)
-        .where(eq(campaigns.id, campaignId))
-        .limit(1)
-        .all();
-      if (campaign && (campaign.status !== 'active' || campaign.deletedAt !== null)) {
-        throw new ForbiddenException(
-          `Campaign is ${campaign.deletedAt !== null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
-        );
-      }
-      return;
-    }
-    return this.db
-      .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
+  private assertDeathSavesSupportedForCampaign(campaignId: number, tx: SyncDb): void {
+    const [campaign] = tx
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1)
-      .then(([campaign]) => {
-        if (campaign && (campaign.status !== 'active' || campaign.deletedAt !== null)) {
-          throw new ForbiddenException(
-            `Campaign is ${campaign.deletedAt !== null ? 'trashed' : campaign.status} (read-only) — set its status back to 'active' to make changes`,
-          );
-        }
-      });
-  }
-
-  private assertDeathSavesSupportedForCampaign(campaignId: number, tx: SyncDb): void {
-    const [campaign] = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1).all();
-    const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+      .all();
+    const adapter = ruleSystemAdapter(
+      campaign?.ruleSystem,
+      fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+    );
     if (!hasDeathSavesForAdapter(adapter)) {
       throw new BadRequestException(`Death saves are not supported for the ${adapter.id} ruleset`);
     }
@@ -4198,7 +4787,14 @@ export class EncountersService {
     role: Role,
     options?: CombatantUpdateTransactionOptions,
   ): Promise<Combatant> {
-    const encounterRow = await this.getRowOrThrow(encounterId);
+    const encounterRow = await this.getRowOrThrow(encounterId, true);
+    // A hidden/prep encounter must be nonexistent for non-DMs (issue #262); otherwise a
+    // keyed replay's role-filtered fallback can 404 after the write already landed.
+    // Same-role, visible-encounter replays still replay the stored body; role-mismatched
+    // ones re-derive through `getWithCombatantsOrThrow` below.
+    if (!isVisibleTo({ hidden: encounterRow.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
     // An operation key may name a result that already committed before the encounter
     // ended. Let the transaction check that claim first; fresh keyed writes still hit
     // the same guard inside the transaction below.
@@ -4239,17 +4835,31 @@ export class EncountersService {
       // now; manual initiative PATCHes (set or clear) are DM-only, same as name/hpMax/
       // initMod/tokenSize. Absolute rule, same reasoning as actorId above: a player
       // never needs to send this field, so it is rejected outright rather than ignored.
+      // `statblock`, `statblockRevealed`, `eac`, and `kac` join the list for the same reason,
+      // and because omitting them was actively harmful rather than merely permissive: each
+      // is written only under `isDm`, so a non-DM patch carrying one of them alone reached
+      // the write transaction with an empty `writeSet` and drizzle threw "No values to set"
+      // — a 500 where the caller deserved a 403. Rejecting outright beats silently no-opping:
+      // a player who edits a statblock should be told they may not, not told it worked.
       if (
         patch.name !== undefined ||
         patch.hpMax !== undefined ||
         patch.initMod !== undefined ||
         patch.tokenSize !== undefined ||
-        patch.initiative !== undefined
+        patch.initiative !== undefined ||
+        patch.statblock !== undefined ||
+        patch.statblockRevealed !== undefined ||
+        patch.eac !== undefined ||
+        patch.kac !== undefined ||
+        // Issue #1921: DM force-toggle of a limited-use/recharge action's spend state joins
+        // the same absolute-rule list — a player never needs to override their own or a
+        // monster's spend, and (per the acceptance criteria) must get a 403, not a silent no-op.
+        patch.actionUses !== undefined
       ) {
         throw new ForbiddenException({
           code: 'COMBATANT_FIELD_DM_ONLY',
           message:
-            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, or initiative — roll your own initiative via the dedicated roll-initiative action.',
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, eac, kac, or actionUses — roll your own initiative via the dedicated roll-initiative action.',
         });
       }
       if (!existing.characterId) {
@@ -4340,6 +4950,36 @@ export class EncountersService {
     if (patch.statblock !== undefined && isDm) {
       staticUpdate.statblockJson = toJsonText(CombatantStatblock.parse(patch.statblock));
     }
+    // Statblock reveal toggle (issue #1926) — DM-only (see the ForbiddenException above).
+    if (patch.statblockRevealed !== undefined && isDm) staticUpdate.statblockRevealed = patch.statblockRevealed;
+    // DM force-toggle of a limited-use/recharge action's spend state (issue #1921) — DM-only
+    // (see the ForbiddenException above). The target action is resolved from the CURRENT
+    // sheet/statblock action list by index/name, through the SAME resolveActionUsesTarget a
+    // resolve/apply spend uses, so this can never touch a different action's spend key than
+    // the one the DM actually named. `spent` is clamped into [0, max] server-side — the field
+    // is a direct set (not a delta), so both "force recharge" (spent: 0) and "force exhaust"
+    // (spent: max) are one call.
+    let actionUsesLabel: string | null = null;
+    // Resolved here but MERGED INSIDE the transaction against the fresh row — see the
+    // `actionUsesPatch` block beside the condition rebase below. `action_uses` is one JSON
+    // blob covering every tracked action, so building it from the pre-transaction `existing`
+    // snapshot and writing it wholesale would silently revert any OTHER action's spend that
+    // landed in between (a concurrent apply, or a turn-start recharge) — the same lost-update
+    // hazard conditions already avoid by rebasing (issue #747). Resolving the target here is
+    // safe: it reads the action LIST, not the spend map.
+    let actionUsesPatch: { key: string; spent: number } | null = null;
+    if (patch.actionUses !== undefined && isDm) {
+      if (!this.actionResolver) {
+        throw new BadRequestException('Action-uses override is unavailable.');
+      }
+      const target = this.actionResolver.resolveActionUsesTarget(
+        existing,
+        { actionIndex: patch.actionUses.actionIndex, actionName: patch.actionUses.actionName },
+        encounterRow.campaignId,
+      );
+      actionUsesPatch = { key: target.key, spent: Math.max(0, Math.min(patch.actionUses.spent, target.max)) };
+      actionUsesLabel = target.name;
+    }
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
@@ -4371,15 +5011,28 @@ export class EncountersService {
       patch.rpSet !== undefined ||
       patch.rpDelta !== undefined;
     const deathStateTouched = patch.deathState !== undefined;
+    // `eac`/`kac` are the one pair of writable fields that never enter `staticUpdate` —
+    // they are applied straight onto `writeSet` inside the transaction below, DM-only.
+    // Without them here, a patch carrying ONLY armour class matched the no-op condition
+    // and returned 200 with the unchanged combatant, having persisted nothing (issue
+    // #1990 review). Gated on `isDm` to mirror the write exactly: a non-DM's eac/kac is
+    // dropped there, so admitting it here would buy a pointless transaction, not a fix.
+    const defenseFieldsTouched = isDm && (patch.eac !== undefined || patch.kac !== undefined);
 
     if (
       Object.keys(staticUpdate).length === 0 &&
       !recomputeHp &&
+      // `actionUses` no longer lands in `staticUpdate` (it is merged against the fresh row
+      // inside the transaction), so it needs its own term here or an actionUses-only patch
+      // would early-return as a no-op and silently persist nothing.
+      actionUsesPatch === null &&
       !conditionFieldsTouched &&
       !spFieldsTouched &&
       !deathStateTouched &&
+      !defenseFieldsTouched &&
       patch.statblock === undefined
     ) {
+      this.assertMutable(encounterRow);
       return combatantToDomain(existing);
     }
 
@@ -4455,7 +5108,10 @@ export class EncountersService {
           ),
         }
       : null;
-    let replayedCombatant: Combatant | null = null;
+    // Issue #1990: keyed replay must be resolved outside the synchronous transaction
+    // callback because role-filtered re-derivation (getWithCombatantsOrThrow) is async.
+    // The prior is captured here and resolved below after the transaction commits.
+    let priorFromReplay: EncounterOpPrior | null = null;
     // Issue #1902 rework (round 21, codex P2 sweep continuation): read after the
     // transaction commits, at this method's own `emitEncounterEvent` call below — see
     // `ActionResolverService.apply()`'s `sheetMirrored` doc comment for the general
@@ -4464,19 +5120,38 @@ export class EncountersService {
     // here into an outer-scope flag the same way.
     let combatantSheetMirrored = false;
 
+    const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant | null> => {
+      let parsed: Combatant | null = null;
+      try {
+        parsed = options?.replayCombatant
+          ? options.replayCombatant(prior.response)
+          : ((prior.response as Combatant | null) ?? null);
+      } catch {
+        parsed = null;
+      }
+      if (parsed && prior.responseRole === role) return parsed;
+      // A stored body may be missing or unparseable while the combatant still exists
+      // (race/winner wrote a null response). Fall back to a current, role-filtered
+      // projection — and tolerate a trashed encounter so an already-committed result
+      // can still be replayed (issue #1990). A lookup failure must not mask the real
+      // rejection reason in the `EncounterOpRaceMarker` catch path.
+      try {
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        return snapshot.combatants.find((c) => c.id === combatantId) ?? null;
+      } catch {
+        return null;
+      }
+    };
+
     try {
       this.db.transaction((tx) => {
         if (opClaim) {
           const prior = findPriorEncounterOp(tx, opClaim, Date.now());
           if (prior) {
-            // Already applied. Return the ORIGINAL committed combatant — the retrying
-            // client does not know the outcome, so the committed HP is the whole point.
-            // (A missing body cannot happen here: the combatant response is stored inside
-            // this transaction, never backfilled. Fall back defensively anyway.)
-            replayedCombatant = options?.replayCombatant
-              ? options.replayCombatant(prior.response)
-              : (prior.response as Combatant | null) ?? null;
-            if (replayedCombatant) return;
+            // Already applied. Capture the prior outside this synchronous transaction
+            // so role-filtered replay can perform async work (issue #1990).
+            priorFromReplay = prior;
+            return;
           }
         }
         // No matching committed response: this is a fresh write. Re-read the encounter
@@ -4484,7 +5159,17 @@ export class EncountersService {
         // the request was awaiting preflight cannot be bypassed with the stale outer row.
         const [freshEncounter] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
         if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+        // The outer `isVisibleTo` gate ran against the STALE pre-transaction row. A DM who
+        // hides the encounter in the window between that check and this transaction would
+        // otherwise leave a non-DM's write landing — mirroring onto the character sheet and
+        // emitting a combat-log event — on an encounter that must now be wholesale
+        // nonexistent to them (issue #262). `adjustCombatantResource` (issue #1909 review)
+        // and `rollDeathSave` already re-check here; this path was the outlier.
+        if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
+          throw new NotFoundException(`Encounter ${encounterId} not found`);
+        }
         this.assertMutable(freshEncounter);
+        this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
         // Issue #1902 rework (round 14, codex P1): re-validate `expectedUpdatedAt` against
         // THIS transaction-local row, not just the pre-transaction `encounterRow` checked
         // above — the same reason `freshEncounter` itself is re-read here rather than reused
@@ -4500,6 +5185,34 @@ export class EncountersService {
         if (!fresh || fresh.encounterId !== encounterId) {
           throw new NotFoundException(`Combatant ${combatantId} not found`);
         }
+        // Issue #1992: guard a `statblock` write against the STATBLOCK'S OWN prior
+        // content, not a row/encounter revision token. Two earlier approaches were tried
+        // and rejected: pinning the ENCOUNTER's `updatedAt` (any OTHER combatant's write
+        // anywhere in the fight invalidated an in-progress edit) and pinning a
+        // per-COMBATANT revision bumped on every write to that row (an ordinary hp tick
+        // on the very monster being edited still invalidated it, since that column
+        // advanced on hp/condition/position writes too — neither one ever touches the
+        // statblock). Comparing the actual stored content sidesteps both: an
+        // hp/condition/position write never touches `statblockJson`, so it structurally
+        // cannot trip this check — only a genuine concurrent `statblock` write (this
+        // row's stored statblock no longer matches what the caller started from) can.
+        // Deliberately a content compare, not a hash: `CombatantStatblock` is bounded
+        // (actions ≤50, traits ≤30, notes ≤2000 chars) and already sent in full on every
+        // whole-statblock PATCH, so comparing the actual value costs nothing extra worth
+        // optimizing away, and needs no extra column. Only relevant to a `statblock`
+        // write itself — ignored (not even parsed) when `patch.statblock` is absent from
+        // this same call.
+        if (patch.statblock !== undefined && patch.expectedStatblock !== undefined) {
+          const storedStatblock = parseCombatantStatblock(fresh.statblockJson);
+          if (!deepJsonEqual(storedStatblock, patch.expectedStatblock)) {
+            throw new ConflictException({
+              code: 'STALE_WRITE',
+              message:
+                'This statblock was changed by someone else since you loaded it — saving now would erase their edit. ' +
+                'Reload to get the latest version, reapply your changes, then save again.',
+            });
+          }
+        }
         // A caller may attach a tightly-scoped transactional side effect after the
         // fresh lifecycle read but before this mutation. A failure rolls both it and
         // the ensuing combatant write back. Used only for #1462's mandatory dice-log
@@ -4511,6 +5224,27 @@ export class EncountersService {
         _beforeSucc = fresh.deathSaveSuccesses;
         _beforeFail = fresh.deathSaveFailures;
         const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+        // Issue #2084 finding 1 (the "clear the stamp" half): a DM's manual `initiative`
+        // PATCH (set or clear) moves this combatant out of whatever tie group its
+        // `manualOrder` stamp referred to — that tie no longer exists, so the stamp must
+        // not go on deciding a DIFFERENT tie the combatant lands in later (or continue
+        // being consulted for a tie it no longer belongs to at all). Compared against
+        // `fresh`, the transaction-local row, not the pre-transaction `existing` snapshot,
+        // for the same staleness reason `expectedUpdatedAt` is re-checked against `fresh`
+        // above. A same-value PATCH (idempotent resend) leaves the stamp alone.
+        if (staticUpdate.initiative !== undefined && staticUpdate.initiative !== fresh.initiative) {
+          writeSet.manualOrder = null;
+        }
+        if (actionUsesPatch) {
+          // Rebase the DM's uses override against the FRESH row, for the same reason the
+          // condition block below does (issue #747): `action_uses` is a single JSON map of
+          // EVERY tracked action's spend, so merging into a pre-transaction snapshot would
+          // clobber a concurrent spend or turn-start recharge of a DIFFERENT action rather
+          // than merging with it — letting an already-spent ability quietly become available
+          // again. Only the named key is written; every other key carries over from `fresh`.
+          const currentUses = fromJsonText<Record<string, { spent?: number }>>(fresh.actionUses, {});
+          writeSet.actionUses = toJsonText({ ...currentUses, [actionUsesPatch.key]: { spent: actionUsesPatch.spent } });
+        }
         if (conditionFieldsTouched) {
           // Rebase every condition mutation against the FRESH row (issue #747 / #423).
           // Legacy string deltas and structured instance deltas share this path so a
@@ -4833,22 +5567,23 @@ export class EncountersService {
     } catch (err) {
       if (err instanceof EncounterOpRaceMarker) {
         // Two concurrent attempts of the SAME intent: ours rolled back, theirs committed.
-        // Replay their response so exactly one apply survives (issue #580).
+        // Replay their response so exactly one apply survives (issue #580), re-deriving
+        // for the caller's current role (issue #1990).
         const prior = await readEncounterOpAfterRace(this.db, err.claim);
-        if (prior.response) {
-          const replayed = options?.replayCombatant
-            ? options.replayCombatant(prior.response)
-            : (prior.response as Combatant | null);
-          if (replayed) return replayed;
-        }
-        return this.getCombatantRowOrThrow(encounterId, combatantId).then(combatantToDomain);
+        const replayed = await resolveReplay(prior);
+        if (replayed) return replayed;
+        throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       }
       throw err;
     }
 
     // An idempotent replay stops here: no second audit row, no duplicate combat-log
     // events, no second SSE nudge — the first attempt already produced all of those.
-    if (replayedCombatant) return replayedCombatant;
+    if (priorFromReplay) {
+      const replayedCombatant = await resolveReplay(priorFromReplay);
+      if (replayedCombatant) return replayedCombatant;
+      throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+    }
 
     // #74: don't audit-log pure HP ticks. A single combat generates hundreds of
     // ±1 HP updates (every hit, heal, temp-hp adjust); auditing each one was the
@@ -4856,11 +5591,24 @@ export class EncountersService {
     // still log the meaningful state changes — conditions, initiative, and the
     // identity edits (rename / hpMax / initMod, issue #114) — which are rare and
     // worth a trail. An update that ONLY touched HP/death-save fields is skipped.
+    // `statblock`, `eac`, and `kac` are listed off `patch`, not `staticUpdate`: they are the
+    // writable fields that never enter `staticUpdate` at all (they go straight onto `writeSet`
+    // inside the transaction), which is the same asymmetry that let an armour-class-only PATCH
+    // silently persist nothing before this PR. Fixing that made such a patch a real domain
+    // write, and a real domain write must be audited — AGENTS.md is unconditional about that,
+    // and #74's exemption is scoped to high-frequency HP/death-save ticks, which identity-like
+    // defence and statblock edits are not. Gated on `isDm` to match the write exactly, so a
+    // rejected non-DM patch cannot mint an audit row for a change that never happened.
+    const defenseOrStatblockChanged =
+      isDm && (patch.statblock !== undefined || patch.eac !== undefined || patch.kac !== undefined);
     const changedNonHp =
       conditionFieldsTouched ||
       staticUpdate.initiative !== undefined ||
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
+      staticUpdate.statblockRevealed !== undefined ||
+      actionUsesPatch !== null ||
+      defenseOrStatblockChanged ||
       hpMaxChanged;
     if (changedNonHp) {
       await this.audit.log({
@@ -4880,6 +5628,33 @@ export class EncountersService {
     // endpoint stays member-visible without leaking issue #43's redaction.
     const round = encounterRow.round;
     const targetName = row.name;
+
+    // Issue #1926: log the statblock reveal toggle. `detail` deliberately omits the
+    // combatant's name (issue #869 convention — never interpolate names into `detail`,
+    // only `target`/`targetId`) so a non-DM's redacted listing composes the same
+    // "<name> ...detail" phrasing as every other combat-log line.
+    if (staticUpdate.statblockRevealed !== undefined && staticUpdate.statblockRevealed !== existing.statblockRevealed) {
+      await this.appendEvent(encounterId, round, 'note', {
+        target: targetName,
+        targetId: combatantId,
+        detail: staticUpdate.statblockRevealed ? "'s statblock is revealed to players" : "'s statblock is hidden again",
+      });
+    }
+
+    // Issue #1921: log the DM's manual override of an action's limited-use/recharge spend.
+    // The ability's NAME is deliberately omitted for the same reason as the turn-start
+    // recharge log (see `rechargeRolls` in nextTurn): the combat log is readable by every
+    // campaign member, `redactEncounterEventsForViewer` masks only hidden-combatant
+    // identity rather than action names, and this fires for a monster whose statblock may
+    // be deliberately unrevealed (#1926). `actionUsesLabel` is still resolved — it gates
+    // whether the event is written at all — but only the COMBATANT lands on the event.
+    if (actionUsesPatch && actionUsesLabel) {
+      await this.appendEvent(encounterId, round, 'resource_changed', {
+        target: targetName,
+        targetId: combatantId,
+        detail: 'limited-use ability uses set by DM',
+      });
+    }
 
     // Issue #620: attribute HP/death events to the attacker so the log reads "Ember hit
     // Goblin 3 for 8" rather than just "Goblin 3 took 8 damage". Resolution order:
@@ -5161,8 +5936,15 @@ export class EncountersService {
       }
       this.assertMutable(freshEncounter);
       this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
-      const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, freshEncounter.campaignId)).get();
-      const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+      const campaign = tx
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+        .from(campaigns)
+        .where(eq(campaigns.id, freshEncounter.campaignId))
+        .get();
+      const adapter = ruleSystemAdapter(
+        campaign?.ruleSystem,
+        fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+      );
       const roster = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const snapshot = roster.find((row) => row.id === combatantId);
       if (!snapshot) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
@@ -5254,6 +6036,12 @@ export class EncountersService {
       const afterTurnVersion = freshEncounter.turnVersion + (runningAdapter && freshEncounter.currentCombatantId === combatantId ? 1 : 0);
       const afterCombatantStateVersion = freshEncounter.combatantStateVersion + (runningAdapter ? 1 : 0);
       let turnVersionUpdate: { turnVersion?: SQL } = {};
+      // Turn timer (issue #1935 review — Devin): removing the CURRENT combatant is a genuine
+      // turn transition (advanceEncounterTurn runs, turnVersion bumps, encounter.turn_changed
+      // fires) even though this method isn't named like a turn-advance one. Restamp alongside
+      // turnVersionUpdate below — same gate, same reasoning — so the new turn's chip doesn't
+      // keep accumulating the removed combatant's elapsed time.
+      let turnRestampUpdate: { turnStartedAt?: string } = {};
       let escalation: ReturnType<EncountersService['nextEscalationState']> | null = null;
       if (runningAdapter) {
         const sortedAfter = this.sortCombatantsWithAdapter(
@@ -5277,6 +6065,7 @@ export class EncountersService {
         // Keep this SQL expression out of the persisted undo snapshot.
         if (freshEncounter.currentCombatantId === combatantId) {
           turnVersionUpdate = { turnVersion: sql`${encounters.turnVersion} + 1` };
+          turnRestampUpdate = { turnStartedAt: now };
           // A removal can advance the active actor just like endTurn. Preserve that
           // turn edge for connected clients, including a lair transition with no
           // current combatant, while ordinary roster edits remain updated-only.
@@ -5365,6 +6154,7 @@ export class EncountersService {
       tx.update(encounters).set({
         ...afterEncounter,
         ...turnVersionUpdate,
+        ...turnRestampUpdate,
         turnPhase,
         ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
         updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? freshEncounter.updatedAt),
@@ -5387,6 +6177,10 @@ export class EncountersService {
           escalationDieHistory: freshEncounter.escalationDieHistory,
           lairResumeCombatantId: freshEncounter.lairResumeCombatantId,
           turnPhase: (freshEncounter.turnPhase as EncounterTurnPhase) ?? 'combatant',
+          // Turn timer (issue #1935 review): captured so undo can restore the ORIGINAL
+          // stamp, not a fresh one — see the restore side in undoRemoveCombatant for why
+          // this differs from undoTurn's deliberate "always fresh" restart.
+          turnStartedAt: freshEncounter.turnStartedAt,
         }),
         afterEncounterJson: toJsonText({ ...afterEncounter, turnVersion: afterTurnVersion, combatantStateVersion: afterCombatantStateVersion, escalationEventId }),
         expiresAt,
@@ -5457,8 +6251,15 @@ export class EncountersService {
         }
         this.assertMutable(current);
         this.assertCampaignWritableInTx(tx, current.campaignId);
-        const campaign = tx.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, current.campaignId)).get();
-        const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+        const campaign = tx
+          .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+          .from(campaigns)
+          .where(eq(campaigns.id, current.campaignId))
+          .get();
+        const adapter = ruleSystemAdapter(
+          campaign?.ruleSystem,
+          fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+        );
         // A rule-pack uninstall nulls live combatants before deleting its entries, but
         // a removed combatant only exists in this snapshot during the undo window.
         // Restore the same ON DELETE SET NULL state rather than inserting a dangling FK.
@@ -5526,7 +6327,7 @@ export class EncountersService {
           snapshot.turnState = toJsonText(restoredTurnState);
         }
         tx.insert(combatants).values(snapshot).run();
-        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
+        const before = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase; turnStartedAt?: string | null }>(undo.beforeEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
         const after = fromJsonText<{ currentCombatantId: number | null; turnIndex: number; round: number; escalationDie: number; escalationDieHistory: string | null; lairResumeCombatantId: number | null; turnPhase: EncounterTurnPhase; turnVersion?: number; combatantStateVersion?: number; escalationEventId?: number | null }>(undo.afterEncounterJson, { currentCombatantId: null, turnIndex: 0, round: 1, escalationDie: 0, escalationDieHistory: null, lairResumeCombatantId: null, turnPhase: 'combatant' });
         const runningAdapter = current.status === 'running' ? adapter : null;
         if (current.currentCombatantId === after.currentCombatantId && current.turnIndex === after.turnIndex && current.round === after.round && current.escalationDie === after.escalationDie && current.escalationDieHistory === after.escalationDieHistory && current.lairResumeCombatantId === after.lairResumeCombatantId && current.turnPhase === after.turnPhase && after.turnVersion === current.turnVersion && after.combatantStateVersion === current.combatantStateVersion) {
@@ -5555,7 +6356,33 @@ export class EncountersService {
             escalationDieHistory: before.escalationDieHistory,
             lairResumeCombatantId: before.lairResumeCombatantId,
             turnPhase: before.turnPhase,
-            ...(before.currentCombatantId !== current.currentCombatantId ? { turnVersion: sql`${encounters.turnVersion} + 1` } : {}),
+            ...(before.currentCombatantId !== current.currentCombatantId
+              ? {
+                  turnVersion: sql`${encounters.turnVersion} + 1`,
+                  // Turn timer (issue #1935 review): restore the ORIGINAL pre-removal stamp,
+                  // not a fresh one. This undo is a short-lived (~30s) "erase my mistake"
+                  // capability — every other piece of state here (HP, conditions, escalation
+                  // die, turn pointer, lair resume, legendary usage) is restored to exactly
+                  // what it was, so a removal-then-undo is a true no-op. Giving the reverted
+                  // turn a fresh 0:00 instead would be a visible side effect of an action the
+                  // DM is actively erasing. That is why this differs from `undoTurn`, which
+                  // is a deliberate DM gameplay-rewind tool with its own documented "always
+                  // restamp fresh" semantics — there is no accidental click to fully undo.
+                  //
+                  // Issue #1935 review round 4 (Devin) — upgrade-window bug: `before` is
+                  // parsed from a JSON blob a PRE-upgrade binary may have written, before
+                  // `turnStartedAt` existed in that snapshot shape at all. `?? null` cannot
+                  // tell "the snapshot recorded null" (a real prior state — restoring null is
+                  // correct) apart from "the snapshot has no such key" (nothing to restore —
+                  // the live column must be left alone), collapsing both to null and
+                  // clobbering a perfectly valid running stamp for up to 24h after upgrade
+                  // (undo rows persist that long for idempotency replay, though the undo
+                  // CAPABILITY itself only lives ~30s). Only include the key when the
+                  // snapshot genuinely recorded one; omitting it from this partial `.set`
+                  // leaves the live column exactly as it was.
+                  ...(before.turnStartedAt !== undefined ? { turnStartedAt: before.turnStartedAt } : {}),
+                }
+              : {}),
             ...(runningAdapter ? { combatantStateVersion: sql`${encounters.combatantStateVersion} + 1` } : {}),
             updatedAt: nextUpdatedAt(currentEnc1?.updatedAt ?? current.updatedAt),
           }).where(eq(encounters.id, encounterId)).run();
@@ -5625,6 +6452,7 @@ export class EncountersService {
     const initModel = initiativeModelForAdapter(adapter);
     let rolled: Array<{ id: number; initiative: number; breakdown: CombatantInitiativeBreakdown; name: string }> = [];
     let freshEncounter = encounterRow;
+    const recordedRolls: DiceRoll[] = [];
 
     // The roster read, initiative assignment, log rows, and any turn-index repair must be
     // one SQLite transaction. Otherwise two devices can both see the same unrolled roster,
@@ -5649,14 +6477,14 @@ export class EncountersService {
       // below borrow the combatant's raw name, so a hidden NPC's identity must be
       // masked before it reaches that label — same rule the quick-roll dice log
       // already applies (issue #1850).
-      const npcIdsInRoll = [...new Set(unrolled.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+      const npcIdsInRoll = [...new Set(unrolled.flatMap((row) => row.kind === 'npc' ? [row.npcId, row.npcIdentitySourceId].filter((id): id is number => id !== null) : []))];
       const hiddenNpcIds = new Set<number>();
       if (npcIdsInRoll.length > 0) {
         const hiddenRows = tx.select({ id: npcs.id }).from(npcs).where(and(inArray(npcs.id, npcIdsInRoll), eq(npcs.hidden, true))).all();
         for (const r of hiddenRows) hiddenNpcIds.add(r.id);
       }
-      const diceLogName = (row: { kind: string; npcId: number | null; name: string }): string =>
-        row.kind === 'npc' && row.npcId !== null && hiddenNpcIds.has(row.npcId) ? UNKNOWN_COMBATANT_LABEL : row.name;
+      const diceLogName = (row: { kind: string; npcId: number | null; npcIdentitySourceId: number | null; name: string }): string =>
+        row.kind === 'npc' && [row.npcId, row.npcIdentitySourceId].some((id) => id !== null && hiddenNpcIds.has(id)) ? UNKNOWN_COMBATANT_LABEL : row.name;
 
       // One shared dice-log row per rolled combatant (one per SIDE in group mode) — issue
       // #1904. The bulk roll used to fill the tracker with no visible evidence; this makes
@@ -5704,6 +6532,7 @@ export class EncountersService {
         rolled = unrolled.map((row) => {
           const initiative = rollInitiative(row.initMod, adapter.initiativeDie);
           const natural = initiative - row.initMod;
+          const diceLogNpcId = row.npcIdentitySourceId ?? row.npcId;
           const existing = parseInitiativeBreakdown(row.initiativeBreakdown) ?? manualInitiativeBreakdown(adapter, row.initMod);
           // Issue #1904 review finding: rebuild against the CURRENT initMod, not whatever
           // the stored breakdown's terms summed to when it was last written — a DM's PATCH
@@ -5724,7 +6553,7 @@ export class EncountersService {
             expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
             rolls: [natural],
             total: initiative,
-            ...(row.kind === 'npc' && row.npcId !== null ? { npcId: row.npcId } : {}),
+            ...(row.kind === 'npc' && diceLogNpcId !== null ? { npcId: diceLogNpcId } : {}),
           });
           return { id: row.id, initiative, breakdown, name: row.name };
         });
@@ -5736,7 +6565,7 @@ export class EncountersService {
       // roll must never leak into it (matches the per-combatant roll's same rule below).
       if (!fresh.hidden) {
         for (const entry of diceLogEntries) {
-          this.rolls.recordInTransaction(
+          const rec = this.rolls.recordInTransaction(
             tx,
             fresh.campaignId,
             {
@@ -5750,6 +6579,7 @@ export class EncountersService {
             },
             user,
           );
+          recordedRolls.push(rec);
         }
       }
       const cases = sql.join(rolled.map((r) => sql`WHEN ${r.id} THEN ${r.initiative}`), sql` `);
@@ -5758,6 +6588,13 @@ export class EncountersService {
         .set({
           initiative: sql`CASE ${combatants.id} ${cases} END`,
           initiativeBreakdown: sql`CASE ${combatants.id} ${breakdownCases} END`,
+          // Issue #2084 finding 1: this row's initiative is moving off null, so any
+          // `manualOrder` it carries can only be leftover from data written under the
+          // pre-#2084 roster-wide stamp (which stamped unrolled `preparing` rows too) —
+          // never a value this narrower scheme would itself have written, since a
+          // null-initiative row is never stamped now. Clear it so a first roll can't hand
+          // a brand-new tie an insertion-order decision instead of the adapter's.
+          manualOrder: null,
         })
         .where(and(inArray(combatants.id, rolled.map((r) => r.id)), isNull(combatants.initiative)))
         .run();
@@ -5819,6 +6656,11 @@ export class EncountersService {
     });
 
     this.emitEncounterEvent('encounter.updated', freshEncounter.campaignId, encounterId, freshEncounter.hidden);
+    if (!freshEncounter.hidden) {
+      for (const rec of recordedRolls) {
+        this.rolls.emitDiceRolled?.(rec);
+      }
+    }
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     return { ...snapshot, rolledCount: rolled.length };
@@ -5887,11 +6729,17 @@ export class EncountersService {
       const parsed = replayResponse(prior.response);
       if (!parsed) return null;
       if (prior.responseRole === role) return parsed;
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
-      const found = snapshot.combatants.find((c) => c.id === combatantId);
-      if (!found) return null;
-      const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
-      return { combatant: found, roll };
+      // Re-derive for a changed role; tolerate a trashed encounter and treat any
+      // visibility failure as best-effort so the original rejection reason is preserved.
+      try {
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const found = snapshot.combatants.find((c) => c.id === combatantId);
+        if (!found) return null;
+        const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+        return { combatant: found, roll };
+      } catch {
+        return null;
+      }
     };
     const findPrior = (): EncounterOpPrior | null => {
       let prior: EncounterOpPrior | null = null;
@@ -5999,7 +6847,16 @@ export class EncountersService {
         });
 
         tx.update(combatants)
-          .set({ initiative, initiativeBreakdown: toJsonText(breakdown) })
+          .set({
+            initiative,
+            initiativeBreakdown: toJsonText(breakdown),
+            // Issue #2084 finding 1: an overwrite re-roll (or a first roll off a legacy
+            // null-but-stamped row) assigns a fresh initiative value, so whatever tie
+            // group any prior `manualOrder` referred to no longer applies — the DM's next
+            // drag, if any, will re-establish one for wherever this combatant actually
+            // lands now.
+            manualOrder: null,
+          })
           .where(eq(combatants.id, combatantId))
           .run();
 
@@ -6036,8 +6893,9 @@ export class EncountersService {
         // to a hide that happens after the roll was already recorded.
         if (!fresh.hidden) {
           let hiddenNpcName = false;
-          if (freshCombatant.kind === 'npc' && freshCombatant.npcId !== null) {
-            const [npc] = tx.select({ hidden: npcs.hidden }).from(npcs).where(eq(npcs.id, freshCombatant.npcId)).limit(1).all();
+          const npcIdentityId = freshCombatant.npcIdentitySourceId ?? freshCombatant.npcId;
+          if (freshCombatant.kind === 'npc' && npcIdentityId !== null) {
+            const [npc] = tx.select({ hidden: npcs.hidden }).from(npcs).where(eq(npcs.id, npcIdentityId)).limit(1).all();
             hiddenNpcName = npc?.hidden === true;
           }
           const label = `${hiddenNpcName ? UNKNOWN_COMBATANT_LABEL : freshCombatant.name} · Initiative`;
@@ -6052,7 +6910,7 @@ export class EncountersService {
               label,
               source: 'rolled',
               encounterId,
-              ...(freshCombatant.kind === 'npc' && freshCombatant.npcId !== null ? { npcId: freshCombatant.npcId } : {}),
+              ...(freshCombatant.kind === 'npc' && npcIdentityId !== null ? { npcId: npcIdentityId } : {}),
             },
             user,
           );
@@ -6090,6 +6948,9 @@ export class EncountersService {
         throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
       }
       this.emitEncounterEvent('encounter.updated', freshEncounterRow.campaignId, encounterId, freshEncounterRow.hidden);
+      if (roll && !freshEncounterRow.hidden) {
+        this.rolls.emitDiceRolled?.(roll);
+      }
       return { combatant: committed, roll };
     } catch (err) {
       // The original same-key request can commit after our early replay lookup but before
@@ -6103,6 +6964,311 @@ export class EncountersService {
       }
       throw err;
     }
+  }
+
+  /**
+   * DM-only manual reorder (issue #1923) — POST .../combatants/:cid/reorder. This is the
+   * documented answer to an unresolved initiative tie (initiative-tiebreak.ts's own doc
+   * comment: "the DM can manually reorder") and the only mechanical expression of
+   * Delay/Ready, which otherwise ship as log-only markers that clear themselves without
+   * ever moving the combatant.
+   *
+   * `afterCombatantId` names the combatant the moved one should land immediately after
+   * under `sortCombatants` (or the literal `'top'` to become first). The whole roster's
+   * `sortOrder` is rewritten to the requested display order in one pass — cheap (an
+   * encounter roster is at most a few dozen rows) and it guarantees the write reproduces
+   * exactly under `sortCombatants`'s own comparator, rather than trying to slot one value
+   * between two neighbors that might already be adjacent sortOrder integers.
+   *
+   * `initiative` is only ever touched while the encounter is `running` — `sortCombatants`
+   * ignores `initiative` entirely while `preparing` (plain sortOrder ascending), so a
+   * preparing-time reorder never overrides a rolled value. Whether it also establishes
+   * tie-break order for later depends on whether the moved combatant already has a real
+   * `initiative` at drag time: `manualOrder` is skipped whenever the landing value is
+   * null (see that field's schema doc), which it usually is before `/start` — a
+   * preparing-time drag of two still-unrolled combatants records ONLY `sortOrder`, and
+   * once real values are rolled, a tie between them resolves through the adapter, not
+   * this drag. Only a prep-time reorder among combatants that ALREADY carry a real
+   * `initiative` (set ahead of the roll) establishes real tie-break order. Deciding what
+   * "the DM's ordering intent" even means for combatants that have not rolled yet — which
+   * of them the DM meant relative to which, when the tie groups they will land in do not
+   * exist — is tracked as a follow-up (issue #2102), not attempted here: it is the exact
+   * design question whose rushed first answer (stamping unconditionally during prep)
+   * produced #2084's "encodes add order" defect in the first place. While running, a
+   * move that leaves the moved combatant's own initiative
+   * already sitting between its NEW neighbours' values (the ordinary within-a-tie case,
+   * e.g. reordering a tied 14, but also a move that happens to land back where the value
+   * already belonged) only rewrites `sortOrder` — issue #2084 finding 2: the old
+   * "differs from both neighbours" predicate rewrote a rolled value whenever it merely
+   * differed, including when it already sat correctly between them. A move that truly
+   * crosses initiative values sets the moved combatant's `initiative` to a value between
+   * its NEW neighbors — so the manual placement survives a later resort — and clears the
+   * now-stale `initiativeBreakdown` (#1476: this must never fabricate a breakdown for a
+   * manually-assigned value). `manualOrder` is stamped for every row sharing the moved
+   * combatant's landing initiative — its whole tie group, not the roster and not just the
+   * rows the drag physically crossed (issue #2084 finding 1, corrected to whole-group
+   * scope by issue #2095 review) — see that field's own doc comment in @campfire/schema.
+   *
+   * `expectedTurnVersion` CAS: 409s when it no longer matches the encounter's current
+   * `turnVersion` (bumped on every turn advance) — a drag issued against a roster the DM
+   * is no longer looking at must not silently reorder the new one. Moving the current
+   * actor (`currentCombatantId`) is refused outright — reordering the roster mid-turn
+   * around the acting combatant itself has no sensible meaning. A combatant that was
+   * delaying has that marker cleared and logged in the same transaction: the drag itself
+   * IS Delay's mechanical resolution ("the fighter acts after the wizard now").
+   */
+  async reorderCombatant(
+    encounterId: number,
+    combatantId: number,
+    input: CombatantReorderRequest,
+    user: RequestUser,
+    role: Role,
+  ): Promise<Combatant> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
+    // Adapter lookup reads outside the transaction (rollCombatantInitiative precedent) —
+    // it is deterministic from the campaign's ruleSystem/customMechanicsProfile, which a
+    // concurrent reorder cannot itself change.
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+
+    let committed!: Combatant;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertMutable(fresh);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      if (input.expectedTurnVersion !== undefined && fresh.turnVersion !== input.expectedTurnVersion) {
+        throw new ConflictException({
+          code: 'TURN_VERSION_MISMATCH',
+          message: 'The turn has moved on since this order was loaded — refresh and try again.',
+        });
+      }
+      if (fresh.currentCombatantId === combatantId) {
+        throw new ForbiddenException('Cannot reorder the combatant whose turn it currently is.');
+      }
+
+      const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      const moved = rows.find((r) => r.id === combatantId);
+      if (!moved) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+      if (input.afterCombatantId === combatantId) {
+        throw new BadRequestException('A combatant cannot be reordered after itself.');
+      }
+      if (input.afterCombatantId !== 'top' && !rows.some((r) => r.id === input.afterCombatantId)) {
+        throw new NotFoundException(`Combatant ${input.afterCombatantId} not found in encounter ${encounterId}`);
+      }
+
+      const status = fresh.status as EncounterStatus;
+      const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), status, adapter);
+      const withoutMoved = sorted.filter((c) => c.id !== combatantId);
+      const insertAt = input.afterCombatantId === 'top'
+        ? 0
+        : withoutMoved.findIndex((c) => c.id === input.afterCombatantId) + 1;
+      const prev = insertAt > 0 ? withoutMoved[insertAt - 1] : null;
+      const next = insertAt < withoutMoved.length ? withoutMoved[insertAt] : null;
+
+      // Cross-value initiative reassignment is only meaningful once `sortCombatants`
+      // actually orders by initiative (status === 'running'); see the doc comment above.
+      let newInitiative = moved.initiative;
+      if (status === 'running') {
+        const origInit = moved.initiative;
+        const prevInit = prev?.initiative ?? null;
+        const nextInit = next?.initiative ?? null;
+        // Issue #2084 finding 2 (originally reported as review finding 4): the predicate
+        // used to be "origInit differs from BOTH neighbours", which is true even when
+        // origInit already sits strictly BETWEEN them — its natural, already-correct
+        // position. Roster A(20), M(14), C(6): dragging M to just after A (a no-op, or
+        // "Move after A" from the menu) has prev=20, next=6; 14 differs from both, so the
+        // old code wrote floor((20+6)/2)=13 and nulled a real, already-fine
+        // initiativeBreakdown for a move that changed nothing about the ordering. The
+        // question that matters is whether the CURRENT value already lies within the new
+        // neighbours' bounds, not whether it differs from them.
+        const alreadyBetween =
+          origInit !== null && (prevInit === null || origInit <= prevInit) && (nextInit === null || origInit >= nextInit);
+        // Issue #2095 review (Codex P1): `alreadyBetween` above is `false` unconditionally
+        // whenever `origInit === null` (an unrolled combatant), so a null-origin move used
+        // to fall straight into reassignment below. Roster A(20), B(10), U(null), V(null):
+        // dragging U to just after B — where it already sits — had prevInit=10, nextInit=
+        // null, landing in the `prevInit != null` branch and writing `newInitiative = 9`.
+        // That silently rolls an unrolled combatant in for a drop `sortOrder` alone should
+        // have satisfied — the same class of bug as finding 2 above, at the rolled/null
+        // boundary instead of between two rolled neighbours.
+        //
+        // `nextInit === null` is exactly "the drop still lands inside (or at the end of)
+        // the unrolled tier": `sorted` above places every rolled row before every unrolled
+        // one, so the only way an unrolled combatant's NEXT neighbour can be a rolled row is
+        // a drop at the very top of the whole roster (`insertAt === 0`, `prevInit === null`
+        // too) — deliberately rolling it in ahead of everyone. Any other `nextInit === null`
+        // drop keeps at least the row immediately after it (if any) unrolled, so the
+        // combatant belongs in the unrolled tier regardless of `prevInit`. Preserve `null`
+        // there; only the two cases below (`nextInit !== null`) are actually placing an
+        // unrolled combatant into the rolled region, which — unlike the null-preserving
+        // cases — is a deliberate re-roll-by-position, not an accident of the drop math.
+        const stillUnrolled = origInit === null && nextInit === null;
+        if (!alreadyBetween && !stillUnrolled) {
+          if (prevInit != null && nextInit != null) {
+            newInitiative = prevInit === nextInit ? prevInit : Math.floor((prevInit + nextInit) / 2);
+          } else if (prevInit != null) {
+            newInitiative = prevInit - 1;
+          } else if (nextInit != null) {
+            newInitiative = nextInit + 1;
+          }
+          // else: neither neighbor has a rolled initiative to anchor to (both unrolled or
+          // absent) — leave `initiative` untouched; the roster still lands in a valid
+          // state (unrolled combatants always sort last, regardless of sortOrder).
+        }
+      }
+
+      const orderedIds = [
+        ...withoutMoved.slice(0, insertAt).map((c) => c.id),
+        combatantId,
+        ...withoutMoved.slice(insertAt).map((c) => c.id),
+      ];
+      // Issue #1923 review finding 1: on a running encounter, `sortCombatants` orders by
+      // initiative and breaks ties via the adapter's own comparator (e.g. 5e's
+      // initModDescThenSortOrderAsc, which compares initMod BEFORE sortOrder) — a
+      // sortOrder-only rewrite is silently discarded whenever the tied combatants have
+      // different initMod (different DEX), so the DM's drag has no visible effect. Stamp
+      // `manualOrder` to hold the moved combatant's new position across a re-sort.
+      //
+      // Issue #2084 finding 1: NOT every combatant in the roster. The original fix
+      // stamped the whole roster on every drag, so after one reorder EVERY row carried a
+      // value, and `sortCombatants` consults `manualOrder` ahead of the adapter tiebreak
+      // whenever a stamped row is involved — so `adapter.initiativeTiebreak` never ran
+      // again for this encounter, including for ties the DM never touched. It was worse
+      // while `preparing`, where most rows have no rolled initiative yet and the stamped
+      // index encoded add order, not a DM decision.
+      //
+      // The narrower rule: stamp only rows that share the moved combatant's landing
+      // (possibly just-reassigned) initiative value — its FULL tie group as it exists in
+      // the newly computed order, not merely the ones the drag's own start/end positions
+      // happened to span. A tie group nobody dragged into stays entirely null and keeps
+      // falling through to the adapter, since only same-initiative rows are relevant to a
+      // tiebreak comparison at all (`sortCombatants` never calls into `manualOrder` for
+      // two different initiative values — it decides those numerically first).
+      //
+      // Issue #2095 review (Devin, Codex, and Copilot, same root cause, three independent
+      // repros): an
+      // earlier version stamped only the moved combatant plus whichever OTHER tie-group
+      // members its start/end positions physically crossed — but #2088's
+      // stamped-before-unstamped total-order rule (relanded in this same PR, see
+      // `sortCombatants`) makes ANY stamped row sort ahead of ANY unstamped one within a
+      // tie, with no regard for whether that row was crossed. A partial stamp therefore
+      // does not merely fail to help the untouched members — it ACTIVELY sinks them below
+      // the touched ones, an order the DM never asked for:
+      //
+      //   running A(20), W/X/Y/Z all tied at 14; drag Z to just after X. Crossing only
+      //   spans Y, so the old code stamped {Z, Y} and left W/X null — sorting to
+      //   A, Z, Y, W, X instead of the requested A, W, X, Z, Y.
+      //
+      // Smaller and nastier: a tied [A, B, C], no-op move of B to right after A crosses
+      // NOBODY (insertAt already equals B's old position) — the old code still stamped
+      // only B, and a stamped B alone now sorts ahead of unstamped A and C: a no-op drag
+      // silently reorders its own tie group.
+      //
+      // Stamping the WHOLE landing group, using each member's index in this SAME
+      // `orderedIds` pass, also closes a second issue both reviewers noted: `manualOrder`
+      // is an absolute index into `orderedIds`, so a stamp from an EARLIER drag lives in a
+      // different index space than one from this drag. A partial stamp could leave part of
+      // a tie group holding stale indices from a prior operation while the rest got fresh
+      // ones, risking duplicate or inverted values within one group. Every member of the
+      // group is (re)stamped together here, in one consistent space, every time.
+      //
+      // Deliberately skipped altogether when the moved combatant's landing initiative is
+      // null (unrolled): `sortCombatants` decides an unrolled tie by `sortOrder` alone
+      // (its own null/null branch), same as every row while `preparing` — there is no
+      // adapter tiebreak for a stamp to protect there, and stamping it anyway is exactly
+      // what reproduced the preparing-time "encodes add order" bug even under this
+      // narrower scheme, since prep-time rows are null far more often than not.
+      const finalInitiative = newInitiative;
+      const manualOrderIds = new Set<number>();
+      if (finalInitiative !== null) {
+        manualOrderIds.add(combatantId);
+        for (const c of withoutMoved) {
+          if (c.initiative === finalInitiative) manualOrderIds.add(c.id);
+        }
+      }
+      orderedIds.forEach((id, index) => {
+        tx.update(combatants)
+          .set({ sortOrder: index, ...(manualOrderIds.has(id) ? { manualOrder: index } : {}) })
+          .where(eq(combatants.id, id))
+          .run();
+      });
+      const initiativeChanged = newInitiative !== moved.initiative;
+      if (initiativeChanged) {
+        tx.update(combatants)
+          .set({ initiative: newInitiative, initiativeBreakdown: null })
+          .where(eq(combatants.id, combatantId))
+          .run();
+      }
+
+      const turnState = CombatantTurnState.parse(fromJsonText<unknown>(moved.turnState, null) ?? {});
+      const delayCleared = turnState.delaying === true;
+      if (delayCleared) {
+        turnState.delaying = false;
+        tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, combatantId)).run();
+      }
+
+      // Realign the positional turnIndex with the unchanged identity pointer (issue #49) —
+      // reordering the OTHER combatants around the current actor can shift its position
+      // even though the current actor itself can never be the one being moved (guarded
+      // above). Mirrors rollCombatantInitiative's own late-joiner realignment.
+      if (status === 'running') {
+        const resorted = this.sortCombatantsWithAdapter(
+          tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain),
+          'running',
+          adapter,
+        );
+        const turnIndex = turnIndexFor(resorted, fresh.currentCombatantId);
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
+        tx.update(encounters)
+          .set({
+            turnIndex,
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
+          })
+          .where(eq(encounters.id, encounterId))
+          .run();
+      }
+
+      // Name-free detail (issue #869 redaction rule) — actor/target ids carry identity;
+      // listing redacts a hidden NPC's name from `target` at read time.
+      this.appendEventInTransaction(tx, encounterId, fresh.round, 'override', {
+        target: moved.name,
+        targetId: combatantId,
+        // Driven by `initiativeChanged` — the flag that governs whether the write above
+        // actually happened — not by "did the move cross an initiative value". Those two
+        // disagree when the move crosses values but neither neighbour has a rolled
+        // initiative to anchor to: the anchoring block falls through its `else`,
+        // `newInitiative` stays put, nothing is written, and the "(now N)" wording would
+        // have announced a change that did not occur. Reachable by dragging a rolled
+        // combatant down among not-yet-rolled ones mid-fight.
+        detail: initiativeChanged ? `reordered in initiative (now ${newInitiative})` : 'reordered in initiative',
+      });
+      if (delayCleared) {
+        this.appendEventInTransaction(tx, encounterId, fresh.round, 'note', {
+          actor: moved.name,
+          actorId: combatantId,
+          detail: 'is no longer delaying',
+        });
+      }
+
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.combatant.reorder',
+        entityType: 'combatant',
+        entityId: combatantId,
+        campaignId: fresh.campaignId,
+        detail: moved.name,
+      });
+
+      const [updatedRow] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      committed = combatantToDomain(updatedRow);
+    });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    return committed;
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
@@ -6149,7 +7315,7 @@ export class EncountersService {
     // Fresh-prep encounters (including campaign clones) deliberately have no
     // historical allegiance. Capture the linked NPC's current disposition exactly
     // when play starts, so a later NPC edit cannot rewrite the finished fight's XP.
-    const npcIds = [...new Set(rows.flatMap((row) => (row.kind === 'npc' && row.npcId !== null ? [row.npcId] : [])))];
+    const npcIds = [...new Set(rows.flatMap((row) => row.kind === 'npc' ? [row.npcId, row.npcIdentitySourceId].filter((id): id is number => id !== null) : []))];
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
       const npcDispositionById = new Map(
@@ -6165,7 +7331,7 @@ export class EncountersService {
       for (const [npcId, disposition] of npcDispositionById) {
         tx.update(combatants)
           .set({ npcDispositionSnapshot: disposition })
-          .where(and(eq(combatants.encounterId, encounterId), eq(combatants.npcId, npcId)))
+          .where(and(eq(combatants.encounterId, encounterId), or(eq(combatants.npcId, npcId), eq(combatants.npcIdentitySourceId, npcId))))
           .run();
       }
 
@@ -6201,6 +7367,9 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? encounterRow.escalationDieHistory,
+          // Turn timer (issue #1935): stamp the fresh server "now" the very first turn
+          // begins, in the same transaction that flips status to running.
+          turnStartedAt: ts,
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
@@ -6348,6 +7517,25 @@ export class EncountersService {
       throw new BadRequestException('No combatant currently has the turn');
     }
     const isDm = role === 'dm';
+    const currentRole = role;
+    // A successful player write changes the active combatant, so replay an exact,
+    // actor-bound receipt after rechecking campaign authority but before active-owner
+    // validation. Changed arguments fall through to the normal authorization path.
+    if (!isDm && input.idempotencyKey) {
+      const claim: EncounterOpClaim = {
+        actorId: user.id,
+        operation: 'turn.advance',
+        key: input.idempotencyKey,
+        encounterId,
+        campaignId: encounterRow.campaignId,
+        fingerprint: encounterOpFingerprint({ auditAction: 'encounter.end_turn', expectedCurrentCombatantId: input.expectedCurrentCombatantId ?? null }),
+      };
+      const prior = this.db.transaction((tx) => findExactPriorEncounterOp(tx, claim, Date.now()));
+      if (prior && prior.responseRole === currentRole) {
+        if (prior.response) return prior.response as EncounterWithCombatants;
+        return this.getWithCombatantsOrThrow(encounterId, currentRole, user.id);
+      }
+    }
     const [campaign] = await this.db
       .select({ dmControlsTurns: campaigns.dmControlsTurns, requireDmTurnConfirmation: campaigns.requireDmTurnConfirmation })
       .from(campaigns)
@@ -6466,6 +7654,9 @@ export class EncountersService {
     let skippedTurns: Array<{ id: number; name: string; round: number }> = [];
     const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
     const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
+    // Issue #1921: recharge rolls for the starting combatant's spent recharge actions,
+    // logged AFTER commit (mirrors expiredEffects/expiredConditions above).
+    const rechargeRolls: Array<{ combatantId: number; combatantName: string; actionName: string; roll: number; needs: number; recovered: boolean }> = [];
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
     const turnTickSnapshot: TurnTickDelta = {
@@ -6484,7 +7675,9 @@ export class EncountersService {
         if (opClaim) {
           const prior = findPriorEncounterOp(tx, opClaim, Date.now());
           if (prior) {
-            if (prior.response && prior.responseRole === role) {
+            // Player projections include their own fog-concealed AoE templates, so a
+            // role-only cached response is safe only for the DM's shared projection.
+            if (role === 'dm' && prior.response && prior.responseRole === role) {
               replayedEncounter = prior.response as EncounterWithCombatants;
             } else {
               // Claim committed but its body was never backfilled (a crash in the moment
@@ -6517,6 +7710,22 @@ export class EncountersService {
         }
 
         const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+        if (rows.length === 0) {
+          // Issue #2091: removeCombatant deliberately still permits emptying a RUNNING
+          // encounter's roster (including its last combatant) — two pre-existing flows
+          // depend on that: the 30-second combatant-removal undo window, and a death-save
+          // replay that removes its subject and only later calls /end. Guarding the delete
+          // itself would break both. Instead, the invariant is enforced HERE, at the only
+          // place emptying the roster actually harmed the DM: next-turn/end-turn (this
+          // function backs both) must never silently report success and advance the round
+          // on a fight with nobody in it — that silent "success" is what let the campaign's
+          // one-live-fight slot (issue #744) stay wedged with no discoverable way out. The
+          // message names the actual recovery so the DM's very next action tells them what
+          // to do, rather than leaving them to rediscover it via a 409 on a different fight.
+          throw new BadRequestException(
+            'This encounter has no combatants — end the encounter instead of advancing an empty fight.',
+          );
+        }
         const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
         const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
         const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
@@ -6625,6 +7834,45 @@ export class EncountersService {
             starting.id === ending?.id ? (endingConditionKept ?? starting.conditionInstances ?? []) : (starting.conditionInstances ?? []);
           const condTick = tickConditionInstancesAtTurnStart(startConditionPre);
           const conditionDelta = buildConditionTickDelta(startConditionPre, condTick.kept);
+
+          // Issue #1921: roll recharge for every currently-spent recharge action of the
+          // combatant starting its turn, in this SAME transaction as resetTurnStateForStart
+          // below. X/day pools never reach rollRechargeAtTurnStart at all — only entries
+          // whose `uses.recharge` actually parses as `recharge-N-M` are passed in.
+          const startingRow = rows.find((r) => r.id === starting.id);
+          const rechargeEntries = startingRow
+            ? (this.actionResolver?.usesTrackedActions(startingRow, fresh.campaignId) ?? [])
+                .map((entry) => {
+                  const range = parseRechargeRange(entry.uses.recharge);
+                  // `max` rides along so the undo delta can clamp its `spent + 1` revert to
+                  // the pool ceiling without re-resolving the action list at undo time.
+                  return range
+                    ? { key: entry.key, name: entry.name, min: range.min, max: effectiveActionUsesMax(entry.uses) }
+                    : null;
+                })
+                .filter((e): e is { key: string; name: string; min: number; max: number } => e !== null)
+            : [];
+          let actionUsesRecharged: ActionUsesRechargeDelta[] = [];
+          let nextActionUses: ActionUsesMap | null = null;
+          if (startingRow && rechargeEntries.length > 0) {
+            const currentUses = fromJsonText<ActionUsesMap>(startingRow.actionUses, {});
+            const rolled = rollRechargeAtTurnStart(currentUses, rechargeEntries, () => rollDice('1d6').total);
+            if (rolled.rolls.length > 0) {
+              actionUsesRecharged = rolled.delta;
+              nextActionUses = rolled.uses;
+              for (const r of rolled.rolls) {
+                rechargeRolls.push({
+                  combatantId: starting.id,
+                  combatantName: starting.name,
+                  actionName: r.actionName,
+                  roll: r.roll,
+                  needs: r.needs,
+                  recovered: r.recovered,
+                });
+              }
+            }
+          }
+
           // Active effects are not ticked at turn start; no effect delta to record.
           turnTickSnapshot.starting = {
             combatantId: starting.id,
@@ -6632,6 +7880,7 @@ export class EncountersService {
             conditionExpired: conditionDelta.expired,
             effectTicks: [],
             effectExpired: [],
+            actionUsesRecharged,
           };
           const reset = resetTurnStateForStart(starting.turnState);
           const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
@@ -6643,6 +7892,9 @@ export class EncountersService {
               expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
             }
             Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
+          }
+          if (nextActionUses) {
+            startSet.actionUses = toJsonText(nextActionUses);
           }
           tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
         } else if (phase === 'lair') {
@@ -6660,6 +7912,11 @@ export class EncountersService {
             lairResumeCombatantId,
             escalationDie: escalation.escalationDie,
             escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
+            // Turn timer (issue #1935): a fresh stamp for the NEW current turn, inside the
+            // same serialized transaction as the pointer move. Guarded by the idempotency
+            // dedup above (an early `return` there skips this whole tx.update), so a replayed
+            // retry of the same intent never restamps a turn that already started.
+            turnStartedAt: nowIso(),
             updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
           })
           .where(eq(encounters.id, encounterId))
@@ -6712,8 +7969,8 @@ export class EncountersService {
       if (err instanceof EncounterOpRaceMarker) {
         // Same intent, two concurrent attempts: ours rolled back, theirs committed.
         const prior = await readEncounterOpAfterRace(this.db, err.claim);
-        if (prior.response && prior.responseRole === role) return prior.response as EncounterWithCombatants;
-        return this.getWithCombatantsOrThrow(encounterId, role);
+        if (role === 'dm' && prior.response && prior.responseRole === role) return prior.response as EncounterWithCombatants;
+        return this.getWithCombatantsOrThrow(encounterId, role, user.id);
       }
       throw err;
     }
@@ -6722,7 +7979,7 @@ export class EncountersService {
     // turn marker, re-auditing, or re-emitting would manufacture the very duplicate this
     // exists to prevent.
     if (replayedEncounter) return replayedEncounter;
-    if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role);
+    if (replayedWithoutBody) return this.getWithCombatantsOrThrow(encounterId, role, user.id);
 
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
@@ -6741,6 +7998,37 @@ export class EncountersService {
         actor: ex.combatantName,
         actorId: ex.combatantId,
         detail: `condition expired: ${ex.conditionName}`,
+      });
+    }
+    // Issue #1921: one combat-log line per recharge roll on the starting combatant's turn —
+    // both outcomes are logged (acceptance criterion), under the NEW round (the roll happens
+    // at the start of the combatant's turn, not the end of the prior one).
+    //
+    // The ability's NAME, the die result, and the THRESHOLD are all deliberately absent from
+    // `detail`. An earlier revision embedded the name, reasoning by analogy with
+    // `resolution.actionName` elsewhere in this file — but that analogy breaks: an action USE
+    // is logged because the table just watched it happen. A recharge roll is invisible
+    // bookkeeping that fires every turn for an ability that may never have been used, on a
+    // monster whose statblock the DM may have deliberately left unrevealed (#1926) and whose
+    // action list 403s a non-DM. The combat log is readable by every campaign member and
+    // `redactEncounterEventsForViewer` masks only hidden-combatant identity, not action
+    // names, so naming the ability here would hand players a statblock the server otherwise
+    // withholds.
+    //
+    // `needed N+` is the same category of secret and had to go with it: it IS the statblock's
+    // recharge condition, stated verbatim. Dropping the threshold alone would not have been
+    // enough either — `rolled 3` plus `stays spent` bounds the threshold from below, and two
+    // or three rounds of those lines converge on it exactly, so the roll goes too. What
+    // survives is the acceptance criterion itself: both outcomes are logged, once per roll.
+    //
+    // Recovering the name, roll, and threshold FOR THE DM needs a DM-only log channel, which
+    // does not exist yet (`metadata.dmText` is only scrubbed when the actor is a hidden NPC,
+    // so it is not one) — that is the follow-up, not a reason to leak now.
+    for (const r of rechargeRolls) {
+      await this.appendEvent(encounterId, newRound, 'resource_changed', {
+        actor: r.combatantName,
+        actorId: r.combatantId,
+        detail: r.recovered ? 'a limited-use ability recharges' : 'a limited-use ability stays spent',
       });
     }
     if (escalationLogDetail) {
@@ -6791,7 +8079,7 @@ export class EncountersService {
         .catch(() => {});
     }
 
-    const view = await this.getWithCombatantsOrThrow(encounterId, role);
+    const view = await this.getWithCombatantsOrThrow(encounterId, role, user.id);
     // Backfill the original response onto the already-committed claim (issue #580) so a
     // retry gets the turn pointer THIS call produced, not merely "some current state".
     // Best-effort by construction: the claim (the part that prevents a second advance) is
@@ -6825,6 +8113,7 @@ export class EncountersService {
       combatantName: string;
       conditionNames: string[];
       effectNames: string[];
+      actionUsesNames: string[];
     }> = [];
 
     this.db.transaction((tx) => {
@@ -6938,14 +8227,17 @@ export class EncountersService {
         combatantName: string;
         conditionNames: string[];
         effectNames: string[];
+        actionUsesNames: string[];
       }> = [];
       if (snapshot) {
         type Working = {
           row: typeof combatants.$inferSelect;
           conditions: ConditionInstance[];
           effects: ActiveEffect[];
+          actionUses: ActionUsesMap;
           conditionRestored: string[];
           effectRestored: string[];
+          actionUsesRestored: string[];
         };
         const workByCombatant = new Map<number, Working>();
         for (const side of ['ending', 'starting'] as const) {
@@ -6959,8 +8251,10 @@ export class EncountersService {
               row,
               conditions: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
               effects: parseActiveEffects(row.activeEffects),
+              actionUses: fromJsonText<ActionUsesMap>(row.actionUses, {}),
               conditionRestored: [],
               effectRestored: [],
+              actionUsesRestored: [],
             };
             workByCombatant.set(entry.combatantId, working);
           }
@@ -6971,23 +8265,35 @@ export class EncountersService {
           working.effects = effectResult.merged;
           working.conditionRestored.push(...conditionResult.restoredNames);
           working.effectRestored.push(...effectResult.restoredNames);
+          // Issue #1921: put a recharged action back to "spent" if THIS is the turn-start
+          // tick that recharged it — mirrors condition/effect tick undo above.
+          if (entry.actionUsesRecharged && entry.actionUsesRecharged.length > 0) {
+            const usesResult = undoActionUsesRecharge(working.actionUses, entry.actionUsesRecharged);
+            working.actionUses = usesResult.uses;
+            working.actionUsesRestored.push(...usesResult.restoredNames);
+          }
         }
 
         for (const [combatantId, working] of workByCombatant) {
           const conditionNames = [...new Set(working.conditionRestored)];
           const effectNames = [...new Set(working.effectRestored)];
-          if (conditionNames.length > 0 || effectNames.length > 0) {
+          const actionUsesNames = [...new Set(working.actionUsesRestored)];
+          if (conditionNames.length > 0 || effectNames.length > 0 || actionUsesNames.length > 0) {
             restoredLog.push({
               combatantId,
               combatantName: working.row.name,
               conditionNames,
               effectNames,
+              actionUsesNames,
             });
 
             const writeSet: Partial<typeof combatants.$inferInsert> = {
               activeEffects: toJsonText(working.effects),
               ...conditionWriteSetFromInstances(working.conditions),
             };
+            if (actionUsesNames.length > 0) {
+              writeSet.actionUses = toJsonText(working.actionUses);
+            }
             tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).run();
           }
         }
@@ -7028,6 +8334,10 @@ export class EncountersService {
           lairResumeCombatantId,
           escalationDie: escalation.escalationDie,
           escalationDieHistory: escalation.escalationDieHistory ?? fresh.escalationDieHistory,
+          // Turn timer (issue #1935): undo restores a FRESH stamp, not the pre-advance one —
+          // a documented restart. The prior elapsed time is intentionally gone; undo produces
+          // a new "now" for whichever turn it retreats to, inside this same transaction.
+          turnStartedAt: nowIso(),
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
@@ -7061,6 +8371,16 @@ export class EncountersService {
           actor: entry.combatantName,
           actorId: entry.combatantId,
           detail: `effect restored: ${name}`,
+        });
+      }
+      // Issue #1921: undoing a turn advance that recharged an action puts it back to spent.
+      // The ability's NAME stays out of `detail` for the same secrecy reason as the forward
+      // recharge log — this is player-visible and would expose an unrevealed statblock.
+      for (const _name of entry.actionUsesNames) {
+        await this.appendEvent(encounterId, newRound, 'resource_changed', {
+          actor: entry.combatantName,
+          actorId: entry.combatantId,
+          detail: 'limited-use ability recharge undone',
         });
       }
     }
@@ -7222,16 +8542,37 @@ export class EncountersService {
 
     const model = actionEconomyForAdapter(adapter);
     const used = current.turnState.used;
+    const movementSlot = model.slots.find((s) => s.kind === 'movement');
+    // Issue #1910 review (Devin, PR #1980, round 4): resolve the per-combatant
+    // movement max as the combatant's own add-time speed snapshot, or — full
+    // stop — the adapter's movement-slot max (e.g. 30 ft for 5e). Deliberately
+    // NOT falling through to the linked character's live speed when the
+    // snapshot is null: `combatant.speed === null` is unavoidably ambiguous
+    // between "this row predates the speed column" and "the linked character
+    // had no speed set at add time" (Character.speed defaults to null, so the
+    // second case is every character until someone fills in a value) — the two
+    // cases are indistinguishable at the DB level without a discriminator
+    // column, and a live-character fallback resolves BOTH the same way,
+    // reintroducing exactly the retroactive-change bug this snapshot exists to
+    // prevent for the (overwhelmingly common) second case. Falling through to
+    // the adapter default instead costs nothing relative to pre-PR behavior —
+    // every combatant reported the hardcoded adapter constant before this
+    // column existed, which for 5e is the same 30 the default resolves to now.
+    //
+    // Routed through the shared `movementSlotMax` (encounters.logic.ts, round 5 review)
+    // rather than computed inline: `ActionResolverService.resolveActionEconomyCost` calls
+    // the SAME function for the movement spend/guard path, so this DISPLAY value and that
+    // ENFORCEMENT value cannot drift apart the way they did before round 5.
+    const resolvedMovementMax = movementSlot ? movementSlotMax('movement', movementSlot.max, current.speed) : 0;
     const actionEconomy = model.slots.map((slot) => ({
       key: slot.key,
       label: slot.label,
       help: slot.help,
       kind: slot.kind,
-      max: slot.max,
+      max: movementSlotMax(slot.kind, slot.max, current.speed),
       used: slot.kind === 'movement' ? current.turnState.movementUsedFt : used[slot.key] ?? 0,
       resetsAt: slot.resetsAt,
     }));
-    const movementSlot = model.slots.find((s) => s.kind === 'movement');
     const reactionSlot = model.slots.find((s) => s.kind === 'reaction');
     const suggestedActions = await this.suggestedActionsForCombatant(current);
 
@@ -7253,7 +8594,7 @@ export class EncountersService {
       isYourTurn,
       canEndTurn,
       actionEconomy,
-      movement: movementSlot ? { maxFt: movementSlot.max, usedFt: current.turnState.movementUsedFt } : null,
+      movement: movementSlot ? { maxFt: resolvedMovementMax, usedFt: current.turnState.movementUsedFt } : null,
       reactionAvailable: reactionSlot ? (used[reactionSlot.key] ?? 0) < reactionSlot.max : false,
       concentration: current.turnState.concentration,
       activeEffects: current.activeEffects,
@@ -7377,7 +8718,7 @@ export class EncountersService {
     if (c.ruleEntryId !== null) {
       const encounterRow = await this.getRowOrThrow(c.encounterId);
       const adapter = await this.adapterForCampaign(encounterRow.campaignId);
-      const ruleSystem = await this.ruleSystemForCampaign(encounterRow.campaignId);
+      const { ruleSystem } = await this.ruleSystemForCampaign(encounterRow.campaignId);
       const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(and(eq(ruleEntries.id, c.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounterRow.campaignId)))).limit(1);
       const data = fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {});
       const expanded = expandStatblockActions(data, adapter, ruleSystem ?? '');
@@ -7892,7 +9233,9 @@ export class EncountersService {
       }
       const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
       tx.update(encounters)
-        .set({ status: 'ended', endedAt: ts, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
+        // Turn timer (issue #1935): null the stamp when the encounter ends — there is no
+        // "current turn" running any more, so no client should keep ticking a chip.
+        .set({ status: 'ended', endedAt: ts, turnStartedAt: null, updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt) })
         .where(and(eq(encounters.id, encounterId), eq(encounters.status, 'running')))
         .run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
@@ -8083,6 +9426,10 @@ export class EncountersService {
           turnIndex,
           turnPhase: 'combatant',
           lairResumeCombatantId: null,
+          // Turn timer (issue #1935): a reopened encounter begins a fresh turn (see the
+          // turnVersion bump above), so the timer restarts too rather than resuming a stamp
+          // from before the encounter ended.
+          turnStartedAt: ts,
           updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? encounterRow.updatedAt),
         })
         .where(eq(encounters.id, encounterId))
@@ -8270,20 +9617,21 @@ export class EncountersService {
 
     // Redact hidden NPC or hidden encounter identity in campaign-wide dice rolls log (issue #1850 / review finding)
     let isActorHidden = false;
-    if (encounter.hidden) {
-      isActorHidden = true;
-    } else if (combatantRow) {
-      if (combatantRow.kind === 'npc' && combatantRow.npcId !== null) {
+    let npcIdentityId: number | null = null;
+    if (combatantRow) {
+      npcIdentityId = combatantRow.npcIdentitySourceId ?? combatantRow.npcId;
+      if (combatantRow.kind === 'npc' && npcIdentityId !== null) {
         const [npc] = await this.db
           .select({ hidden: npcs.hidden })
           .from(npcs)
-          .where(and(eq(npcs.id, combatantRow.npcId), eq(npcs.campaignId, encounter.campaignId)))
+          .where(and(eq(npcs.id, npcIdentityId), eq(npcs.campaignId, encounter.campaignId)))
           .limit(1);
         if (npc?.hidden) {
           isActorHidden = true;
         }
       }
     }
+    if (encounter.hidden) isActorHidden = true;
 
     const mode = body.mode || 'flat';
     let formula = '';
@@ -8347,6 +9695,10 @@ export class EncountersService {
         label: diceLabel,
         actor: diceActor,
         natural20: isNat20 ? 1 : 0,
+        encounterId,
+        ...(combatantRow?.kind === 'npc' && npcIdentityId !== null
+          ? { npcId: npcIdentityId }
+          : {}),
       },
       user,
     );
@@ -8489,95 +9841,730 @@ export class EncountersService {
     return persisted;
   }
 
-  /** Inline spend or restore of spell slots or character resources during combat (issue #422). */
+  /**
+   * Inline spend or restore of ONE spell slot or bounded resource during combat (issue
+   * #422), for a character-linked combatant OR — issue #1909 — a statblock combatant with
+   * an inline statblock. Delta-based and transactional: the row is re-read INSIDE the same
+   * synchronous better-sqlite3 transaction that decides and writes the new `used` value, so
+   * two concurrent single-pip writes to DIFFERENT resources on the SAME sheet/statblock
+   * both persist — unlike the whole-statblock/whole-character PATCH this REST/MCP surface
+   * replaces, which raced last-writer-wins across the ENTIRE JSON blob built from whatever
+   * the client last read, silently reverting the other writer's unrelated edits.
+   *
+   * Roles mirror `updateCombatant`'s statblock rule: the DM may adjust any combatant; a
+   * player may adjust only a combatant linked to a character they own; a statblock
+   * combatant (no linked character) is DM-only, since it has no owning player.
+   *
+   * RESPONSE CONTRACT (issue #1909 review, Codex P2 — decided deliberately, documented
+   * here rather than left implicit): the returned `Combatant` reflects the COMMITTED write
+   * for the statblock branch (the inline statblock lives ON the combatant row), but NOT for
+   * the character branch — `Combatant` has no `resources`/`spellSlots` field at all; that
+   * state lives exclusively on the linked CHARACTER row, which this method never re-reads
+   * for its response. The returned object for a character-linked combatant is therefore
+   * byte-identical to a fresh read of that SAME unchanged combatant row (nothing on it
+   * ever writes), not because it is stale, but because the domain model has nowhere on a
+   * `Combatant` to put a character's resource state. A caller of the character branch that
+   * wants to confirm/display the new value must read the CHARACTER separately (e.g.
+   * `GET /characters/:id`, or `get_character` over MCP) — the same second read every OTHER
+   * character-resource caller (`POST /characters/:id/resources`/`.../spell-slots` returns
+   * the `Character` itself) never needed, because THEIR response type already matches
+   * what changed. This is a narrower contract than "Updated combatant" (the REST route's
+   * summary) literally promises for the character branch specifically; see that route's
+   * and the MCP tool's own doc comments for the corresponding caller-facing wording.
+   */
   async adjustCombatantResource(
     encounterId: number,
     combatantId: number,
-    patch: { key?: string; spellLevel?: number; delta?: number },
+    patch: { key?: string; spellLevel?: number; delta?: number; expectedUsed?: number; idempotencyKey?: string },
     user: RequestUser,
     role: Role,
-  ) {
-    const encounter = await this.getRowOrThrow(encounterId);
-    this.assertMutable(encounter);
-    const combatant = this.db.select().from(combatants).where(and(eq(combatants.id, combatantId), eq(combatants.encounterId, encounterId))).limit(1).all()[0];
-    if (!combatant) throw new NotFoundException(`No such combatant ${combatantId} in encounter ${encounterId}`);
-
-    if (combatant.characterId === null) {
-      throw new BadRequestException('Only character combatants have sheet resources');
+  ): Promise<Combatant> {
+    // Issue #1909 review (Codex + Devin, same defect): retain a soft-deleted (trashed)
+    // encounter row here — a keyed retry is a read of an already-committed response, not a
+    // fresh write, and needs this row only to resolve `campaignId`/`hidden` for that replay.
+    // `rollDeathSave` (`:4090`) and `rollCombatantInitiative` (`:5970`) both do the same. A
+    // genuinely fresh write is unaffected: the transaction-local `assertMutable` below still
+    // rejects it once no prior claim is found.
+    const encounter = await this.getRowOrThrow(encounterId, true);
+    // Issue #1909 review (Codex): a hidden/prep encounter auto-adds combatants for a
+    // party's existing characters, so the OWNERSHIP branch just below could otherwise let
+    // a non-DM player reach and mutate a combatant belonging to an encounter that every
+    // sibling read/roll path (GET, /difficulty, /events, roll_death_save,
+    // roll_combatant_initiative) treats as wholesale nonexistent for them. 404, not 403 —
+    // a 403 would itself leak that a hidden encounter exists. `role` here is the caller's
+    // already-resolved CAMPAIGN role floor (dm/player/viewer), independent of this
+    // encounter's own `hidden` flag, so this check cannot be skipped by resolving role
+    // first and relying on the ownership branch alone.
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
-
-    const isDm = role === 'dm';
-    if (!isDm) {
-      const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
-      if (!character || character.ownerUserId !== user.id) {
-        throw new ForbiddenException('Only dm or the owning player may adjust this combatant\'s resources');
-      }
-    }
+    // Issue #1909 review (Codex): a keyed retry may name a result that already committed
+    // BEFORE the encounter ended — the transaction-local replay lookup must run first and
+    // win, exactly like `updateCombatant`'s own ordering. An unkeyed (fresh) write still
+    // fails immediately here; a keyed one instead hits the identical `assertMutable` check
+    // inside each transaction below, AFTER the replay lookup finds nothing to replay.
+    if (!patch.idempotencyKey) this.assertMutable(encounter);
 
     const delta = patch.delta ?? 1;
-    const characterId = combatant.characterId;
 
+    // Issue #1909 review (Codex P1, secrecy): `combatantToDomain(row)` is the RAW row —
+    // unlike `getWithCombatantsOrThrow`'s role-filtered projection, it never withholds a
+    // fog-hidden token's exact position. A non-DM owning player adjusting their own
+    // character-linked combatant would otherwise learn (via THIS response, and via a
+    // same-role replay of the stored claim body) exactly where their token sits even when
+    // fog conceals it from every other read path. Redacts using this encounter's own fog
+    // PLUS the given `siblingProtects` boolean — together the same two conditions
+    // `getWithCombatantsOrThrow` applies. `siblingProtects` is an explicit parameter
+    // (issue #1909 review, Codex eighth finding), not a closed-over value, precisely
+    // because the WRITE path (computed at write time, see `siblingFogProtectsAtWrite`
+    // below) and the REPLAY path (recomputed fresh at replay time, see `resolveReplay`
+    // below) legitimately need DIFFERENT answers to the same question asked at different
+    // moments. Applied identically to the STORED claim body (so a same-role replay never
+    // surfaces the raw position either) and to the fresh-write's own returned value —
+    // never only on the way out, which a future caller of the stored body could too
+    // easily miss. Declared here, BEFORE `resolveReplay` (issue #1909 review, Devin's
+    // ninth-finding-adjacent fix): `resolveReplay` can be invoked from the EARLY,
+    // transaction-free replay check below, which runs before the write path's own
+    // `siblingFogProtectsAtWrite` computation — a pure function with no closed-over
+    // dependency on that value has no such ordering constraint, so it is declared as
+    // early as its one real dependency (`role`, a parameter available from the top of
+    // this method) allows.
+    const redactForRole = (c: Combatant, encounterFogJson: string | null, siblingProtects: boolean): Combatant => {
+      if (role === 'dm') return c;
+      const fog = parseFog(encounterFogJson);
+      const invalidFog = encounterFogJson !== null && fog === null;
+      if (invalidFog || siblingProtects) return redactTokenInFog(c, { enabled: true, revealed: [] });
+      if (fog?.enabled) return redactTokenInFog(c, fog);
+      return c;
+    };
+
+    // Issue #580 — per-intent idempotency, same mechanism `updateCombatant`/`rollDeathSave`
+    // use above: `delta` is a RELATIVE write, so a retry after a lost response must replay
+    // the ORIGINAL committed combatant rather than spend/restore a second time. Scoped to
+    // its own operation name so a key reused for a different action still 409s instead of
+    // silently replaying the wrong result. Built from fields alone (no combatant row
+    // needed) so it can be checked before requiring one to exist — see the early replay
+    // check just below.
+    const opClaim: EncounterOpClaim | null = patch.idempotencyKey
+      ? {
+          actorId: user.id,
+          operation: 'combatant.resource_adjust',
+          key: patch.idempotencyKey,
+          encounterId,
+          campaignId: encounter.campaignId,
+          fingerprint: encounterOpFingerprint({ combatantId, key: patch.key, spellLevel: patch.spellLevel, delta, expectedUsed: patch.expectedUsed }),
+        }
+      : null;
+    let replayed: Combatant | null = null;
     let eventDetail = '';
 
-    this.db.transaction((tx) => {
-      const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
-      if (!character) throw new NotFoundException(`No such character ${characterId}`);
-
-      if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
-        const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
-        const levelKey = String(patch.spellLevel);
-        const slot = slots[levelKey];
-        if (!slot || slot.max <= 0) {
-          throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
-        }
-        const nextUsed = slot.used + delta;
-        if (nextUsed < 0 || nextUsed > slot.max) {
-          throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
-        }
-        slot.used = nextUsed;
-        slots[levelKey] = slot;
-        // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
-        // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
-        // EVERY spellSlots writer. `character` was read INSIDE this same transaction
-        // above, so there's no separate atomicity gap to guard here.
-        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
-        eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
-      } else if (patch.key) {
-        const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
-        const res = resources[patch.key] ?? { max: 1, used: 0, name: patch.key, recharge: 'long-rest' };
-        const nextUsed = res.used + delta;
-        if (nextUsed < 0 || nextUsed > res.max) {
-          throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
-        }
-        res.used = nextUsed;
-        resources[patch.key] = res;
-        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
-        eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
-      } else {
-        throw new BadRequestException('Must supply either spellLevel or key to adjust');
+    // Issue #1909 review (Devin/Codex secrecy finding): a stored response was rendered for
+    // the ROLE that committed it — a DM-only projection (exact fog-hidden token position,
+    // unbanded monster HP, an inline statblock) can be embedded in it. If the SAME actor's
+    // role has since dropped within the replay window (e.g. a co-DM demoted to player who
+    // still happens to own the linked character), replaying that body verbatim would hand
+    // them content they may no longer be entitled to see. Mirrors the
+    // `prior.responseRole === role` guard every OTHER keyed mutation that stores a
+    // role-shaped body already has (`rollCombatantInitiative`, `advanceCurrentTurn`,
+    // `undoTurn`): on a mismatch — or a missing body, which cannot happen for THIS
+    // implementation since the claim and its body are written in the same transaction, but
+    // is handled the same defensive way as those siblings anyway — fall through to a FRESH
+    // role-filtered read (`getWithCombatantsOrThrow`) rather than trust the stored
+    // projection. This never re-runs the effect a second time; only the returned VIEW is
+    // re-derived. Deliberately does NOT require the combatant to still exist when a stored
+    // body is being replayed verbatim — only the fresh-read fallback path does, and only
+    // because it has no other way to answer "what is the combatant now".
+    //
+    // Issue #1909 review (Codex, eighth finding): a SAME-role match is not sufficient to
+    // trust the stored body VERBATIM for a NON-DM viewer — the stored body was redacted
+    // against the fog/sibling-map state as it stood at the ORIGINAL commit, not as it
+    // stands now. If a DM has since enabled fog, or a sibling encounter's fog now protects
+    // a previously-unprotected shared map, the stored body can still carry raw `tokenX`/
+    // `tokenY` that `GET /encounters/:id` would withhold at THIS moment — the role hasn't
+    // changed, but the world has. A stored replay response is a snapshot of an
+    // AUTHORIZATION decision, not just of data, and that snapshot can go stale exactly like
+    // the data it wraps. For a same-role NON-DM match, re-derive the redaction decision
+    // fresh (below) rather than either trusting the stored body outright or falling all the
+    // way through to `getWithCombatantsOrThrow` — the latter would require the COMBATANT to
+    // still exist, which is not the question this finding is about and would undo the
+    // replay-survives-combatant-removal/encounter-trash guarantees above for a non-DM
+    // caller. The only per-role projection this endpoint's own `redactForRole` ever applies
+    // is fog-based token concealment (its scope comment says so explicitly) — HP banding and
+    // hidden-NPC-identity masking are never in a Combatant this method returns in the first
+    // place (statblock writes are DM-only; character writes carry no HP field on the
+    // combatant row) — so re-deriving just that one projection against CURRENT fog/sibling
+    // state is sufficient, not a narrowing of what the previous fix already covered.
+    const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant> => {
+      const body = prior.response as Combatant | null;
+      if (body && prior.responseRole === role) {
+        if (role === 'dm') return body;
+        const freshEncounterForReplay = await this.getRowOrThrow(encounterId, true);
+        const freshSiblingProtects =
+          freshEncounterForReplay.mapAttachmentId != null &&
+          !fogConcealsPixels(parseFog(freshEncounterForReplay.fog)) &&
+          (await this.attachmentsService.isFogProtectedEncounterMap(freshEncounterForReplay.mapAttachmentId, freshEncounterForReplay.campaignId));
+        return redactForRole(body, freshEncounterForReplay.fog, freshSiblingProtects);
       }
+      // Role MISMATCH (or a missing body, which cannot happen for THIS implementation
+      // since the claim and its body are written in the same transaction, but handled the
+      // same defensive way as the sibling keyed mutations that guard on this): mirrors
+      // `rollCombatantInitiative`/`advanceCurrentTurn`/`undoTurn`'s own
+      // `prior.responseRole === role` guard — fall through to a FULL fresh, role-filtered
+      // read (`getWithCombatantsOrThrow`), since a role change can affect more projections
+      // than fog alone (e.g. a demoted co-DM). This never re-runs the effect a second time;
+      // only the returned VIEW is re-derived. Unlike the same-role branch above, THIS path
+      // does require the combatant to still exist — it has no other way to answer "what is
+      // the combatant now" for an unknown/changed role; a real combatant removal since the
+      // original commit still 404s here, same as before this finding.
+      //
+      // Issue #1909 review (Devin, tenth finding): this fallback used to call
+      // `getWithCombatantsOrThrow(encounterId, role)` with its default `includeDeleted =
+      // false`, so it 404ed on a role-MISMATCHED replay against an encounter TRASHED since
+      // the original commit — the exact class of gap the round-7 fix (the outer
+      // `getRowOrThrow(encounterId, true)` plus the early transaction-free
+      // `findPriorEncounterOp` short-circuit) closed for the SAME-role path, but this
+      // second exit of the same function had the identical defect. `includeDeleted: true`
+      // makes this fallback tolerate a trashed encounter exactly like the same-role branch
+      // above and the early replay check do — a role-mismatched replay of an
+      // already-committed outcome must survive the encounter having since been trashed
+      // just as much as a same-role one does.
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+      const found = snapshot.combatants.find((c) => c.id === combatantId);
+      if (!found) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+      return found;
+    };
 
-      tx.insert(encounterEvents)
-        .values({
-          encounterId,
-          round: encounter.round,
-          type: 'resource_changed',
-          actor: combatant.name,
-          actorId: combatant.id,
-          target: null,
-          targetId: null,
-          detail: eventDetail,
-          createdAt: nowIso(),
-        })
-        .run();
+    // Issue #1909 review (Codex): a keyed retry must replay an already-committed outcome
+    // even if the combatant was removed (a real DELETE, not soft) since the original commit
+    // — the same "the effect already happened, only the response was lost" guarantee every
+    // other keyed encounter mutation provides. The transactional `findPriorEncounterOp`
+    // check inside each branch below runs AFTER `getCombatantRowOrThrow`, which throws 404
+    // unconditionally the moment the combatant is gone — so an ordinary post-action roster
+    // change (the DM removing a defeated monster, say) landing between the original commit
+    // and a lost-response retry would otherwise break replay for a request that already
+    // succeeded. This is a plain, transaction-free SELECT purely as a short-circuit for
+    // that case; it does not replace the race-safe `findPriorEncounterOp`/`recordEncounterOp`
+    // pair still run inside each branch's own transaction for a genuinely FRESH write —
+    // that pair is what actually protects against two concurrent requests with the SAME key
+    // racing each other, and is untouched by this early check finding nothing.
+    if (opClaim) {
+      const earlyPrior = findPriorEncounterOp(this.db, opClaim, Date.now());
+      if (earlyPrior) return resolveReplay(earlyPrior);
+    }
+
+    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+    let row: typeof combatants.$inferSelect = combatant;
+
+    const isDm = role === 'dm';
+    if (combatant.characterId !== null) {
+      if (!isDm) {
+        const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+        if (!character || character.ownerUserId !== user.id) {
+          throw new ForbiddenException('Only dm or the owning player may adjust this combatant\'s resources');
+        }
+      }
+    } else if (!isDm) {
+      throw new ForbiddenException('Only dm may adjust a statblock combatant\'s resources');
+    }
+
+    let priorClaim: EncounterOpPrior | null = null;
+    // Issue #1909 review (Codex, sixth finding): `getWithCombatantsOrThrow`'s own token
+    // redaction doesn't stop at THIS encounter's fog — when this encounter's own fog is
+    // absent or fully revealed but a SIBLING encounter sharing the same `mapAttachmentId`
+    // still conceals it (`isFogProtectedEncounterMap`), every token on the shared map is
+    // still masked. That check is async (it queries sibling encounters), so it cannot run
+    // inside the synchronous better-sqlite3 transaction below — awaited ONCE here, before
+    // any transaction opens, since it depends only on `mapAttachmentId`/campaignId and
+    // sibling encounters' fog, none of which THIS write touches. A sibling's fog could in
+    // principle change between this read and the eventual commit; erring toward redaction
+    // (a stale `true` still redacts) is the safe direction — a redaction that turns out to
+    // have been momentarily unnecessary costs a caller one extra read, a missed one is the
+    // disclosure this finding is about.
+    // Issue #1909 review (Codex, eighth finding): computing this ONCE here and closing
+    // over it (as the original version of this fix did) is exactly right for the WRITE
+    // path just below (the sibling state at write time is what the write's own response
+    // should reflect), but is the WRONG value for a REPLAY read that happens later — see
+    // `resolveReplay`'s own fresh recomputation below, which intentionally does NOT reuse
+    // this closed-over value. `siblingFogProtectsAtWrite` is named accordingly so a future
+    // reader does not accidentally reach for it from the replay path.
+    const siblingFogProtectsAtWrite =
+      role !== 'dm' &&
+      encounter.mapAttachmentId != null &&
+      !fogConcealsPixels(parseFog(encounter.fog)) &&
+      (await this.attachmentsService.isFogProtectedEncounterMap(encounter.mapAttachmentId, encounter.campaignId));
+    let committedFogJson: string | null = null;
+
+    if (combatant.characterId !== null) {
+      const characterId = combatant.characterId;
+      try {
+        this.db.transaction((tx) => {
+          if (opClaim) {
+            const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+            if (prior) {
+              priorClaim = prior;
+              return;
+            }
+          }
+          // Re-read the encounter INSIDE this transaction, after the replay lookup, so an
+          // End that committed while this request was in flight can't be bypassed with the
+          // stale outer `encounter` row (issue #1909 review, Codex) — same ordering
+          // `updateCombatant` uses. A keyed retry whose claim already committed replayed
+          // above and never reaches this line at all.
+          const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all()[0];
+          if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+          // Issue #1909 review (Codex P2): the outer `isVisibleTo` check above ran against
+          // the STALE outer `encounter` row — if a DM hides this encounter in the window
+          // between that check and this transaction, an owning player's in-flight write
+          // would otherwise proceed on `assertMutable`/campaign-writability alone, letting a
+          // non-DM mutate a character sheet and log a combat event for an encounter that
+          // should now be wholesale nonexistent to them (AGENTS.md's server-enforced-secrecy
+          // invariant). Only meaningful here: the statblock branch is DM-only, and a DM's
+          // visibility never depends on `hidden`.
+          if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
+            throw new NotFoundException(`Encounter ${encounterId} not found`);
+          }
+          this.assertMutable(freshEncounter);
+          // Issue #1909 review (Codex P2): `assertMutable` only covers the ENCOUNTER's own
+          // deleted/ended status, not the CAMPAIGN's lifecycle — if the campaign was
+          // archived or trashed in the window between the controller/MCP tool's role gate
+          // and this transaction, `assertMutable` alone would let this write commit anyway.
+          // Every OTHER encounter-write transaction that re-reads a fresh encounter row
+          // pairs it with this recheck (`addCombatant` `:3863`, `removeCombatant` `:5163`,
+          // `undoRemoveCombatant` `:5459`, `rollCombatantInitiative` `:5953`) —
+          // `updateCombatant` itself turns out to be a pre-existing exception (missing it
+          // too), noted here rather than silently left unmentioned.
+          this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
+          // Issue #1909 review (Codex): re-read the COMBATANT row too, inside this same
+          // transaction — the outer `getCombatantRowOrThrow` above ran before this
+          // transaction started, so a `removeCombatant` (a real DELETE, not a soft one) in
+          // that window would otherwise leave this branch writing to the character's sheet
+          // and inserting a `resource_changed` event for a combatant no longer in the
+          // encounter, using only the stale outer row. Same TOCTOU class as the
+          // `assertCampaignWritableInTx` gap above; `updateCombatant`'s own transaction
+          // re-reads its combatant row the identical way (`:4499-4502`) after its own fresh
+          // encounter read, so this mirrors the established sibling shape. `row` (used below
+          // for the event detail and the idempotency claim's stored response body) is
+          // reassigned to this fresh row so a name change in the same window isn't lost.
+          const freshCombatant = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
+          if (!freshCombatant || freshCombatant.encounterId !== encounterId) {
+            throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+          }
+          row = freshCombatant;
+          const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
+          if (!character) throw new NotFoundException(`No such character ${characterId}`);
+
+          if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
+            const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
+            const levelKey = String(patch.spellLevel);
+            const slot = slots[levelKey];
+            if (!slot || slot.max <= 0) {
+              throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+            }
+            // Issue #1909 review (Devin, thirteenth finding): the statblock branch got this
+            // malformed-entry guard and its character twin did not — the same
+            // one-of-two-symmetric-branches omission as the twelfth finding's missing
+            // `encounterId` check, in this same method. `character.spellSlots` is read with a
+            // bare `fromJsonText` carrying a CLAIMED type and no runtime validation, so a
+            // legacy/imported row can hold a non-numeric `used`/`max`. The check just above
+            // does NOT catch it: `'three' <= 0` is false, so a string `max` sails through.
+            // Then every NaN comparison is false, so `nextUsed < 0 || nextUsed > slot.max`
+            // passes in BOTH directions and persists `used: NaN`, which serializes to `null`
+            // and leaves the tracker unusable — the exact contradiction of the "never a
+            // silent clamp" contract this PR's own REST and MCP docs state for both
+            // branches. Placed before the CAS below so a malformed entry reports what is
+            // actually wrong instead of a misleading STALE_WRITE.
+            if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
+              throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
+            }
+            // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
+            // ("set this slot's used to N") converted to a relative delta against whatever
+            // `used` the caller last rendered. The transactional fresh-row read above
+            // prevents the whole-blob lost-update this endpoint replaced, but does nothing
+            // to stop a SECOND caller's delta — computed against the SAME stale baseline —
+            // from landing on top of a first caller's fresh result (two clicks of "set to
+            // 1" from a shared used:0 baseline would otherwise commit used:1 then used:2).
+            // `expectedUsed` is optional (a purely relative caller, e.g. an AI DM's
+            // "restore 2 charges", never sends it) but when present is checked against the
+            // FRESH `slot.used` read just above, inside this same transaction — the same
+            // per-value CAS shape as `expectedUpdatedAt` elsewhere, scoped to one resource
+            // instead of the whole sheet/statblock.
+            if (patch.expectedUsed !== undefined && patch.expectedUsed !== slot.used) {
+              throw new ConflictException({
+                code: 'STALE_WRITE',
+                message: `Level ${patch.spellLevel} spell slot changed since last read (expected used ${patch.expectedUsed}, now ${slot.used})`,
+                expectedUsed: patch.expectedUsed,
+                currentUsed: slot.used,
+              });
+            }
+            const nextUsed = slot.used + delta;
+            if (nextUsed < 0 || nextUsed > slot.max) {
+              throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
+            }
+            slot.used = nextUsed;
+            slots[levelKey] = slot;
+            // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
+            // token `patchSpellSlots`'s `expectedUpdatedAt` guard depends on advancing on
+            // EVERY spellSlots writer. `character` was read INSIDE this same transaction
+            // above, so there's no separate atomicity gap to guard here.
+            tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
+            eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
+          } else if (patch.key) {
+            const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
+            // Issue #1909 review (Devin, eleventh finding): this used to fall back to a
+            // SYNTHESIZED `{max: 1, used: 0, ...}` entry when `patch.key` didn't exist on
+            // the character, silently creating a brand-new max-1 resource and marking it
+            // spent — the opposite of the spell-slot path just above, which 400s on an
+            // unknown level (`No spell slots at level N`), and a direct contradiction of
+            // this tool's own documented contract (`mcp-tools.ts`: "Spending past 0 or
+            // restoring past max FAILS with a 400 — never a silent clamp — so success can
+            // be trusted"). A fabricated pool made that promise false: the spend "succeeds"
+            // against a resource that never existed. This PR is what made the defect
+            // reachable at all — the web UI only ever sent keys it rendered FROM the
+            // stored resources, so an unknown key could never occur before this REST/MCP
+            // surface existed, and finding 9's AI-driver allow-list entry put a caller that
+            // can plausibly hallucinate a key on the other end. Decision: unknown key 400s,
+            // matching the spell-slot path and the documented contract, on BOTH branches of
+            // this method (see the statblock branch's identical fix below) — create-on-
+            // demand is a real feature someone could want, but it must be an explicit,
+            // named capability, not an accident of `??`.
+            const res = resources[patch.key];
+            if (!res) {
+              throw new BadRequestException(`No such resource '${patch.key}'`);
+            }
+            // Issue #1909 review (Devin, thirteenth finding): character-branch counterpart to
+            // the statblock branch's identical guard. `character.resources` gets the same
+            // unvalidated `fromJsonText` treatment as `spellSlots` above, and here there is
+            // no prior check at all to lean on — a missing `used` reaches the arithmetic
+            // directly. A string `max` additionally disables the upper bound outright, since
+            // `nextUsed > 'three'` is false for any number.
+            if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
+              throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
+            }
+            // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
+            // spell-slot branch above.
+            if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
+              throw new ConflictException({
+                code: 'STALE_WRITE',
+                message: `Resource '${patch.key}' changed since last read (expected used ${patch.expectedUsed}, now ${res.used})`,
+                expectedUsed: patch.expectedUsed,
+                currentUsed: res.used,
+              });
+            }
+            const nextUsed = res.used + delta;
+            if (nextUsed < 0 || nextUsed > res.max) {
+              throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
+            }
+            res.used = nextUsed;
+            resources[patch.key] = res;
+            tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
+            eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
+          } else {
+            throw new BadRequestException('Must supply either spellLevel or key to adjust');
+          }
+
+          tx.insert(encounterEvents)
+            .values({
+              encounterId,
+              round: freshEncounter.round,
+              type: 'resource_changed',
+              actor: row.name,
+              actorId: row.id,
+              target: null,
+              targetId: null,
+              detail: eventDetail,
+              createdAt: nowIso(),
+            })
+            .run();
+
+          // `row` was reassigned to the fresh in-transaction re-read above (issue #1909
+          // review, Codex) — this branch never WRITES to the `combatants` row itself (the
+          // resource lives on the linked character sheet), but the re-read still confirms
+          // the combatant is still actually present before either the event or this claim
+          // body references it.
+          committedFogJson = freshEncounter.fog;
+          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: redactForRole(combatantToDomain(row), freshEncounter.fog, siblingFogProtectsAtWrite), role });
+        });
+        if (priorClaim) replayed = await resolveReplay(priorClaim);
+      } catch (err) {
+        // Issue #1909 review (Devin + Copilot, same defect): `recordEncounterOp` throws
+        // this plain Error — never an HttpException — when a concurrent request with the
+        // SAME idempotencyKey inserted its claim first; our own effect already rolled
+        // back. Replay the winner's stored response instead of letting the marker escape
+        // as an unhandled 500, exactly like `updateCombatant`/`removeCombatant` do —
+        // through the same role-checked `resolveReplay` as the in-transaction replay above
+        // (issue #1909 review, secrecy finding), not the raw stored body.
+        if (opClaim && err instanceof EncounterOpRaceMarker) {
+          const prior = await readEncounterOpAfterRace(this.db, err.claim);
+          replayed = await resolveReplay(prior);
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      // Statblock branch (issue #1909): inline monster/NPC resources live on the
+      // combatant row's `statblockJson`, not a character sheet. Same fresh-row-inside-
+      // the-transaction read-modify-write as the character branch above.
+      if (!combatant.statblockJson) {
+        throw new BadRequestException('This combatant has no inline statblock resources');
+      }
+      try {
+        this.db.transaction((tx) => {
+          if (opClaim) {
+            const prior = findPriorEncounterOp(tx, opClaim, Date.now());
+            if (prior) {
+              priorClaim = prior;
+              return;
+            }
+          }
+          // Re-read the encounter row too, INSIDE this transaction, after the replay
+          // lookup, so an End that committed while this request was in flight can't be
+          // bypassed with the stale outer `encounter` row (issue #1909 review, Codex) —
+          // same ordering `updateCombatant` uses — and so the `updatedAt` this write
+          // advances from (below) is never a stale pre-transaction snapshot.
+          const freshEncounter = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all()[0];
+          if (!freshEncounter) throw new NotFoundException(`Encounter ${encounterId} not found`);
+          this.assertMutable(freshEncounter);
+          // Issue #1909 review (Codex P2): see the character branch's identical comment
+          // above — `assertMutable` alone does not cover an archive/trash of the CAMPAIGN
+          // landing in the window between the role gate and this transaction.
+          this.assertCampaignWritableInTx(tx, freshEncounter.campaignId);
+          // Issue #1909 review (Devin): this re-read must answer the SAME two questions the
+          // character branch answers at `:8946-8949`, and it was collapsing them into one.
+          // "Row is gone" and "row exists but carries no inline statblock" are different
+          // facts with different correct answers, and the missing-row case is the whole
+          // reason this re-read exists — reporting it as "has no inline statblock resources"
+          // tells a DM whose monster a co-DM deleted mid-click that their statblock is
+          // broken. The encounter-scoping half was simply absent: the stale outer row is
+          // exactly what cannot be trusted here, so a combatant that moved encounters inside
+          // this window would have been written through unscoped. Both branches were added
+          // in this PR for the identical TOCTOU concern; the asymmetry was an oversight, not
+          // a decision.
+          const fresh = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
+          if (!fresh || fresh.encounterId !== encounterId) {
+            throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+          }
+          if (!fresh.statblockJson) {
+            throw new BadRequestException('This combatant has no inline statblock resources');
+          }
+          // Issue #1909 review (Devin P2): every READ path for this column
+          // (`parseCombatantStatblock`, `:248-252`) uses `safeParse` and degrades a
+          // corrupt/legacy row to `null` rather than throwing — this write path used
+          // `.parse`, so a `ZodError` on a legacy/malformed stored statblock escaped as an
+          // unhandled 500, inconsistent with the typed 400s this same branch deliberately
+          // added for malformed `used`/`max` just below. `rawStatblock` is the ORIGINAL
+          // parsed JSON (untouched by Zod's defaults/strip-unknown-keys), kept alongside
+          // the validated `statblock` so the write below can merge only the ONE changed
+          // resource/spell-slot entry back into it — see the write below for why.
+          const rawStatblock = fromJsonText<Record<string, unknown>>(fresh.statblockJson, {});
+          const parsedStatblock = CombatantStatblock.safeParse(rawStatblock);
+          if (!parsedStatblock.success) {
+            throw new BadRequestException("This combatant's inline statblock is malformed and cannot be adjusted here — open it in the statblock editor to fix or replace it.");
+          }
+          const statblock = parsedStatblock.data;
+
+          if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
+            const levelKey = String(patch.spellLevel);
+            const slot = statblock.spellSlots[levelKey] as { max: number; used: number } | undefined;
+            if (!slot || slot.max <= 0) {
+              throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+            }
+            // Issue #1909 review (Codex P2): `CombatantStatblock.spellSlots`/`.resources`
+            // are `z.record(..., z.any())` — no per-entry shape enforcement — so a stored
+            // entry can be malformed (`{max: 3}` with no `used`, or `{}` entirely). Without
+            // this check, `slot.used + delta` below would be `NaN`, and `NaN < 0 || NaN >
+            // slot.max` is FALSE either way (every NaN comparison is false), so the
+            // overspend/over-restore guard would silently pass and persist `used: NaN` —
+            // which serializes to `null` and leaves the tracker unusable — directly
+            // contradicting this endpoint's documented contract that overspend/
+            // over-restore is always a typed 400, never a silent clamp (or, worse here, a
+            // silent corruption). A non-numeric `max` would also disable the upper bound
+            // entirely (`nextUsed > undefined` is always false). Validate numerically
+            // BEFORE computing the delta so a malformed entry 400s, naming it, instead of
+            // writing garbage.
+            if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
+              throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
+            }
+            // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
+            // ("set this slot's used to N") converted to a relative delta against whatever
+            // `used` the caller last rendered. The transactional fresh-row read above
+            // prevents the whole-blob lost-update this endpoint replaced, but does nothing
+            // to stop a SECOND caller's delta — computed against the SAME stale baseline —
+            // from landing on top of a first caller's fresh result (two clicks of "set to
+            // 1" from a shared used:0 baseline would otherwise commit used:1 then used:2).
+            // `expectedUsed` is optional (a purely relative caller, e.g. an AI DM's
+            // "restore 2 charges", never sends it) but when present is checked against the
+            // FRESH `slot.used` read just above, inside this same transaction — the same
+            // per-value CAS shape as `expectedUpdatedAt` elsewhere, scoped to one resource
+            // instead of the whole encounter.
+            if (patch.expectedUsed !== undefined && patch.expectedUsed !== slot.used) {
+              throw new ConflictException({
+                code: 'STALE_WRITE',
+                message: `Level ${patch.spellLevel} spell slot changed since last read (expected used ${patch.expectedUsed}, now ${slot.used})`,
+                expectedUsed: patch.expectedUsed,
+                currentUsed: slot.used,
+              });
+            }
+            const nextUsed = slot.used + delta;
+            if (nextUsed < 0 || nextUsed > slot.max) {
+              throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
+            }
+            statblock.spellSlots[levelKey] = { ...slot, used: nextUsed };
+            // Issue #1909 review (Devin P2): merge only the TOUCHED level back into the
+            // ORIGINAL raw `rawStatblock.spellSlots`, not the re-parsed `statblock` as a
+            // whole — `.safeParse` applies schema defaults and strips unknown keys, so
+            // writing the re-parsed object back would silently normalize every OTHER
+            // untouched part of the stored statblock (AC, actions, unrelated resources) on
+            // a single pip click. Every field this endpoint didn't touch survives exactly
+            // as stored.
+            rawStatblock.spellSlots = { ...(rawStatblock.spellSlots as Record<string, unknown> | undefined), [levelKey]: statblock.spellSlots[levelKey] };
+            eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
+          } else if (patch.key) {
+            // Issue #1909 review (Devin, eleventh finding): see the character branch's
+            // identical fix above for the full rationale — this branch had the SAME
+            // synthesized-`{max: 1, used: 0, ...}`-on-missing-key fallback, silently
+            // creating a brand-new resource on a typo or a hallucinated AI-driver key
+            // instead of 400ing the way the spell-slot path above already does.
+            const res = statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined;
+            if (!res) {
+              throw new BadRequestException(`No such resource '${patch.key}'`);
+            }
+            // Issue #1909 review (Codex P2): same malformed-entry guard as the spell-slot
+            // branch above — an EXISTING stored entry is not schema-enforced and can carry
+            // a non-numeric `used`/`max`.
+            if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
+              throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
+            }
+            // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
+            // spell-slot branch above.
+            if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
+              throw new ConflictException({
+                code: 'STALE_WRITE',
+                message: `Resource '${patch.key}' changed since last read (expected used ${patch.expectedUsed}, now ${res.used})`,
+                expectedUsed: patch.expectedUsed,
+                currentUsed: res.used,
+              });
+            }
+            const nextUsed = res.used + delta;
+            if (nextUsed < 0 || nextUsed > res.max) {
+              throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
+            }
+            statblock.resources[patch.key] = { ...res, used: nextUsed };
+            // Issue #1909 review (Devin P2): same merge-only-the-touched-entry rationale as
+            // the spell-slot branch above.
+            rawStatblock.resources = { ...(rawStatblock.resources as Record<string, unknown> | undefined), [patch.key]: statblock.resources[patch.key] };
+            eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
+          } else {
+            throw new BadRequestException('Must supply either spellLevel or key to adjust');
+          }
+
+          const [updated] = tx
+            .update(combatants)
+            .set({ statblockJson: toJsonText(rawStatblock) })
+            .where(eq(combatants.id, combatantId))
+            .returning()
+            .all();
+          row = updated;
+
+          // Issue #1909 review (Devin + Copilot, same defect): this write touches the
+          // COMBATANT row directly, exactly like updateCombatant's own writes — advance the
+          // ENCOUNTER's `updatedAt` too (the CAS token `PATCH .../combatants/:cid`'s
+          // `expectedUpdatedAt` validates against). Without this, a second writer holding a
+          // pre-spend token could still PATCH the whole statblock, pass `assertNotStale` on
+          // the encounter-wide check, and silently revert this spend.
+          //
+          // `combatantStateVersion` moves too, mirroring `updateCombatant`'s own
+          // unconditional-when-running rule (issue #1637's action-preview ABA guard): a
+          // statblock resource spend is a real combatant-state change and must invalidate an
+          // in-flight action preview the same way any other combatant write does.
+          if (freshEncounter.status === 'running') {
+            tx.update(encounters)
+              .set({
+                combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+                updatedAt: nextUpdatedAt(freshEncounter.updatedAt),
+              })
+              .where(eq(encounters.id, encounterId))
+              .run();
+          } else {
+            tx.update(encounters)
+              .set({ updatedAt: nextUpdatedAt(freshEncounter.updatedAt) })
+              .where(eq(encounters.id, encounterId))
+              .run();
+          }
+
+          // Issue #1909 review (Devin, seventh finding): use the in-transaction re-read
+          // (`row`, reassigned to `updated` just above), not the pre-transaction
+          // `combatant` snapshot — a combatant renamed in the window between the outer
+          // fetch and this transaction must not be logged under its stale name. Matches
+          // the character branch above (`actor: row.name`), which already does this and
+          // documents why; this branch had drifted from it.
+          tx.insert(encounterEvents)
+            .values({
+              encounterId,
+              round: freshEncounter.round,
+              type: 'resource_changed',
+              actor: row.name,
+              actorId: row.id,
+              target: null,
+              targetId: null,
+              detail: eventDetail,
+              createdAt: nowIso(),
+            })
+            .run();
+
+          committedFogJson = freshEncounter.fog;
+          // `redactForRole` is a no-op here in practice (this branch is DM-only, and a DM's
+          // response is never redacted) but applied for consistency with the character
+          // branch above rather than special-cased away.
+          if (opClaim) recordEncounterOp(tx, opClaim, nowIso(), { body: redactForRole(combatantToDomain(row), freshEncounter.fog, siblingFogProtectsAtWrite), role });
+        });
+        if (priorClaim) replayed = await resolveReplay(priorClaim);
+      } catch (err) {
+        // Issue #1909 review (Devin + Copilot, same defect): same race-marker replay as
+        // the character branch above — `recordEncounterOp` throws a plain Error (never an
+        // HttpException) on a concurrent same-key insert; replay the winner instead of
+        // letting it escape as an unhandled 500 — through the same role-checked
+        // `resolveReplay` as the in-transaction replay above (issue #1909 review, secrecy
+        // finding), not the raw stored body.
+        if (opClaim && err instanceof EncounterOpRaceMarker) {
+          const prior = await readEncounterOpAfterRace(this.db, err.claim);
+          replayed = await resolveReplay(prior);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    // An idempotent replay stops here: no second audit row, no duplicate combat-log event,
+    // no second SSE nudge — the first attempt already produced all of those.
+    if (replayed) return replayed;
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.combatant.resource',
+      entityType: 'combatant',
+      entityId: combatantId,
+      campaignId: encounter.campaignId,
+      detail: eventDetail,
     });
 
-    // Issue #1902 rework (round 19, codex P2): `sheetMirrored: true` unconditionally — this
-    // method's entire purpose is spending/restoring a linked character's spell slot or
-    // resource, so every call here writes the sheet (see the `characters` update above).
-    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id, sheetMirrored: true });
+    // `sheetMirrored` only for the character branch (issue #1902 rework, round 19
+    // convention) — the statblock branch writes only the combatant row itself, which the
+    // ordinary encounter.updated nudge already covers.
+    //
+    // Issue #1909 review (Codex P2): gating on the OUTER `encounter.hidden` (read before the
+    // transaction) let a DM's concurrent hide land between that read and this emit, still
+    // publishing the encounter id on the shared campaign stream. `emitEncounterEvent` exists
+    // precisely to close this — it re-reads `hidden` itself at emit time — so route through
+    // it instead of gating manually on a value that can go stale mid-request, matching every
+    // other encounter-write path in this service.
+    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounter.id, false, {
+      sheetMirrored: combatant.characterId !== null,
+    });
 
-    return this.getRowOrThrow(encounterId);
+    // Issue #1909 review (Codex P1, secrecy): redact using the fog state committed inside
+    // the transaction above, not a value read before it — see `redactForRole`'s own comment.
+    return redactForRole(combatantToDomain(row), committedFogJson, siblingFogProtectsAtWrite);
   }
 
   async listTokenFormations(campaignId: number, _role: Role) {

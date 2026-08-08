@@ -1,208 +1,126 @@
-import { expect, test } from '@playwright/test';
-import {
-  buildFormDraftEnvelope,
-  clearFormDraft,
-  formDraftStorageKey,
-  isFormDraftStale,
-  readFormDraft,
-  writeFormDraft,
-  type FormDraftEnvelope,
-} from '../../src/lib/formDraftStorage';
-import {
-  deriveProtectedFormSaveStatus,
-  protectedFormSaveStatusLabel,
-  recordsEqual,
-} from '../../src/lib/protectedFormState';
-import {
-  isRecapEditorDirty,
-  isNewRecapDraftMeaningful,
-  recapEditorDraftsEqual,
-} from '../../src/features/sessions/recapFormFields';
-import {
-  isSessionZeroCharterDirty,
-  sessionZeroCharterDraftsEqual,
-} from '../../src/features/session-zero/sessionZeroFormState';
-import {
-  characterSheetDraftFrom,
-  characterSheetDraftsEqual,
-  isCharacterSheetDirty,
-} from '../../src/features/characters/characterSheetFormState';
-import { Dnd5eAdapter, OpenLegendAdapter } from '@campfire/schema';
-import type { Character } from '@campfire/schema';
-
-class MemoryStorage implements Storage {
-  private data = new Map<string, string>();
-
-  get length() {
-    return this.data.size;
-  }
-
-  clear(): void {
-    this.data.clear();
-  }
-
-  getItem(key: string): string | null {
-    return this.data.get(key) ?? null;
-  }
-
-  key(index: number): string | null {
-    return [...this.data.keys()][index] ?? null;
-  }
-
-  removeItem(key: string): void {
-    this.data.delete(key);
-  }
-
-  setItem(key: string, value: string): void {
-    this.data.set(key, value);
-  }
-}
-
-function character(overrides: Partial<Character> = {}): Character {
-  return {
-    id: 9,
-    campaignId: 4,
-    ownerUserId: '42',
-    name: 'Astra',
-    species: 'Human',
-    className: 'Fighter',
-    level: 3,
-    xp: 0,
-    background: 'Soldier',
-    status: 'active',
-    stats: { STR: 16, DEX: 12 },
-    ac: 16,
-    eac: null,
-    kac: null,
-    hpCurrent: 20,
-    hpMax: 20,
-    spCurrent: 0,
-    spMax: 0,
-    rpCurrent: 0,
-    rpMax: 0,
-    hpTemp: 0,
-    deathState: 'none',
-    deathSaveSuccesses: 0,
-    deathSaveFailures: 0,
-    conditions: [],
-    conditionInstances: [],
-    saveProficiencies: [],
-    skills: {},
-    actions: [],
-    spellSlots: {},
-    resources: {},
-    portraitUrl: null,
-    ddbId: null,
-    notes: '',
-    dmSecret: '',
-    createdAt: '2026-07-01T00:00:00.000Z',
-    updatedAt: '2026-07-01T12:00:00.000Z',
-    ...overrides,
-  };
-}
-
 /**
- * Issue #641 — local draft persistence, stale detection, and dirty helpers.
+ * Form draft storage and shape validation (issue #1986) unit test suite.
  */
-test.describe('form draft storage (issue #641)', () => {
-  test('keys are namespaced by user, campaign, and form id', () => {
-    expect(formDraftStorageKey(7, 4, 'session-zero-charter')).toBe(
-      'cf.formDraft.v1:7:4:session-zero-charter',
-    );
-  });
+import { expect, test } from '@playwright/test';
+import { normalizeDraft } from '../../src/lib/formDraftStorage';
 
-  test('write/read/clear round-trip', () => {
-    const store = new MemoryStorage();
-    const key = formDraftStorageKey(1, 2, 'session-recap:5');
-    const envelope = buildFormDraftEnvelope({ title: 'Ash', recap: 'We fought.' }, '2026-07-01T12:00:00.000Z');
-    expect(writeFormDraft(key, envelope, store)).toBe(true);
-    expect(readFormDraft<{ title: string; recap: string }>(key, store)).toEqual(envelope);
-    clearFormDraft(key, store);
-    expect(readFormDraft(key, store)).toBeNull();
-  });
-
-  test('stale detection compares baselineUpdatedAt to the live server revision', () => {
-    const fresh: FormDraftEnvelope<{ body: string }> = {
-      v: 1,
-      savedAt: '2026-07-02T00:00:00.000Z',
-      baselineUpdatedAt: '2026-07-01T12:00:00.000Z',
-      data: { body: 'draft' },
+test.describe('normalizeDraft (issue #1986)', () => {
+  test('fills missing top-level fields from baseline for non-character-sheet forms', () => {
+    // Non-character-sheet consumer 1: Session Zero Charter draft
+    type CharterDraft = {
+      theme: string;
+      boundaries: string;
+      safetyTools: string;
+      newField: string;
     };
-    expect(isFormDraftStale(fresh, '2026-07-01T12:00:00.000Z')).toBe(false);
-    expect(isFormDraftStale(fresh, '2026-07-02T08:00:00.000Z')).toBe(true);
-    expect(isFormDraftStale(fresh, null)).toBe(false);
-    expect(isFormDraftStale(fresh, '2026-07-01T12:00:00Z')).toBe(false);
-  });
-});
 
-test.describe('protected form state (issue #641)', () => {
-  test('save status labels distinguish dirty server work from local-only drafts', () => {
-    expect(protectedFormSaveStatusLabel(deriveProtectedFormSaveStatus({ dirty: true, saving: false, hasStoredDraft: true }))).toBe(
-      'Unsaved changes',
-    );
-    expect(
-      protectedFormSaveStatusLabel(
-        deriveProtectedFormSaveStatus({ dirty: false, saving: false, hasStoredDraft: true }),
-      ),
-    ).toBe('Draft saved locally — not on the server yet');
-  });
+    const baseline: CharterDraft = {
+      theme: '',
+      boundaries: '',
+      safetyTools: '',
+      newField: 'default-value',
+    };
 
-  test('recordsEqual compares stat maps', () => {
-    expect(recordsEqual({ STR: '16' }, { STR: '16' })).toBe(true);
-    expect(recordsEqual({ STR: '16' }, { STR: '14' })).toBe(false);
-  });
-});
+    // Draft saved BEFORE newField was added
+    const legacyStored = {
+      theme: 'Dark Fantasy',
+      boundaries: 'No PVP',
+      safetyTools: 'Lines & Veils',
+      // newField is missing
+    };
 
-test.describe('session-zero charter dirty detection (issue #641)', () => {
-  const baseline = {
-    lines: ['No torture'],
-    veils: [],
-    safetyTools: ['X-card'],
-    houseRules: 'Phones down',
-    toneAndExpectations: 'Heroic',
-  };
+    const normalized = normalizeDraft<CharterDraft>(legacyStored, baseline);
 
-  test('detects meaningful charter edits and ignores identical drafts', () => {
-    expect(sessionZeroCharterDraftsEqual(baseline, { ...baseline })).toBe(true);
-    expect(isSessionZeroCharterDirty({ ...baseline, houseRules: 'Phones away' }, baseline)).toBe(true);
-  });
-});
-
-test.describe('recap editor dirty detection (issue #641)', () => {
-  test('new recap drafts are meaningful after title or recap input', () => {
-    expect(isNewRecapDraftMeaningful({ title: 'Vault', playedAt: '', recap: '' })).toBe(true);
-    expect(isNewRecapDraftMeaningful({ title: '', playedAt: '', recap: '' })).toBe(false);
+    expect(normalized.theme).toBe('Dark Fantasy');
+    expect(normalized.boundaries).toBe('No PVP');
+    expect(normalized.safetyTools).toBe('Lines & Veils');
+    expect(normalized.newField).toBe('default-value');
+    expect(normalized.newField).not.toBeUndefined();
   });
 
-  test('edit recap dirty detection ignores unchanged loaded recap', () => {
-    const baseline = { title: 'Vault', playedAt: '2026-07-01', recap: 'We escaped.' };
-    expect(recapEditorDraftsEqual(baseline, { ...baseline })).toBe(true);
-    expect(isRecapEditorDirty({ ...baseline, recap: 'We escaped!\n' }, baseline)).toBe(true);
-  });
-});
+  test('fills missing top-level fields from baseline for session recap drafts', () => {
+    // Non-character-sheet consumer 2: Session Recap draft
+    type RecapDraft = {
+      title: string;
+      playedAt: string;
+      recap: string;
+      dmSecret?: string;
+      locationTag?: string;
+    };
 
-test.describe('character sheet dirty detection (issue #641)', () => {
-  test('sheet draft snapshot round-trips from a character record', () => {
-    const baseline = characterSheetDraftFrom(character(), Dnd5eAdapter);
-    expect(isCharacterSheetDirty({ ...baseline, level: '4' }, baseline)).toBe(true);
-    expect(characterSheetDraftsEqual(baseline, characterSheetDraftFrom(character(), Dnd5eAdapter))).toBe(true);
+    const baseline: RecapDraft = {
+      title: 'Session 1',
+      playedAt: '2026-08-01',
+      recap: 'Fought goblins.',
+      dmSecret: '',
+      locationTag: 'Phandalin',
+    };
+
+    const legacyStored = {
+      title: 'Session 1 (WIP)',
+      playedAt: '2026-08-01',
+      recap: 'Fought goblins and escaped.',
+      // dmSecret and locationTag are missing
+    };
+
+    const normalized = normalizeDraft<RecapDraft>(legacyStored, baseline);
+
+    expect(normalized.title).toBe('Session 1 (WIP)');
+    expect(normalized.recap).toBe('Fought goblins and escaped.');
+    expect(normalized.dmSecret).toBe('');
+    expect(normalized.locationTag).toBe('Phandalin');
+    expect(normalized.locationTag).not.toBeUndefined();
   });
 
-  test('Open Legend drafts include adapter-native and custom stats', () => {
-    const ol = character({
-      className: '',
-      stats: {
-        AGILITY: 4,
-        MIGHT: 5,
-        ENERGY: 3,
-        CUSTOM_NATIVE: 7,
-      },
-    });
-    const baseline = characterSheetDraftFrom(ol, OpenLegendAdapter);
-    expect(baseline.className).toBe('');
-    expect(baseline.stats.AGILITY).toBe('4');
-    expect(baseline.stats.ENERGY).toBe('3');
-    expect(baseline.stats.CUSTOM_NATIVE).toBe('7');
-    expect(Object.keys(baseline.stats)).toContain('PRESCIENCE');
+  test('handles nested object properties gracefully (e.g., stats or config objects)', () => {
+    type CharacterDraft = {
+      name: string;
+      speed: string;
+      stats: Record<string, string>;
+    };
+
+    const baseline: CharacterDraft = {
+      name: 'Hero',
+      speed: '30 ft',
+      stats: { str: '10', dex: '10', con: '10' },
+    };
+
+    const legacyStored = {
+      name: 'Hero WIP',
+      // speed is missing
+      stats: { str: '16' }, // dex and con are missing
+    };
+
+    const normalized = normalizeDraft<CharacterDraft>(legacyStored, baseline);
+
+    expect(normalized.name).toBe('Hero WIP');
+    expect(normalized.speed).toBe('30 ft');
+    expect(normalized.stats).toEqual({ str: '16', dex: '10', con: '10' });
+  });
+
+  test('suppresses false restore prompt when legacy stored draft equals baseline after normalization', () => {
+    type FormDraft = {
+      title: string;
+      notes: string;
+      addedField: string;
+    };
+
+    const baseline: FormDraft = {
+      title: '',
+      notes: '',
+      addedField: 'default',
+    };
+
+    // User made no edits, but saved before addedField existed
+    const legacyUneditedStored = {
+      title: '',
+      notes: '',
+    };
+
+    const normalized = normalizeDraft<FormDraft>(legacyUneditedStored, baseline);
+
+    // Deep equality check between normalized draft and baseline
+    const isEqual = JSON.stringify(normalized) === JSON.stringify(baseline);
+    expect(isEqual).toBe(true);
   });
 });

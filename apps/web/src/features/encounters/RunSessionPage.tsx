@@ -1,24 +1,33 @@
 import { CombatLog } from './CombatLog';
 import { ApplyDamageBar, BattleMap, type EncounterGridPatch } from './map/BattleMap';
 import { AddCombatantPanel } from './combat/AddCombatantPanel';
-import { CombatantRow, hpDisplay } from './combat/CombatantRow';
+import { CombatantRow, hpDisplay, type CombatantRowProps } from './combat/CombatantRow';
+import { combatantPatchUrl } from './combat/combatantPatchUrl';
+import { useCombatantDragReorder } from './combat/useCombatantDragReorder';
+import { afterCombatantIdForMoveDown, afterCombatantIdForMoveUp, reorderMenuTargets } from './combatantReorder';
+import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
+import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
 import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
+import { GatedControl } from '../../components/GatedControl';
+import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
+import { classifyDeathSaveOutcome, deathSaveSpectatorToastInfo, type DeathSaveOutcome } from './combat/deathSaveOutcome';
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize } from '@campfire/schema';
-import { ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
+import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
+import { rulesetCapabilitiesForSelection } from '../../lib/rules';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
-import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions, invalidateTableSafety, useTableSafety } from '../../lib/query';
 import { newOperationId, useKeyedMutation } from '../../lib/keyedMutation';
 import { beginReconcile, blocksFurtherActions, clearReconcile, completeReconcile, IDLE_RECONCILE, isAmbiguousOutcome, type ReconcileState } from '../../lib/ambiguousMutation';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
@@ -27,12 +36,15 @@ import { endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
+import { FloatingNumbers } from './FloatingNumbers';
+import { diffHpFeedback, hpFeedbackSnapshot, sameHpFeedbackSnapshot, withOptimisticHpFeedbackTargets, type HpFeedbackEvent, type HpFeedbackSnapshot } from './hpFeedback';
 import { hasRestoredTrashedEncounter, isCurrentCombatantUndoEncounter, REMOVE_COMBATANT_CONFIRM_BODY } from './combatantLifecycle';
 import { isAdjacentDuplicateEncounterPatch, observedEncounterPatchRevision, reconcileEncounterPatchResponse, rollbackEncounterPatchError, type QueuedEncounterPatch } from './encounterPatchQueue';
 import { pendingFogForEncounter, type ScopedPendingFog } from './fogSyncState';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
+import { TurnElapsedChip } from './TurnElapsedChip';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
 import { detectSseTurnBeat, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
@@ -40,16 +52,21 @@ import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
-import { CheckRequestPanel } from './CheckRequests';
-import { ActionUsePanel } from './ActionUseFlow';
+import { shouldRevealInitiative } from './initiativeReveal';
+import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
+import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
+import { ActionUsePanel, legalTargets } from './ActionUseFlow';
+import { GroupActionRunner } from './GroupActionRunner.tsx';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
+import { MonsterHpDisplayControl } from './MonsterHpDisplayControl';
 import { useAnnounce } from '../../components/Announcer';
 import { useRollApplyDamageBridge, useRollResultToast } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
@@ -64,13 +81,13 @@ import { useDisclosure } from '../../components/useDisclosure';
 import { advanceCombatLogAnnouncements, formatCombatLogAnnouncementBatch, type CombatLogAnnouncementCursor } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { type AoeHitLayout } from './aoeHitTest';
-import { type TargetDamageApplication } from './directDamage';
+import { type DirectDamageMetadata, type TargetDamageApplication } from './directDamage';
 import { resolveGridCalibration } from './mapRenderedBounds';
 import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMotion';
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
-import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
+import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, gateForWrite, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
-import { tokenIdentityBackground } from './tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH, pingIdentityColor } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export { BattleMap } from './map/BattleMap';
@@ -417,21 +434,137 @@ function EncounterLinks({
 // Non-DM viewers see a monster's HP as a coarse status band, never exact numbers
 // (issue #43 — the server redacts hpCurrent/hpMax to null and sends hpBand instead).
 
-function InitiativeStrip({
+const InitiativeStrip = memo(function InitiativeStrip({
   combatants,
   currentCombatantId,
   charactersById,
   turnPulse = false,
+  hpFeedbackByCombatant,
+  colorVisionAssist = false,
+  revealTick = 0,
+  canReorder = false,
+  onReorderDrop,
 }: {
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
   turnPulse?: boolean;
+  hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
+  /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
+  colorVisionAssist?: boolean;
+  /** Issue #1934: reveal animation trigger tick when transitioning preparing->running. */
+  revealTick?: number;
+  /** DM-only manual reorder (issue #1923) — drag a tile to a new slot. */
+  canReorder?: boolean;
+  onReorderDrop?: (combatantId: number, afterCombatantId: number | 'top') => void;
 }) {
+  const { t } = useTranslation();
+  const combatantRefs = useRef(new Map<number, HTMLDivElement>());
+  const prevPositionsRef = useRef<Map<number, number>>(new Map());
+  const [staggeredVisibleIds, setStaggeredVisibleIds] = useState<Set<number> | null>(null);
+
+  const staggerTimersRef = useRef<NodeJS.Timeout[]>([]);
+  const consumedRevealTickRef = useRef(0);
+
+  const orderedIds = useMemo(() => combatants.map((c) => c.id), [combatants]);
+  const dragReorder = useCombatantDragReorder({
+    axis: 'x',
+    orderedIds,
+    enabled: canReorder && !!onReorderDrop,
+    elementsRef: combatantRefs,
+    onDrop: useCallback((combatantId: number, afterCombatantId: number | 'top') => onReorderDrop?.(combatantId, afterCombatantId), [onReorderDrop]),
+  });
+
+  // A callback ref runs again for unrelated renders, which repeatedly stole the
+  // DM's horizontal scroll position. Restrict the scroll to an actual turn
+  // transition while retaining the user's reduced-motion preference (#1956).
+  useLayoutEffect(() => {
+    if (currentCombatantId == null) return;
+    combatantRefs.current
+      .get(currentCombatantId)
+      ?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
+  }, [currentCombatantId]);
+
+  useEffect(() => {
+    return () => {
+      staggerTimersRef.current.forEach(clearTimeout);
+      staggerTimersRef.current = [];
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    // Record current untransformed layout positions BEFORE applying FLIP transforms
+    // (offsetLeft is transform- and scroll-independent)
+    const currentPositions = new Map<number, number>();
+    combatantRefs.current.forEach((el, id) => {
+      if (el) {
+        currentPositions.set(id, el.offsetLeft);
+      }
+    });
+
+    const prevPositions = prevPositionsRef.current;
+
+    const animateFlip = () => {
+      combatantRefs.current.forEach((el, id) => {
+        const prevLeft = prevPositions.get(id);
+        if (prevLeft == null || !el) return;
+        const currentLeft = currentPositions.get(id) ?? el.offsetLeft;
+        const deltaX = prevLeft - currentLeft;
+        if (Math.abs(deltaX) > 1) {
+          el.style.transform = `translateX(${deltaX}px)`;
+          el.style.transition = 'none';
+          requestAnimationFrame(() => {
+            el.style.transition = 'transform 500ms cubic-bezier(0.2, 0, 0, 1)';
+            el.style.transform = '';
+          });
+        }
+      });
+    };
+
+    if (revealTick > 0 && revealTick !== consumedRevealTickRef.current) {
+      consumedRevealTickRef.current = revealTick;
+
+      staggerTimersRef.current.forEach(clearTimeout);
+      staggerTimersRef.current = [];
+
+      if (prefersReducedMotion()) {
+        setStaggeredVisibleIds(null);
+        prevPositionsRef.current = currentPositions;
+        return;
+      }
+
+      animateFlip();
+
+      const sortedCombatantIds = [...combatants]
+        .sort((a, b) => (b.initiative ?? -Infinity) - (a.initiative ?? -Infinity))
+        .map((c) => c.id);
+
+      setStaggeredVisibleIds(new Set());
+      sortedCombatantIds.forEach((id, index) => {
+        const timer = setTimeout(() => {
+          setStaggeredVisibleIds((prev) => (prev ? new Set([...prev, id]) : null));
+        }, index * 60);
+        staggerTimersRef.current.push(timer);
+      });
+
+      const totalTime = sortedCombatantIds.length * 60 + 200;
+      const endTimer = setTimeout(() => {
+        setStaggeredVisibleIds(null);
+        staggerTimersRef.current = [];
+      }, totalTime);
+      staggerTimersRef.current.push(endTimer);
+    } else if (consumedRevealTickRef.current > 0) {
+      animateFlip();
+    }
+
+    prevPositionsRef.current = currentPositions;
+  }, [revealTick, combatants]);
+
   return (
     <div
       className="flex gap-2 overflow-x-auto pb-4 pt-2 px-2"
       style={{
+        position: 'relative',
         scrollSnapType: 'x mandatory',
         scrollbarWidth: 'none',
       }}
@@ -441,22 +574,64 @@ function InitiativeStrip({
         const isCurrent = c.id === currentCombatantId;
         const character = c.characterId ? charactersById.get(c.characterId) : null;
         const isSilhouette = c.kind === 'npc' && c.npcId == null;
+        const feedback = hpFeedbackByCombatant.get(c.id) ?? [];
+        const feedbackClass = feedback.some((event) => event.kind === 'down')
+          ? ' cf-hp-feedback-anchor--down'
+          : feedback.some((event) => event.kind === 'revive')
+            ? ' cf-hp-feedback-anchor--revive'
+            : feedback.some((event) => event.crit)
+              ? ' cf-hp-feedback-anchor--crit'
+              : '';
+        const initiativeValue = c.initiative != null ? String(c.initiative) : '—';
+        const isChipVisible = staggeredVisibleIds == null || staggeredVisibleIds.has(c.id);
+
+        const isDragging = dragReorder.draggingId === c.id;
+        const isDropTarget = dragReorder.overId === c.id;
 
         return (
           <div
             key={c.id}
-            className="flex flex-col items-center gap-1 flex-none"
-            style={{ scrollSnapAlign: 'center' }}
+            data-testid={`initiative-strip-tile-${c.id}`}
+            className={`cf-hp-feedback-anchor flex flex-col items-center gap-1 flex-none${feedbackClass}`}
+            style={{
+              scrollSnapAlign: 'center',
+              ...(canReorder
+                ? {
+                    opacity: isDragging ? 0.5 : 1,
+                    outline: isDropTarget ? '2px solid var(--color-accent)' : undefined,
+                    outlineOffset: 2,
+                  }
+                : {}),
+            }}
             ref={(el) => {
-              if (isCurrent && el) {
-                el.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'center' });
-              }
+              if (el) combatantRefs.current.set(c.id, el);
+              else combatantRefs.current.delete(c.id);
             }}
           >
+            {c.turnState.delaying && (
+              <span
+                className="tag tag-neutral"
+                data-testid={`strip-delaying-${c.id}`}
+                title={t('encounters.reorder.delayingBadge', 'Delaying')}
+                style={{ fontSize: 9, lineHeight: 1, padding: '1px 4px' }}
+              >
+                {t('encounters.reorder.delayingBadge', 'Delaying')}
+              </span>
+            )}
+            {colorVisionAssist && isCurrent && (
+              <span
+                data-testid="strip-token-turn-chevron"
+                aria-hidden="true"
+                style={{ fontSize: 11, lineHeight: 1, color: 'var(--color-accent)' }}
+              >
+                ▾
+              </span>
+            )}
             <div
               aria-current={isCurrent ? 'true' : undefined}
-              className={`flex items-center justify-center overflow-hidden bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
+              className={`flex items-center justify-center bg-surface ${isCurrent && turnPulse ? 'cf-turn-beat-pulse' : ''}`}
               style={{
+                position: 'relative',
                 width: isCurrent ? 48 : 40,
                 height: isCurrent ? 48 : 40,
                 transition: 'all 0.2s ease',
@@ -466,16 +641,100 @@ function InitiativeStrip({
               }}
               title={c.name}
             >
-              {character?.portraitUrl ? (
-                <img src={character.portraitUrl} alt={c.name} className="w-full h-full object-cover" />
-              ) : isSilhouette ? (
-                <span style={{ color: '#fff', display: 'flex' }}><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.sm} /></span>
-              ) : (
-                <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
-                  {tokenInitials(c.name)}
+              {canReorder && (
+                // Issue #2074 review finding 2: `touchAction: 'none'` used to cover the
+                // WHOLE tile, so a finger swipe anywhere on it dragged instead of scrolling
+                // this horizontally-scrollable strip. Confine the drag surface to this small
+                // handle — mirroring the roster's ⠿ handle (CombatantRow.tsx) — so the rest
+                // of the tile keeps native touch scrolling and only a deliberate touch on the
+                // handle starts a reorder gesture.
+                <span
+                  aria-hidden="true"
+                  data-testid={`initiative-strip-drag-handle-${c.id}`}
+                  style={{
+                    position: 'absolute',
+                    top: -4,
+                    left: -4,
+                    width: 16,
+                    height: 16,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderRadius: 8,
+                    background: 'var(--color-bg-surface-raised, #1e293b)',
+                    border: '1px solid var(--color-border, #475569)',
+                    color: 'var(--color-text-main, #f8fafc)',
+                    fontSize: 9,
+                    lineHeight: 1,
+                    cursor: 'grab',
+                    touchAction: 'none',
+                    zIndex: 10,
+                  }}
+                  {...dragReorder.handleProps(c.id)}
+                >
+                  ⠿
                 </span>
               )}
+              <div className="w-full h-full flex items-center justify-center overflow-hidden" style={{ borderRadius: 4 }}>
+                {character?.portraitUrl ? (
+                  <img src={character.portraitUrl} alt={c.name} className="w-full h-full object-cover" />
+                ) : isSilhouette ? (
+                  <span style={{ color: '#fff', display: 'flex' }}><GameIcon slug="hooded-figure" size={UI_ICON_SIZE.sm} /></span>
+                ) : (
+                  <span style={{ color: '#fff', fontSize: isCurrent ? 16 : 14, fontWeight: 700, pointerEvents: 'none' }}>
+                    {tokenInitials(c.name)}
+                  </span>
+                )}
+              </div>
+              {/* Persistent initiative chip (issue #1934) */}
+              <span
+                data-testid="initiative-chip"
+                data-combatant-id={c.id}
+                aria-label={t('encounters.initiativeChipLabel', 'Initiative: {{value}}', { value: initiativeValue })}
+                style={{
+                  position: 'absolute',
+                  top: -4,
+                  right: -4,
+                  minWidth: 18,
+                  height: 18,
+                  padding: '0 4px',
+                  borderRadius: 9,
+                  background: 'var(--color-bg-surface-raised, #1e293b)',
+                  border: '1px solid var(--color-border, #475569)',
+                  color: 'var(--color-text-main, #f8fafc)',
+                  fontSize: 10,
+                  fontWeight: 700,
+                  lineHeight: '16px',
+                  textAlign: 'center',
+                  zIndex: 10,
+                  pointerEvents: 'none',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.5)',
+                  opacity: isChipVisible ? 1 : 0,
+                  transform: isChipVisible ? 'scale(1)' : 'scale(0)',
+                  transition: prefersReducedMotion() ? 'none' : 'opacity 0.2s ease, transform 0.2s ease',
+                }}
+              >
+                {initiativeValue}
+              </span>
+              {colorVisionAssist && (
+                <span
+                  data-testid="strip-token-identity-shape"
+                  data-token-shape={tokenIdentityShape(c.id)}
+                  aria-hidden="true"
+                  style={{
+                    position: 'absolute',
+                    right: 2,
+                    bottom: 2,
+                    width: 9,
+                    height: 9,
+                    background: '#fff',
+                    clipPath: TOKEN_IDENTITY_SHAPE_CLIP_PATH[tokenIdentityShape(c.id)],
+                    boxShadow: '0 0 0 1px rgba(15,23,42,.7)',
+                  }}
+                />
+              )}
             </div>
+            <FloatingNumbers events={feedback} />
             <span className="text-muted" style={{ fontSize: 10, lineHeight: 1 }}>
               {hpDisplay(c)}
             </span>
@@ -484,7 +743,7 @@ function InitiativeStrip({
       })}
     </div>
   );
-}
+});
 
 
 /** Combat-log actor for HP/death patches (issues #620, #494). Omit self-attribution. */
@@ -554,15 +813,27 @@ export default function RunSessionPage() {
   canDmWriteRef.current = canDmWrite;
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
+  // #599/#1933: mirrors the server's assertNoSafetyHold rejection on start/nextTurn/
+  // undoTurn/endTurn as a GatedControl reason — no server or authorization change, just
+  // reading the same table-wide safety-hold state SafetyHoldBar already shows everyone.
+  const { data: tableSafety } = useTableSafety(Number.isFinite(cid) ? cid : undefined);
+  const safetyHoldActive = tableSafety?.active === true;
 
   // Resolve the rule-system adapter FROM THE ACTIVE CAMPAIGN (issue #234) rather than at
   // module scope with no argument — so a future non-5e adapter's condition vocabulary and
   // statblock mapping actually take effect. Default (5e) is unchanged.
   const ruleSystem = campaign?.ruleSystem ?? null;
-  const activeAdapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const activeAdapter = useMemo(() => ruleSystemAdapter(ruleSystem, campaign?.customMechanicsProfile), [ruleSystem, campaign?.customMechanicsProfile]);
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
   const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
+  // Issue #1910 review: the vitals header's speed fallback must read the ACTIVE
+  // campaign's own adapter default, not a hardcoded 30 — a system without a
+  // movement slot at all (e.g. PF2e) has no adapter default to fall back to.
+  const movementDefault = useMemo(
+    () => actionEconomyForAdapter(activeAdapter).slots.find((s) => s.kind === 'movement')?.max,
+    [activeAdapter],
+  );
 
   const queryClient = useQueryClient();
 
@@ -606,6 +877,12 @@ export default function RunSessionPage() {
   const [actionError, setActionError] = useState<ActionErrorState>(null);
   const [encounterPatchConflict, setEncounterPatchConflict] = useState<string | null>(null);
   const [pendingFog, setPendingFog] = useState<ScopedPendingFog | undefined>(undefined);
+  // Issue #1917: hoisted out of BattleMap's `pendingFog` JSX prop, which called this at the
+  // call site on every render. `pendingFogForEncounter` itself already returns a referentially
+  // stable value (either `undefined` or the SAME `pendingFog.fog` object already held in
+  // state) — the useMemo here is a belt-and-braces guard against that invariant silently
+  // breaking later, and documents the prop as intentionally stabilized for BattleMap's memo.
+  const battleMapPendingFog = useMemo(() => pendingFogForEncounter(pendingFog, eid), [pendingFog, eid]);
   const pendingEncounterPatches = useRef(new Map<string, QueuedEncounterPatch>());
   const lastLocalEncounterRevision = useRef(new Map<number, string>());
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
@@ -623,39 +900,80 @@ export default function RunSessionPage() {
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
   const [pendingActionUse, setPendingActionUse] = useState<{
+    id: number;
     combatantId: number;
     actorName: string;
     actionIndex: number;
     actionName: string;
     spec: ActionSpec;
   } | null>(null);
+  const pendingActionUseSequence = useRef(0);
+  const pendingActionUseIdRef = useRef<number | null>(null);
+  const [actionTargetIds, setActionTargetIds] = useState<number[]>([]);
+  const [actionTargetsDeclared, setActionTargetsDeclared] = useState(false);
+  // Issue #1922: group action rolls — run one monster/NPC action for every selected identical
+  // combatant in one pass. A separate pending slot from `pendingActionUse` above (mutually
+  // exclusive in the UI; opening one dismisses the other) because the group flow's own step
+  // machine (candidate + target selection -> sequential loop -> summary card) has nothing in
+  // common with the single-actor preview/apply flow.
+  const [pendingGroupActionUse, setPendingGroupActionUse] = useState<{
+    id: number;
+    combatantId: number;
+    actorName: string;
+    actionIndex: number;
+    actionName: string;
+    spec: ActionSpec;
+    sourceAction: { name: string; toHit: string; damage: string };
+  } | null>(null);
+  const pendingGroupActionUseSequence = useRef(0);
+  const [actionImpactTargetIds, setActionImpactTargetIds] = useState<number[]>([]);
+  const actionImpactTimerRef = useRef<number | null>(null);
   const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
   const [escalationOverrideDraft, setEscalationOverrideDraft] = useState('');
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
-  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
+  const [pings, setPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null; label: string | null }>>([]);
   const pingSeq = useRef(0);
-  const addPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
+  const addPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null; label?: string | null }) => {
     const key = ++pingSeq.current;
-    if (ping.senderName) {
-      announce(`${ping.senderName} pinged the map`);
-    } else {
-      announce('A map ping arrived');
-    }
+    // Issue #1937: a labeled ping (an intent chosen from the long-press/right-click
+    // menu) announces the intent alongside the sender; a plain tap keeps the original
+    // wording unchanged. Issue #2048: this composes exactly as BattleMap's visible ping
+    // log does — same two keys, same `unknownSender` fallback — so the announcement a
+    // screen-reader user hears is the sentence that is on screen, in one language.
+    // Composing the null-sender case separately is what previously left it as a bare
+    // English literal that also silently dropped the intent label.
+    const senderName = ping.senderName || t('encounters.map.ping.log.unknownSender');
+    announce(
+      ping.label
+        ? t('encounters.map.ping.log.labeled', { name: senderName, label: ping.label })
+        : t('encounters.map.ping.log.plain', { name: senderName }),
+    );
     setPings((prev) => {
-      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null }];
+      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);
     });
     setTimeout(() => setPings((prev) => prev.filter((p) => p.key !== key)), 10000);
-  }, [announce]);
+  }, [announce, t]);
   const dismissPing = useCallback((key: number) => {
     setPings((prev) => prev.filter((p) => p.key !== key));
+  }, []);
+  useEffect(() => () => {
+    if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);
   }, []);
   // Per-combatant in-flight tracking (issue #73) — replaces the single global `busy`
   // flag so one combatant's slower edit (rename, condition, initiative…) disables only
   // that row, never the whole tracker. HP steppers bypass this entirely: they're
   // optimistic and stay live even while a request is in flight.
   const [pendingCombatantIds, setPendingCombatantIds] = useState<ReadonlySet<number>>(() => new Set());
+  // Issue #1926: combatants for which the DM has resolved (revealed from, or dismissed)
+  // the one-tap kill prompt this session. Client-local only — a page reload resets it,
+  // same as every other transient run-session UI state; the server-persisted
+  // `statblockRevealed` flag itself is the only thing that's actually authoritative.
+  const [dismissedKillPromptIds, setDismissedKillPromptIds] = useState<ReadonlySet<number>>(() => new Set());
+  // React state disables the source row after render; the ref closes the same-tick
+  // double-click window before that render can happen.
+  const pendingDuplicateCombatantIds = useRef(new Set<number>());
   const markCombatantPending = useCallback((combatantId: number, on: boolean) => {
     setPendingCombatantIds((prev) => {
       const next = new Set(prev);
@@ -870,6 +1188,116 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+  const hpFeedbackSnapshotRef = useRef<{ encounterId: number; combatants: Map<number, HpFeedbackSnapshot> } | null>(null);
+  const bulkHpFeedbackOperationsRef = useRef(new Map<string, { targets: Set<number>; stale: Map<number, HpFeedbackSnapshot>; emitted: Set<number> }>());
+  const nextHpFeedbackIdRef = useRef(0);
+  const [hpFeedbackEvents, setHpFeedbackEvents] = useState<Array<HpFeedbackEvent & { id: number }>>([]);
+  const appendHpFeedbackEvents = useCallback((events: readonly HpFeedbackEvent[]) => {
+    if (events.length === 0) return;
+    setHpFeedbackEvents((current) => [...current, ...events.map((event) => ({ ...event, id: nextHpFeedbackIdRef.current++ }))]);
+  }, []);
+  const appendOrUpgradeHpFeedbackCrit = useCallback((events: readonly HpFeedbackEvent[]) => {
+    const criticalDamage = events.find((event) => event.kind === 'damage' && event.crit);
+    if (!criticalDamage) {
+      appendHpFeedbackEvents(events);
+      return;
+    }
+    setHpFeedbackEvents((current) => {
+      let index = -1;
+      for (let candidate = current.length - 1; candidate >= 0; candidate -= 1) {
+        const event = current[candidate];
+        if (
+          event.combatantId === criticalDamage.combatantId
+          && event.kind === 'damage'
+          && event.amount === criticalDamage.amount
+        ) {
+          index = candidate;
+          break;
+        }
+      }
+      if (index < 0) {
+        return [...current, ...events.map((event) => ({ ...event, id: nextHpFeedbackIdRef.current++ }))];
+      }
+      return current.map((event, eventIndex) => eventIndex === index ? { ...event, crit: true } : event);
+    });
+  }, [appendHpFeedbackEvents]);
+  useEffect(() => { setHpFeedbackEvents([]); hpFeedbackSnapshotRef.current = null; }, [eid]);
+  useEffect(() => {
+    if (!encounter) return;
+    const previous = hpFeedbackSnapshotRef.current;
+    if (previous?.encounterId !== encounter.id) {
+      hpFeedbackSnapshotRef.current = { encounterId: encounter.id, combatants: hpFeedbackSnapshot(encounter.combatants) };
+      return;
+    }
+    // A refetch can observe a committed earlier click while later plain-stepper clicks
+    // remain in the optimistic ledger. The click emits its feedback at mutation time;
+    // retain that predicted baseline for its targets so a 30 → 20 prediction followed
+    // by a 25 server refetch does not look like +5 heal. Still diff non-targets so a
+    // concurrent remote change remains visible while the local write is pending.
+    const optimisticQueue = optimisticHpQueueRef.current;
+    if (optimisticQueue.encounterId === eid && optimisticQueue.base && optimisticQueue.operations.size > 0) {
+      const optimisticCombatants = replayOptimisticHpDeltas(
+        optimisticQueue.base.combatants,
+        [...optimisticQueue.operations.values()]
+          .sort((a, b) => a.sequence - b.sequence)
+          .map(({ combatantId, delta }) => ({ combatantId, delta })),
+        ruleSystem,
+        campaign?.customMechanicsProfile,
+      );
+      const pendingTargetIds = new Set([...optimisticQueue.operations.values()].map(({ combatantId }) => combatantId));
+      const suppressedTargetIds = new Set([
+        ...pendingTargetIds,
+        ...[...bulkHpFeedbackOperationsRef.current.values()].flatMap((operation) => [...operation.targets]),
+      ]);
+      const events = diffHpFeedback(previous.combatants, encounter.combatants)
+        .filter((event) => !suppressedTargetIds.has(event.combatantId));
+      const nextSnapshot = withOptimisticHpFeedbackTargets(encounter.combatants, optimisticCombatants, pendingTargetIds);
+      hpFeedbackSnapshotRef.current = { encounterId: encounter.id, combatants: nextSnapshot };
+      appendHpFeedbackEvents(events);
+      return;
+    }
+    if (bulkHpFeedbackOperationsRef.current.size > 0) {
+      const pendingTargets = new Set([...bulkHpFeedbackOperationsRef.current.values()].flatMap((operation) => [...operation.targets]));
+      for (const combatant of encounter.combatants) {
+        const before = previous.combatants.get(combatant.id);
+        if (pendingTargets.has(combatant.id) && before && !sameHpFeedbackSnapshot(before, combatant)) {
+          for (const operation of bulkHpFeedbackOperationsRef.current.values()) if (operation.targets.has(combatant.id)) operation.stale.set(combatant.id, combatant);
+        }
+      }
+      const events = diffHpFeedback(previous.combatants, encounter.combatants)
+        .filter((event) => !pendingTargets.has(event.combatantId));
+      const optimisticTargets = [...pendingTargets]
+        .map((combatantId) => previous.combatants.get(combatantId))
+        .filter((combatant): combatant is HpFeedbackSnapshot => combatant != null);
+      hpFeedbackSnapshotRef.current = {
+        encounterId: encounter.id,
+        combatants: withOptimisticHpFeedbackTargets(encounter.combatants, optimisticTargets, pendingTargets),
+      };
+      appendHpFeedbackEvents(events);
+      return;
+    }
+    const events = diffHpFeedback(previous.combatants, encounter.combatants);
+    hpFeedbackSnapshotRef.current = { encounterId: encounter.id, combatants: hpFeedbackSnapshot(encounter.combatants) };
+    appendHpFeedbackEvents(events);
+  }, [appendHpFeedbackEvents, eid, encounter, ruleSystem]);
+  useEffect(() => {
+    if (hpFeedbackEvents.length === 0) return;
+    const timeout = window.setTimeout(() => setHpFeedbackEvents([]), 1_080 + (hpFeedbackEvents.length - 1) * 120);
+    return () => window.clearTimeout(timeout);
+  }, [hpFeedbackEvents]);
+  const hpFeedbackByCombatant = useMemo(() => {
+    const byCombatant = new Map<number, Array<HpFeedbackEvent & { id: number }>>();
+    for (const event of hpFeedbackEvents) {
+      const events = byCombatant.get(event.combatantId) ?? [];
+      events.push(event);
+      byCombatant.set(event.combatantId, events);
+    }
+    return byCombatant;
+  }, [hpFeedbackEvents]);
+  const seedHpFeedbackSnapshot = useCallback((source: EncounterWithCombatants | undefined) => {
+    if (source?.id !== eid) return;
+    hpFeedbackSnapshotRef.current = { encounterId: eid, combatants: hpFeedbackSnapshot(source.combatants) };
+  }, [eid]);
   useWakeLock(encounter?.status === 'running');
 
   // An encounter can be restored by another client or API caller. A newer authoritative
@@ -1100,25 +1528,32 @@ export default function RunSessionPage() {
   // documented contract for a cached-identity restore is that membership may be obsolete,
   // so the override must be neither offerable nor valid while it is true, however long
   // the outage has lasted or who confirmed it.
+  // Issue #1914: `canPlayerWrite` is the scope-specific authority for an 'own-combatant'
+  // override, exactly parallel to `canDmWrite` for the 'dm' scope — see
+  // `encounterOverrideAuthorized`'s doc for why each scope checks its own authority rather
+  // than sharing one.
   const overrideAuthority: EncounterOverrideAuthority = {
     canDmWrite,
+    canPlayerWrite,
     staleIdentity,
     campaignId: cid,
     userId: me?.user.id ?? null,
   };
   // A confirmed override is scoped to ONE outage — consumed the moment the stream is live
   // again, so a later, separate outage prompts again rather than silently sailing through
-  // on a stale confirmation. ALSO revoked the instant it is no longer authorized (lost DM
-  // authority, or the identity went stale) — regaining authority requires a fresh
-  // confirmation rather than silently resuming the earlier one.
+  // on a stale confirmation. ALSO revoked the instant it is no longer authorized (lost the
+  // write authority its scope requires, or the identity went stale) — regaining authority
+  // requires a fresh confirmation rather than silently resuming the earlier one. Routed
+  // through `encounterOverrideAuthorized` itself (issue #1914) rather than a hand-rolled
+  // boolean here, so the revoke condition and the render-time authorization check (below)
+  // can never drift — the round-4 (#1446) failure mode this guarded against was exactly two
+  // different moments computing "authorized" two different ways.
   useEffect(() => {
-    setEncounterSyncOverride((prev) =>
-      revokeEncounterOverrideIfUnauthorized(
-        settleEncounterOverride(prev, encounterSync),
-        overrideAuthority.canDmWrite && !overrideAuthority.staleIdentity,
-      ),
-    );
-  }, [encounterSync, overrideAuthority.canDmWrite, overrideAuthority.staleIdentity]);
+    setEncounterSyncOverride((prev) => {
+      const settled = settleEncounterOverride(prev, encounterSync);
+      return revokeEncounterOverrideIfUnauthorized(settled, encounterOverrideAuthorized(settled, overrideAuthority));
+    });
+  }, [encounterSync, overrideAuthority.canDmWrite, overrideAuthority.canPlayerWrite, overrideAuthority.staleIdentity, overrideAuthority.campaignId, overrideAuthority.userId]);
   // Belt-and-braces alongside the effect above: `encounterOverrideAuthorized` is THE
   // single gate (every precondition, including the campaign/identity tag match),
   // re-evaluated synchronously at render time too — so there is no one-render gap between
@@ -1130,16 +1565,34 @@ export default function RunSessionPage() {
   )
     ? encounterSyncOverride
     : ENCOUNTER_OVERRIDE_INACTIVE;
+  // `riskyBlocked` stays the DM-grade gate exactly as before #1914 (`encounterActionsBlocked`
+  // is now itself scope-gated to `'dm'`, so an active 'own-combatant' override never
+  // satisfies it) — every existing consumer (next-turn, AoE declare, escalation die, apply
+  // damage bar, …) keeps its pre-#1914 behavior unchanged. `gateForWrite` (below, and at the
+  // per-combatant call sites) is the only place a same-outage 'own-combatant' override can
+  // additionally relax anything, and only for the combatant it names by ownership.
   const riskyBlocked = encounterActionsBlocked(encounterSync, effectiveEncounterSyncOverride);
-  // Issue #1446 fix: the "continue anyway" acknowledgement is a DM decision (per the
-  // issue text) — a player confirming it would re-enable their own owned-combatant HP /
-  // death-save / action mutations against possibly-stale data, and a stale-identity
-  // viewer confirming it would authorize mutations against a membership snapshot that may
-  // no longer be true (final review round). Neither has a path to ever set
-  // encounterSyncOverride.active; they stay blocked (with the informational banner) for
-  // the duration.
+  // Issue #1446 fix: the DM's "continue anyway" acknowledgement re-enables every
+  // conflict-prone control at once; a stale-identity viewer confirming it would authorize
+  // mutations against a membership snapshot that may no longer be true (final review
+  // round). Neither has a path to ever set a 'dm'-scoped `encounterSyncOverride.active`
+  // without `canDmWrite`; they stay blocked (with the informational banner) for the
+  // duration. This DM offer is distinct from `encounterSyncOwnOverrideOfferable` below
+  // (issue #1914) — a player's own-combatant confirm never grants this scope.
   const encounterSyncOverrideOfferable =
     overrideAuthority.canDmWrite
+    && !overrideAuthority.staleIdentity
+    && encounterOverrideOfferable(encounterSync)
+    && !(effectiveEncounterSyncOverride.active && effectiveEncounterSyncOverride.scope === 'dm');
+  // Issue #1914: the scoped, player-facing counterpart — offered only to a non-DM viewer
+  // with current player-write authority, gated by every other precondition
+  // `encounterOverrideAuthorized` will itself require once granted (fresh identity,
+  // past the connecting grace, nothing already active). `myCombatants.length > 0` is
+  // ANDed in at the render site below (that array isn't computed yet at this point in the
+  // component) — an offer with nothing owned to unblock would be a dead prompt.
+  const encounterSyncOwnOverrideOfferable =
+    overrideAuthority.canPlayerWrite
+    && !overrideAuthority.canDmWrite
     && !overrideAuthority.staleIdentity
     && encounterOverrideOfferable(encounterSync)
     && !effectiveEncounterSyncOverride.active;
@@ -1147,7 +1600,11 @@ export default function RunSessionPage() {
   // the base banner's "combat actions are paused" copy would be actively false (and
   // contradict the enabled controls for both screen-reader and sighted users). Swap to an
   // override-aware i18n variant that keeps the stale-data warning without that claim.
-  const overrideBannerKey = effectiveEncounterSyncOverride.active ? encounterSyncOverrideBannerKey(encounterSync) : null;
+  // Issue #1914: the variant is itself scope-aware — an 'own-combatant' override must not
+  // claim combat at large is unblocked, only the owning player's own combatant.
+  const overrideBannerKey = effectiveEncounterSyncOverride.active
+    ? encounterSyncOverrideBannerKey(encounterSync, effectiveEncounterSyncOverride.scope)
+    : null;
   const encounterSyncBanner = overrideBannerKey ? t(overrideBannerKey) : encounterSyncBannerMessage(encounterSync);
   const encounterSyncChip = encounterSyncChipLabel(encounterSync);
   const encounterSyncLastSyncTitle = useMemo(() => {
@@ -1159,13 +1616,27 @@ export default function RunSessionPage() {
   }, [syncRevision?.lastSyncAt, formattingLocale, timeFormat]);
 
   // Issue #431: tailor preparing next-steps to whether a monster pack is installed.
+  // Issue #1939: also open to non-DM players — the "Full rule" link on a rules-hint
+  // popover needs the same installed-pack data DM prep already fetched, and the read
+  // endpoint (GET /rules/packs) is any-authenticated-user already (rules.controller.ts).
   const packsQuery = useQuery({
     queryKey: ['rules', 'packs'],
     queryFn: () => api.get<RulePack[]>(`${API}/rules/packs`),
-    enabled: Number.isFinite(cid) && isDm,
+    enabled: Number.isFinite(cid),
     staleTime: 60_000,
   });
   const campaignHasCompendium = (packsQuery.data?.length ?? 0) > 0;
+  // Issue #1939: whether the campaign's resolved rule pack has searchable compendium
+  // entries — gates the rules-hint popovers' "Full rule" link. Identical for DM and
+  // players (hints are public rules text; criterion 4), unlike `campaignHasCompendium`
+  // above which only asks "is ANY pack installed server-wide".
+  const rulesHintCompendiumAvailable = useMemo(
+    () =>
+      rulesetCapabilitiesForSelection(ruleSystem, packsQuery.data).capabilities.find(
+        (c) => c.key === 'compendium',
+      )?.status === 'available',
+    [ruleSystem, packsQuery.data],
+  );
 
   const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
   const loadError =
@@ -1239,6 +1710,19 @@ export default function RunSessionPage() {
           // This one event represents the whole atomic recovery batch. Linked
           // encounter rows emit their own post-commit encounter.updated frame.
           invalidateCampaignCharactersForOwnership();
+          return;
+        }
+        // Issue #1933 review finding: this event has no encounterId (it is campaign-wide,
+        // like character/membership frames above) and was falling into the encounterId
+        // filter below, which drops it — so another participant's hold activate/release
+        // only reached this page via useTableSafety's own 20s poll. safetyHoldActive
+        // gates real writes (start/nextTurn/undoTurn/endTurn), so a stale mirror meant the
+        // exact failure this feature exists to prevent: the server rejects and the UI
+        // cannot say why, for up to a poll interval. Refetch the safety row immediately
+        // instead — the anonymity rules stay enforced there, this frame carries only
+        // `active` (see useCampaignEvents' own doc comment on 'safety.hold').
+        if (event.type === 'safety.hold') {
+          invalidateTableSafety(queryClient, cid);
           return;
         }
         // Sheet / membership frames have no encounterId — must not fall into the
@@ -1353,6 +1837,13 @@ export default function RunSessionPage() {
         // `sheetMirrored`, so this only piggybacks the invalidation when it's actually
         // needed.
         if (event.sheetMirrored) invalidateCampaignCharactersForOwnership();
+        // Issue #1919 — a death-save roll (like any other combatant write) emits only
+        // `encounter.updated`; the persisted combat-log/dice-log event it also wrote would
+        // otherwise wait for the events feed's own 5s backstop poll before another viewer's
+        // spectator toast (and CombatLog highlight) could appear. Piggybacking this cheap
+        // refetch on the SAME frame that already invalidates the encounter itself is enough
+        // to satisfy "after the encounter.updated-driven refetch (or within one poll cycle)".
+        void queryClient.invalidateQueries({ queryKey: queryKeys.encounterEvents(eid) });
       },
       [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
     ),
@@ -1366,6 +1857,12 @@ export default function RunSessionPage() {
       // review): a dropped-then-recovered stream must not leave the Spellbook's
       // /turn-sourced slots/spells stale either.
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      // Issue #1933 review: handling the delivered `safety.hold` frame is not enough on
+      // its own — a hold activated or released WHILE the stream was down produces no
+      // frame to deliver on reconnect. safetyHoldActive now gates Start/Next/Undo/End
+      // turn, so without this the controls stay wrongly enabled (or wrongly gated) until
+      // useTableSafety's 20s poll happens to land.
+      invalidateTableSafety(queryClient, cid);
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -1374,9 +1871,24 @@ export default function RunSessionPage() {
       invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+      invalidateTableSafety(queryClient, cid);
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
+
+  // Issue #1919 — the roller's own settled death-save outcome (nat 20 revive / fresh
+  // death / fresh stabilization / plain success-or-failure), fed to the ONE combatant's
+  // tracker whose roll it belongs to. `deathSaveBeforeStateRef` captures the pre-roll
+  // deathState at the roll mutation's `onMutate` time (the classifier needs a before/after
+  // pair; the server response only carries "after"). `recentDeathSaveSelfRollRef` marks
+  // this client as the one that just rolled for a combatant, briefly, so the spectator-
+  // toast diff below (which reads the same persisted event this roll produces) does not
+  // also toast the roller their own roll a second time.
+  const deathSaveBeforeStateRef = useRef(new Map<number, string>());
+  const recentDeathSaveSelfRollRef = useRef(new Map<number, number>());
+  const [deathSaveOutcome, setDeathSaveOutcome] = useState<{ combatantId: number; outcome: DeathSaveOutcome } | null>(null);
+  const deathSaveOutcomeTimerRef = useRef<number | null>(null);
+  const DEATH_SAVE_SELF_ROLL_WINDOW_MS = 8_000;
 
   // The persisted event stream is the single announcement source for turn, HP,
   // condition, death, note, override, and correction updates. ID-based tracking
@@ -1386,6 +1898,14 @@ export default function RunSessionPage() {
     encounterId: number;
     cursor: CombatLogAnnouncementCursor;
   } | null>(null);
+  // Issue #1919 — "table side": a compact toast for anyone OTHER than the roller when a
+  // death-save roll appears in the same already role-projected event feed CombatLog reads
+  // (never a new SSE type or a raw dice-log read — see `deathSaveOutcome.ts`'s doc comment).
+  // `recentDeathSaveSelfRollRef` (set at the roll mutation's `onMutate`) suppresses the
+  // roller's OWN roll here, since that client already got the full dice-overlay treatment.
+  const deathSaveSpectatorToastSequence = useRef(0);
+  const [deathSaveSpectatorToast, setDeathSaveSpectatorToast] = useState<{ id: number; message: string } | null>(null);
+  const deathSaveSpectatorToastTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!eventsQuery.data) return;
 
@@ -1406,7 +1926,46 @@ export default function RunSessionPage() {
         dedupeKey: `combat-log:${eid}:${appended.length}:${firstId}:${lastId}`,
       });
     }
-  }, [eid, eventsQuery.data, announce]);
+
+    // A null cursor is the initial-history baseline (same rule as the SR announcement
+    // above) — a page freshly opened mid-encounter must not toast every past roll.
+    if (!cursor) return;
+    const now = Date.now();
+    for (const event of advanced.appendedEvents) {
+      // Issue #1919 secrecy boundary: `deathSaveSpectatorToastInfo` reads ONLY the
+      // already role-projected `event.target`/`detail` — the same fields CombatLog
+      // renders for every viewer via the server's `redactEncounterEventsForViewer`
+      // (issue #869). A hidden combatant's name arrives already masked to the
+      // "Unknown combatant" placeholder (never null); this never does its own lookup
+      // that could bypass that redaction. See `deathSaveOutcome.unit.spec.ts` for the
+      // pinned regression.
+      const info = deathSaveSpectatorToastInfo(event);
+      if (!info) continue;
+      const selfRolledAt = event.targetId != null ? recentDeathSaveSelfRollRef.current.get(event.targetId) : undefined;
+      if (selfRolledAt != null) {
+        if (event.targetId != null) recentDeathSaveSelfRollRef.current.delete(event.targetId);
+        if (now - selfRolledAt < DEATH_SAVE_SELF_ROLL_WINDOW_MS) continue;
+      }
+      const outcomeWord = info.outcomeKind === 'success'
+        ? t('encounters.deathSave.spectatorOutcomeSuccess', 'success')
+        : t('encounters.deathSave.spectatorOutcomeFailure', 'failure');
+      const toastMessage = t(
+        'encounters.deathSave.spectatorToast',
+        '{{name}} death save: {{outcome}} (rolled {{natural}})',
+        { name: info.name, outcome: outcomeWord, natural: info.natural },
+      );
+      if (deathSaveSpectatorToastTimerRef.current != null) window.clearTimeout(deathSaveSpectatorToastTimerRef.current);
+      const toastId = ++deathSaveSpectatorToastSequence.current;
+      setDeathSaveSpectatorToast({ id: toastId, message: toastMessage });
+      deathSaveSpectatorToastTimerRef.current = window.setTimeout(() => {
+        setDeathSaveSpectatorToast((current) => (current?.id === toastId ? null : current));
+      }, 4_000);
+    }
+  }, [eid, eventsQuery.data, announce, t]);
+
+  const revealedEncounterIdsRef = useRef<Set<number>>(new Set());
+  const pendingRollInitiativeCountRef = useRef<number>(0);
+  const [revealTick, setRevealTick] = useState(0);
 
   // Ending an encounter does not currently append a combat-log row. Retain that
   // useful status announcement without restoring the old turn/HP diff path, which
@@ -1418,10 +1977,42 @@ export default function RunSessionPage() {
     if (previous?.encounterId === eid && previous.status !== encounter.status && encounter.status === 'ended') {
       announce('Encounter ended');
     }
+
+    if (previous?.encounterId === eid && previous.status !== 'preparing' && encounter.status === 'preparing') {
+      revealedEncounterIdsRef.current.delete(eid);
+    }
+
+    const prevStatus = previous?.encounterId === eid ? previous.status : null;
+    const rolledCount = pendingRollInitiativeCountRef.current;
+    if (
+      shouldRevealInitiative({
+        prevStatus,
+        nextStatus: encounter.status,
+        encounterId: eid,
+        revealedEncounterIds: revealedEncounterIdsRef.current,
+        rolledCount,
+      })
+    ) {
+      if (encounter.status === 'running') {
+        revealedEncounterIdsRef.current.add(eid);
+      }
+      setRevealTick((t) => t + 1);
+    }
+    pendingRollInitiativeCountRef.current = 0;
+
     previousEncounterStatusRef.current = { encounterId: eid, status: encounter.status };
   }, [eid, encounter, announce]);
 
   const myUserId = me?.user.id;
+  const membersQuery = useQuery({
+    queryKey: queryKeys.campaignMembers(cid),
+    queryFn: () => api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`),
+    enabled: Number.isFinite(cid),
+  });
+  const aoeDeclarerNames = useMemo(
+    () => new Map((membersQuery.data ?? []).map((member) => [String(member.userId), member.displayName || member.username || String(member.userId)])),
+    [membersQuery.data],
+  );
   const ownedCharacterIds = useMemo(
     () =>
       new Set(
@@ -1433,19 +2024,44 @@ export default function RunSessionPage() {
   // rather than a `.find` over all characters on every render (issue: large encounters).
   const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
-  function canEditCombatantPermission(c: Combatant): boolean {
-    // An ended encounter is immutable server-side (assertMutable, #163/#470): the interactive
-    // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
-    // status like canSetInitiative so an ended encounter renders read-only (#368).
-    if (encounter?.status === 'ended') return false;
-    if (canDmWrite) return true;
-    if (!canPlayerWrite) return false;
+  // Issue #1917: `useCallback`, not a plain function declaration — `canEditCombatant` is
+  // passed BY REFERENCE as `BattleMap`'s `canMoveToken` prop (below), and `BattleMap` is now
+  // React.memo-wrapped. A fresh function identity here every render would defeat that.
+  const canEditCombatantPermission = useCallback(
+    (c: Combatant): boolean => {
+      // An ended encounter is immutable server-side (assertMutable, #163/#470): the interactive
+      // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
+      // status like canSetInitiative so an ended encounter renders read-only (#368).
+      if (encounter?.status === 'ended') return false;
+      if (canDmWrite) return true;
+      if (!canPlayerWrite) return false;
+      return c.characterId != null && ownedCharacterIds.has(c.characterId);
+    },
+    [encounter?.status, canDmWrite, canPlayerWrite, ownedCharacterIds],
+  );
+
+  const canEditCombatant = useCallback(
+    (c: Combatant): boolean => {
+      if (riskyBlocked) return false;
+      return canEditCombatantPermission(c);
+    },
+    [riskyBlocked, canEditCombatantPermission],
+  );
+
+  /** Issue #1914: the combatant the ACTING viewer owns (a player's own character link). */
+  function isOwnCombatant(c: Combatant): boolean {
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
   }
 
-  function canEditCombatant(c: Combatant): boolean {
-    if (riskyBlocked) return false;
-    return canEditCombatantPermission(c);
+  /**
+   * Issue #1914: the row-level sync gate for a combatant's OWN-COMBATANT writes (HP/temp
+   * HP, death saves, conditions, turn-state) — every DM-only control on the row (identity
+   * edit, remove, initiative, duplicate) is mounted only for `canDmWrite` regardless of this
+   * value, so relaxing it for an owned row never exposes a DM-only control to a player; it
+   * only ever relaxes writes that were already permission-gated to this row's owner.
+   */
+  function combatantWriteBlocked(c: Combatant): boolean {
+    return gateForWrite('own-combatant', { isOwnCombatant: isOwnCombatant(c) }, encounterSync, effectiveEncounterSyncOverride);
   }
 
   // A character card rolled damage — surface the one-tap "apply to target" bar. A
@@ -1459,10 +2075,68 @@ export default function RunSessionPage() {
 
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
+      const id = ++pendingActionUseSequence.current;
+      pendingActionUseIdRef.current = id;
       setPendingApply(null);
-      setPendingActionUse({ combatantId, actorName, actionIndex, actionName, spec });
+      setActionTargetIds([]);
+      setActionTargetsDeclared(false);
+      setPendingGroupActionUse(null);
+      setPendingActionUse({ id, combatantId, actorName, actionIndex, actionName, spec });
     },
     [],
+  );
+
+  // Issue #1922: same trigger shape as `onUseActionRequested` above, plus the fetched
+  // `UsableAction` row so the group runner can derive its (name, toHit, damage) fingerprint.
+  const onUseGroupActionRequested = useCallback(
+    (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => {
+      const id = ++pendingGroupActionUseSequence.current;
+      pendingActionUseIdRef.current = null;
+      setPendingApply(null);
+      setPendingActionUse(null);
+      setPendingGroupActionUse({
+        id,
+        combatantId,
+        actorName,
+        actionIndex,
+        actionName,
+        spec,
+        sourceAction: { name: action.name, toHit: action.toHit, damage: action.damage },
+      });
+    },
+    [],
+  );
+
+  const toggleActionTarget = useCallback((id: number) => {
+    setActionTargetIds((previous) => {
+      if (!pendingActionUse || actionTargetsDeclared) return previous;
+      if (previous.includes(id)) return previous.filter((targetId) => targetId !== id);
+      const max = pendingActionUse.spec.targets.count > 0 ? pendingActionUse.spec.targets.count : 50;
+      return previous.length >= max ? previous : [...previous, id];
+    });
+  }, [pendingActionUse, actionTargetsDeclared]);
+  const actionLegalTargetIds = useMemo(() => pendingActionUse && pendingActionUse.spec.targets.count > 0
+    ? legalTargets(encounter?.combatants ?? [], pendingActionUse.combatantId, pendingActionUse.spec.targets.allow).map((combatant) => combatant.id)
+    : [], [encounter?.combatants, pendingActionUse]);
+  const actionTargetsAtCapacity = !!pendingActionUse
+    && pendingActionUse.spec.targets.count > 0
+    && actionTargetIds.length >= pendingActionUse.spec.targets.count;
+
+  // Issue #1917: hoisted out of BattleMap's `targeting` JSX prop, which built a fresh object
+  // literal on every render regardless of whether any of its fields actually changed.
+  const battleMapTargeting = useMemo(
+    () =>
+      pendingActionUse && pendingActionUse.spec.targets.count > 0
+        ? {
+            actorId: pendingActionUse.combatantId,
+            legalIds: actionLegalTargetIds,
+            selectedIds: actionTargetIds,
+            declared: actionTargetsDeclared,
+            atCapacity: actionTargetsAtCapacity,
+            onToggle: toggleActionTarget,
+          }
+        : null,
+    [pendingActionUse, actionLegalTargetIds, actionTargetIds, actionTargetsDeclared, actionTargetsAtCapacity, toggleActionTarget],
   );
 
   const onAoeHitLayoutChange = useCallback((layout: AoeHitLayout | null) => {
@@ -1535,6 +2209,14 @@ export default function RunSessionPage() {
     }) => api.post(`${API}/encounters/${eid}/${action}`, body),
     onMutate: () => setActionError(null),
     onError: reportError,
+    onSuccess: (data, variables) => {
+      if (variables.action === 'roll-initiative') {
+        const rolledCount = (data as { rolledCount?: number })?.rolledCount ?? 0;
+        if (rolledCount > 0) {
+          pendingRollInitiativeCountRef.current = rolledCount;
+        }
+      }
+    },
     onSettled: () => invalidateEncounter(queryClient, eid),
   });
 
@@ -1558,8 +2240,11 @@ export default function RunSessionPage() {
   // pending, onSettled clears it and reconciles. Concurrent edits to different combatants
   // don't block each other.
   const combatantPatch = useMutation({
-    mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
-      api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, patch),
+    // Issue #1992 (round 7): the URL is built from `encounterId` — a per-call variable
+    // supplied by the caller — never from the outer `eid` closure. See
+    // `combatantPatchUrl`'s own doc comment for why that distinction is the entire fix.
+    mutationFn: ({ combatantId, encounterId, patch }: { combatantId: number; encounterId: number; patch: Record<string, unknown> }) =>
+      api.patch<Combatant>(combatantPatchUrl(API, encounterId, combatantId), patch),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
@@ -1571,6 +2256,44 @@ export default function RunSessionPage() {
     },
   });
 
+  const duplicateCombatant = useMutation({
+    mutationFn: ({ body }: { combatantId: number; body: Record<string, unknown> }) =>
+      api.post<Combatant>(`${API}/encounters/${eid}/combatants`, body),
+    onMutate: () => setActionError(null),
+    onError: (err) => {
+      if (isAmbiguousOutcome(err)) enterReconciling();
+      else reportError(err);
+    },
+    onSettled: (_data, _err, { combatantId }) => {
+      pendingDuplicateCombatantIds.current.delete(combatantId);
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
+    },
+  });
+
+  const requestDuplicateCombatant = useCallback(
+    (combatant: Combatant, rosterNames: readonly string[]) => {
+      if (riskyBlocked || reconcileBlocks || pendingDuplicateCombatantIds.current.has(combatant.id)) return;
+      pendingDuplicateCombatantIds.current.add(combatant.id);
+      markCombatantPending(combatant.id, true);
+      duplicateCombatant.mutate({
+        combatantId: combatant.id,
+        body: {
+          kind: combatant.kind,
+          duplicateOfCombatantId: combatant.id,
+          name: duplicateCombatantName(combatant.name, rosterNames),
+          ruleEntryId: combatant.ruleEntryId ?? undefined,
+          statblock: combatant.statblock ?? undefined,
+          hpMax: typeof combatant.hpMax === 'number' && combatant.hpMax > 0 ? combatant.hpMax : undefined,
+          initMod: combatant.initMod,
+          initiativeGroup: combatant.initiativeGroup ?? undefined,
+          tokenSize: combatant.tokenSize,
+        },
+      });
+    },
+    [duplicateCombatant, markCombatantPending, reconcileBlocks, riskyBlocked],
+  );
+
   const combatantTurnState = useMutation({
     mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
       api.post(`${API}/encounters/${eid}/combatants/${combatantId}/turn-state`, patch),
@@ -1579,6 +2302,33 @@ export default function RunSessionPage() {
     onSettled: () => {
       invalidateEncounter(queryClient, eid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
+  });
+
+  /**
+   * Manual initiative reorder (issue #1923) — drag (InitiativeStrip + roster) and the
+   * accessible fallback menu both funnel through this one mutation. `expectedTurnVersion`
+   * is passed explicitly at call time (not resolved from an outer closure) so a caller
+   * that queued the request before a turn advance lands still sends the value IT last
+   * rendered — the server's own CAS is what turns that into a 409, not a client guess.
+   * A 409 (or any other failure) still refetches via `onSettled` below, so the roster
+   * always re-renders server-authoritative order — the "refetch" half of "409 → refetch +
+   * toast"; `reportError` below is the toast half.
+   */
+  const reorderCombatant = useMutation({
+    mutationFn: ({ combatantId, afterCombatantId, expectedTurnVersion }: { combatantId: number; afterCombatantId: number | 'top'; expectedTurnVersion: number }) =>
+      api.post<Combatant>(`${API}/encounters/${eid}/combatants/${combatantId}/reorder`, { afterCombatantId, expectedTurnVersion }),
+    onMutate: ({ combatantId }) => {
+      setActionError(null);
+      markCombatantPending(combatantId, true);
+    },
+    onSuccess: (updated) => {
+      announce(t('encounters.reorder.announcement', 'Moved {{name}} in the initiative order.', { name: updated.name }));
+    },
+    onError: reportError,
+    onSettled: (_data, _err, { combatantId }) => {
+      markCombatantPending(combatantId, false);
+      invalidateEncounter(queryClient, eid);
     },
   });
 
@@ -1741,9 +2491,10 @@ export default function RunSessionPage() {
           .sort((a, b) => a.sequence - b.sequence)
           .map(({ combatantId, delta }) => ({ combatantId, delta })),
         ruleSystem,
+        campaign?.customMechanicsProfile,
       ),
     });
-  }, [eid, queryClient, ruleSystem]);
+  }, [eid, queryClient, ruleSystem, campaign?.customMechanicsProfile]);
   const hpDelta = useKeyedMutation({
     mutationKey: HP_MUTATION_KEY,
     mutationFn: ({
@@ -1781,6 +2532,10 @@ export default function RunSessionPage() {
           : undefined;
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
+      const queuedBase = optimisticHpQueueRef.current;
+      const previousCombatant = queuedBase.encounterId === eid && queuedBase.base
+        ? queuedBase.base.combatants.find((combatant) => combatant.id === combatantId)
+        : previous?.combatants.find((combatant) => combatant.id === combatantId);
       // Defence data lives in the server's authoritative statblock.  Do not briefly
       // show an incorrect local HP total when damage rules are active; refetch settles it.
       if (
@@ -1790,10 +2545,46 @@ export default function RunSessionPage() {
         if (queue.encounterId !== eid) return {};
         if (!queue.base) queue.base = previous;
         queue.operations.set(idempotencyKey, optimisticOperation);
+        const optimisticCombatants = replayOptimisticHpDeltas(
+          queue.base.combatants,
+          [...queue.operations.values()]
+            .sort((a, b) => a.sequence - b.sequence)
+            .map(({ combatantId: pendingCombatantId, delta: pendingDelta }) => ({ combatantId: pendingCombatantId, delta: pendingDelta })),
+          ruleSystem,
+          campaign?.customMechanicsProfile,
+        );
+        const optimisticCombatant = optimisticCombatants.find((combatant) => combatant.id === combatantId);
+        const feedbackBefore = hpFeedbackSnapshotRef.current?.encounterId === eid
+          ? hpFeedbackSnapshotRef.current.combatants.get(combatantId)
+          : previousCombatant;
+        if (feedbackBefore && optimisticCombatant) {
+          appendHpFeedbackEvents(diffHpFeedback(hpFeedbackSnapshot([feedbackBefore]), [optimisticCombatant]));
+          const snapshot = hpFeedbackSnapshotRef.current;
+          if (snapshot?.encounterId === eid) snapshot.combatants.set(combatantId, optimisticCombatant);
+        }
         replayPendingOptimisticHpDeltas();
-        return { encounterId: eid, optimisticOperationId: idempotencyKey };
+        return { encounterId: eid, optimisticOperationId: idempotencyKey, previousCombatant };
       }
-      return {};
+      return { previousCombatant };
+    },
+    onSuccess: (combatant, vars, ctx) => {
+      if (!vars.isCrit) return;
+      if (!ctx?.previousCombatant) return;
+      const before = ctx.previousCombatant;
+      const observed = hpFeedbackSnapshotRef.current?.encounterId === eid
+        ? hpFeedbackSnapshotRef.current.combatants.get(combatant.id)
+        : undefined;
+      const events = diffHpFeedback(hpFeedbackSnapshot([before]), [combatant], new Set([vars.combatantId]));
+      // An own SSE/poll update can arrive before this mutation callback. In that case
+      // normal feedback already rendered from the canonical diff; upgrade that exact
+      // event instead of leaking a combatant-wide crit marker to another writer.
+      if (observed && sameHpFeedbackSnapshot(observed, combatant)) {
+        appendOrUpgradeHpFeedbackCrit(events);
+        return;
+      }
+      if (observed && !sameHpFeedbackSnapshot(observed, before)) return;
+      appendHpFeedbackEvents(events);
+      if (observed) hpFeedbackSnapshotRef.current?.combatants.set(combatant.id, combatant);
     },
     onError: (err, _vars, ctx) => {
       const queue = optimisticHpQueueRef.current;
@@ -1804,6 +2595,7 @@ export default function RunSessionPage() {
         queue.operations.delete(ctx.optimisticOperationId)
       ) {
         replayPendingOptimisticHpDeltas();
+        seedHpFeedbackSnapshot(queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid)));
       }
       // An ambiguous failure must NOT be reported as a plain error: the optimistic HP was
       // just rolled back, but the server may in fact have applied it. Telling the DM "that
@@ -1849,13 +2641,42 @@ export default function RunSessionPage() {
         previous &&
         !hasDamageMetadata
       ) {
+        const queue = optimisticHpQueueRef.current;
+        const queuedCombatants = queue.encounterId === eid && queue.base && queue.operations.size > 0
+          ? replayOptimisticHpDeltas(
+              queue.base.combatants,
+              [...queue.operations.values()].sort((a, b) => a.sequence - b.sequence).map(({ combatantId, delta: pendingDelta }) => ({ combatantId, delta: pendingDelta })),
+              ruleSystem,
+              campaign?.customMechanicsProfile,
+            )
+          : null;
+        const queuedTargetIds = new Set([...queue.operations.values()].map(({ combatantId }) => combatantId));
+        const pendingBaseline = queuedCombatants
+          ? previous.combatants.map((combatant) => queuedTargetIds.has(combatant.id)
+              ? queuedCombatants.find((queued) => queued.id === combatant.id) ?? combatant
+              : combatant)
+          : previous.combatants;
+        const feedbackBaseline = hpFeedbackSnapshotRef.current?.encounterId === eid
+          ? [...hpFeedbackSnapshotRef.current.combatants.values()]
+          : pendingBaseline;
+        const optimisticCombatants = pendingBaseline.map((c) =>
+          targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem, campaign?.customMechanicsProfile) : c,
+        );
+        appendHpFeedbackEvents(diffHpFeedback(hpFeedbackSnapshot(feedbackBaseline), optimisticCombatants));
+        const snapshot = hpFeedbackSnapshotRef.current;
+        if (snapshot?.encounterId === eid) {
+          for (const combatant of optimisticCombatants) {
+            if (targets.has(combatant.id)) snapshot.combatants.set(combatant.id, combatant);
+          }
+        }
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
-          combatants: previous.combatants.map((c) =>
-            targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem) : c,
-          ),
+          combatants: optimisticCombatants,
         });
       }
+      const bulkOperationId = newOperationId();
+      const feedbackOperation = { targets, stale: new Map<number, HpFeedbackSnapshot>(), emitted: new Set<number>() };
+      bulkHpFeedbackOperationsRef.current.set(bulkOperationId, feedbackOperation);
       // Issue #580: one id for this apply-to-all, extended per target so each PATCH gets a
       // distinct key (the server fingerprints the payload, so one key cannot cover two
       // different combatants). This loop is a plain async function, not a TanStack
@@ -1865,10 +2686,9 @@ export default function RunSessionPage() {
       // A DM manually re-running a half-failed apply-to-all still double-applies to the
       // targets that succeeded; making that safe needs a stable id on the pending-apply
       // itself and is deliberately left out of this change.
-      const bulkOperationId = newOperationId();
       try {
-        for (const { combatantId, damage } of applications) {
-          await api.patch<Combatant>(
+        const results = await Promise.all(applications.map(async ({ combatantId, damage }) => {
+          const combatant = await api.patch<Combatant>(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
             hpPatchWithActor(
               { hpDelta: delta, ...damage, idempotencyKey: `${bulkOperationId}:${combatantId}` },
@@ -1877,43 +2697,131 @@ export default function RunSessionPage() {
               isDm,
             ),
           );
+          return { combatantId, damage, combatant };
+        }));
+        if (previous && hasDamageMetadata) {
+          const snapshot = hpFeedbackSnapshotRef.current;
+          if (snapshot?.encounterId === eid) {
+            for (const { combatant, combatantId, damage } of results) {
+              const before = previous.combatants.find((candidate) => candidate.id === combatant.id);
+              const observed = snapshot.combatants.get(combatant.id);
+              const staleObserved = feedbackOperation.stale.get(combatant.id);
+              if (feedbackOperation.emitted.has(combatant.id)) continue;
+              if (staleObserved && !sameHpFeedbackSnapshot(staleObserved, combatant)) continue;
+              // A refetch may have already observed a different change to this target.
+              // Do not fold that remote update into this local result (or label it crit).
+              if (
+                !before
+                || !observed
+                || (!sameHpFeedbackSnapshot(observed, before) && !sameHpFeedbackSnapshot(observed, combatant))
+              ) continue;
+              appendHpFeedbackEvents(diffHpFeedback(
+                hpFeedbackSnapshot([before]),
+                [combatant],
+                damage.isCrit ? new Set([combatantId]) : new Set(),
+              ));
+              snapshot.combatants.set(combatant.id, combatant);
+              feedbackOperation.emitted.add(combatant.id);
+            }
+          }
         }
+        bulkHpFeedbackOperationsRef.current.delete(bulkOperationId);
         await invalidateEncounter(queryClient, eid);
       } catch (err) {
-        if (previous) queryClient.setQueryData(queryKeys.encounter(eid), previous);
+        bulkHpFeedbackOperationsRef.current.delete(bulkOperationId);
+        if (previous) {
+          queryClient.setQueryData(queryKeys.encounter(eid), previous);
+          seedHpFeedbackSnapshot(previous);
+        }
         // Same rule as the single-target stepper: an unknown outcome is not a failure.
         if (isAmbiguousOutcome(err)) enterReconciling();
         else reportError(err);
         throw err;
       }
     },
-    [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm],
+    [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm, seedHpFeedbackSnapshot, appendHpFeedbackEvents],
   );
 
+  // Issue #1909 scope note: earlier rounds of this PR added a CAS token + debounce/
+  // serialization queue to this whole-statblock PATCH (the in-app statblock editor's
+  // onChange path), trying to close a pre-existing lost-update on a caller this issue
+  // never named. That mechanism went through five review-caught regressions in a row (no
+  // token → lost updates; token added → 409 on every keystroke; token re-read at send time
+  // → guard defeated by a concurrent writer; token latched per-combatant → permanent
+  // lockout after any other encounter write; draft leaked across an encounter-id change
+  // mid-debounce) — a strong signal it was being built in the wrong place for this PR.
+  // Reverted back to this endpoint's actual, and already-solved, scope: `patchCombatant`
+  // sends every patch (including `statblock`) as a plain, immediate, token-less PATCH,
+  // exactly as it did before this PR touched this file. This restores the PRE-EXISTING
+  // whole-statblock-editor concurrency gap (a concurrent whole-statblock save can still
+  // revert another writer's unrelated edit) rather than introducing a new one — that gap
+  // predates this PR and is now tracked as its own follow-up issue rather than solved here.
+  // What #1909 actually asked for — flipping ONE resource pip no longer clobbers the WHOLE
+  // statblock — is unaffected: the pip path went through `adjustCombatantResource`'s
+  // delta-based endpoint from the very first round and never depended on this mechanism.
   const patchCombatant = useCallback(
-    (combatantId: number, patch: Record<string, unknown>) => {
+    // Issue #1992 review: returns whether the write actually landed (never rejects — both
+    // outcomes RESOLVE) so a caller that needs to know (the statblock editor's save-on-blur,
+    // which must not clear its local draft on a rejected write) can await it, while every
+    // OTHER call site keeps ignoring the return value exactly as before. combatantPatch's own
+    // onError still fires unconditionally (the generic error toast), so nothing here changes
+    // what the user is told — only whether CombatantRow discards its draft afterward.
+    //
+    // Round 5: no longer resolves an `updatedAt` — the statblock draft (the only consumer
+    // of that value) moved off a revision-token guard entirely in favor of a content
+    // compare (`expectedStatblock`, see combatantStatblockDraft.ts), so there is nothing
+    // left that needs this write's row-level token.
+    //
+    // Round 7 (Devin): `encounterId` is now a required, explicit parameter — every call
+    // site passes it (usually the page's own `eid`, but `CombatantRow`'s statblock
+    // save-on-blur passes ITS OWN `encounterId` prop instead) rather than this function
+    // resolving it from the surrounding closure. See `combatantPatchUrl`'s doc comment for
+    // why that distinction is what actually fixes the wrong-encounter-on-navigation defect.
+    (encounterId: number, combatantId: number, patch: Record<string, unknown>) => {
       const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
       const actorCombatantId =
         needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
       const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId, isDm) : patch;
-      combatantPatch.mutate({ combatantId, patch: enriched });
+      return combatantPatch.mutateAsync({ combatantId, encounterId, patch: enriched }).then(
+        () => ({ ok: true }),
+        () => ({ ok: false }),
+      );
     },
     [combatantPatch, encounter?.status, encounter?.currentCombatantId, isDm],
   );
 
   const deathSaveRoll = useKeyedMutation({
     mutationFn: ({ combatantId, idempotencyKey }: { combatantId: number; idempotencyKey: string }) =>
-      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
+      api.post<{ combatant: Combatant; roll: DiceRoll }>(`${API}/encounters/${eid}/combatants/${combatantId}/death-save`, { idempotencyKey }),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
+      const before = encounter?.combatants.find((candidate) => candidate.id === combatantId);
+      deathSaveBeforeStateRef.current.set(combatantId, before?.deathState ?? 'dying');
+      recentDeathSaveSelfRollRef.current.set(combatantId, Date.now());
+      // Issue #1919 — no client-supplied die face: this only starts the shared tumble
+      // animation. The face it settles on always comes from `showRoll(data.roll)` below.
+      beginRollAnimation('1d20');
+    },
+    onSuccess: (data) => {
+      showRoll(data.roll);
+      const before = deathSaveBeforeStateRef.current.get(data.combatant.id) ?? 'dying';
+      const outcome: DeathSaveOutcome = {
+        natural: data.roll.total,
+        kind: classifyDeathSaveOutcome(data.roll.total, before, data.combatant.deathState),
+      };
+      if (deathSaveOutcomeTimerRef.current != null) window.clearTimeout(deathSaveOutcomeTimerRef.current);
+      setDeathSaveOutcome({ combatantId: data.combatant.id, outcome });
+      deathSaveOutcomeTimerRef.current = window.setTimeout(() => setDeathSaveOutcome(null), 2_600);
     },
     onError: (err) => {
+      cancelRollAnimation();
       if (isAmbiguousOutcome(err)) enterReconciling();
       else reportError(err);
     },
     onSettled: (_data, _err, { combatantId }) => {
       markCombatantPending(combatantId, false);
+      deathSaveBeforeStateRef.current.delete(combatantId);
       invalidateEncounter(queryClient, eid);
     },
   });
@@ -1985,6 +2893,11 @@ export default function RunSessionPage() {
   const patchCombatantTurnState = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantTurnState.mutate({ combatantId, patch }),
     [combatantTurnState],
+  );
+  // Issue #1917: hoisted out of BattleMap's `onMoveFt` JSX prop.
+  const handleMoveFt = useCallback(
+    (combatantId: number, moveFt: number) => patchCombatantTurnState(combatantId, { moveFt }),
+    [patchCombatantTurnState],
   );
 
   /** One server roll drives both the death-save outcome and its shared dice-log entry. */
@@ -2347,6 +3260,17 @@ export default function RunSessionPage() {
       queueEncounterPatch({ mapAttachmentId: attachmentId, mapAlignment: alignment }),
     [queueEncounterPatch],
   );
+  // Issue #1917: hoisted out of BattleMap's `onImportMap`/`onDismissGuidance` JSX props —
+  // both were freshly bound arrows every render, defeating BattleMap's new React.memo.
+  const handleImportMap = useCallback(
+    (id: number) => {
+      setEncounterMap(id);
+      setShowMapGuidance(true);
+      announce('Map imported. Check the grid, set fog, then place tokens.');
+    },
+    [setEncounterMap, announce],
+  );
+  const handleDismissMapGuidance = useCallback(() => setShowMapGuidance(false), []);
   // Grid config (issue #40, phase 2) — any subset of gridSize/gridScale/gridUnit/gridSnap.
   const setEncounterGrid = useCallback((patch: EncounterGridPatch) => queueEncounterPatch(patch), [queueEncounterPatch]);
   // Fog of war (issue #40, phase 3) — replace the whole fog state (null clears it).
@@ -2355,6 +3279,74 @@ export default function RunSessionPage() {
   }, [eid, queueEncounterPatch]);
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
+  // Player declarations use scoped routes so the server, not the browser, owns
+  // declarer attribution and per-template authorization (#1913).
+  const declareAoeTemplate = useCallback(async (template: Omit<AoeTemplate, 'declaredByUserId'>) => {
+    setActionError(null);
+    await api.post(`${API}/encounters/${eid}/aoe-templates`, template);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const updateAoeTemplate = useCallback(async (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => {
+    setActionError(null);
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+      current
+        ? { ...current, aoe: current.aoe.map((template) => (template.id === templateId ? { ...template, ...patch } : template)) }
+        : current,
+    );
+    try {
+      await api.patch(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`, patch);
+    } catch (error) {
+      // A refetch is a rollback that does not clobber a later local nudge that
+      // may already have updated the same cache entry.
+      invalidateEncounter(queryClient, eid);
+      throw error;
+    }
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const removeAoeTemplate = useCallback(async (templateId: string) => {
+    setActionError(null);
+    await api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(templateId)}`);
+    invalidateEncounter(queryClient, eid);
+  }, [eid, queryClient]);
+  const clearPlayerAoeTemplates = useCallback(async () => {
+    const playerTemplates = (encounter?.aoe ?? []).filter((template) => template.declaredByUserId != null);
+    if (playerTemplates.length === 0) return;
+    setActionError(null);
+    const results = await Promise.allSettled(playerTemplates.map((template) => api.delete(`${API}/encounters/${eid}/aoe-templates/${encodeURIComponent(template.id)}`)));
+    invalidateEncounter(queryClient, eid);
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
+  }, [eid, encounter?.aoe, queryClient]);
+
+  // Issue #1917: `BattleMap`'s `onDeclareAoe`/`onUpdateAoe`/`onRemoveAoe`/`onClearPlayerAoe`
+  // props each wrapped an already-stable mutator (above) in a fresh inline arrow at the JSX
+  // call site — hoisted here so BattleMap's React.memo boundary sees stable references.
+  const handleDeclareAoe = useCallback(
+    (template: Omit<AoeTemplate, 'declaredByUserId'>) => {
+      void declareAoeTemplate(template).catch(reportError);
+    },
+    [declareAoeTemplate, reportError],
+  );
+  const handleUpdateAoe = useCallback(
+    async (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => {
+      try {
+        await updateAoeTemplate(templateId, patch);
+      } catch (error) {
+        reportError(error);
+        throw error;
+      }
+    },
+    [updateAoeTemplate, reportError],
+  );
+  const handleRemoveAoe = useCallback(
+    (templateId: string) => {
+      void removeAoeTemplate(templateId).catch(reportError);
+    },
+    [removeAoeTemplate, reportError],
+  );
+  const handleClearPlayerAoe = useCallback(() => {
+    void clearPlayerAoeTemplates().catch(reportError);
+  }, [clearPlayerAoeTemplates, reportError]);
 
   // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
   // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
@@ -2394,11 +3386,25 @@ export default function RunSessionPage() {
     mutationFn: (ping: MapPing) => api.post(`${API}/encounters/${eid}/ping`, ping),
     onError: reportError,
   });
-  const sendPing = (x: number, y: number) => pingMap.mutate({ x, y, color: null, label: null, senderId: null, senderName: null } as unknown as MapPing);
+  // Issue #1937: color carries per-user identity (not per-combatant — the same person
+  // keeps the same ping color across every combatant they might be playing). label is
+  // set only when the caller chose an intent from the long-press/right-click menu; a
+  // plain tap keeps sending null, byte-identical to before this issue. senderId/senderName
+  // stay null — the server stamps the authenticated caller's identity (issue #869/#1636).
+  // Issue #1917: hoisted from an inline JSX arrow into a stable useCallback — BattleMap is
+  // now React.memo-wrapped, so a fresh function identity here on every render would defeat it.
+  const sendPing = useCallback(
+    (x: number, y: number, label: string | null = null) =>
+      pingMap.mutate({ x, y, color: pingIdentityColor(String(myUserId ?? '')), label, senderId: null, senderName: null } as unknown as MapPing),
+    [pingMap, myUserId],
+  );
 
   // Move a combatant's token on the battle map. The server clamps to 0–100 and gates on
   // role (DM moves any; a player only their own character's token).
-  const moveToken = (combatantId: number, x: number, y: number) => patchCombatant(combatantId, { tokenX: x, tokenY: y });
+  const moveToken = useCallback(
+    (combatantId: number, x: number, y: number) => patchCombatant(eid, combatantId, { tokenX: x, tokenY: y }),
+    [patchCombatant, eid],
+  );
   const tokenUndoKeys = useRef(new Map<string, string>());
   const tokenBatchApplyIntents = useRef(new Map<string, { previewToken: string; idempotencyKey: string }>());
   // Batch map changes deliberately use the preview/apply protocol rather than a loop of
@@ -2436,9 +3442,15 @@ export default function RunSessionPage() {
   // Unplace a token (issue #271): clear its position back to null so it returns to the
   // "Unplaced" tray WITHOUT deleting the combatant (its HP/conditions/initiative survive).
   // An explicit null is required — `undefined` would be a no-op patch server-side.
-  const unplaceToken = (combatantId: number) => patchCombatant(combatantId, { tokenX: null, tokenY: null });
+  const unplaceToken = useCallback(
+    (combatantId: number) => patchCombatant(eid, combatantId, { tokenX: null, tokenY: null }),
+    [patchCombatant, eid],
+  );
   // Token size category (issue #40, phase 2) — DM-only, server-enforced.
-  const setTokenSize = (combatantId: number, size: TokenSize) => patchCombatant(combatantId, { tokenSize: size });
+  const setTokenSize = useCallback(
+    (combatantId: number, size: TokenSize) => patchCombatant(eid, combatantId, { tokenSize: size }),
+    [patchCombatant, eid],
+  );
 
   // Header run-control group shares one pending flag (see runControl above).
   // `reconcileBlocks` folds into the same busy flag the header already honors (issue
@@ -2453,7 +3465,11 @@ export default function RunSessionPage() {
     canDmWrite && encounter
       ? {
           canExecute: () => {
-            if (!encounter || headerBusy || riskyBlocked) return false;
+            // #599/#1933: the keyboard path must honor the same safety-hold mirror as the
+            // Next-turn button's GatedControl reason — otherwise the shortcut would still
+            // fire (and get server-rejected) while the button next to it visibly explains
+            // why it will not.
+            if (!encounter || headerBusy || riskyBlocked || safetyHoldActive) return false;
             if (confirmEnd || confirmReopen || confirmDelete) return false;
             return dmLifecycleActions(encounter.status).nextTurn;
           },
@@ -2570,6 +3586,102 @@ export default function RunSessionPage() {
     if (el) combatantRowRefs.current.set(combatantId, el);
     else combatantRowRefs.current.delete(combatantId);
   }, []);
+  // Issue #1917 stage 1: `CombatantRow` is now `React.memo`-wrapped, so a per-row `rowRef`
+  // callback recreated inline in the roster `.map()` below (`(el) => setCombatantRowRef(c.id,
+  // el)`) would be a fresh function identity every render and defeat the memo for that prop
+  // alone. `setCombatantRowRef` itself is already a stable (`[]` deps) top-level callback, so
+  // a cached per-combatant-id binding can never become *wrong* — the thing it closes over
+  // never changes identity.
+  //
+  // It can still make the cache *grow*. `RunSessionPage` is reused across encounters, so with
+  // no reset every combatant id the session has ever shown would accumulate here for the life
+  // of the page. Correct-forever and bounded are separate properties, and only the first
+  // follows from the stable closure; the effect below clears both maps on `eid`, matching the
+  // other per-encounter resets in this file.
+  const combatantRowRefCallbacks = useRef(new Map<number, (el: HTMLElement | null) => void>());
+  const getCombatantRowRef = useCallback(
+    (combatantId: number) => {
+      const cache = combatantRowRefCallbacks.current;
+      let bound = cache.get(combatantId);
+      if (!bound) {
+        bound = (el: HTMLElement | null) => setCombatantRowRef(combatantId, el);
+        cache.set(combatantId, bound);
+      }
+      return bound;
+    },
+    [setCombatantRowRef],
+  );
+
+  // Manual initiative reorder (issue #1923). `handleReorderDrop` is the single write
+  // path both InitiativeStrip's drag and the roster's drag-handle/menu funnel through —
+  // `encounter.turnVersion` is read HERE, at call time, not memoized into a stale
+  // closure, so the CAS token sent is always the one this render actually showed the DM.
+  const rosterOrderedIds = useMemo(() => encounter?.combatants.map((c) => c.id) ?? [], [encounter]);
+  const canReorderCombatants = canDmWrite && encounter != null && encounter.status !== 'ended';
+  const handleReorderDrop = useCallback(
+    (combatantId: number, afterCombatantId: number | 'top') => {
+      if (!encounter) return;
+      reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion });
+    },
+    [encounter, reorderCombatant],
+  );
+  const rosterDragReorder = useCombatantDragReorder({
+    axis: 'y',
+    orderedIds: rosterOrderedIds,
+    // Issue #2084 finding 4: `reconcileBlocks`/`riskyBlocked` were already folded into
+    // `buildReorderControls`' `busy` below (issue #2074 review finding 3), which
+    // withholds `dragHandleProps` on the row — but withholding props off an ELEMENT
+    // THAT STAYS MOUNTED only drops the DOM listeners; it never told this hook a
+    // gesture already in flight had gone stale, so `gestureRef` stayed populated and
+    // every later drag on every row was refused until reload. Folding the same gate
+    // into `enabled` here lets the hook's own enabled-transition effect reset (and
+    // release pointer capture on) an in-progress gesture directly, independent of
+    // whatever the caller's props end up doing with `busy`.
+    enabled: canReorderCombatants && !reconcileBlocks && !riskyBlocked,
+    elementsRef: combatantRowRefs,
+    onDrop: handleReorderDrop,
+  });
+  const buildReorderControls = useCallback(
+    (combatant: Combatant): CombatantRowProps['reorder'] => {
+      if (!canReorderCombatants || !encounter) return null;
+      const ids = rosterOrderedIds;
+      const moveUpTarget = afterCombatantIdForMoveUp(ids, combatant.id);
+      const moveDownTarget = afterCombatantIdForMoveDown(ids, combatant.id);
+      return {
+        canMoveUp: moveUpTarget !== null,
+        canMoveDown: moveDownTarget !== null,
+        onMoveUp: () => { if (moveUpTarget !== null) handleReorderDrop(combatant.id, moveUpTarget); },
+        onMoveDown: () => { if (moveDownTarget !== null) handleReorderDrop(combatant.id, moveDownTarget); },
+        menuTargets: reorderMenuTargets(encounter.combatants, combatant.id).map((c) => ({ id: c.id, name: c.name })),
+        onMoveAfter: (afterCombatantId) => handleReorderDrop(combatant.id, afterCombatantId),
+        dragHandleProps: rosterDragReorder.handleProps(combatant.id),
+        isDragging: rosterDragReorder.draggingId === combatant.id,
+        isDropTarget: rosterDragReorder.overId === combatant.id,
+        // Issue #2074 review finding 3: reorder performs a write (POST .../reorder), so
+        // it must consult the live-sync gate (`riskyBlocked`) the same way every other
+        // write control on this row does — see CombatantRowProps.syncBlocked's own doc
+        // ("EVERY control that performs a write must consult both"). Omitting it left the
+        // drag handle and ReorderMenu draggable/clickable during an SSE outage that blocks
+        // every other conflict-prone write on the row.
+        busy: pendingCombatantIds.has(combatant.id) || reconcileBlocks || riskyBlocked,
+      };
+    },
+    [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks, riskyBlocked],
+  );
+  // Drop the previous encounter's cached ref bindings on switch, so the cache stays bounded
+  // across a long session.
+  //
+  // ONLY the callback cache. Clearing `combatantRowRefs` here too is actively wrong (#2083
+  // review): with the target encounter already in the React Query cache, `encounter` is
+  // non-null in the same render `eid` changes, so rows mount and attach their refs during that
+  // commit — and this passive effect, running afterwards, would drop refs for rows that are
+  // still mounted. React does not re-invoke a ref until its identity changes, so those entries
+  // would stay missing until the next render and the turn auto-scroll would silently fall back
+  // to a `querySelector`. React already clears that map on unmount by invoking each ref with
+  // null, so the belt-and-braces line was not harmless.
+  useEffect(() => {
+    combatantRowRefCallbacks.current.clear();
+  }, [eid]);
   const autoScrollSkipped = useRef(false);
   // `RunSessionPage` is reused across encounters; reset the first-load latch so
   // each new encounter starts with the header controls visible.
@@ -2602,6 +3714,55 @@ export default function RunSessionPage() {
     });
     return () => cancelAnimationFrame(frame);
   }, [encounter?.status, currentCombatantId]);
+
+  // Issue #1917: `ApplyDamageBar` is now React.memo-wrapped, so its `targets`/`aoeHitContext`
+  // array/object props and its `onApply`/`onApplyToAll`/`onDismiss` handlers are hoisted out
+  // of the JSX call site (below) rather than rebuilt inline on every render. Placed above the
+  // `!encounter` early returns (below) — like every other hook in this component — so hook
+  // order stays identical across renders regardless of loading/not-found/error state.
+  const applyDamageBarTargets = useMemo(
+    () => (encounter?.combatants ?? []).filter((c) => canEditCombatantPermission(c) && c.hpCurrent != null),
+    [encounter?.combatants, canEditCombatantPermission],
+  );
+  const applyDamageBarAoeHitContext = useMemo(
+    () =>
+      encounter &&
+      encounter.gridSize != null &&
+      encounter.gridSize > 0 &&
+      encounter.gridScale != null &&
+      encounter.gridScale > 0 &&
+      aoeHitLayout
+        ? {
+            gridSize: encounter.gridSize,
+            gridScale: encounter.gridScale,
+            mapRect: aoeHitLayout.mapRect,
+            cellPx: aoeHitLayout.cellPx,
+            gridType: encounter.gridType ?? 'square',
+            hexOrientation: encounter.hexOrientation ?? 'pointy',
+            calibration: resolveGridCalibration(encounter),
+          }
+        : null,
+    [encounter, aoeHitLayout],
+  );
+  const applyDamageBarOnApply = useCallback(
+    (combatantId: number, delta: number, damage: DirectDamageMetadata) => {
+      if (!pendingApply) return;
+      const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
+      hpDelta.mutate({ combatantId, delta, actorId, ...damage });
+      setPendingApply(null);
+    },
+    [pendingApply, currentCombatantId, hpDelta],
+  );
+  const applyDamageBarOnApplyToAll = useCallback(
+    (applications: TargetDamageApplication[], delta: number) => {
+      const actorId = pendingApply?.actorCombatantId ?? currentCombatantId ?? undefined;
+      void applyHpDeltaBulk(applications, delta, actorId)
+        .then(() => setPendingApply(null))
+        .catch(() => undefined);
+    },
+    [pendingApply, currentCombatantId, applyHpDeltaBulk],
+  );
+  const applyDamageBarOnDismiss = useCallback(() => setPendingApply(null), []);
 
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
@@ -2664,6 +3825,7 @@ export default function RunSessionPage() {
   const pendingConcentrationCheck = concentrationCheckCombatant?.turnState.pendingConcentrationChecks[0] ?? null;
   const canResolveConcentrationCheck =
     concentrationCheckCombatant != null && canEditCombatantPermission(concentrationCheckCombatant);
+
   // Issue #420: DM header actions come from an explicit lifecycle matrix (not
   // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
   const lifecycle = dmLifecycleActions(encounter.status);
@@ -2773,6 +3935,16 @@ export default function RunSessionPage() {
         />
       )}
 
+      {canEditEncounter && (
+        <MonsterHpDisplayControl
+          value={encounter.monsterHpDisplay}
+          disabled={riskyBlocked}
+          onChange={(mode) => {
+            void queueEncounterPatch({ monsterHpDisplay: mode });
+          }}
+        />
+      )}
+
       <div className="flex items-center gap-2.5 flex-wrap">
         <h1 className="text-2xl font-extrabold text-white m-0 min-w-0 break-words">{encounter.name}</h1>
         <span className={STATUS_TAG_CLASS[encounter.status]}>
@@ -2783,6 +3955,16 @@ export default function RunSessionPage() {
             Round {encounter.round}
             {encounter.turnPhase === 'lair' ? ` · Lair (init ${LAIR_INITIATIVE_COUNT})` : ''}
           </span>
+        )}
+        {/* Turn timer (issue #1935): DM-cockpit elapsed chip next to the round tag. Players
+            get the same information (only once a limit is set) via PlayerVitalsHeader below,
+            not here — see TurnElapsedChip's audience doc. */}
+        {isDm && (
+          <TurnElapsedChip
+            turnStartedAt={encounter.turnStartedAt}
+            turnTimerSeconds={encounter.turnTimerSeconds}
+            audience="dm"
+          />
         )}
         <DifficultyBadge difficulty={difficulty} />
         {isDm && <PrintControl resetKey={encounter.id} className="ml-auto" />}
@@ -2851,6 +4033,7 @@ export default function RunSessionPage() {
           lifecycle={lifecycle}
           headerBusy={headerBusy}
           riskyBlocked={riskyBlocked}
+          safetyHoldActive={safetyHoldActive}
           needsInitiativeCount={needsInitiativeCount}
           hasNoCombatants={hasNoCombatants}
           undoTurnDisabled={
@@ -2875,6 +4058,10 @@ export default function RunSessionPage() {
             setConfirmReopen(true);
           }}
           onRequestDelete={() => setConfirmDelete(true)}
+          turnTimerSeconds={encounter.turnTimerSeconds}
+          onSetTurnTimerSeconds={(seconds) => {
+            void queueEncounterPatch({ turnTimerSeconds: seconds });
+          }}
         />
       </div>
 
@@ -2887,9 +4074,10 @@ export default function RunSessionPage() {
           a stuck stream (proxy buffering, a terminated long-lived connection, …) must not
           brick combat permanently. Granting the override does not touch the banner above,
           which stays visible for as long as the stream is unhealthy so the DM never loses
-          track of which mode they're in. DM-only (canDmWrite): the issue frames "continue
-          anyway" as a DM decision — a player has no path to grant it, so a player's own
-          combatant mutations stay blocked for the whole outage. */}
+          track of which mode they're in. DM-only (canDmWrite): this is the table-wide
+          override — unblocks every conflict-prone control. Issue #1914 adds a second,
+          player-facing prompt just below, scoped to the confirming player's own combatant
+          only; a player has no path to grant THIS one. */}
       {encounterSyncOverrideOfferable && (
         <div
           role="status"
@@ -2916,9 +4104,43 @@ export default function RunSessionPage() {
           </Btn>
         </div>
       )}
+      {/* Issue #1914: the scoped, player-facing "continue anyway" — visible only to a
+          non-DM viewer with at least one owned combatant in THIS encounter (an offer with
+          nothing to unblock would be a dead prompt). Grants `scope: 'own-combatant'`
+          explicitly; `gateForWrite` is what actually confines its effect to the confirming
+          player's own combatant rows, not this handler. */}
+      {encounterSyncOwnOverrideOfferable && myCombatants.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid="encounter-sync-own-override-prompt"
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap"
+        >
+          <span>{t('encounters.sync.ownOverridePrompt')}</span>
+          <Btn
+            density="xs"
+            ghost
+            className="text-xs"
+            data-testid="encounter-sync-own-override-confirm"
+            onClick={() => {
+              // Defense in depth alongside the gate above — never let a DM/staff-only or a
+              // stale-identity viewer grant the scoped override even if this handler is
+              // somehow reachable, and never grant it with `scope: 'dm'`.
+              if (!overrideAuthority.canPlayerWrite || overrideAuthority.canDmWrite || overrideAuthority.staleIdentity) return;
+              setEncounterSyncOverride(
+                confirmEncounterOverride(overrideAuthority.campaignId, overrideAuthority.userId, 'own-combatant'),
+              );
+            }}
+          >
+            {t('encounters.sync.ownOverrideConfirm')}
+          </Btn>
+        </div>
+      )}
       {effectiveEncounterSyncOverride.active && encounterSync !== 'live' && (
         <span className="tag tag-accent" data-testid="encounter-sync-override-active" style={{ fontSize: 11 }}>
-          {t('encounters.sync.overrideActive')}
+          {effectiveEncounterSyncOverride.scope === 'own-combatant'
+            ? t('encounters.sync.ownOverrideActive')
+            : t('encounters.sync.overrideActive')}
         </span>
       )}
 
@@ -3168,8 +4390,12 @@ export default function RunSessionPage() {
           canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
+          currentTurnCombatantId={encounter.status === 'running' ? turnWorkspace?.current?.combatantId ?? null : null}
+          currentTurnMovementMaxFt={turnWorkspace?.movement?.maxFt ?? null}
+          onMoveFt={handleMoveFt}
           onBatchTokens={batchMoveTokens}
           onUndoTokenBatch={undoTokenBatch}
           dismissTokenUndoNonce={dismissTokenUndoNonce}
@@ -3178,42 +4404,63 @@ export default function RunSessionPage() {
           onSetTokenSize={setTokenSize}
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
-          pendingFog={pendingFogForEncounter(pendingFog, eid)}
+          pendingFog={battleMapPendingFog}
           onSetAoe={setEncounterAoe}
+          aoeDeclarerNames={aoeDeclarerNames}
+          canDeclareAoe={!riskyBlocked && encounter.status !== 'ended' && (canDmWrite || canPlayerWrite)}
+          onDeclareAoe={handleDeclareAoe}
+          onUpdateAoe={handleUpdateAoe}
+          onRemoveAoe={handleRemoveAoe}
+          onClearPlayerAoe={canEditEncounter ? handleClearPlayerAoe : undefined}
+          hpFeedbackByCombatant={hpFeedbackByCombatant}
           onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
-          onImportMap={
-            canEditEncounter
-              ? (id) => {
-                  setEncounterMap(id);
-                  setShowMapGuidance(true);
-                  announce('Map imported. Check the grid, set fog, then place tokens.');
-                }
-              : undefined
-          }
+          onImportMap={canEditEncounter ? handleImportMap : undefined}
           showGuidance={showMapGuidance}
-          onDismissGuidance={() => setShowMapGuidance(false)}
+          onDismissGuidance={handleDismissMapGuidance}
           onPing={sendPing}
           pings={pings}
           onDismissPing={dismissPing}
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
           ruleSystem={ruleSystem}
+          customMechanicsProfile={campaign?.customMechanicsProfile}
+          targeting={battleMapTargeting}
+          impactTargetIds={actionImpactTargetIds}
         />
       )}
 
       {/* Sticky Player Vitals Header */}
       {!isDm && myCombatants.length > 0 && (
-        <PlayerVitalsHeader 
-          combatants={myCombatants} 
+        <PlayerVitalsHeader
+          combatants={myCombatants}
           charactersById={charactersById}
           turnPulse={turnPulse}
           currentCombatantId={currentCombatantId}
+          movementDefault={movementDefault}
+          colorVisionAssist={me?.user.colorVisionAssist ?? false}
+          turnStartedAt={encounter.turnStartedAt}
+          turnTimerSeconds={encounter.turnTimerSeconds}
+          ruleSystem={ruleSystem}
+          campaignId={cid}
+          rulesHintCompendiumAvailable={rulesHintCompendiumAvailable}
           onHpDelta={(id, delta) => {
             if (reconcileBlocks) return;
             const actorId = hpLogActorId(currentCombatantId, id);
             hpDelta.mutate({ combatantId: id, delta, actorId });
           }}
-          onSetHpMax={(id, max) => patchCombatant(id, { hpMax: max })}
+          onSetHpMax={(id, max) => {
+            if (reconcileBlocks) return;
+            patchCombatant(eid, id, { hpMax: max });
+          }}
+          onRollDeathSave={(id) => rollDeathSave({ id })}
+          isDeathSaveBusy={(id) => pendingCombatantIds.has(id) || reconcileBlocks}
+          // Issue #1914: every combatant here is, by construction, one `myCombatants`
+          // owns (the mount condition above) — so this is always an OWN-COMBATANT write,
+          // unblockable by the scoped player override without touching any other row.
+          syncBlocked={gateForWrite('own-combatant', { isOwnCombatant: true }, encounterSync, effectiveEncounterSyncOverride)}
+          deathSaveOutcome={deathSaveOutcome}
+          customMechanicsProfile={campaign?.customMechanicsProfile}
+          onSpecialResourceError={surfaceActionError}
         />
       )}
 
@@ -3234,9 +4481,23 @@ export default function RunSessionPage() {
             <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
             <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
             {canDmWrite && (
-              <Btn className="ml-auto" disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
-                Done →
-              </Btn>
+              // Issue #1933 review: this is the THIRD entry point to `nextTurn`, alongside
+              // the keyboard shortcut and DmLifecycleHeader's button. Both of those got the
+              // safety-hold mirror; this one did not, so a DM resolving a lair action while
+              // the table is paused fired a write `assertNoSafetyHold` rejects and got a
+              // bare error — the exact "server rejects and the UI cannot say why" outcome
+              // this issue exists to remove. Same shared resolver as the header, so all
+              // three agree by construction rather than by three people remembering.
+              // `ml-auto` moves to the WRAPPER: it is the flex item of this row now, so the
+              // button's own auto margin would push nothing (issue #1933 review).
+              <GatedControl
+                className="ml-auto"
+                reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t, headerBusy)}
+              >
+                <Btn disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
+                  Done →
+                </Btn>
+              </GatedControl>
             )}
           </div>
         </Card>
@@ -3248,12 +4509,23 @@ export default function RunSessionPage() {
           turn={turnWorkspace}
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
+          customMechanicsProfile={campaign?.customMechanicsProfile}
           currentTurnState={currentCombatant?.turnState}
-          actionsDisabled={riskyBlocked}
+          // Issue #1914: `actionsDisabled` now gates the workspace's OWN-COMBATANT writes
+          // (action-economy slots, death-save roll, spellbook, delay/ready, movement — all
+          // server-redacted to the DM or the current combatant's OWNER, so whenever a
+          // player sees any of this it is already their own turn) and can be relaxed by a
+          // same-outage 'own-combatant' override. `endTurnBlocked` stays the unrelaxed
+          // DM-grade gate for the End-turn button specifically — turn-topology writes are
+          // never unblocked by that scope, per the issue's acceptance criteria.
+          actionsDisabled={gateForWrite('own-combatant', { isOwnCombatant: turnWorkspace?.isYourTurn === true }, encounterSync, effectiveEncounterSyncOverride)}
+          endTurnBlocked={riskyBlocked}
           deathSavePending={reconcileBlocks}
           isCombatantPending={(combatantId) => pendingCombatantIds.has(combatantId)}
           gridUnit={encounter.gridUnit}
           gridScale={encounter.gridScale}
+          campaignId={cid}
+          rulesHintCompendiumAvailable={rulesHintCompendiumAvailable}
           onRollDeathSave={rollDeathSave}
           onUpdateSpellSlot={
             // Review fix: derive the actor from turnWorkspace.current (the SAME data the
@@ -3325,6 +4597,7 @@ export default function RunSessionPage() {
             endTurn.mutate({ expectedCurrentCombatantId })
           }
           endTurnBusy={endTurn.isPending}
+          safetyHoldActive={safetyHoldActive}
         />
       )}
       <TurnChangeBeat
@@ -3337,6 +4610,13 @@ export default function RunSessionPage() {
             : turnWorkspace?.current?.combatantId === currentCombatantId
               && turnWorkspace?.isYourTurn === true)}
       />
+      {/* Issue #1919 "table side": visible-only, same convention as TurnChangeBeat above —
+          the combat-log Announcer already covers this exact roll for every viewer via SR. */}
+      {deathSaveSpectatorToast && (
+        <div key={deathSaveSpectatorToast.id} className="cf-death-save-spectator-toast" data-testid="death-save-spectator-toast">
+          {deathSaveSpectatorToast.message}
+        </div>
+      )}
 
       {pendingApply && (
         <ApplyDamageBar
@@ -3345,39 +4625,15 @@ export default function RunSessionPage() {
           label={pendingApply.label}
           diceTotal={pendingApply.diceTotal}
           ruleSystem={campaign?.ruleSystem}
-          targets={orderedCombatants.filter((c) => canEditCombatantPermission(c) && c.hpCurrent != null)}
+          customMechanicsProfile={campaign?.customMechanicsProfile}
+          targets={applyDamageBarTargets}
           applyDisabled={riskyBlocked}
           aoeTemplates={encounter.aoe ?? []}
-          aoeHitContext={
-            encounter.gridSize != null &&
-            encounter.gridSize > 0 &&
-            encounter.gridScale != null &&
-            encounter.gridScale > 0 &&
-            aoeHitLayout
-              ? {
-                  gridSize: encounter.gridSize,
-                  gridScale: encounter.gridScale,
-                  mapRect: aoeHitLayout.mapRect,
-                  cellPx: aoeHitLayout.cellPx,
-                  gridType: encounter.gridType ?? 'square',
-                  hexOrientation: encounter.hexOrientation ?? 'pointy',
-                  calibration: resolveGridCalibration(encounter),
-                }
-              : null
-          }
+          aoeHitContext={applyDamageBarAoeHitContext}
           isStarfinder={isStarfinder}
-          onApply={(combatantId, delta, damage) => {
-            const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
-            hpDelta.mutate({ combatantId, delta, actorId, ...damage });
-            setPendingApply(null);
-          }}
-          onApplyToAll={(applications, delta) => {
-            const actorId = pendingApply.actorCombatantId ?? currentCombatantId ?? undefined;
-            void applyHpDeltaBulk(applications, delta, actorId)
-              .then(() => setPendingApply(null))
-              .catch(() => undefined);
-          }}
-          onDismiss={() => setPendingApply(null)}
+          onApply={applyDamageBarOnApply}
+          onApplyToAll={applyDamageBarOnApplyToAll}
+          onDismiss={applyDamageBarOnDismiss}
         />
       )}
 
@@ -3436,21 +4692,51 @@ export default function RunSessionPage() {
 
       {pendingActionUse && (
         <ActionUsePanel
+          key={pendingActionUse.id}
           encounterId={eid}
           actorCombatantId={pendingActionUse.combatantId}
           actorName={pendingActionUse.actorName}
           actionIndex={pendingActionUse.actionIndex}
           actionName={pendingActionUse.actionName}
+          actionToken={pendingActionUse.id}
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
+          targetIds={actionTargetIds}
+          onToggleTarget={toggleActionTarget}
+          onPreview={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(true); }}
+          onPreviewStart={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(true); }}
+          onPreviewError={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(false); }}
+          onBackToTargets={(actionToken) => { if (pendingActionUseIdRef.current === actionToken) setActionTargetsDeclared(false); }}
           isDm={isDm}
+          // #599/#1933: `ActionResolverService.apply` has its own `assertNotHeld`, separate
+          // from `EncountersService.assertNoSafetyHold`. Threading the hold only into the
+          // lifecycle controls left this Apply enabled during a pause, so raising an X-Card
+          // after a preview produced a bare server conflict instead of the gate reason.
+          // Scoped to Apply: the server keeps `resolve` (the preview) open during a hold,
+          // so the roll/preview controls in this panel stay as they were.
+          // Deliberately NOT `|| safetyHoldActive`: this prop also feeds the panel's
+          // QuickRollButtons, and `/quick-roll` carries no hold guard server-side (only
+          // `apply` does). Folding the hold in here would disable a control the server
+          // would have allowed. The hold reaches Apply alone, via `applyGateReason`.
           applyDisabled={riskyBlocked}
-          onDismiss={() => setPendingActionUse(null)}
+          applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
+          onDismiss={() => { pendingActionUseIdRef.current = null; setPendingActionUse(null); setActionTargetIds([]); setActionTargetsDeclared(false); }}
           onError={surfaceActionError}
           onApplied={(token, _policy, sourceEncounterId) => {
             if (!isCurrentCombatantUndoEncounter(sourceEncounterId, activeEncounterIdRef.current)) return;
             void invalidateEncounter(queryClient, sourceEncounterId);
+            pendingActionUseIdRef.current = null;
             setPendingActionUse(null);
+            if (!prefersReducedMotion()) {
+              if (actionImpactTimerRef.current != null) window.clearTimeout(actionImpactTimerRef.current);
+              setActionImpactTargetIds(actionTargetIds);
+              actionImpactTimerRef.current = window.setTimeout(() => {
+                setActionImpactTargetIds([]);
+                actionImpactTimerRef.current = null;
+              }, 250);
+            }
+            setActionTargetIds([]);
+            setActionTargetsDeclared(false);
             if (trashedEncounterIdsRef.current.has(sourceEncounterId)) return;
             dismissCompetingRecoveryUndos();
             setActionUndo({ token, label: pendingActionUse.actionName });
@@ -3466,6 +4752,26 @@ export default function RunSessionPage() {
             await undoAction.mutateAsync(actionUndo.token);
           }}
           onExpire={() => setActionUndo(null)}
+        />
+      )}
+
+      {pendingGroupActionUse && (
+        <GroupActionRunner
+          key={pendingGroupActionUse.id}
+          encounterId={eid}
+          actorCombatantId={pendingGroupActionUse.combatantId}
+          actorName={pendingGroupActionUse.actorName}
+          actionIndex={pendingGroupActionUse.actionIndex}
+          actionName={pendingGroupActionUse.actionName}
+          spec={pendingGroupActionUse.spec}
+          sourceAction={pendingGroupActionUse.sourceAction}
+          combatants={orderedCombatants}
+          // Same gate as ActionUsePanel's own `applyDisabled`/`applyGateReason` above — the
+          // group runner's "Roll for group" button applies (commits), so it is gated exactly
+          // like a single Apply: sync-blocked always, safety-hold-blocked too (#599/#1933).
+          applyDisabled={riskyBlocked}
+          applyGateReason={gateReasonText(actionApplyGateReason({ safetyHoldActive, riskyBlocked }), t)}
+          onDismiss={() => setPendingGroupActionUse(null)}
         />
       )}
 
@@ -3487,6 +4793,11 @@ export default function RunSessionPage() {
               currentCombatantId={encounter.currentCombatantId}
               charactersById={charactersById}
               turnPulse={turnPulse}
+              hpFeedbackByCombatant={hpFeedbackByCombatant}
+              colorVisionAssist={me?.user.colorVisionAssist ?? false}
+              revealTick={revealTick}
+              canReorder={canEditEncounter}
+              onReorderDrop={handleReorderDrop}
             />
           )}
           <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
@@ -3519,10 +4830,13 @@ export default function RunSessionPage() {
               orderedCombatants.map((c) => (
                 <CombatantRow
                   key={c.id}
-                  rowRef={(el) => setCombatantRowRef(c.id, el)}
+                  customMechanicsProfile={campaign?.customMechanicsProfile}
+                  rowRef={getCombatantRowRef(c.id)}
                   encounterId={eid}
                   combatant={c}
+                  hpFeedbackEvents={hpFeedbackByCombatant.get(c.id) ?? []}
                   isCurrentTurn={c.id === currentCombatantId}
+                  colorVisionAssist={me?.user.colorVisionAssist ?? false}
                   // Permission decides whether these controls MOUNT at all (issue #1746):
                   // a genuinely unauthorized viewer (wrong owner, ended encounter) never sees
                   // them. Whether the sync gate currently blocks writes is a separate, transient
@@ -3531,11 +4845,37 @@ export default function RunSessionPage() {
                   // not `canEdit` (Devin review finding): every write-control consumer inside
                   // CombatantRow must consult BOTH this and `syncBlocked`, and the old name read
                   // as if permission alone were sufficient.
+                  isDm={isDm}
+                  myUserId={myUserId}
                   canEditPermission={canEditCombatantPermission(c)}
-                  syncBlocked={riskyBlocked}
+                  // Issue #1914: the DM-only controls on this row (identity edit, remove,
+                  // initiative, duplicate) are mounted only for `canDmWrite` regardless of
+                  // this value, so `combatantWriteBlocked` — which can relax below
+                  // `riskyBlocked` for a player's OWNED row via a same-outage
+                  // 'own-combatant' override — never exposes anything beyond that row's own
+                  // HP/temp HP, death saves, and conditions. Every other row (not owned)
+                  // and every DM row (unaffected — a 'dm' override already covers it) sees
+                  // exactly `riskyBlocked`, unchanged.
+                  syncBlocked={combatantWriteBlocked(c)}
+                  turnTopologyBlocked={riskyBlocked}
                   canEditIdentity={canDmWrite && encounter.status !== 'ended'}
-                  statblock={isDm && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} campaignId={cid} /> : undefined}
+                  reorder={buildReorderControls(c)}
+                  // Issue #1926: a non-DM viewer mounts the same compendium statblock viewer
+                  // once the DM has revealed this combatant — the ruleEntryId link itself is
+                  // not campaign-secret (unchanged by this issue; see /rules/entries/:id), so
+                  // the server-enforced gate here is `statblockRevealed`, not `isDm`.
+                  statblock={(isDm || c.statblockRevealed) && c.ruleEntryId != null ? <CombatantStatblock ruleEntryId={c.ruleEntryId} ruleSystem={ruleSystem} customMechanicsProfile={campaign?.customMechanicsProfile} campaignId={cid} /> : undefined}
+                  showKillPrompt={isDm && shouldShowKillPrompt(c, dismissedKillPromptIds)}
+                  onDismissKillPrompt={() => setDismissedKillPromptIds((prev) => dismissKillPrompt(prev, c.id))}
                   canRemove={canDmWrite}
+                  // Issue #1944: DM-only Award for the adapter-declared special resource
+                  // (5e inspiration / PF2e hero points). Same DM-write gate as canRemove —
+                  // CombatantRow additionally requires a resolvable character and an
+                  // adapter that declares one of SPECIAL_RESOURCE_KEYS before it mounts.
+                  canAwardSpecialResource={canDmWrite}
+                  onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
+                    ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))
+                    : undefined}
                   canSetInitiative={canDmWrite && encounter.status !== 'ended'}
                   running={encounter.status === 'running'}
                   character={
@@ -3562,6 +4902,7 @@ export default function RunSessionPage() {
                       ? cid
                       : undefined
                   }
+                  routeCampaignId={cid}
                   // Issue #1898 review: the statblock read is a plain GET, not a write —
                   // it has none of the staleness/edit-permission concerns campaignId above
                   // guards against, so it must not go `undefined` (and 404 for homebrew) in
@@ -3588,11 +4929,22 @@ export default function RunSessionPage() {
                       ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                       : undefined
                   }
+                  // Issue #1922: identical gating to `onUseMonsterAction` above — DM-only
+                  // (`canEditCombatantPermission` reduces to `canDmWrite` once `characterId`
+                  // is null), monster/npc rows only. The sync gate disables the rendered
+                  // button the same way, via `disabledReason` inside `CombatantActionsList`.
+                  onUseGroupAction={
+                    canEditCombatantPermission(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
+                      ? (actionIndex, actionName, spec, action) => onUseGroupActionRequested(c.id, c.name, actionIndex, actionName, spec, action)
+                      : undefined
+                  }
                   busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
                   conditionSuggestions={conditionSuggestions}
                   conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
                   defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
                   ruleSystem={ruleSystem}
+                  rulesHintCampaignId={cid}
+                  rulesHintCompendiumAvailable={rulesHintCompendiumAvailable}
                   onHpDelta={(delta) => {
                     // Belt-and-braces with the `busy` prop above: never let a second damage
                     // intent start while the outcome of the previous one is still unknown (#580).
@@ -3600,18 +4952,19 @@ export default function RunSessionPage() {
                     const actorId = hpLogActorId(currentCombatantId, c.id);
                     hpDelta.mutate({ combatantId: c.id, delta, actorId });
                   }}
-                  onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
-                  onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
+                  onSetTempHp={(value) => patchCombatant(eid, c.id, { hpTemp: value })}
+                  onSetDeathSaves={(patch) => patchCombatant(eid, c.id, patch)}
                   onRollDeathSave={() => rollDeathSave(c)}
+                  deathSaveOutcome={deathSaveOutcome?.combatantId === c.id ? deathSaveOutcome.outcome : null}
                   onRollInitiative={() => rollCombatantInitiative(c)}
-                  onSetInitiative={(value) => patchCombatant(c.id, { initiative: value })}
-                  onClearInitiative={() => patchCombatant(c.id, { initiative: null })}
-                  onAddCondition={(cond) => patchCombatant(c.id, { addConditions: [cond] })}
-                  onRemoveCondition={(cond) => patchCombatant(c.id, { removeConditions: [cond] })}
-                  onRename={(name) => patchCombatant(c.id, { name })}
-                  onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
+                  onSetInitiative={(value) => patchCombatant(eid, c.id, { initiative: value })}
+                  onClearInitiative={() => patchCombatant(eid, c.id, { initiative: null })}
+                  onAddCondition={(cond) => patchCombatant(eid, c.id, { addConditions: [cond] })}
+                  onRemoveCondition={(cond) => patchCombatant(eid, c.id, { removeConditions: [cond] })}
+                  onRename={(name) => patchCombatant(eid, c.id, { name })}
+                  onSetHpMax={(value) => patchCombatant(eid, c.id, { hpMax: value })}
                   onSetTokenSize={(size) => setTokenSize(c.id, size)}
-                  onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
+                  onPatchCombatant={(patch, targetEncounterId) => patchCombatant(targetEncounterId, c.id, patch)}
                   onPatchSourceTurnState={
                     canDmWrite || c.id === currentCombatantId
                       ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)
@@ -3629,6 +4982,7 @@ export default function RunSessionPage() {
                       : undefined
                   }
                   onRemove={() => setConfirmRemoveCombatantId(c.id)}
+                  targeting={pendingActionUse && pendingActionUse.spec.targets.count > 0 ? { legal: actionLegalTargetIds.includes(c.id), selected: actionTargetIds.includes(c.id), declared: actionTargetsDeclared, atCapacity: actionTargetsAtCapacity, onToggle: () => toggleActionTarget(c.id) } : null}
                 />
               ))
             )}
@@ -3641,6 +4995,7 @@ export default function RunSessionPage() {
               characters={characters}
               existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
               rulePack={campaign?.ruleSystem || ''}
+              customMechanicsProfile={campaign?.customMechanicsProfile}
               onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
             />
           )}
@@ -3653,14 +5008,23 @@ export default function RunSessionPage() {
           <CombatLog events={events} />
 
           <SharedDiceLog campaignId={cid} />
+
+          <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} customMechanicsProfile={campaign?.customMechanicsProfile} />
         </aside>
       </div>
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} encounterUpdatedAt={encounter.updatedAt} />
+      <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} />
 
-      {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
+      {canDmWrite && (
+        <>
+          <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />
+          <EncounterQuickWhisperPanel campaignId={cid} myUserId={myUserId} onError={surfaceActionError} />
+        </>
+      )}
+
+      {canDmWrite && <GroupCheckBoard campaignId={cid} />}
 
       <EntityDiscussion campaignId={cid} entityType="encounter" entityId={encounter.id} />
 

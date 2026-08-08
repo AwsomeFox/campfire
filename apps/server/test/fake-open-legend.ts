@@ -98,7 +98,7 @@ export async function startFakeOpenLegend(): Promise<FakeOpenLegend> {
   app.get('/feats/feats.yml', (_req, res) => res.json(jsonPage(FEATS))); // {results} page on purpose
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Open Legend server');
@@ -134,7 +134,7 @@ export async function startFakeOpenLegendBadPagination(): Promise<FakeOpenLegend
     res.json(jsonPage([{ name: 'Should Never Be Imported', power: [1] }]));
   });
   const evilServer: Server = await new Promise((resolve) => {
-    const s = evilApp.listen(0, () => resolve(s));
+    const s = evilApp.listen(0, '127.0.0.1', () => resolve(s));
   });
   const evilAddress = evilServer.address();
   if (!evilAddress || typeof evilAddress === 'string') throw new Error('failed to bind evil fake Open Legend server');
@@ -156,7 +156,7 @@ export async function startFakeOpenLegendBadPagination(): Promise<FakeOpenLegend
   app.get('/feats/feats.yml', (_req, res) => res.json(jsonPage([])));
 
   const server: Server = await new Promise((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('failed to bind fake Open Legend server');

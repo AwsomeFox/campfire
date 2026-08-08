@@ -74,6 +74,11 @@ describe('#587 catalog projection', () => {
       'icsTokenExpiresAt',
       'activeEncounterId',
       'latestSessionNumber', // denormalized session-position stat; not needed in the catalog
+      // Homebrew mechanics profile (issue #1502): a 13-field combat-math blob the catalog has
+      // no use for. `ruleSystem` — the slug it pairs with — is already projected, which is the
+      // only part a catalog browser needs to know; the profile itself is read by the adapter
+      // factory on the campaign's own paths.
+      'customMechanicsProfile',
     ];
     const all = Object.keys(getTableColumns(campaigns));
     const unclassified = all.filter(

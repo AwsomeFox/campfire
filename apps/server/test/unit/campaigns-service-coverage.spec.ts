@@ -4,6 +4,7 @@ import path from 'node:path';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignsService } from '../../src/modules/campaigns/campaigns.service';
+import { CampaignGovernanceDeniedError, CampaignGovernanceService } from '../../src/modules/campaigns/campaign-governance.service';
 import { QuestsService } from '../../src/modules/quests/quests.service';
 import { NpcsService } from '../../src/modules/npcs/npcs.service';
 import { LocationsService } from '../../src/modules/locations/locations.service';
@@ -22,6 +23,8 @@ import { CampaignEventsService } from '../../src/modules/events/campaign-events.
 import { AiDmService } from '../../src/modules/ai-dm/ai-dm.service';
 import { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { UsersService } from '../../src/modules/users/users.service';
+import { campaigns as campaignsTable } from '../../src/db/schema';
+import { count } from 'drizzle-orm';
 import type { RequestUser } from '../../src/common/user.types';
 
 describe('CampaignsService unit coverage tests', () => {
@@ -31,6 +34,11 @@ describe('CampaignsService unit coverage tests', () => {
   let db: DrizzleDb;
   let campaignsService: CampaignsService;
   let usersService: UsersService;
+  let audit: AuditService;
+  let dummyGovernance: Pick<
+    CampaignGovernanceService,
+    'resolveContext' | 'enforceTx' | 'assertPolicyAllowed' | 'getOwnerUserId' | 'enforceActiveLimitTx'
+  >;
 
   let creatorUserId: number;
 
@@ -40,7 +48,7 @@ describe('CampaignsService unit coverage tests', () => {
     process.env.DATA_DIR = dataDir;
     holder = new DbHolder();
     db = holder.proxy as DrizzleDb;
-    const audit = new AuditService(db);
+    audit = new AuditService(db);
     usersService = new UsersService(db, audit);
 
     const user = await usersService.create({ username: 'creator', displayName: 'Creator', password: 'pw' });
@@ -77,8 +85,38 @@ describe('CampaignsService unit coverage tests', () => {
     } as unknown as RoleResolver;
     const dummyMembers = {
       addCreatorAsDm: jest.fn().mockResolvedValue(undefined),
+      // Issue #851: create()/clone() now insert the dm membership row INSIDE their
+      // own atomic governance transaction via addCreatorAsDmTx (not the async
+      // addCreatorAsDm above) — see CampaignsService.create/clone.
+      addCreatorAsDmTx: jest.fn(),
       listRosterForCampaign: jest.fn().mockResolvedValue([]),
     } as unknown as MembersService;
+    // Issue #851 — shared-instance governance double. `bypass: true` mirrors the
+    // real service's dev-auth carve-out: this test suite's synthetic RequestUsers
+    // (see below) are exercising CampaignsService's OWN logic, not governance
+    // enforcement (that has its own dedicated spec), so the policy/limit gate is a
+    // no-op here — every create()/clone() call in this file behaves exactly as it
+    // did before #851 introduced the constructor dependency.
+    dummyGovernance = {
+      resolveContext: jest.fn().mockResolvedValue({
+        bypass: true,
+        policy: 'everyone',
+        isServerAdmin: false,
+        canCreateCampaigns: true,
+        userId: null,
+        limits: { activePerUser: null, totalPerUser: null, activeServerWide: null, totalServerWide: null },
+        defaultStorageQuotaBytes: null,
+      }),
+      enforceTx: jest.fn(),
+      assertPolicyAllowed: jest.fn(),
+      // Issue #2016 — the reactivation ceiling. Same `bypass` rationale as above: this
+      // suite exercises CampaignsService's own logic, and the real enforcement has its
+      // own spec (campaign-governance.spec.ts). `getOwnerUserId` must still return a
+      // value rather than being absent, because update()/restore() call it before
+      // enforceActiveLimitTx on every reactivation.
+      getOwnerUserId: jest.fn().mockReturnValue(null),
+      enforceActiveLimitTx: jest.fn(),
+    };
     const dummyInvites = {
       suspendForCampaign: jest.fn().mockResolvedValue(undefined),
     } as unknown as InvitesService;
@@ -120,6 +158,7 @@ describe('CampaignsService unit coverage tests', () => {
       dummyEvents,
       dummyAiDm,
       dummyNotifications,
+      dummyGovernance as unknown as CampaignGovernanceService,
     );
   });
 
@@ -231,5 +270,157 @@ describe('CampaignsService unit coverage tests', () => {
       creatorActor,
     );
     expect(clonedTmpl.name).toBe('Cloned Template Campaign');
+  });
+
+  // Issue #851 — CampaignsService's WIRING to CampaignGovernanceService: the
+  // authoritative policy/limit logic itself is covered exhaustively in
+  // campaign-governance.spec.ts against a real CampaignGovernanceService; here we
+  // only prove create()/clone() call it correctly — atomically, with audit-on-deny
+  // and rollback, and that the resolved default quota lands on the inserted row.
+  describe('shared-instance governance wiring (issue #851)', () => {
+    const creatorActor: RequestUser = { id: '', name: 'Creator', serverRole: 'user' };
+
+    beforeEach(() => {
+      (creatorActor as { id: string }).id = String(creatorUserId);
+    });
+
+    async function campaignRowCount(): Promise<number> {
+      const [row] = await db.select({ n: count() }).from(campaignsTable);
+      return Number(row?.n ?? 0);
+    }
+
+    it('denies create() when enforceTx throws, audits campaign.create.denied, and inserts no row', async () => {
+      (dummyGovernance.enforceTx as jest.Mock).mockImplementation(() => {
+        throw new CampaignGovernanceDeniedError('limit_active_per_user', 'no more for you');
+      });
+      const auditSpy = jest.spyOn(audit, 'log');
+
+      await expect(
+        campaignsService.create({ name: 'Blocked Campaign' }, creatorActor),
+      ).rejects.toThrow(CampaignGovernanceDeniedError);
+
+      expect(await campaignRowCount()).toBe(0);
+      expect(auditSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'campaign.create.denied', detail: expect.stringContaining('limit_active_per_user') }),
+      );
+    });
+
+    // Review: the three denial audits hard-coded actorRole:'dm'. Limits are deliberately
+    // NOT admin-exempt (enforceTx's doc), so an admin refused by a ceiling is reachable —
+    // and 'dm' erases exactly the distinction an incident reviewer needs. The assertions
+    // below discriminate: an admin must log 'admin', and a viewer-scoped PAT held BY that
+    // same admin must still log 'dm', because adminEnabled=false caps the power the role
+    // is meant to record. A `user.serverRole === 'admin'` shortcut would fail the second.
+    it('records the denied actor\'s real role, not a hard-coded dm', async () => {
+      (dummyGovernance.enforceTx as jest.Mock).mockImplementation(() => {
+        throw new CampaignGovernanceDeniedError('limit_active_per_user', 'no more for you');
+      });
+      const auditSpy = jest.spyOn(audit, 'log');
+
+      const adminActor: RequestUser = { id: String(creatorUserId), name: 'Admin', serverRole: 'admin' };
+      await expect(campaignsService.create({ name: 'Blocked By Ceiling' }, adminActor)).rejects.toThrow(
+        CampaignGovernanceDeniedError,
+      );
+      expect(auditSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'campaign.create.denied', actorRole: 'admin' }),
+      );
+
+      auditSpy.mockClear();
+      const cappedPatActor: RequestUser = {
+        id: String(creatorUserId),
+        name: 'Admin',
+        serverRole: 'admin',
+        tokenContext: { name: 'viewer-pat', scope: 'viewer', adminEnabled: false },
+      } as RequestUser;
+      await expect(campaignsService.create({ name: 'Blocked By Ceiling 2' }, cappedPatActor)).rejects.toThrow(
+        CampaignGovernanceDeniedError,
+      );
+      expect(auditSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'campaign.create.denied', actorRole: 'dm' }),
+      );
+
+      expect(await campaignRowCount()).toBe(0);
+    });
+
+    // Review: enforceTx runs inside the insert transaction, which for an archive import is
+    // reached only after the whole zip is decompressed and staged to disk — so a caller the
+    // POLICY forbids could force that work on every attempt just to be handed a 403.
+    //
+    // The buffer below is deliberately not a zip at all. If the policy check runs first, the
+    // caller sees the governance denial; if it runs after JSZip.loadAsync, they see "not a
+    // valid zip archive" instead. The error identity is therefore a direct proof of ordering,
+    // with no need to time or instrument the decompression itself.
+    it('refuses a policy-forbidden archive import before the zip is ever opened', async () => {
+      (dummyGovernance.assertPolicyAllowed as jest.Mock).mockImplementation(() => {
+        throw new CampaignGovernanceDeniedError('policy_admins_only', 'admins only');
+      });
+
+      await expect(
+        campaignsService.importArchive(Buffer.from('this is not a zip'), creatorActor),
+      ).rejects.toThrow(CampaignGovernanceDeniedError);
+      expect(await campaignRowCount()).toBe(0);
+    });
+
+    it('opens the archive normally when the policy allows the caller', async () => {
+      // The other half of the same branch: assertPolicyAllowed is a no-op by default, so this
+      // must get PAST the policy gate and fail on the archive itself. Without it, a check that
+      // rejected everyone would still pass the test above.
+      await expect(
+        campaignsService.importArchive(Buffer.from('this is not a zip'), creatorActor),
+      ).rejects.toThrow(/not a valid zip/i);
+    });
+
+    it('applies the resolved default storage quota to a newly created campaign', async () => {
+      (dummyGovernance.resolveContext as jest.Mock).mockResolvedValue({
+        bypass: false,
+        policy: 'everyone',
+        isServerAdmin: false,
+        canCreateCampaigns: true,
+        userId: creatorUserId,
+        limits: { activePerUser: null, totalPerUser: null, activeServerWide: null, totalServerWide: null },
+        defaultStorageQuotaBytes: 123456,
+      });
+
+      const created = await campaignsService.create({ name: 'Quota Campaign' }, creatorActor);
+      expect(created.storageQuotaBytes).toBe(123456);
+    });
+
+    it('denies clone() when enforceTx throws, audits the denial, and inserts no new row', async () => {
+      const source = await campaignsService.create({ name: 'Clone Source' }, creatorActor);
+      const before = await campaignRowCount();
+
+      (dummyGovernance.enforceTx as jest.Mock).mockImplementation(() => {
+        throw new CampaignGovernanceDeniedError('limit_total_per_user', 'no more for you');
+      });
+      const auditSpy = jest.spyOn(audit, 'log');
+
+      await expect(
+        campaignsService.clone(source.id, { name: 'Blocked Clone', mode: 'full' }, creatorActor),
+      ).rejects.toThrow(CampaignGovernanceDeniedError);
+
+      expect(await campaignRowCount()).toBe(before);
+      expect(auditSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'campaign.create.denied', detail: expect.stringContaining('limit_total_per_user') }),
+      );
+    });
+
+    it('applies the resolved default storage quota to a clone (not the source campaign quota)', async () => {
+      const source = await campaignsService.create({ name: 'Quota Clone Source' }, creatorActor);
+      (dummyGovernance.resolveContext as jest.Mock).mockResolvedValue({
+        bypass: false,
+        policy: 'everyone',
+        isServerAdmin: false,
+        canCreateCampaigns: true,
+        userId: creatorUserId,
+        limits: { activePerUser: null, totalPerUser: null, activeServerWide: null, totalServerWide: null },
+        defaultStorageQuotaBytes: 555000,
+      });
+
+      const cloned = await campaignsService.clone(source.id, { name: 'Quota Clone', mode: 'full' }, creatorActor);
+      expect(cloned.storageQuotaBytes).toBe(555000);
+      // The source itself was created before the quota override took effect (null default).
+      const refetchedSource = await campaignsService.getOrThrow(source.id);
+      expect(refetchedSource.storageQuotaBytes).toBeNull();
+    });
   });
 });

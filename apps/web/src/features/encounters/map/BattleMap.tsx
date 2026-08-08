@@ -1,11 +1,16 @@
 import { useTranslation } from 'react-i18next';
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { UIIcon } from '../../../components/UIIcon';
+import { GatedControl } from '../../../components/GatedControl';
 import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridType, TokenSize } from '@campfire/schema';
-import { FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, eraseFogRegion, filterAoeTemplatesForViewer, fogRectFromCorners, gridDistanceForAdapter, hitTestFogRegion, moveFogRegion, ruleSystemAdapter } from '@campfire/schema';
+import type { HpFeedbackEvent } from '../hpFeedback';
+import { FloatingNumbers } from '../FloatingNumbers';
+import { FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, eraseFogRegion, filterAoeTemplatesForViewer, fogRectFromCorners, gridDistanceForAdapter, hitTestFogRegion, moveFogRegion, ruleSystemAdapter, type CustomMechanicsProfile } from '@campfire/schema';
 import { useQuery } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../../lib/api';
 import { reconcileFogSyncState } from '../fogSyncState';
+import { adapterConditionLabel } from '../../../lib/adapterVocabularyLabel';
 import { initials as tokenInitials } from '../../../lib/avatarText';
 import { Card, TextInput } from '../../../components/ui';
 import { ImageUpload, MapUploadButton, castEncounterMapUrl, encounterMapSrcSet, encounterMapUrl, playerDisplayEncounterMapUrl, uploadAttachment } from '../../../components/ImageUpload';
@@ -24,13 +29,14 @@ import { gridCellRevealRect } from '../fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from '../aoeHitTest';
 import { buildAoeDamageApplications, normalizeDirectDamageType, type DamageSaveOutcome, type DirectDamageMetadata, type TargetDamageApplication } from '../directDamage';
 import { calibrationToPx, clampPercent, computeContainedRect, DEFAULT_GRID_OPACITY, layerPxToMapPercent, mapPercentToLayerPx, pointerToMapPercent, resolveGridCalibration, snapMapPercentCalibrated, type GridCalibration } from '../mapRenderedBounds';
-import { formatRulerReadout, gridCellUnitPlural, measureToolHelp } from '../rulerReadout';
+import { formatRulerReadout, gridCellUnitPlural, measureToolHelp, rulerDistanceFeet } from '../rulerReadout';
 import { hexAoeCirclePolygons, hexPolygons, hexKeyboardStepPx, mapPercentGridDistance, snapFogRectToHexGrid, snapMapPercentToHex, tokenFootprintDiameterPx } from '../hexGeometry';
+import { dragBudget, dragMoveFt, isCurrentActorDrag, type DragBudget } from '../dragDistance';
 import { scrollBehavior, prefersReducedMotion } from '../../../lib/prefersReducedMotion';
-import { armMapPingTap, decideMapPingTapRelease, isMapPingKeyboardActivation, mapPingTapExceededSlop, MAP_PING_KEYBOARD_POINT, type MapPingTapArm } from '../mapPingTap';
+import { armMapPingTap, decideMapPingTapRelease, isMapPingIntentMenuKeyboardActivation, isMapPingKeyboardActivation, mapPingTapExceededSlop, MAP_PING_KEYBOARD_POINT, MAP_PING_TAP_MAX_MS, type MapPingTapArm } from '../mapPingTap';
 import { applyPinch, applyWheelZoom, clampPan, DEFAULT_MAP_VIEWPORT, fitViewport, formatViewportZoomPercent, MAP_VIEWPORT_PAN_STEP_PX, MAP_VIEWPORT_ZOOM_STEP, panBy, resetViewport, surfaceToContentPoint, viewportTransformStyle, zoomByFactor, type MapViewportState, type PinchGesture } from '../mapViewport';
 import { tokenDiameterPx } from '../tokenFootprint';
-import { tokenIdentityBackground } from '../tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH } from '../tokenIdentity';
 import {
   readTokenDetailMode,
   tokenArcGeometry,
@@ -43,6 +49,7 @@ import {
   type TokenDetailMode,
 } from '../tokenStateBadges';
 import { UI_ICON_SIZE } from '../../../lib/uiIcons';
+import { GridOverlay } from './GridOverlay';
 export const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
 
 /** Measure an element's rendered pixel box, tracking resizes — used for square grid cells + the ruler. */
@@ -77,8 +84,26 @@ type MapTool = 'move' | 'token-select' | 'measure' | 'reveal' | 'erase' | 'selec
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
 
+/**
+ * Ping intents (issue #1937) — a fixed, small set (not an extensible taxonomy), matching
+ * the icons already used elsewhere in the app for the same concepts: `eyeball`
+ * (EntitySecrecyControls), `hazard-sign` (StuckLadder), `position-marker`
+ * (LocationStatusLabel / SessionLog).
+ */
+const PING_INTENTS = [
+  { key: 'look', icon: 'eyeball' },
+  { key: 'danger', icon: 'hazard-sign' },
+  { key: 'move', icon: 'position-marker' },
+] as const;
+type PingIntentKey = (typeof PING_INTENTS)[number]['key'];
+
 // Creature token footprints live in ./tokenFootprint; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
+
+// Issue #1911: a pause this long after the last arrow-key nudge ends a keyboard-drag "burst" and
+// commits its accumulated distance as one `moveFt` delta, mirroring a pointer drag's single
+// commit-on-drop rather than one POST per keypress.
+const KEYBOARD_DRAG_BURST_MS = 900;
 
 /** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
 function newAoeId(): string {
@@ -169,6 +194,16 @@ export type BattleMapProps = {
   canMoveToken: (c: Combatant) => boolean;
   onSetMap: (attachmentId: number | null, alignment?: MapReplaceAlignment) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
+  /** Issue #1911: the running encounter's current-actor combatant id, and their turn-workspace
+   * movement max (`TurnWorkspaceRead.movement.maxFt`) — already redacted server-side to the DM
+   * and that combatant's owner, so its mere presence is the client's whole secrecy gate for the
+   * drag budget line. `null` when there is no running turn, or the viewer cannot see it. */
+  currentTurnCombatantId?: number | null;
+  currentTurnMovementMaxFt?: number | null;
+  /** POST a `moveFt` turn-state delta for a completed token drag/keyboard-nudge burst on the
+   * current actor (issue #1911); negative to undo. No-op default for the cast projection, where
+   * dragging is already disabled via `canMoveToken`. */
+  onMoveFt?: (combatantId: number, moveFt: number) => void;
   onBatchTokens?: (placements: Array<{ combatantId: number; x: number; y: number }>, mapAspect: number) => Promise<{ undoToken: string }>;
   onUndoTokenBatch?: (undoToken: string) => Promise<void>;
   onBeginTokenBatchUndo?: () => boolean;
@@ -179,21 +214,38 @@ export type BattleMapProps = {
   onSetFog: (fog: FogState | null) => void;
   pendingFog?: FogState | null;
   onSetAoe: (aoe: AoeTemplate[]) => void;
+  canDeclareAoe?: boolean;
+  onDeclareAoe?: (template: Omit<AoeTemplate, 'declaredByUserId'>) => void;
+  onUpdateAoe?: (templateId: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) => void | Promise<void>;
+  onRemoveAoe?: (templateId: string) => void;
+  onClearPlayerAoe?: () => void;
+  aoeDeclarerNames?: ReadonlyMap<string, string>;
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
   onImportMap?: (attachmentId: number) => void;
   showGuidance?: boolean;
   onDismissGuidance?: () => void;
-  onPing: (x: number, y: number) => void;
-  pings: ReadonlyArray<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>;
+  /** `label` is set only for an intent chosen from the long-press/right-click menu (issue #1937). */
+  onPing: (x: number, y: number, label?: string | null) => void;
+  pings: ReadonlyArray<{ key: number; x: number; y: number; senderName: string | null; color: string | null; label: string | null }>;
   onDismissPing: (key: number) => void;
   onError: (message: string) => void;
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
   projection?: 'session' | 'cast';
   castToken?: string | null;
+  hpFeedbackByCombatant?: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   ruleSystem: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
+  targeting?: { actorId: number; legalIds: readonly number[]; selectedIds: readonly number[]; declared: boolean; atCapacity: boolean; onToggle: (id: number) => void } | null;
+  impactTargetIds?: readonly number[];
+  /**
+   * Color-vision-assist mode (issue #1942): adds a non-color identity shape badge
+   * and a current-turn chevron to the map token, alongside their color-only
+   * counterparts (fill color, accent ring).
+   */
+  colorVisionAssist?: boolean;
 };
 
-export function BattleMap({
+export const BattleMap = memo(function BattleMap({
   encounter,
   campaignId,
   isDm,
@@ -203,6 +255,9 @@ export function BattleMap({
   canMoveToken,
   onSetMap,
   onMoveToken,
+  currentTurnCombatantId = null,
+  currentTurnMovementMaxFt = null,
+  onMoveFt = () => undefined,
   onBatchTokens,
   onUndoTokenBatch,
   dismissTokenUndoNonce,
@@ -213,6 +268,12 @@ export function BattleMap({
   onSetFog,
   pendingFog,
   onSetAoe,
+  canDeclareAoe = false,
+  onDeclareAoe = () => undefined,
+  onUpdateAoe = () => undefined,
+  onRemoveAoe = () => undefined,
+  onClearPlayerAoe,
+  aoeDeclarerNames = new Map(),
   onGenerateMap,
   onImportMap,
   showGuidance,
@@ -224,14 +285,33 @@ export function BattleMap({
   onAoeHitLayoutChange,
   projection = 'session',
   castToken = null,
+  hpFeedbackByCombatant = new Map(),
   ruleSystem,
+  customMechanicsProfile,
+  targeting = null,
+  impactTargetIds = [],
+  colorVisionAssist = false,
 }: BattleMapProps) {
   const isCast = projection === 'cast';
   const effectiveIsDm = isCast ? false : isDm;
   const effectiveCanDmWrite = isCast ? false : canDmWrite;
+  const effectiveCanDeclareAoe = isCast ? false : canDeclareAoe;
   const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
   const { t } = useTranslation();
   const announce = useAnnounce();
+  const pingIntentLabel = useCallback((key: PingIntentKey) => t(`encounters.map.ping.intents.${key}`), [t]);
+  // A received ping's `label` is plain text — the schema deliberately carries no separate
+  // intent slug (issue #1937 keeps the wire shape to color+label only) — so an incoming
+  // label is matched against THIS viewer's own translated intent strings to find its icon.
+  // A ping labeled in a different locale than the viewer's still renders (plain text, no
+  // icon) rather than breaking; it just doesn't match any of the three known intents.
+  const pingIntentIconForLabel = useCallback(
+    (label: string | null): string | null => {
+      if (!label) return null;
+      return PING_INTENTS.find((intent) => pingIntentLabel(intent.key) === label)?.icon ?? null;
+    },
+    [pingIntentLabel],
+  );
   const [dmTokenDetailMode, setDmTokenDetailMode] = useState<TokenDetailMode>(() =>
     readTokenDetailMode(typeof localStorage === 'undefined' ? null : localStorage),
   );
@@ -243,7 +323,7 @@ export function BattleMap({
   };
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
-    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
+    | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null; start: MapPoint; clientX: number; clientY: number; moved: boolean; targetable: boolean }
     | { kind: 'token-select'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint; additive: boolean }
     | { kind: 'token-lasso'; pointerId: number; captureTarget: Element; points: MapPoint[]; additive: boolean }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
@@ -273,7 +353,34 @@ export function BattleMap({
 
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  // Issue #1911: a keyboard-nudge "burst" — arrow-key repeats on a focused token — tracked the
+  // same way a pointer drag tracks `dragPos`, so the live distance readout renders for both. The
+  // ref is the source of truth read by the burst-end timeout (a closure over state can be stale
+  // by the time the timeout fires); the state copy exists only to re-render the overlay.
+  const [keyboardDrag, setKeyboardDrag] = useState<{ combatantId: number; origin: MapPoint; current: MapPoint } | null>(null);
+  const keyboardDragRef = useRef<{ combatantId: number; origin: MapPoint; current: MapPoint } | null>(null);
+  const keyboardDragTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (keyboardDragTimeoutRef.current) clearTimeout(keyboardDragTimeoutRef.current);
+  }, []);
+  // Issue #1911: the inline "undo this move" chip after a drag/nudge posts a `moveFt` delta —
+  // reuses the same UndoSnackbar the DM's token-batch undo does, one pending move at a time.
+  const [dragMoveUndo, setDragMoveUndo] = useState<{ combatantId: number; origin: MapPoint; moveFt: number } | null>(null);
   const [tool, setTool] = useState<MapTool>('move');
+  // Issue #1937: long-press (past the tap window) or right-click, with Ping armed, opens a
+  // small Look/Danger/Move-here intent menu at the point instead of publishing a plain ping.
+  // `pingHoldTimeoutRef` is armed alongside the ordinary tap gesture below and cleared by
+  // every path that ends that gesture before it fires (release, slop-cancel, or any other
+  // `cancelActiveGesture` — see there), so a completed plain tap never also opens the menu.
+  const [pingIntentMenu, setPingIntentMenu] = useState<{ x: number; y: number; clientX: number; clientY: number } | null>(null);
+  const pingHoldTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearPingHoldTimer = useCallback(() => {
+    if (pingHoldTimeoutRef.current != null) {
+      clearTimeout(pingHoldTimeoutRef.current);
+      pingHoldTimeoutRef.current = null;
+    }
+  }, []);
+  useEffect(() => () => clearPingHoldTimer(), [clearPingHoldTimer]);
   const [ruler, setRuler] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [revealCorners, setRevealCorners] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [selectedFogRegionId, setSelectedFogRegionId] = useState<string | null>(null);
@@ -297,6 +404,9 @@ export function BattleMap({
   // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [aoeDraft, setAoeDraft] = useState<{ id: string; x: string; y: string; sizeFt: string; angleDeg: string } | null>(null);
+  const [editingAoeDraft, setEditingAoeDraft] = useState(false);
+  const pendingAoeDraftRef = useRef<string | null>(null);
   // Keyboard-accessible token selection and numeric editing state (issue #419).
   const [selectedTokenId, setSelectedTokenId] = useState<number | null>(null);
   // This is intentionally a Set rather than a colour-only visual state: the adjacent
@@ -346,6 +456,7 @@ export function BattleMap({
   // released id long enough to identify that expected notification; any earlier capture loss is
   // an interruption and must roll the gesture back without persisting it.
   const successfulPointerUpRef = useRef<number | null>(null);
+  const targetGestureRef = useRef<{ tokenId: number; moved: boolean } | null>(null);
   const { w: surfaceW, h: surfaceH } = useElementSize(surfaceRef);
 
   const clearGesturePreview = useCallback((kind: ActiveMapGesture['kind']) => {
@@ -378,6 +489,10 @@ export function BattleMap({
       // dispatch lostpointercapture. That follow-up must observe an already-cancelled gesture.
       activeGestureRef.current = null;
       successfulPointerUpRef.current = null;
+      // Issue #1937: this is the single choke point every non-release ping-ending path
+      // (slop-cancel, pointercancel, lostpointercapture, tab-hidden, page-hide, rotation)
+      // funnels through, so the pending long-press timer never survives past its gesture.
+      if (gesture.kind === 'ping') clearPingHoldTimer();
       if (clearPreview) clearGesturePreview(gesture.kind);
       try {
         if (gesture.captureTarget.hasPointerCapture?.(gesture.pointerId)) {
@@ -387,7 +502,7 @@ export function BattleMap({
         // The browser may already have dropped capture while backgrounding or unmounting.
       }
     },
-    [clearGesturePreview],
+    [clearGesturePreview, clearPingHoldTimer],
   );
 
   useEffect(() => {
@@ -460,7 +575,10 @@ export function BattleMap({
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
   const hexOrientation = encounter.hexOrientation ?? 'pointy';
-  const gridDistanceRule = useMemo(() => gridDistanceForAdapter(ruleSystemAdapter(ruleSystem)), [ruleSystem]);
+  const gridDistanceRule = useMemo(
+    () => gridDistanceForAdapter(ruleSystemAdapter(ruleSystem, customMechanicsProfile)),
+    [ruleSystem, customMechanicsProfile],
+  );
   const gridOn = gridSize != null && gridSize > 0;
 
   // A new map starts with unknown natural size until its <img> fires onLoad.
@@ -514,7 +632,32 @@ export function BattleMap({
   // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
   // as the DM drags. Every consumer below reads geometry through this (and its px form),
   // and — because it derives purely from encounter state — every viewport renders it the same.
-  const baseCalibration = useMemo(() => resolveGridCalibration(encounter), [encounter]);
+  // Keyed on the SIX grid fields `resolveGridCalibration` actually reads, not on `encounter`
+  // (issue #1917 stage 2, review round 2). React Query hands back a new encounter object on
+  // every refetch, SSE-driven invalidation and optimistic `setQueryData`, so an `[encounter]`
+  // dependency recomputed this on every HP tick — and since `calibration` → `calibrationPx` →
+  // `hexCells` all chain off it, two of `GridOverlay`'s props were reference-different every
+  // time. Its `memo()` comparator is shallow, so it re-rendered exactly as it had before being
+  // extracted: the containment this stage exists to deliver was not happening at all. These
+  // six are primitives, so the memo now holds while the grid geometry itself is unchanged.
+  const calGridSize = encounter.gridSize;
+  const calGridCellHeight = encounter.gridCellHeight;
+  const calGridOffsetX = encounter.gridOffsetX;
+  const calGridOffsetY = encounter.gridOffsetY;
+  const calGridRotation = encounter.gridRotation;
+  const calGridOpacity = encounter.gridOpacity;
+  const baseCalibration = useMemo(
+    () =>
+      resolveGridCalibration({
+        gridSize: calGridSize,
+        gridCellHeight: calGridCellHeight,
+        gridOffsetX: calGridOffsetX,
+        gridOffsetY: calGridOffsetY,
+        gridRotation: calGridRotation,
+        gridOpacity: calGridOpacity,
+      }),
+    [calGridSize, calGridCellHeight, calGridOffsetX, calGridOffsetY, calGridRotation, calGridOpacity],
+  );
   const calibration = useMemo<GridCalibration | null>(() => {
     if (!baseCalibration || !calibrateDrag || !mapRect) return baseCalibration;
     const w = mapRect.width;
@@ -658,7 +801,7 @@ export function BattleMap({
    * `clamp` is set (in-progress drags stay pinned to the map edge). Inverse-applies
    * the local viewport transform first (issue #712).
    */
-  function pointerToPercent(e: ReactPointerEvent, clamp = false): MapPoint | null {
+  function pointerToPercent(e: { clientX: number; clientY: number }, clamp = false): MapPoint | null {
     if (!mapRect) return null;
     const rect = surfaceRef.current?.getBoundingClientRect();
     if (!rect) return null;
@@ -716,6 +859,13 @@ export function BattleMap({
   }
 
   function onViewportKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    // Issue #2047: Shift+Enter/Space, checked before the plain-ping activation below,
+    // opens the intent menu instead of sending an unlabeled ping — the keyboard-only
+    // path to the same Look/Danger/Move-here menu long-press and right-click reach.
+    if (tool === 'ping' && isMapPingIntentMenuKeyboardActivation(e)) {
+      onPingIntentMenuKeyDown(e);
+      return;
+    }
     if (tool === 'ping' && isMapPingKeyboardActivation(e)) {
       onPingKeyDown(e);
       return;
@@ -862,6 +1012,41 @@ export function BattleMap({
     return snapMapPercentCalibrated(pt, calibration, mapRect, gridOn && encounter.gridSnap);
   }
 
+  /**
+   * Issue #1911: on a completed single-token drag drop or keyboard-nudge burst, declare the
+   * straight-line distance as `moveFt` turn-state IF the dragged combatant is the current actor
+   * of a running encounter — off-turn drags and DM repositioning of any other combatant show the
+   * live readout (rendered separately) but write nothing, matching the acceptance criteria.
+   * Gridless/uncalibrated maps (`canMeasure` false) have no distance to declare at all.
+   */
+  function commitDragMovement(combatantId: number, origin: MapPoint, current: MapPoint): void {
+    if (!canMeasure || !mapRect) return;
+    if (!isCurrentActorDrag(encounter.status, currentTurnCombatantId, combatantId)) return;
+    const cells = mapPercentGridDistance(origin, current, mapRect, cellPx, gridType, calibration, hexOrientation, gridDistanceRule);
+    const moveFt = dragMoveFt(cells, gridScale ?? 0);
+    if (!(moveFt > 0)) return; // dropped back on the origin cell — nothing to declare or undo.
+    onMoveFt(combatantId, moveFt);
+    setDragMoveUndo({ combatantId, origin, moveFt });
+  }
+
+  /**
+   * Issue #1911: accumulate an arrow-key nudge "burst" on a focused token — each keypress
+   * extends the same in-progress move rather than declaring its own `moveFt` — then commit once
+   * as a single delta after a pause, the same way a pointer drag commits once on drop.
+   */
+  function scheduleKeyboardDragCommit(combatantId: number, origin: MapPoint, current: MapPoint): void {
+    const next = { combatantId, origin, current };
+    keyboardDragRef.current = next;
+    setKeyboardDrag(next);
+    if (keyboardDragTimeoutRef.current) clearTimeout(keyboardDragTimeoutRef.current);
+    keyboardDragTimeoutRef.current = setTimeout(() => {
+      const final = keyboardDragRef.current;
+      keyboardDragRef.current = null;
+      setKeyboardDrag(null);
+      if (final) commitDragMovement(final.combatantId, final.origin, final.current);
+    }, KEYBOARD_DRAG_BURST_MS);
+  }
+
   /** Commit a fog reveal rectangle, snapping corners to hex centres in hex grid mode (issue #467). */
   function commitFogReveal(start: MapPoint, end: MapPoint): void {
     let rect = fogRectFromCorners(start, end);
@@ -923,9 +1108,13 @@ export function BattleMap({
     const point = pointerToPercent(e, true);
     if (!point) return;
     const captureTarget = e.currentTarget;
+    const targetable = (targeting?.legalIds.includes(c.id) ?? false)
+      && !targeting?.declared
+      && ((targeting?.selectedIds.includes(c.id) ?? false) || !targeting?.atCapacity);
+    if (targetable) targetGestureRef.current = null;
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
-    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point };
+    activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point, start: point, clientX: e.clientX, clientY: e.clientY, moved: false, targetable };
     setDraggingId(c.id);
     setDragPos(point);
   }
@@ -957,22 +1146,37 @@ export function BattleMap({
     const pct = pointerToPercent(e);
     if (!pct) return;
     if (tool === 'ping') {
+      // Issue #1937: the secondary (right) mouse button never arms a plain-tap ping — it
+      // opens the intent menu instead, through the dedicated onContextMenu handler below.
+      // (Belt-and-suspenders with onSurfaceContextMenu's own cancelActiveGesture() call —
+      // this guard alone matters when a right button's own pointerup lands before any
+      // contextmenu event ever reaches the surface, e.g. a suppressed native menu.)
+      if (e.button === 2) return;
       // Arm on press; publish only from a matching completed tap (pointer-up inside slop/time).
       e.currentTarget.setPointerCapture?.(e.pointerId);
       successfulPointerUpRef.current = null;
-      activeGestureRef.current = {
-        kind: 'ping',
+      const arm = armMapPingTap({
         pointerId: e.pointerId,
-        captureTarget: e.currentTarget,
-        arm: armMapPingTap({
-          pointerId: e.pointerId,
-          clientX: e.clientX,
-          clientY: e.clientY,
-          startedAt: performance.now(),
-          x: pct.x,
-          y: pct.y,
-        }),
-      };
+        clientX: e.clientX,
+        clientY: e.clientY,
+        startedAt: performance.now(),
+        x: pct.x,
+        y: pct.y,
+      });
+      activeGestureRef.current = { kind: 'ping', pointerId: e.pointerId, captureTarget: e.currentTarget, arm };
+      // Issue #1937: held past the tap window (which used to just cancel on release) opens
+      // the Look/Danger/Move-here intent menu instead, at the armed point. A release before
+      // this fires still takes the ordinary decideMapPingTapRelease path in onSurfacePointerUp
+      // completely unchanged — this timer only ever fires for a hold that outlasts a tap.
+      const pointerId = e.pointerId;
+      clearPingHoldTimer();
+      pingHoldTimeoutRef.current = setTimeout(() => {
+        pingHoldTimeoutRef.current = null;
+        const gesture = activeGestureRef.current;
+        if (!gesture || gesture.kind !== 'ping' || gesture.pointerId !== pointerId) return;
+        cancelActiveGesture(pointerId, false);
+        setPingIntentMenu({ x: gesture.arm.x, y: gesture.arm.y, clientX: gesture.arm.clientX, clientY: gesture.arm.clientY });
+      }, MAP_PING_TAP_MAX_MS + 1);
       return;
     }
     if (tool === 'token-select' && effectiveIsDm) {
@@ -1066,6 +1270,11 @@ export function BattleMap({
 
     if (gesture.kind === 'token') {
       gesture.point = pct;
+      // A movable legal target needs ordinary touch jitter to remain a target tap. Use the
+      // same CSS-pixel slop as map pings; map-percent movement varies with rendered map size.
+      if (gesture.targetable
+        ? mapPingTapExceededSlop(gesture, e.clientX, e.clientY)
+        : Math.hypot(pct.x - gesture.start.x, pct.y - gesture.start.y) >= 0.25) gesture.moved = true;
       setDragPos(pct);
     } else if (gesture.kind === 'token-select') {
       gesture.end = pct;
@@ -1128,6 +1337,12 @@ export function BattleMap({
     // Ping: decide publish/cancel first, then always clear ownership + release capture so a
     // completed (or cancelled) tap never leaves `kind: 'ping'` armed for a later pointerup.
     if (gesture.kind === 'ping') {
+      // A normal release always happens strictly before or strictly after the long-press
+      // timer (never both fire the same gesture — the timer only checks a still-armed
+      // 'ping' gesture, which this release is about to clear), but clear it here too so a
+      // release that lands in the last instant before MAP_PING_TAP_MAX_MS never leaves a
+      // stray timer that could theoretically outlive this gesture's pointerId being reused.
+      clearPingHoldTimer();
       const decision = decideMapPingTapRelease(gesture.arm, {
         pointerId: e.pointerId,
         clientX: e.clientX,
@@ -1147,6 +1362,8 @@ export function BattleMap({
     if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
 
     if (gesture.kind === 'token') {
+      if (gesture.targetable) targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };
+      if (gesture.targetable && !gesture.moved) return;
       const raw = finalPoint ?? gesture.point;
       if (raw) {
         const pt = snapPoint(raw);
@@ -1156,7 +1373,15 @@ export function BattleMap({
         if (effectiveIsDm && group.length > 1 && onBatchTokens) void onBatchTokens(group.map(item => ({ combatantId: item.id, x: item.x, y: item.y })), tokenPlanningAspect).then(result => {
           beginTokenBatchUndo(result.undoToken); announce(`${group.length} tokens moved together`);
         }).catch(error => onError(error instanceof Error ? error.message : 'Unable to move selected tokens'));
-        else onMoveToken(gesture.tokenId, pt.x, pt.y);
+        else {
+          // Issue #1911: origin is the combatant's pre-drop position — read it BEFORE
+          // onMoveToken's patch lands, since a DM multi-select drag (above) never reaches here.
+          const draggedCombatant = encounter.combatants.find((c) => c.id === gesture.tokenId);
+          onMoveToken(gesture.tokenId, pt.x, pt.y);
+          if (draggedCombatant) {
+            commitDragMovement(gesture.tokenId, { x: draggedCombatant.tokenX ?? 0, y: draggedCombatant.tokenY ?? 0 }, pt);
+          }
+        }
       }
       return;
     }
@@ -1176,7 +1401,8 @@ export function BattleMap({
     }
     if (gesture.kind === 'aoe') {
       const point = finalPoint ?? gesture.point;
-      onSetAoe(aoeTemplates.map((t) => (t.id === gesture.templateId ? { ...t, x: point.x, y: point.y } : t)));
+      if (effectiveCanDmWrite) updateAoe(gesture.templateId, { x: point.x, y: point.y });
+      else updatePlayerAoeFromDraft(gesture.templateId, { x: point.x, y: point.y });
       return;
     }
     if (gesture.kind === 'calibrate') {
@@ -1245,6 +1471,104 @@ export function BattleMap({
     onPing(MAP_PING_KEYBOARD_POINT.x, MAP_PING_KEYBOARD_POINT.y);
   }
 
+  /** Right-click, with Ping armed, opens the intent menu directly (issue #1937) — the
+   * mirror of the long-press path above, for a mouse user who never holds the button. */
+  function onSurfaceContextMenu(e: ReactMouseEvent<HTMLDivElement>) {
+    if (tool !== 'ping') return;
+    e.preventDefault();
+    const pct = pointerToPercent(e);
+    if (!pct) return;
+    // A synthetic pointerdown may already be armed from the right-click's own press —
+    // drop it so it can never also publish a plain ping on some later stray pointerup.
+    cancelActiveGesture();
+    setPingIntentMenu({ x: pct.x, y: pct.y, clientX: e.clientX, clientY: e.clientY });
+  }
+
+  /**
+   * Shift+Enter/Space, with Ping armed, opens the intent menu at the map center —
+   * the keyboard-only mirror of the long-press and right-click paths above, neither
+   * of which has any keyboard equivalent (issue #2047). The menu's own popover
+   * (`clientX`/`clientY`) is anchored on the map surface itself, mirroring how a
+   * plain keyboard ping (above) always lands at `MAP_PING_KEYBOARD_POINT` regardless
+   * of pointer position.
+   */
+  function onPingIntentMenuKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    if (tool !== 'ping' || !isMapPingIntentMenuKeyboardActivation(e)) return;
+    e.preventDefault();
+    // Discrete keyboard activation never shares ownership with an armed pointer tap.
+    if (activeGestureRef.current) return;
+    pingIntentOpenedByKeyboardRef.current = true;
+    const rect = surfaceRef.current?.getBoundingClientRect();
+    setPingIntentMenu({
+      x: MAP_PING_KEYBOARD_POINT.x,
+      y: MAP_PING_KEYBOARD_POINT.y,
+      clientX: rect ? rect.left + rect.width / 2 : 0,
+      clientY: rect ? rect.top + rect.height / 2 : 0,
+    });
+  }
+
+  function choosePingIntent(key: PingIntentKey) {
+    const menu = pingIntentMenu;
+    if (!menu) return;
+    setPingIntentMenu(null);
+    onPing(menu.x, menu.y, pingIntentLabel(key));
+    // Return focus to the map surface so a keyboard user who opened the menu with
+    // Shift+Enter/Space isn't left with focus on a button that just unmounted.
+    surfaceRef.current?.focus();
+  }
+
+  function dismissPingIntentMenu() {
+    setPingIntentMenu(null);
+  }
+
+  // The first menu item is focused once the menu opens (issue #2047) — the intent
+  // menu is a portal appended at the end of `document.body`, so its DOM tab order does
+  // not follow the map surface; without an explicit focus move, a keyboard user who just
+  // opened it via Shift+Enter/Space would have no reliable way to reach it at all.
+  // When opened via keyboard, focus move is deferred until keyup so holding Shift+Enter
+  // does not immediately auto-repeat into native button activation on the first item.
+  const pingIntentOpenedByKeyboardRef = useRef(false);
+  const pingIntentFirstItemRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!pingIntentMenu) return;
+    if (pingIntentOpenedByKeyboardRef.current) {
+      const handleKeyUp = (e: KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+          pingIntentOpenedByKeyboardRef.current = false;
+          pingIntentFirstItemRef.current?.focus();
+          window.removeEventListener('keyup', handleKeyUp);
+        }
+      };
+      window.addEventListener('keyup', handleKeyUp);
+      return () => {
+        pingIntentOpenedByKeyboardRef.current = false;
+        window.removeEventListener('keyup', handleKeyUp);
+      };
+    }
+    pingIntentFirstItemRef.current?.focus();
+  }, [pingIntentMenu]);
+
+  // Close the intent menu on Escape or an outside pointerdown, matching the established
+  // long-press/right-click popover pattern (RollContextMenu). Escape additionally returns
+  // focus to the map surface — the outside-pointerdown path leaves focus alone, since the
+  // user's pointer action already moved their attention elsewhere.
+  useEffect(() => {
+    if (!pingIntentMenu) return;
+    const closeOnOutside = () => dismissPingIntentMenu();
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        dismissPingIntentMenu();
+        surfaceRef.current?.focus();
+      }
+    };
+    window.addEventListener('pointerdown', closeOnOutside);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutside);
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [pingIntentMenu]);
+
   function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
     trackPinchPointer(e, 'cancel');
     cancelActiveGesture(e.pointerId);
@@ -1272,7 +1596,7 @@ export function BattleMap({
   }
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
-    if (!e.isPrimary || activeGestureRef.current || viewportPan || !canDmWrite) return;
+    if (!e.isPrimary || activeGestureRef.current || viewportPan || !canEditAoe(t)) return;
     e.currentTarget.focus();
     setSelectedAoeId(t.id);
     e.preventDefault();
@@ -1298,6 +1622,12 @@ export function BattleMap({
       const next = nudgeMapPoint({ x: c.tokenX ?? 0, y: c.tokenY ?? 0 }, e);
       onMoveToken(c.id, next.x, next.y);
       announce(`${c.name} moved to ${Math.round(next.x)} percent across, ${Math.round(next.y)} percent down`);
+      // Issue #1911: keep the SAME burst (and its origin) going while nudges keep landing on
+      // this token; a nudge on a different token, or after the previous burst already
+      // committed, starts a fresh one from this token's own pre-nudge position.
+      const burstOrigin =
+        keyboardDragRef.current?.combatantId === c.id ? keyboardDragRef.current.origin : { x: c.tokenX ?? 0, y: c.tokenY ?? 0 };
+      scheduleKeyboardDragCommit(c.id, burstOrigin, next);
       return;
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -1310,6 +1640,7 @@ export function BattleMap({
   }
 
   function onAoeHandleKeyDown(e: ReactKeyboardEvent<HTMLDivElement>, t: AoeTemplate) {
+    if (!canEditAoe(t)) return;
     e.stopPropagation();
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -1319,7 +1650,8 @@ export function BattleMap({
       e.preventDefault();
       e.stopPropagation();
       const next = nudgeMapPoint({ x: t.x, y: t.y }, e);
-      onSetAoe(aoeTemplates.map((item) => (item.id === t.id ? { ...item, x: next.x, y: next.y } : item)));
+      if (effectiveCanDmWrite) updateAoe(t.id, { x: next.x, y: next.y });
+      else updatePlayerAoeFromDraft(t.id, { x: next.x, y: next.y });
       announce(`${t.shape} template moved to ${Math.round(next.x)} percent across, ${Math.round(next.y)} percent down`);
       return;
     }
@@ -1331,19 +1663,48 @@ export function BattleMap({
     }
   }
 
-  // AoE template CRUD (issue #238) — all DM-only PATCHes of the whole template list.
+  function canEditAoe(t: AoeTemplate): boolean {
+    return effectiveCanDmWrite || (effectiveCanDeclareAoe && t.declaredByUserId === viewerUserId);
+  }
+
+  // DMs retain the whole-list PATCH workflow; players use the scoped endpoints so
+  // their ownership remains server-enforced (issue #1913).
   function addAoe(shape: AoeShape) {
     const sizeFt = shape === 'circle' ? (gridScale ?? 5) * 2 : (gridScale ?? 5) * BASE_AOE_LENGTH_MULT;
     const t: AoeTemplate = { id: newAoeId(), shape, x: 50, y: 50, sizeFt, angleDeg: 0, color: null, declaredByUserId: null };
     setSelectedAoeId(t.id);
-    onSetAoe([...aoeTemplates, t]);
+    if (effectiveCanDmWrite) onSetAoe([...aoeTemplates, t]);
+    else {
+      // Omit at runtime, not merely in the TypeScript annotation: the server's
+      // strict declaration schema rejects caller-supplied attribution.
+      const { declaredByUserId: _serverOwnedDeclarer, ...declaration } = t;
+      onDeclareAoe(declaration);
+    }
   }
-  function updateAoe(id: string, patch: Partial<AoeTemplate>) {
-    onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  function updateAoe(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>): void | Promise<void> {
+    if (effectiveCanDmWrite) return onSetAoe(aoeTemplates.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+    return onUpdateAoe(id, patch);
+  }
+  function updatePlayerAoeFromDraft(id: string, patch: Partial<Omit<AoeTemplate, 'id' | 'declaredByUserId'>>) {
+    void Promise.resolve().then(() => updateAoe(id, patch)).catch(() => {
+      // The server rejected this edit. Restore an editable draft from the
+      // last known template; clearing it leaves a focused controlled input
+      // without a draft for its onChange handler to update.
+      if (pendingAoeDraftRef.current === id) pendingAoeDraftRef.current = null;
+      const template = aoeTemplates.find((candidate) => candidate.id === id);
+      setAoeDraft(template ? {
+        id: template.id,
+        x: String(template.x),
+        y: String(template.y),
+        sizeFt: String(template.sizeFt),
+        angleDeg: String(template.angleDeg),
+      } : null);
+    });
   }
   function removeAoe(id: string) {
     if (selectedAoeId === id) setSelectedAoeId(null);
-    onSetAoe(aoeTemplates.filter((t) => t.id !== id));
+    if (effectiveCanDmWrite) onSetAoe(aoeTemplates.filter((t) => t.id !== id));
+    else onRemoveAoe(id);
   }
 
   // Measurement readout — fractional cells along a straight line, rounded to whole cells for scale.
@@ -1362,6 +1723,41 @@ export function BattleMap({
     return { cells };
   })();
 
+  // Issue #1911: live distance readout for an in-progress token drag or keyboard-nudge burst —
+  // the SAME mapPercentGridDistance path the Measure tool's `rulerReadout` above uses, so a
+  // dragged token and a ruler drawn between the same two points read identically. `budget` is
+  // additionally gated on the dragged combatant being the current actor AND
+  // `currentTurnMovementMaxFt` being present — that prop is already redacted server-side to the
+  // DM and that combatant's owner, so its presence alone keeps this secrecy-safe by construction.
+  const dragDistancePreview = (() => {
+    if (!canMeasure || !mapRect) return null;
+    let combatantId: number | null = null;
+    let origin: MapPoint | null = null;
+    let current: MapPoint | null = null;
+    if (draggingId != null && dragPos != null) {
+      const dragged = encounter.combatants.find((c) => c.id === draggingId);
+      if (dragged) {
+        combatantId = dragged.id;
+        origin = { x: dragged.tokenX ?? 0, y: dragged.tokenY ?? 0 };
+        current = dragPos;
+      }
+    } else if (keyboardDrag) {
+      combatantId = keyboardDrag.combatantId;
+      origin = keyboardDrag.origin;
+      current = keyboardDrag.current;
+    }
+    if (combatantId == null || !origin || !current) return null;
+    const cells = mapPercentGridDistance(origin, current, mapRect, cellPx, gridType, calibration, hexOrientation, gridDistanceRule);
+    let budget: DragBudget | null = null;
+    if (currentTurnMovementMaxFt != null && isCurrentActorDrag(encounter.status, currentTurnCombatantId, combatantId)) {
+      const draggedCombatant = encounter.combatants.find((c) => c.id === combatantId);
+      if (draggedCombatant) {
+        budget = dragBudget(draggedCombatant.turnState.movementUsedFt, rulerDistanceFeet(cells, gridScale ?? 0), currentTurnMovementMaxFt);
+      }
+    }
+    return { origin, current, cells, budget };
+  })();
+
   const revealPreview = revealCorners ? fogRectFromCorners(revealCorners.start, revealCorners.end) : null;
   const fogBrushMode = tool === 'erase' ? 'erase' : 'reveal';
   const displayedFogRects = useMemo(() => {
@@ -1372,6 +1768,27 @@ export function BattleMap({
     );
   }, [fog?.revealed, fogRegionDrag]);
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
+  useEffect(() => {
+    if (!selectedAoe || effectiveCanDmWrite) {
+      setAoeDraft(null);
+      return;
+    }
+    // Keep unfocused fields truthful after a drag, keyboard nudge, or concurrent
+    // DM update, but never replace text while the player is actively typing it.
+    if (editingAoeDraft) return;
+    if (pendingAoeDraftRef.current === selectedAoe.id && aoeDraft) {
+      if (aoeDraft.x === String(selectedAoe.x) && aoeDraft.y === String(selectedAoe.y) && aoeDraft.sizeFt === String(selectedAoe.sizeFt) && aoeDraft.angleDeg === String(selectedAoe.angleDeg)) pendingAoeDraftRef.current = null;
+      else return;
+    }
+    setAoeDraft({
+      id: selectedAoe.id,
+      x: String(selectedAoe.x),
+      y: String(selectedAoe.y),
+      sizeFt: String(selectedAoe.sizeFt),
+      angleDeg: String(selectedAoe.angleDeg),
+    });
+  }, [editingAoeDraft, effectiveCanDmWrite, selectedAoe]);
+  const playerAoeDraft = !effectiveCanDmWrite && selectedAoe && aoeDraft?.id === selectedAoe.id ? aoeDraft : null;
   const selectedToken = selectedTokenId != null ? encounter.combatants.find((c) => c.id === selectedTokenId) ?? null : null;
 
   // Condition chips already carry their detailed title/metadata in the roster. A
@@ -1413,6 +1830,12 @@ export function BattleMap({
     [gridOn, gridType, mapRect, calibrationPx, hexOrientation],
   );
 
+  // A primitive value, not memoized (issue #1917 stage 2): comparing two equal numbers is
+  // always `===` regardless of how many times this line runs, so `<GridOverlay>`'s memo
+  // boundary skips just as cleanly as if this were wrapped in its own useMemo. Kept beside
+  // `hexCells` since both feed `<GridOverlay>`'s geometry-only prop surface.
+  const gridOverlayOpacity = calibrationPx?.opacity ?? DEFAULT_GRID_OPACITY;
+
   function changeTool(next: MapTool) {
     // Leaving a mode drops any armed/incomplete gesture (including an unfinished ping tap).
     cancelActiveGesture();
@@ -1426,22 +1849,33 @@ export function BattleMap({
     setFogRegionDrag(null);
   }
 
-  const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
-    <button
-      type="button"
-      className="cf-map-tool cf-map-focusable"
-      data-testid={`map-tool-${value}`}
-      disabled={disabled}
-      title={hint}
-      aria-pressed={tool === value}
-      onClick={() => changeTool(value)}
-      style={{
-        borderColor: tool === value ? 'var(--color-accent)' : 'var(--color-divider)',
-        color: tool === value ? 'var(--color-accent)' : undefined,
-      }}
-    >
-      {label}
-    </button>
+  // `gateReason` is optional and separate from `hint` (issue #1933): most of this
+  // toolbar's disabled buttons keep their pre-existing hover-only `title`, unchanged.
+  // Only the one call site that passes `gateReason` gets the full GatedControl
+  // affordance (hover/focus tooltip, aria-describedby, coarse-pointer tap hint) — but the
+  // wrapper itself is ALWAYS present (reason={gateReason}, which is undefined for every
+  // other call site) rather than conditionally rendered. GatedControl's own doc comment
+  // explains why: a conditional wrapper changes the tree shape the moment `gateReason`
+  // flips from set to undefined, forcing React to unmount and remount the button — losing
+  // focus on the exact transition (grid scale gets set) this affordance exists to explain.
+  const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string, gateReason?: string) => (
+    <GatedControl reason={gateReason}>
+      <button
+        type="button"
+        className="cf-map-tool cf-map-focusable"
+        data-testid={`map-tool-${value}`}
+        disabled={disabled}
+        title={hint}
+        aria-pressed={tool === value}
+        onClick={() => changeTool(value)}
+        style={{
+          borderColor: tool === value ? 'var(--color-accent)' : 'var(--color-divider)',
+          color: tool === value ? 'var(--color-accent)' : undefined,
+        }}
+      >
+        {label}
+      </button>
+    </GatedControl>
   );
 
   return (
@@ -1603,7 +2037,13 @@ export function BattleMap({
           >
             {modeBtn('move', 'Move')}
             {effectiveCanDmWrite && modeBtn('token-select', 'Tokens', false, 'Drag a rectangle to select tokens; hold Alt to lasso; Shift, Ctrl, or Command adds.')}
-            {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? measureToolHelp(gridType) : 'Set a grid scale first')}
+            {modeBtn(
+              'measure',
+              'Measure',
+              !canMeasure,
+              canMeasure ? measureToolHelp(gridType) : undefined,
+              canMeasure ? undefined : t('run.gate.measureNoGridScale'),
+            )}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
             {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region. Shift-click a grid cell when the grid is on.')}
             {effectiveCanDmWrite && modeBtn('erase', 'Erase', !fogOn, fogOn ? 'Click-drag to hide a fog region' : 'Enable fog first')}
@@ -1633,12 +2073,15 @@ export function BattleMap({
               </>
             )}
             {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
-            {effectiveCanDmWrite && canAoe && (
+            {effectiveCanDeclareAoe && canAoe && (
               <>
-                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
+                <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>{t('encounters.map.aoe.label')}:</span>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCircle')} onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addCone')} onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.addLine')} onClick={() => addAoe('line')}>+ Line</button>
+                {effectiveCanDmWrite && onClearPlayerAoe && (encounter.aoe ?? []).some((template) => template.declaredByUserId != null) && (
+                  <button type="button" className="cf-map-tool cf-map-focusable" title={t('encounters.map.aoe.clearPlayersHint')} onClick={onClearPlayerAoe}>{t('encounters.map.aoe.clearPlayers')}</button>
+                )}
               </>
             )}
             <div style={{ flex: 1 }} />
@@ -1759,8 +2202,8 @@ export function BattleMap({
             </div>
           )}
 
-          {/* Selected AoE template editor (DM) — size / rotation / remove for the picked shape. */}
-          {!isCast && effectiveCanDmWrite && selectedAoe && canAoe && (
+          {/* Selected AoE editor: players only receive controls for their own templates. */}
+          {!isCast && selectedAoe && canAoe && canEditAoe(selectedAoe) && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }}>
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedAoe.shape}</span>
               <label className="flex items-center gap-1 text-muted">
@@ -1770,8 +2213,19 @@ export function BattleMap({
                   min={0}
                   max={100}
                   step={0.5}
-                  value={selectedAoe.x}
-                  onChange={(e) => updateAoe(selectedAoe.id, { x: clampPercent(Number(e.target.value) || 0) })}
+                  value={playerAoeDraft?.x ?? selectedAoe.x}
+                  onFocus={() => setEditingAoeDraft(true)}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { x: clampPercent(Number(e.target.value) || 0) });
+                    else setAoeDraft((draft) => draft && { ...draft, x: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    const x = clampPercent(Number(e.currentTarget.value) || 0);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, x: String(x) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
+                    setEditingAoeDraft(false);
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { x });
+                  }}
                   style={{ width: 56 }}
                 />
               </label>
@@ -1782,8 +2236,19 @@ export function BattleMap({
                   min={0}
                   max={100}
                   step={0.5}
-                  value={selectedAoe.y}
-                  onChange={(e) => updateAoe(selectedAoe.id, { y: clampPercent(Number(e.target.value) || 0) })}
+                  value={playerAoeDraft?.y ?? selectedAoe.y}
+                  onFocus={() => setEditingAoeDraft(true)}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { y: clampPercent(Number(e.target.value) || 0) });
+                    else setAoeDraft((draft) => draft && { ...draft, y: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    const y = clampPercent(Number(e.currentTarget.value) || 0);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, y: String(y) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
+                    setEditingAoeDraft(false);
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { y });
+                  }}
                   style={{ width: 56 }}
                 />
               </label>
@@ -1793,8 +2258,19 @@ export function BattleMap({
                   type="number"
                   min={0}
                   step={gridScale ?? 5}
-                  value={selectedAoe.sizeFt}
-                  onChange={(e) => updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.target.value) || 1) })}
+                  value={playerAoeDraft?.sizeFt ?? selectedAoe.sizeFt}
+                  onFocus={() => setEditingAoeDraft(true)}
+                  onChange={(e) => {
+                    if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { sizeFt: Math.max(1, Number(e.target.value) || 1) });
+                    else setAoeDraft((draft) => draft && { ...draft, sizeFt: e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    const sizeFt = Math.max(1, Number(e.currentTarget.value) || 1);
+                    if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, sizeFt: String(sizeFt) });
+                    pendingAoeDraftRef.current = selectedAoe.id;
+                    setEditingAoeDraft(false);
+                    if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { sizeFt });
+                  }}
                   style={{ width: 56 }}
                 />
                 {gridUnit}
@@ -1805,8 +2281,19 @@ export function BattleMap({
                   <input
                     type="number"
                     step={15}
-                    value={selectedAoe.angleDeg}
-                    onChange={(e) => updateAoe(selectedAoe.id, { angleDeg: Number(e.target.value) || 0 })}
+                    value={playerAoeDraft?.angleDeg ?? selectedAoe.angleDeg}
+                    onFocus={() => setEditingAoeDraft(true)}
+                    onChange={(e) => {
+                      if (effectiveCanDmWrite) updateAoe(selectedAoe.id, { angleDeg: Number(e.target.value) || 0 });
+                      else setAoeDraft((draft) => draft && { ...draft, angleDeg: e.target.value });
+                    }}
+                    onBlur={(e) => {
+                      const angleDeg = Number(e.currentTarget.value) || 0;
+                      if (!effectiveCanDmWrite) setAoeDraft((draft) => draft && { ...draft, angleDeg: String(angleDeg) });
+                      pendingAoeDraftRef.current = selectedAoe.id;
+                      setEditingAoeDraft(false);
+                      if (!effectiveCanDmWrite) updatePlayerAoeFromDraft(selectedAoe.id, { angleDeg });
+                    }}
                     style={{ width: 56 }}
                   />
                 </label>
@@ -2135,7 +2622,12 @@ export function BattleMap({
             tabIndex={0}
             aria-label={
               tool === 'ping'
-                ? 'Ping the map center for everyone. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
+                ? // Issue #2047 review: the whole sentence resolves from one key rather than
+                  // interpolating a translated hint into an English template. That template
+                  // shape is the exact defect #2048 fixed one file over and #2053 tracks —
+                  // an Arabic screen-reader user would otherwise hear an English label with
+                  // a single Arabic sentence embedded in it.
+                  t('encounters.map.ping.surfaceAriaLabel', { hint: t('encounters.map.ping.keyboardHint') })
                 : 'Battle map viewport. +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
             }
             aria-describedby="map-keyboard-help"
@@ -2169,6 +2661,7 @@ export function BattleMap({
             onPointerCancel={onSurfacePointerCancel}
             onLostPointerCapture={onSurfaceLostPointerCapture}
             onKeyDown={onViewportKeyDown}
+            onContextMenu={onSurfaceContextMenu}
             onDragStart={(e) => e.preventDefault()}
           >
             <div
@@ -2209,46 +2702,21 @@ export function BattleMap({
                 {/* Grid overlay (issue #40 / #238 / #417) — a calibrated square grid (origin
                     offset, independent cell w/h, rotation, opacity via an SVG pattern) or a
                     pointy-top hex SVG. The pattern honours the SAME calibration as snapping +
-                    the ruler, so the overlay a player sees matches the DM's exactly. */}
-                {gridOn && gridType === 'square' && calibrationPx && calibrationPx.cellWpx > 1 && calibrationPx.cellHpx > 1 && (
-                  <svg
-                    data-testid="battle-map-grid"
-                    className="absolute inset-0"
-                    width={mapRect.width}
-                    height={mapRect.height}
-                    style={{ opacity: calibrationPx.opacity }}
-                  >
-                    <defs>
-                      <pattern
-                        id={`grid-${encounter.id}`}
-                        patternUnits="userSpaceOnUse"
-                        width={calibrationPx.cellWpx}
-                        height={calibrationPx.cellHpx}
-                        patternTransform={`translate(${calibrationPx.originXpx} ${calibrationPx.originYpx}) rotate(${calibrationPx.rotationDeg})`}
-                      >
-                        <path
-                          d={`M ${calibrationPx.cellWpx} 0 L 0 0 0 ${calibrationPx.cellHpx}`}
-                          fill="none"
-                          stroke="rgb(148,163,184)"
-                          strokeWidth={1}
-                        />
-                      </pattern>
-                    </defs>
-                    <rect width={mapRect.width} height={mapRect.height} fill={`url(#grid-${encounter.id})`} />
-                  </svg>
-                )}
-                {gridOn && gridType === 'hex' && hexCells.length > 0 && (
-                  <svg
-                    className="absolute inset-0"
-                    width={mapRect.width}
-                    height={mapRect.height}
-                    style={{ opacity: calibrationPx?.opacity ?? DEFAULT_GRID_OPACITY }}
-                  >
-                    {hexCells.map((pts, i) => (
-                      <polygon key={i} points={pts} fill="none" stroke="rgb(148,163,184)" strokeWidth={1} />
-                    ))}
-                  </svg>
-                )}
+                    the ruler, so the overlay a player sees matches the DM's exactly. Extracted
+                    into its own memoized component (issue #1917 stage 2) whose props are
+                    geometry inputs only, so a token drag or an unrelated HP/roster update never
+                    re-renders this subtree — see `gridOverlayOpacity` above for why that stays a
+                    primitive derived value rather than reading `encounter` here. */}
+                <GridOverlay
+                  gridOn={gridOn}
+                  gridType={gridType}
+                  mapRect={mapRect}
+                  calibrationPx={calibrationPx}
+                  hexOrientation={hexOrientation}
+                  hexCells={hexCells}
+                  opacity={gridOverlayOpacity}
+                  encounterId={encounter.id}
+                />
 
                 {/* Calibration anchors (issue #417) — DM-only, only in the Calibrate tool.
                     Drag the origin anchor to a corner of the map's printed grid, then drag the
@@ -2301,7 +2769,33 @@ export function BattleMap({
                   );
                 })()}
 
+                {targeting && (() => {
+                  const actor = placed.find((combatant) => combatant.id === targeting.actorId);
+                  if (!actor || actor.tokenX == null || actor.tokenY == null) return null;
+                  const actorX = actor.tokenX;
+                  const actorY = actor.tokenY;
+                  return (
+                    <svg data-testid="map-target-lines" className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ pointerEvents: 'none', zIndex: 1 }}>
+                      {targeting.selectedIds.map((targetId) => {
+                        const target = placed.find((combatant) => combatant.id === targetId);
+                        if (!target || target.tokenX == null || target.tokenY == null) return null;
+                        const targetX = target.tokenX;
+                        const targetY = target.tokenY;
+                        return <line key={targetId} data-testid={`map-target-line-${targetId}`} x1={actorX} y1={actorY} x2={targetX} y2={targetY} stroke="var(--color-accent)" strokeWidth={2} opacity="0.6" strokeDasharray={targeting.declared ? '1.2 0.8' : undefined} vectorEffect="non-scaling-stroke" />;
+                      })}
+                    </svg>
+                  );
+                })()}
+
                 {placed.map((c) => {
+                  const feedback = hpFeedbackByCombatant.get(c.id) ?? [];
+                  const feedbackClass = feedback.some((event) => event.kind === 'down')
+                    ? ' cf-hp-feedback-anchor--down'
+                    : feedback.some((event) => event.kind === 'revive')
+                      ? ' cf-hp-feedback-anchor--revive'
+                      : feedback.some((event) => event.crit)
+                        ? ' cf-hp-feedback-anchor--crit'
+                        : '';
                   const isDragging = draggingId === c.id && dragPos != null;
                   const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
@@ -2316,7 +2810,14 @@ export function BattleMap({
                           gridType,
                         });
                   const selectedForBatch = selectedTokenIds.has(c.id);
-                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedForBatch ? ', selected' : ''}`;
+                  const legalTarget = targeting?.legalIds.includes(c.id) ?? false;
+                  const selectedTarget = targeting?.selectedIds.includes(c.id) ?? false;
+                  const targetAvailable = selectedTarget || !targeting?.atCapacity;
+                  // Map gestures retain precedence outside move mode, and movable tokens keep
+                  // their drag behavior.
+                  const targetClickable = legalTarget && targetAvailable && !targeting?.declared && tool === 'move' && !viewportPan && !movable;
+                  const impactTarget = !reducedMotion && impactTargetIds.includes(c.id);
+                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token${selectedTarget ? ', target selected' : selectedForBatch ? ', selected' : ''}`;
                   const hpFraction = tokenHpFraction(c);
                   const hpTone = tokenHpTone(hpFraction);
                   const arc = tokenArcGeometry(sizePx);
@@ -2341,30 +2842,64 @@ export function BattleMap({
                       key={c.id}
                       data-testid={`map-token-${c.id}`}
                       role="button"
-                      tabIndex={movable ? 0 : -1}
+                      tabIndex={movable || targetClickable ? 0 : -1}
                       aria-label={tokenLabel}
+                      aria-pressed={legalTarget ? selectedTarget : undefined}
+                      aria-disabled={legalTarget && !targetAvailable ? true : undefined}
                       aria-describedby="map-keyboard-help"
-                      aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
+                      aria-keyshortcuts={movable ? 'ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace' : undefined}
                       className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
                       style={{
                         left: `${left}%`,
                         top: `${top}%`,
                         // In measure/reveal mode tokens must not eat the surface drag.
-                        pointerEvents: movable ? 'auto' : 'none',
+                        pointerEvents: movable || targetClickable ? 'auto' : 'none',
                         touchAction: 'none',
                         cursor: movable ? 'grab' : 'default',
-                        opacity: isDragging ? 0.85 : 1,
-                        outline: selectedForBatch ? '3px solid var(--color-accent)' : undefined,
+                        opacity: isDragging ? 0.85 : targeting && (!legalTarget || !targetAvailable) ? 0.6 : 1,
+                        outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget && targetAvailable && !targeting?.declared ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
                         zIndex: isDragging ? 10 : 2,
                       }}
-                      onPointerDown={(e) => onTokenPointerDown(e, c)}
-                      onKeyDown={(e) => onTokenKeyDown(e, c)}
+                      onPointerDown={(e) => {
+                        if (targetClickable && e.isPrimary) {
+                          e.stopPropagation();
+                          return;
+                        }
+                        onTokenPointerDown(e, c);
+                      }}
+                      onClick={(event) => {
+                        const targetGesture = targetGestureRef.current;
+                        if (targetGesture?.tokenId === c.id) {
+                          targetGestureRef.current = null;
+                          if (!targetGesture.moved && legalTarget && targetAvailable) {
+                            event.stopPropagation();
+                            targeting?.onToggle(c.id);
+                          }
+                          return;
+                        }
+                        if (targetClickable) event.stopPropagation();
+                        // A drag ends with a click; only a stationary token tap may select.
+                        if (targetClickable && !isDragging) targeting?.onToggle(c.id);
+                      }}
+                      onKeyDown={(e) => {
+                        if (legalTarget && targetAvailable && !targeting?.declared && !e.repeat && (e.key === 'Enter' || e.key === ' ')) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          targeting?.onToggle(c.id);
+                          return;
+                        }
+                        if (movable) onTokenKeyDown(e, c);
+                      }}
                       onFocus={(e) => {
-                        setSelectedTokenId(c.id);
+                        if (movable) setSelectedTokenId(c.id);
                         e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });
                       }}
                     >
-                      <div style={{ position: 'relative', width: sizePx, height: sizePx }}>
+                      <div
+                        className={`cf-hp-feedback-anchor${feedbackClass}`}
+                        style={{ position: 'relative', width: sizePx, height: sizePx }}
+                      >
+                        <FloatingNumbers events={feedback} />
                         <span
                           style={{
                             display: 'grid', placeItems: 'center', width: sizePx, height: sizePx, borderRadius: '50%',
@@ -2377,6 +2912,26 @@ export function BattleMap({
                         >
                           {tokenInitials(c.name)}
                         </span>
+                        {colorVisionAssist && (
+                          <span
+                            data-testid={`map-token-identity-shape-${c.id}`}
+                            data-token-shape={tokenIdentityShape(c.id)}
+                            aria-hidden="true"
+                            style={{
+                              position: 'absolute',
+                              right: 0,
+                              bottom: 0,
+                              width: Math.max(6, Math.round(sizePx * 0.24)),
+                              height: Math.max(6, Math.round(sizePx * 0.24)),
+                              background: '#fff',
+                              clipPath: TOKEN_IDENTITY_SHAPE_CLIP_PATH[tokenIdentityShape(c.id)],
+                              boxShadow: '0 0 0 1px rgba(15,23,42,.85)',
+                              pointerEvents: 'none',
+                            }}
+                          />
+                        )}
+                        {selectedTarget && <span aria-hidden="true" data-testid={`map-target-crosshair-${c.id}`} style={{ position: 'absolute', inset: -7, display: 'grid', placeItems: 'center', color: 'var(--color-accent)', fontSize: Math.max(14, Math.round(sizePx * .45)), pointerEvents: 'none' }}>⌖</span>}
+                        {impactTarget && <span aria-hidden="true" data-testid={`map-target-impact-${c.id}`} className="cf-target-impact-ring" />}
                         {showTokenState && hpFraction != null && hpTone != null && (
                           <svg data-testid={`map-token-hp-arc-${c.id}`} width={sizePx} height={sizePx} viewBox={`0 0 ${sizePx} ${sizePx}`}
                             aria-label={t('encounters.map.tokenDetails.hp', { state: t(`encounters.map.tokenDetails.hpStates.${hpTone}`) })}
@@ -2391,6 +2946,24 @@ export function BattleMap({
                           <span data-testid={`map-token-current-turn-${c.id}`} aria-label={t('encounters.map.tokenDetails.currentTurn')} role="img"
                             className={reducedMotion ? undefined : 'cf-token-state-pulse'}
                             style={{ position: 'absolute', inset: -4, border: '2px solid var(--color-accent)', borderRadius: '50%', pointerEvents: 'none' }} />
+                        )}
+                        {isCurrentTurn && colorVisionAssist && (
+                          <span
+                            data-testid={`map-token-turn-chevron-${c.id}`}
+                            aria-hidden="true"
+                            style={{
+                              position: 'absolute',
+                              top: -14,
+                              left: '50%',
+                              transform: 'translateX(-50%)',
+                              color: 'var(--color-accent)',
+                              fontSize: Math.max(10, Math.round(sizePx * 0.3)),
+                              lineHeight: 1,
+                              pointerEvents: 'none',
+                            }}
+                          >
+                            ▾
+                          </span>
                         )}
                         {showTokenState && deathMarker && (
                           <span data-testid={`map-token-death-${c.id}`} aria-label={t(`encounters.map.tokenDetails.${deathMarker}`)} role="img"
@@ -2410,10 +2983,14 @@ export function BattleMap({
                             {conditionBadges.visible.map((badge, index) => {
                               const placement = conditionPlacements[index];
                               if (!placement) return null;
+                              // Issue #2053 — `badge.condition` is the adapter-declared condition
+                              // name (or a DM-typed custom one); translate for display, falling
+                              // back to the name itself when there's no catalog entry.
+                              const conditionLabel = adapterConditionLabel(t, badge.condition);
                               return (
                                 <button key={badge.condition} type="button" data-testid={`map-token-condition-${c.id}-${index}`}
                                   tabIndex={conditionDetailsInteractive ? 0 : -1}
-                                  aria-label={t('encounters.map.tokenDetails.conditions', { name: c.name, conditions: badge.condition })} title={badge.condition}
+                                  aria-label={t('encounters.map.tokenDetails.conditions', { name: c.name, conditions: conditionLabel })} title={conditionLabel}
                                   onPointerDown={conditionDetailsInteractive ? (event) => { event.preventDefault(); event.stopPropagation(); } : undefined}
                                   onKeyDown={(event) => event.stopPropagation()}
                                   onClick={(event) => { if (!conditionDetailsInteractive) return; event.stopPropagation(); focusTokenConditionDetails(c.id); }}
@@ -2497,7 +3074,8 @@ export function BattleMap({
                       const lengthPx = (t.sizeFt / gridScale!) * cellPx;
                       if (lengthPx <= 0) return null;
                       const selected = t.id === selectedAoeId;
-                      const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
+                      const playerDeclared = t.declaredByUserId != null;
+                      const stroke = selected ? 'rgba(56,189,248,.95)' : playerDeclared ? 'rgba(99,102,241,.9)' : 'rgba(239,68,68,.8)';
                       const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
                       if (t.shape === 'circle') {
                         if (gridType === 'hex' && calibrationPx) {
@@ -2506,30 +3084,31 @@ export function BattleMap({
                           return (
                             <g key={t.id}>
                               {hexPolys.map((pts, i) => (
-                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />
+                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />
                               ))}
                             </g>
                           );
                         }
-                        return <circle key={t.id} data-testid={`map-aoe-shape-${t.id}`} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
+                        return <circle key={t.id} data-testid={`map-aoe-shape-${t.id}`} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />;
                       }
                       const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
-                      return <polygon key={t.id} data-testid={`map-aoe-shape-${t.id}`} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />;
+                      return <polygon key={t.id} data-testid={`map-aoe-shape-${t.id}`} points={pts} fill={fill} stroke={stroke} strokeWidth={2} strokeDasharray={playerDeclared ? '6 4' : undefined} />;
                     })}
                   </svg>
                 )}
-                {effectiveCanDmWrite && canAoe &&
-                  aoeTemplates.map((t) => {
-                    const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
-                    const x = drag ? drag.x : t.x;
-                    const y = drag ? drag.y : t.y;
-                    const aoeLabel = `${t.shape} template · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''}`;
+                {(effectiveCanDmWrite || effectiveCanDeclareAoe) && canAoe &&
+                  aoeTemplates.filter((template) => canEditAoe(template)).map((template) => {
+                    const drag = aoeDrag && aoeDrag.id === template.id ? aoeDrag : null;
+                    const x = drag ? drag.x : template.x;
+                    const y = drag ? drag.y : template.y;
+                    const declarerName = template.declaredByUserId == null ? null : (aoeDeclarerNames.get(template.declaredByUserId) ?? template.declaredByUserId);
+                    const aoeLabel = `${template.shape} template · ${template.sizeFt} ${gridUnit}${template.shape !== 'circle' ? ` · ${template.angleDeg}°` : ''}${declarerName ? ` · ${t('encounters.map.aoe.declaredBy', { name: declarerName })}` : ''}`;
                     return (
                       <div
-                        key={t.id}
-                        data-testid={`map-aoe-${t.id}`}
+                        key={template.id}
+                        data-testid={`map-aoe-${template.id}`}
                         role="button"
-                        tabIndex={tool === 'move' ? 0 : -1}
+                        tabIndex={tool === 'move' && canEditAoe(template) ? 0 : -1}
                         aria-label={aoeLabel}
                         aria-describedby="map-keyboard-help"
                         aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
@@ -2540,17 +3119,17 @@ export function BattleMap({
                           width: 14,
                           height: 14,
                           borderRadius: '50%',
-                          background: t.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
+                          background: template.id === selectedAoeId ? 'var(--color-accent)' : 'rgba(239,68,68,.9)',
                           border: '2px solid rgba(15,23,42,.85)',
                           // Only grab the pointer in move mode, so reveal/measure drags pass through.
-                          pointerEvents: tool === 'move' && !viewportPan ? 'auto' : 'none',
+                          pointerEvents: tool === 'move' && !viewportPan && canEditAoe(template) ? 'auto' : 'none',
                           cursor: 'grab',
                           touchAction: 'none',
                           zIndex: 7,
                         }}
-                        onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
-                        onKeyDown={(e) => onAoeHandleKeyDown(e, t)}
-                        onFocus={() => setSelectedAoeId(t.id)}
+                        onPointerDown={(e) => onAoeHandlePointerDown(e, template)}
+                        onKeyDown={(e) => onAoeHandleKeyDown(e, template)}
+                        onFocus={() => setSelectedAoeId(template.id)}
                         title={`${aoeLabel} — drag to move, click to edit`}
                       />
                     );
@@ -2668,10 +3247,67 @@ export function BattleMap({
                   </>
                 )}
 
+                {/* Live token-drag distance readout (issue #1911): same measurement path as the
+                    ruler above, plus the current actor's movement budget when the viewer may see it. */}
+                {dragDistancePreview && (
+                  <>
+                    <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 7 }}>
+                      <line
+                        data-testid="map-drag-distance-line"
+                        x1={`${dragDistancePreview.origin.x}%`}
+                        y1={`${dragDistancePreview.origin.y}%`}
+                        x2={`${dragDistancePreview.current.x}%`}
+                        y2={`${dragDistancePreview.current.y}%`}
+                        stroke="var(--color-accent)"
+                        strokeWidth={1.5}
+                        strokeDasharray="3 4"
+                        opacity={0.65}
+                      />
+                    </svg>
+                    <div
+                      data-testid="map-drag-distance-readout"
+                      className="absolute"
+                      style={{
+                        left: `${dragDistancePreview.current.x}%`,
+                        top: `${dragDistancePreview.current.y}%`,
+                        transform: 'translate(10px, -100%)',
+                        background: dragDistancePreview.budget?.overBudget ? 'var(--color-warning, #d97706)' : 'rgba(15,23,42,.9)',
+                        color: '#fff',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        whiteSpace: 'nowrap',
+                        zIndex: 9,
+                      }}
+                    >
+                      <div>
+                        {formatRulerReadout(
+                          { cells: dragDistancePreview.cells, scale: gridScale ?? 0, gridUnit, gridType },
+                          'display',
+                        )}
+                      </div>
+                      {dragDistancePreview.budget && (
+                        <div data-testid="map-drag-distance-budget">
+                          {t('encounters.map.dragDistance.budget', {
+                            used: dragDistancePreview.budget.usedFt,
+                            max: dragDistancePreview.budget.maxFt,
+                            unit: gridUnit,
+                          })}
+                          {dragDistancePreview.budget.overBudget ? ` · ${t('encounters.map.dragDistance.overSpeed')}` : ''}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
                 {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
                 {pings.map((p) => {
                   const isReduced = prefersReducedMotion();
                   const color = p.color || 'var(--color-accent)';
+                  // Issue #1937: an intent-labeled ping (chosen from the long-press/right-click
+                  // menu) shows its icon + label above the ripple for the ping's whole lifetime.
+                  const intentIcon = pingIntentIconForLabel(p.label);
                   return (
                     <div
                       key={p.key}
@@ -2682,6 +3318,15 @@ export function BattleMap({
                         transform: 'translate(-50%, -50%)',
                       }}
                     >
+                      {p.label && (
+                        <div
+                          className="mb-1 px-1.5 py-0.5 rounded text-xs whitespace-nowrap bg-surface-raised font-semibold shadow-sm flex items-center gap-1"
+                          style={{ color: 'var(--color-text)', border: `1px solid ${color}` }}
+                        >
+                          {intentIcon && <GameIcon slug={intentIcon} size={UI_ICON_SIZE.xs} />}
+                          <span>{p.label}</span>
+                        </div>
+                      )}
                       <div className="relative flex items-center justify-center" style={{ width: 24, height: 24 }}>
                         {!isReduced && (
                           <div
@@ -2718,19 +3363,71 @@ export function BattleMap({
             {/* Ping Log */}
             {pings.length > 0 && (
               <div className="absolute top-2 left-2 flex flex-col gap-1 z-20 pointer-events-none" style={{ maxWidth: 200 }}>
-                {pings.slice().reverse().map((p) => (
-                  <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
-                    <span className="truncate mr-2 font-medium">{p.senderName || 'Someone'} pinged</span>
-                    <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
-                      <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
-                    </button>
-                  </div>
-                ))}
+                {pings.slice().reverse().map((p) => {
+                  const intentIcon = pingIntentIconForLabel(p.label);
+                  const senderName = p.senderName || t('encounters.map.ping.log.unknownSender');
+                  return (
+                    <div key={p.key} className="bg-surface border py-1 px-2 text-xs rounded shadow-sm flex items-center justify-between pointer-events-auto" style={{ borderColor: p.color || 'var(--color-accent)' }}>
+                      <span className="truncate mr-2 font-medium flex items-center gap-1">
+                        {intentIcon && <GameIcon slug={intentIcon} size={UI_ICON_SIZE.xs} />}
+                        {p.label
+                          ? t('encounters.map.ping.log.labeled', { name: senderName, label: p.label })
+                          : t('encounters.map.ping.log.plain', { name: senderName })}
+                      </span>
+                      <button type="button" className="text-muted hover:text-default flex-none" onClick={(e) => { e.stopPropagation(); onDismissPing(p.key); }} aria-label="Dismiss ping">
+                        <GameIcon slug="cross-mark" size={UI_ICON_SIZE.xs} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
             </div>
             <style>{'@keyframes cfPing{0%{transform:scale(.4);opacity:.9}70%{opacity:.55}100%{transform:scale(3);opacity:0}}'}</style>
           </div>
+
+          {/* Ping intent menu (issue #1937) — long-press or right-click with Ping armed. */}
+          {pingIntentMenu && createPortal(
+            <div
+              role="menu"
+              aria-label={t('encounters.map.ping.menuLabel')}
+              data-testid="map-ping-intent-menu"
+              className="cf-popover"
+              style={{
+                position: 'fixed',
+                left: pingIntentMenu.clientX,
+                top: pingIntentMenu.clientY,
+                zIndex: 10000,
+                background: 'var(--color-bg-elevated, #ffffff)',
+                border: '1px solid var(--color-border, #e5e5e5)',
+                borderRadius: 6,
+                padding: 4,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+                minWidth: 160,
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              {PING_INTENTS.map((intent, index) => (
+                <button
+                  key={intent.key}
+                  ref={index === 0 ? pingIntentFirstItemRef : undefined}
+                  type="button"
+                  role="menuitem"
+                  className="cf-menu-item"
+                  data-testid={`map-ping-intent-${intent.key}`}
+                  onClick={() => choosePingIntent(intent.key)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                >
+                  <GameIcon slug={intent.icon} size={UI_ICON_SIZE.xs} />
+                  <span>{pingIntentLabel(intent.key)}</span>
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )}
 
           {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
             <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">
@@ -2865,7 +3562,7 @@ export function BattleMap({
                   : tool === 'select'
                     ? 'Click a revealed region to select it, drag to move, Delete to remove. Escape deselects when a region is focused.'
                     : tool === 'ping'
-                  ? 'Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone.'
+                  ? t('encounters.map.ping.toolHelp', { hint: t('encounters.map.ping.keyboardHint') })
                   : viewportPan
                     ? 'Drag to pan the map. Pinch with two fingers to zoom on touch devices.'
                     : effectiveIsDm
@@ -2888,9 +3585,22 @@ export function BattleMap({
           onExpire={() => setTokenBatchUndo(null)}
         />
       )}
+      {dragMoveUndo && (
+        <UndoSnackbar
+          key={`${dragMoveUndo.combatantId}-${dragMoveUndo.moveFt}`}
+          message={t('encounters.map.dragDistance.movedMessage', { feet: dragMoveUndo.moveFt, unit: gridUnit })}
+          successMessage={t('encounters.map.dragDistance.undoneMessage')}
+          onUndo={async () => {
+            onMoveToken(dragMoveUndo.combatantId, dragMoveUndo.origin.x, dragMoveUndo.origin.y);
+            onMoveFt(dragMoveUndo.combatantId, -dragMoveUndo.moveFt);
+            setDragMoveUndo(null);
+          }}
+          onExpire={() => setDragMoveUndo(null)}
+        />
+      )}
     </Card>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 
@@ -2906,6 +3616,7 @@ export type ApplyDamageBarProps = {
   label: string;
   diceTotal?: number;
   ruleSystem?: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   targets: Combatant[];
   aoeTemplates?: AoeTemplate[];
   aoeHitContext?: AoeHitTestContext | null;
@@ -2916,11 +3627,12 @@ export type ApplyDamageBarProps = {
   onDismiss: () => void;
 };
 
-export function ApplyDamageBar({
+export const ApplyDamageBar = memo(function ApplyDamageBar({
   amount,
   label,
   diceTotal,
   ruleSystem,
+  customMechanicsProfile,
   targets,
   aoeTemplates = [],
   aoeHitContext,
@@ -2937,8 +3649,9 @@ export function ApplyDamageBar({
   const [aoeSaveOutcomes, setAoeSaveOutcomes] = useState<Partial<Record<number, DamageSaveOutcome>>>({});
   const [isCrit, setIsCrit] = useState(false);
   const delta = mode === 'heal' ? amount : -amount;
-  const damageTypes = ruleSystemAdapter(ruleSystem).damageTypes ?? [];
-  const supportsDamageRules = ruleSystemAdapter(ruleSystem).supportsDirectDamageRules === true;
+  const mapAdapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
+  const damageTypes = mapAdapter.damageTypes ?? [];
+  const supportsDamageRules = mapAdapter.supportsDirectDamageRules === true;
   const damage = mode === 'damage' && supportsDamageRules
     ? {
         damageType: normalizeDirectDamageType(damageType),
@@ -3140,4 +3853,4 @@ export function ApplyDamageBar({
       </button>
     </div>
   );
-}
+});

@@ -193,6 +193,26 @@ describe('AI Driver encounter authoring (#1022)', () => {
     if (!result.ok) expect(result.code).toBe('forbidden_encounter_field');
   });
 
+  it('refuses turnTimerSeconds — a pacing decision for the human DM, not the seat (issue #1935)', () => {
+    const s = session();
+    const result = guardDriverLivePlayArgs('update_encounter', { encounterId: 7, turnTimerSeconds: 90 }, s);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('forbidden_encounter_field');
+  });
+
+  it('still allows VTT-only work alongside a rejected turnTimerSeconds — the whole call is refused, nothing partially applies', () => {
+    // The guard is an all-or-nothing gate for the call: a forbidden field anywhere in the
+    // args refuses the entire request rather than silently dropping just that key and
+    // applying the rest (issue #1935 review).
+    const s = session({ driverGeneratedMapIds: [42] });
+    const result = guardDriverLivePlayArgs(
+      'update_encounter',
+      { encounterId: 99, fog: { enabled: true, revealed: [] }, turnTimerSeconds: 60 },
+      s,
+    );
+    expect(result.ok).toBe(false);
+  });
+
   // ---------------------------------------------------------------------------
   // Ownership bookkeeping
   // ---------------------------------------------------------------------------

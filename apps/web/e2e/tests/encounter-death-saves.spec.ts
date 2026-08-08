@@ -94,15 +94,55 @@ test.describe('encounter death saves (#1465)', () => {
       await expect(rollBtn).toBeVisible();
       await expect(rollBtn).toBeEnabled();
 
-      // Roll death save
-      await rollBtn.click();
+      // Roll death save — wait for the actual mutation response (not just the click) and
+      // assert against its outcome. A natural 20 revives the combatant with 1 HP, which
+      // flips `deathState` off 'dying' and removes the card (TurnWorkspace.tsx: `isDying =
+      // deathState === 'dying'`); 3 accumulated failures resolves to 'dead' the same way.
+      // Asserting an unconditional "card still visible" here is both vacuous (it passes
+      // even if the roll silently no-oped) and a ~1-in-20 flake on a natural 20.
+      const [rollResponse] = await Promise.all([
+        page.waitForResponse(
+          (res) => res.url().includes('/death-save') && res.request().method() === 'POST',
+        ),
+        rollBtn.click(),
+      ]);
+      expect(rollResponse.ok(), 'death-save roll request must succeed').toBe(true);
+      const rollBody = (await rollResponse.json()) as {
+        combatant: { deathState: string; deathSaveSuccesses: number; deathSaveFailures: number; hpCurrent: number | null };
+      };
 
-      // Card counter updates or turns end
-      await expect(card).toBeVisible();
+      if (rollBody.combatant.deathState === 'dying') {
+        // Still dying: the card stays, and the roll must have moved a real counter.
+        await expect(card).toBeVisible();
+        expect(
+          rollBody.combatant.deathSaveSuccesses + rollBody.combatant.deathSaveFailures,
+          'a death-save roll that keeps deathState=dying must increment a success or failure counter',
+        ).toBeGreaterThan(0);
+      } else {
+        // Resolved this roll (natural 20 revival, 3rd success -> stable, or 3rd failure ->
+        // dead): the card must disappear because isDying is now false.
+        expect(['stable', 'dead', 'none']).toContain(rollBody.combatant.deathState);
+        await expect(page.getByTestId('turn-death-save-card')).toHaveCount(0);
+      }
 
-      // Case A: Monster turn -> death save card must be absent
-      await dmCtx.post(`/api/v1/encounters/${encounterId}/next-turn`);
+      // Case A: Monster turn -> death save card must be absent regardless of the roll
+      // outcome above (the PC no longer holds the turn either way). If the roll above
+      // already resolved the PC (natural 20, 3rd success/failure), the card is absent
+      // regardless of whose turn it is, so a failed/no-op next-turn here would still let
+      // this assertion pass without ever proving the turn actually moved — assert the
+      // request succeeded AND that `currentCombatantId` genuinely advanced to the monster
+      // (the card's own gate is `turn.current.deathState === 'dying'`, TurnWorkspace.tsx),
+      // so this case exercises real monster-turn suppression even in the resolved branch.
+      const nextTurnRes = await dmCtx.post(`/api/v1/encounters/${encounterId}/next-turn`);
+      expect(nextTurnRes.ok(), 'next-turn request must succeed').toBe(true);
+      const nextTurnBody = (await nextTurnRes.json()) as { currentCombatantId: number | null };
+      expect(nextTurnBody.currentCombatantId, 'turn must have advanced to the monster').toBe(monster.id);
       await page.reload();
+      // Wait for the reloaded turn workspace to actually resolve to the monster's turn
+      // before checking the card is absent — otherwise this can trivially pass against
+      // the post-reload loading state (workspace not yet rendered) even if a monster-turn
+      // regression would show the card once the query settles.
+      await expect(page.getByTestId('turn-workspace')).toContainText(monster.name);
       await expect(page.getByTestId('turn-death-save-card')).toHaveCount(0);
 
     } finally {
@@ -125,6 +165,7 @@ test.describe('encounter death saves (#1465)', () => {
 
     let campaignId: number | null = null;
     let encounterId: number | null = null;
+    let characterId: number | null = null;
 
     try {
       await dmCtx.post('/api/v1/auth/login', { data: CREDS.dm });
@@ -143,6 +184,25 @@ test.describe('encounter death saves (#1465)', () => {
         data: { userId: playerUserId, role: 'player' },
       });
 
+      // Mirror the first test's fixture — a 0-HP, `dying` PC holding the turn — so the
+      // only variable is the ruleset. Without a dying PC in the encounter, `isDying` is
+      // false regardless of the ruleset gate, and the absence assertion below would pass
+      // even if the Open Legend death-save suppression were completely broken.
+      const character = await (
+        await dmCtx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+          data: {
+            name: 'OL Dying Hero',
+            className: 'Adept',
+            level: 4,
+            ownerUserId: String(playerUserId),
+            hpCurrent: 0,
+            hpMax: 20,
+            stats: { CON: 14 },
+          },
+        })
+      ).json();
+      characterId = character.id;
+
       const encounter = await (
         await dmCtx.post(`/api/v1/campaigns/${campaignId}/encounters`, {
           data: { name: 'OL Fight', hidden: false },
@@ -150,23 +210,52 @@ test.describe('encounter death saves (#1465)', () => {
       ).json();
       encounterId = encounter.id;
 
-      await dmCtx.post(`/api/v1/encounters/${encounterId}/combatants`, {
-        data: { kind: 'monster', name: 'OL Monster', hpMax: 20 },
-      });
+      const pcCombatant = (
+        encounter.combatants as Array<{ id: number; characterId: number | null }>
+      ).find((c) => c.characterId === characterId);
+      if (!pcCombatant) throw new Error('Expected auto-added PC combatant');
+
+      const monster = await (
+        await dmCtx.post(`/api/v1/encounters/${encounterId}/combatants`, {
+          data: { kind: 'monster', name: 'OL Monster', hpMax: 20 },
+        })
+      ).json();
 
       await dmCtx.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
+      const dyingPatchRes = await dmCtx.patch(`/api/v1/encounters/${encounterId}/combatants/${pcCombatant.id}`, {
+        data: { initiative: 50, hpSet: 0, deathSaveSuccesses: 0, deathSaveFailures: 0, deathState: 'dying' },
+      });
+      // If this write 400s/no-ops, the PC silently stays a healthy `none` combatant, which
+      // would ALSO suppress the card — for reasons unrelated to the ruleset gate this test
+      // exists to cover. Assert success and the resulting state directly from the response
+      // body, rather than trusting the request landed.
+      expect(dyingPatchRes.ok(), 'setting deathState=dying on the Open Legend PC must succeed').toBe(true);
+      const dyingPatchBody = (await dyingPatchRes.json()) as { deathState: string; hpCurrent: number | null };
+      expect(dyingPatchBody.deathState).toBe('dying');
+      expect(dyingPatchBody.hpCurrent).toBe(0);
+      await dmCtx.patch(`/api/v1/encounters/${encounterId}/combatants/${monster.id}`, {
+        data: { initiative: 10 },
+      });
       await dmCtx.post(`/api/v1/encounters/${encounterId}/start`);
 
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      // 'Running' only proves the encounter header loaded — the death-save card is gated
+      // by the separate turn-workspace data path. Wait for that workspace to actually
+      // resolve to this dying PC's turn before asserting the card stays absent, otherwise
+      // a slow load could pass this check before the workspace (and any regression in it)
+      // ever renders.
+      await expect(page.getByTestId('turn-workspace')).toContainText(character.name);
 
-      // Card must be absent
+      // Card must be absent even though this combatant is 0-HP and `dying` — Open Legend
+      // has no 5e-style death saves, so `hasDeathSavesForAdapter` must gate the card off.
       await expect(page.getByTestId('turn-death-save-card')).toHaveCount(0);
     } finally {
       if (encounterId && campaignId) {
         await dmCtx.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
         await dmCtx.delete(`/api/v1/encounters/${encounterId}`).catch(() => undefined);
       }
+      if (characterId) await dmCtx.delete(`/api/v1/characters/${characterId}`).catch(() => undefined);
       if (campaignId) await dmCtx.delete(`/api/v1/campaigns/${campaignId}`).catch(() => undefined);
 
       await dmCtx.dispose();

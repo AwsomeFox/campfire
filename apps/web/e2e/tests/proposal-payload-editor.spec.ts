@@ -1,0 +1,313 @@
+import { expect, test, type Page, type Route } from '@playwright/test';
+import type { Proposal } from '@campfire/schema';
+import { seed, stateFor } from './seed';
+
+/**
+ * Schema-driven proposal payload editor (issue #769).
+ *
+ * The pure classification/validation/preview logic is covered by
+ * `proposal-payload-form.unit.spec.ts` (no DOM). This suite exercises the actual
+ * rendered editor: persistent labels, an error associated with (and focus moved to)
+ * the invalid field, the normalized-result preview, the guided/advanced round-trip
+ * that preserves the draft on a bad switch, draft survival across a failed network
+ * submit, and keyboard operability of the whole approve/reject flow.
+ */
+function proposal(
+  id: number,
+  options: Partial<Proposal> & Pick<Proposal, 'action' | 'entityType'>,
+): Proposal {
+  const title = `Proposal ${id}`;
+  return {
+    id,
+    campaignId: seed().campaignId,
+    entityId: id,
+    payload: { title },
+    snapshot: null,
+    baseUpdatedAt: null,
+    baseSnapshotHash: null,
+    proposer: 'Player',
+    proposerUserId: '7',
+    proposerToken: null,
+    generationProvenance: null,
+    status: 'pending',
+    resolvedBy: '',
+    note: '',
+    createdAt: '2026-07-22T00:00:00.000Z',
+    updatedAt: '2026-07-22T00:00:00.000Z',
+    ...options,
+  };
+}
+
+interface MockProposalApi {
+  pending: Proposal[];
+  approveCalls: Array<{ id: number; body: unknown }>;
+  approveStatus: number;
+}
+
+async function mockProposalApi(page: Page, pending: Proposal[]): Promise<MockProposalApi> {
+  const state: MockProposalApi = { pending, approveCalls: [], approveStatus: 201 };
+
+  await page.route('**/api/v1/campaigns/*/proposals?status=*', async (route: Route) => {
+    const status = new URL(route.request().url()).searchParams.get('status');
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(status === 'pending' ? state.pending : []),
+    });
+  });
+
+  await page.route('**/api/v1/proposals/*/approve', async (route: Route) => {
+    const id = Number(route.request().url().match(/proposals\/(\d+)\/approve/)?.[1]);
+    const body = route.request().postDataJSON();
+    state.approveCalls.push({ id, body });
+    if (state.approveStatus >= 400) {
+      await route.fulfill({
+        status: state.approveStatus,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Simulated approve failure' }),
+      });
+      return;
+    }
+    state.pending = state.pending.filter((p) => p.id !== id);
+    await route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify({ ok: true }) });
+  });
+
+  return state;
+}
+
+test.describe('proposal payload editor', () => {
+  test.use({ storageState: stateFor('dm') });
+
+  test('guided mode shows a persistent label/help per field and associates + focuses a validation error', async ({ page }) => {
+    const { campaignId } = seed();
+    // A `create` proposal is used here specifically because QuestCreate requires
+    // `title` — QuestUpdate (a partial of it) makes every field optional, which
+    // wouldn't exercise the "required field" error/focus path at all.
+    await mockProposalApi(page, [
+      proposal(501, { action: 'create', entityType: 'quest', payload: { title: 'Old title', reward: 'Gold' } }),
+    ]);
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+
+    const titleField = page.getByLabel('Title', { exact: true });
+    await expect(titleField).toBeVisible();
+    await expect(titleField).toHaveValue('Old title');
+    // Persistent help text, not a placeholder-only hint.
+    await expect(page.getByText('Required. 1–200 characters.')).toBeVisible();
+
+    await titleField.fill('');
+    await page.getByRole('button', { name: 'Approve edited' }).click();
+
+    const error = page.getByRole('alert').filter({ hasText: 'This field is required.' });
+    await expect(error).toBeVisible();
+    await expect(titleField).toBeFocused();
+    // aria-describedby wires the input to its own error paragraph, not just to help text.
+    const describedBy = await titleField.getAttribute('aria-describedby');
+    const errorId = await error.getAttribute('id');
+    expect(describedBy).toContain(errorId);
+  });
+
+  test('preview reports the normalized result and exactly the field that changed', async ({ page }) => {
+    const { campaignId } = seed();
+    await mockProposalApi(page, [
+      proposal(502, { action: 'update', entityType: 'quest', payload: { title: 'Old title', reward: 'Gold' } }),
+    ]);
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+    await expect(page.getByText('Preview: no changes from the current proposal.')).toBeVisible();
+
+    await page.getByLabel('Title', { exact: true }).fill('New title');
+    await expect(page.getByText('Preview — 1 changed field')).toBeVisible();
+    await expect(page.getByText('Old title', { exact: true })).toBeVisible();
+    await expect(page.getByText('→ New title')).toBeVisible();
+    // Reward was untouched, so it must not appear in the changed-fields preview.
+    await expect(page.getByText('→ Gold')).toHaveCount(0);
+  });
+
+  test('an invalid JSON switch back to guided mode is refused and the raw draft is preserved', async ({ page }) => {
+    const { campaignId } = seed();
+    await mockProposalApi(page, [
+      proposal(503, { action: 'update', entityType: 'quest', payload: { title: 'Old title' } }),
+    ]);
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+    await page.getByRole('button', { name: 'Advanced: edit raw JSON' }).click();
+
+    const rawEditor = page.getByLabel('Raw JSON payload');
+    await expect(rawEditor).toBeVisible();
+    await expect(rawEditor).toHaveValue(/"title": "Old title"/);
+
+    await rawEditor.fill('{ this is not json');
+    await page.getByRole('button', { name: 'Back to guided editor' }).click();
+
+    await expect(page.getByRole('alert').filter({ hasText: 'Fix the JSON before switching to the guided editor.' })).toBeVisible();
+    // Still in advanced mode with the broken text intact — nothing was silently discarded.
+    await expect(rawEditor).toHaveValue('{ this is not json');
+    await expect(page.getByRole('button', { name: 'Advanced: edit raw JSON' })).toHaveCount(0);
+  });
+
+  test('fixing the raw JSON clears the stale mode-switch error without a second switch attempt', async ({ page }) => {
+    // Issue #2015: `modeSwitchError` used to be set only on a refused switch and cleared
+    // only on the two success paths, so repairing the JSON left the alert on screen
+    // asserting a problem that no longer existed until the reviewer clicked the toggle
+    // again. It must now clear itself the moment the JSON re-parses.
+    const { campaignId } = seed();
+    await mockProposalApi(page, [
+      proposal(506, { action: 'update', entityType: 'quest', payload: { title: 'Old title' } }),
+    ]);
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+    await page.getByRole('button', { name: 'Advanced: edit raw JSON' }).click();
+
+    const rawEditor = page.getByLabel('Raw JSON payload');
+    await rawEditor.fill('{ this is not json');
+    await page.getByRole('button', { name: 'Back to guided editor' }).click();
+
+    const error = page.getByRole('alert').filter({ hasText: 'Fix the JSON before switching to the guided editor.' });
+    await expect(error).toBeVisible();
+
+    // Repair the JSON WITHOUT clicking "Back to guided editor" again.
+    await rawEditor.fill('{ "title": "Fixed title" }');
+    await expect(error).toHaveCount(0);
+  });
+
+  test('fixing the offending guided field clears the stale mode-switch error without a second switch attempt', async ({ page }) => {
+    // Same defect as above, from the other direction: `switchToAdvanced` refuses and names
+    // the field whose typed value the draft does not hold yet. Fixing that field must clear
+    // the alert on its own.
+    const { campaignId } = seed();
+    // `create` so `title` is required — `QuestUpdate` makes every field optional and would
+    // never populate `buildProposalDraftPayload`'s `fieldErrors` for an emptied box.
+    await mockProposalApi(page, [
+      proposal(507, { action: 'create', entityType: 'quest', payload: { title: 'Old title' } }),
+    ]);
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+
+    const titleField = page.getByLabel('Title', { exact: true });
+    await titleField.fill('');
+    await page.getByRole('button', { name: 'Advanced: edit raw JSON' }).click();
+
+    const error = page.getByRole('alert').filter({ hasText: 'Fix Title before switching to raw JSON.' });
+    await expect(error).toBeVisible();
+
+    // Repair the field WITHOUT clicking "Advanced: edit raw JSON" again.
+    await titleField.fill('New title');
+    await expect(error).toHaveCount(0);
+  });
+
+  test('a failed approve preserves the edited draft instead of resetting it', async ({ page }) => {
+    const { campaignId } = seed();
+    const api = await mockProposalApi(page, [
+      proposal(504, { action: 'update', entityType: 'quest', payload: { title: 'Old title' } }),
+    ]);
+    api.approveStatus = 500;
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+    const titleField = page.getByLabel('Title', { exact: true });
+    await titleField.fill('Edited while offline');
+    await page.getByRole('button', { name: 'Approve edited' }).click();
+
+    await expect(page.getByRole('alert').filter({ hasText: 'Simulated approve failure' })).toBeVisible();
+    // The edit is still there — a network failure must not silently discard the draft.
+    await expect(titleField).toHaveValue('Edited while offline');
+    await expect.poll(() => api.approveCalls.length).toBe(1);
+  });
+
+  test('the whole edit/approve flow is keyboard operable', async ({ page }) => {
+    const { campaignId } = seed();
+    const api = await mockProposalApi(page, [
+      proposal(505, { action: 'update', entityType: 'quest', payload: { title: 'Old title' } }),
+    ]);
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    const editButton = page.getByRole('button', { name: 'Edit payload' });
+    await editButton.focus();
+    await page.keyboard.press('Enter');
+
+    const titleField = page.getByLabel('Title', { exact: true });
+    await titleField.focus();
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Keyboard title');
+    await expect(titleField).toHaveValue('Keyboard title');
+
+    await page.getByRole('button', { name: 'Approve edited' }).focus();
+    await page.keyboard.press('Enter');
+
+    // ONLY the field the user actually edited is sent. Every other guided field was
+    // absent from the original proposal and left untouched, so it stays OMITTED rather
+    // than being materialized as an explicit empty value — for nullables (`giverNpcId`,
+    // `parentId`) exactly as much as for booleans (`hidden`).
+    //
+    // This assertion previously expected `giverNpcId: null, parentId: null`, encoding the
+    // bug as intended behavior (issue #769 review, Devin). `QuestsService.update` applies
+    // `.set({ ...input })`, so those nulls CLEAR the columns: a DM who opened the editor
+    // to fix a title and approved would silently unlink the quest's giver NPC and parent
+    // quest, with nothing shown in the preview. See the two nullable-omission tests in
+    // proposal-payload-form.unit.spec.ts.
+    await expect.poll(() => api.approveCalls).toEqual([
+      { id: 505, body: { payload: { title: 'Keyboard title' } } },
+    ]);
+  });
+});
+
+test.describe('proposal payload editor: proposer self-view revise', () => {
+  test.use({ storageState: stateFor('player') });
+
+  test('revising a pending proposal uses the same schema-driven editor and clears a stale error on cancel', async ({ page }) => {
+    const { campaignId } = seed();
+    const revisions: Array<{ id: number; body: unknown }> = [];
+    const patchStatus = 400;
+
+    await page.route('**/api/v1/campaigns/*/proposals', async (route: Route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([
+          proposal(601, { action: 'update', entityType: 'quest', payload: { title: 'Old title' } }),
+        ]),
+      });
+    });
+    await page.route('**/api/v1/proposals/*', async (route: Route) => {
+      if (route.request().method() !== 'PATCH') {
+        await route.fallback();
+        return;
+      }
+      const id = Number(route.request().url().match(/proposals\/(\d+)/)?.[1]);
+      revisions.push({ id, body: route.request().postDataJSON() });
+      await route.fulfill({
+        status: patchStatus,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Simulated revise failure' }),
+      });
+    });
+
+    await page.goto(`/c/${campaignId}/proposals`);
+    await page.getByRole('button', { name: 'Edit payload' }).click();
+
+    const titleField = page.getByLabel('Title', { exact: true });
+    await expect(titleField).toBeVisible();
+    await titleField.fill('Revised title');
+    await page.getByRole('button', { name: 'Save' }).click();
+
+    const error = page.getByRole('alert').filter({ hasText: 'Simulated revise failure' });
+    await expect(error).toBeVisible();
+    await expect.poll(() => revisions).toEqual([
+      // Same omit-vs-null invariant as the DM approve flow above: untouched nullable
+      // fields absent from the original proposal stay omitted rather than being sent as
+      // explicit nulls that would clear the columns on save (issue #769 review).
+      { id: 601, body: { payload: { title: 'Revised title' } } },
+    ]);
+
+    // Cancelling the edit clears the stale network error instead of leaving it stranded
+    // once the editor (and its own error surface) has unmounted.
+    await page.getByRole('button', { name: 'Cancel edit' }).click();
+    await expect(page.getByRole('alert').filter({ hasText: 'Simulated revise failure' })).toHaveCount(0);
+  });
+});

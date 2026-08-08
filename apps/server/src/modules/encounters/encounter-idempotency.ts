@@ -52,6 +52,7 @@ export type EncounterOperation =
   | 'combatant.update'
   | 'combatant.death_save_roll'
   | 'combatant.roll_initiative'
+  | 'combatant.resource_adjust'
   | 'turn.advance';
 
 // The drizzle transaction handle and the DB handle are structurally identical for the
@@ -161,6 +162,18 @@ export function findPriorEncounterOp(tx: AnyTx, claim: EncounterOpClaim, now: nu
     response: prior.responseJson === null ? null : (JSON.parse(prior.responseJson) as unknown),
     responseRole: (prior.responseRole as Role | null) ?? null,
   };
+}
+
+/** Read only an exact live replay without turning a changed request into key reuse early. */
+export function findExactPriorEncounterOp(tx: AnyTx, claim: EncounterOpClaim, now: number): EncounterOpPrior | null {
+  const cutoff = new Date(now - ENCOUNTER_OP_IDEMPOTENCY_TTL_MS).toISOString();
+  const [prior] = tx.select().from(encounterOpIdempotency).where(and(
+    eq(encounterOpIdempotency.actorId, claim.actorId),
+    eq(encounterOpIdempotency.operation, claim.operation),
+    eq(encounterOpIdempotency.key, claim.key),
+  )).limit(1).all();
+  if (!prior || prior.createdAt < cutoff || prior.encounterId !== claim.encounterId || prior.campaignId !== claim.campaignId || prior.fingerprint !== claim.fingerprint) return null;
+  return { response: prior.responseJson === null ? null : (JSON.parse(prior.responseJson) as unknown), responseRole: (prior.responseRole as Role | null) ?? null };
 }
 
 /**

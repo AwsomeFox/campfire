@@ -30,7 +30,11 @@ import {
   sessions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import { provenanceEndpointBaseUrl } from '../../common/ai-provenance-endpoint';
+import {
+  provenanceEndpointBaseUrl,
+  resolveAiProvenanceEgress,
+  operatorDeclaredLocalAiEndpoint,
+} from '../../common/ai-provenance-endpoint';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
@@ -308,26 +312,6 @@ export class ScribeService implements OnApplicationBootstrap {
   }
 
   /**
-   * The operator's EXPLICIT declaration that the configured provider endpoint is
-   * on-box / operator-controlled, so a generation through it does not constitute
-   * external use (issue #501).
-   *
-   * Deliberately an explicit opt-in rather than an inference. Campfire will NOT try to
-   * decide that a `baseUrl` is "local enough" by inspecting its host: a loopback or
-   * RFC1918 address can just as easily be an egress proxy forwarding to a public vendor,
-   * and guessing wrong leaks member-authored content that a member declined to share.
-   * That is the operator's call to make, and it defaults to OFF (fail-closed).
-   *
-   * Note this is NOT the same knob as `AI_PROVIDER_ALLOW_PRIVATE_HOSTS`, which is the SSRF
-   * host policy — permitting a private host as a *destination* says nothing about whether
-   * content sent there stays inside the deployment.
-   */
-  private operatorDeclaredLocalEndpoint(): boolean {
-    const raw = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL?.trim().toLowerCase();
-    return raw === '1' || raw === 'true';
-  }
-
-  /**
    * Decide, BEFORE any material is assembled, whether this campaign's generation will
    * actually leave the server (issue #501).
    *
@@ -337,14 +321,13 @@ export class ScribeService implements OnApplicationBootstrap {
    * So "no provider row" ⟺ the run falls through to the injected/no-op seam, where
    * `endpointScope` resolves to `'injected'`/`'none'` and nothing is transmitted anywhere.
    *
-   * Anything else is treated as external. A configured `baseUrl` is genuinely ambiguous —
-   * it could be a localhost Ollama or a public API — so it stays external unless the
-   * operator has explicitly declared otherwise.
+   * The configured/operator-declared-local decision itself lives in
+   * `resolveAiProvenanceEgress` (`common/ai-provenance-endpoint.ts`), shared with
+   * `InboxSweepService` and `CoDmService` so the three cannot drift (#1993 review).
    */
   private async resolveEgress(campaignId: number): Promise<ScribeEgress> {
     const view = await this.providerConfig.getEffectiveView(campaignId);
-    if (!view.configured) return 'local';
-    return this.operatorDeclaredLocalEndpoint() ? 'local' : 'external';
+    return resolveAiProvenanceEgress(view.configured);
   }
 
   private async applyConsentGate(
@@ -759,7 +742,7 @@ export class ScribeService implements OnApplicationBootstrap {
           // meantime, this material was assembled unfiltered for a local seam and is now
           // about to be handed to an external endpoint. Refuse rather than send: the catch
           // below releases the reservation and records a failed run.
-          if (egress === 'local' && !this.operatorDeclaredLocalEndpoint()) {
+          if (egress === 'local' && !operatorDeclaredLocalAiEndpoint()) {
             throw new Error(
               'provider configuration changed to an external endpoint after source assembly; ' +
                 'refusing to send material that was not filtered for external-use consent',

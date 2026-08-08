@@ -1,26 +1,28 @@
-import type { Combatant, HpModel, RuleSystemAdapter } from '@campfire/schema';
+import type { Combatant, HpModel, RuleSystemAdapter, CustomMechanicsProfile } from '@campfire/schema';
 import { hpModelForAdapter, ruleSystemAdapter } from '@campfire/schema';
 
 export function resolveHpModel(
   ruleSystemOrAdapterOrHpModel?: string | RuleSystemAdapter | HpModel | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
 ): HpModel {
   if (!ruleSystemOrAdapterOrHpModel) {
-    return hpModelForAdapter(ruleSystemAdapter(null));
+    return hpModelForAdapter(ruleSystemAdapter(null, customMechanicsProfile));
   }
   if (typeof ruleSystemOrAdapterOrHpModel === 'string') {
-    return hpModelForAdapter(ruleSystemAdapter(ruleSystemOrAdapterOrHpModel));
+    return hpModelForAdapter(ruleSystemAdapter(ruleSystemOrAdapterOrHpModel, customMechanicsProfile));
   }
   if (
     typeof ruleSystemOrAdapterOrHpModel === 'object' &&
+    ruleSystemOrAdapterOrHpModel !== null &&
     'massiveDamageInstantDeath' in ruleSystemOrAdapterOrHpModel &&
     'deathSaves' in ruleSystemOrAdapterOrHpModel
   ) {
     return ruleSystemOrAdapterOrHpModel as HpModel;
   }
-  if (typeof ruleSystemOrAdapterOrHpModel === 'object' && 'id' in ruleSystemOrAdapterOrHpModel) {
+  if (typeof ruleSystemOrAdapterOrHpModel === 'object' && ruleSystemOrAdapterOrHpModel !== null && 'id' in ruleSystemOrAdapterOrHpModel) {
     return hpModelForAdapter(ruleSystemOrAdapterOrHpModel as RuleSystemAdapter);
   }
-  return hpModelForAdapter(ruleSystemAdapter(null));
+  return hpModelForAdapter(ruleSystemAdapter(null, customMechanicsProfile));
 }
 
 /**
@@ -34,9 +36,10 @@ export function withOptimisticHpLifecycle(
   damagedWhileDown = true,
   isInstantDeath = false,
   ruleSystemOrAdapterOrHpModel?: string | RuleSystemAdapter | HpModel | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
 ): Combatant {
   if (combatant.kind !== 'character') return { ...combatant, hpCurrent };
-  const hpModel = resolveHpModel(ruleSystemOrAdapterOrHpModel);
+  const hpModel = resolveHpModel(ruleSystemOrAdapterOrHpModel, customMechanicsProfile);
 
   if (hpCurrent === 0) {
     if ((isInstantDeath && hpModel.massiveDamageInstantDeath) || combatant.deathState === 'dead') {

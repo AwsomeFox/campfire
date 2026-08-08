@@ -1,9 +1,9 @@
 /**
  * Run-session encounter sync indicator + guarded actions (issue #471, extended by #1446).
  */
+import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { expect, test } from '@playwright/test';
 import {
   CONNECTING_GRACE_MS,
   confirmEncounterOverride,
@@ -20,10 +20,13 @@ import {
   encounterSyncRevisionFromUpdatedAt,
   ENCOUNTER_SYNC_BANNER_TESTID,
   ENCOUNTER_SYNC_CHIP_TESTID,
+  gateForWrite,
   isConnectingGraceElapsed,
   revokeEncounterOverrideIfUnauthorized,
   settleEncounterOverride,
   type EncounterOverrideAuthority,
+  type EncounterOverrideState,
+  type EncounterSyncState,
 } from '../../src/features/encounters/encounterSyncState';
 
 const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
@@ -98,6 +101,11 @@ test.describe('encounter sync state (issue #471)', () => {
   });
 
   test('RunSessionPage wires encounter sync state and guarded actions', () => {
+    // Asserts against the exported pure-helper IDENTIFIERS (issue #1453) rather than
+    // independently re-typed literals: the sync-chip/banner testids come from
+    // ENCOUNTER_SYNC_CHIP_TESTID / ENCOUNTER_SYNC_BANNER_TESTID (checked for VALUE
+    // below), so a rename only requires updating the shared constant, not this file
+    // and the owning component's JSX in lockstep.
     const runSessionSource = readFileSync(RUN_SESSION_PAGE, 'utf8');
     const lifecycleHeaderSource = readFileSync(DM_LIFECYCLE_HEADER, 'utf8');
     expect(runSessionSource).toMatch(/deriveEncounterSyncState/);
@@ -107,37 +115,37 @@ test.describe('encounter sync state (issue #471)', () => {
     expect(ENCOUNTER_SYNC_CHIP_TESTID).toBe('encounter-sync-chip');
     expect(ENCOUNTER_SYNC_BANNER_TESTID).toBe('encounter-sync-banner');
     expect(runSessionSource).toMatch(/setResyncPending\(true\)/);
+    // Issue #1446: the override affordance and its persistence must be wired, not just defined.
     expect(runSessionSource).toMatch(/data-testid="encounter-sync-override-prompt"/);
     expect(runSessionSource).toMatch(/data-testid="encounter-sync-override-confirm"/);
     expect(runSessionSource).toMatch(/confirmEncounterOverride/);
     expect(runSessionSource).toMatch(/settleEncounterOverride/);
+    // Issue #1446 review fix: DM-gated, and the banner swaps to override-aware copy.
     expect(runSessionSource).toMatch(/overrideAuthority\.canDmWrite/);
     expect(runSessionSource).toMatch(/encounterSyncOverrideBannerKey/);
+    // Issue #1446 review fix (round 4): the override must not survive loss of DM
+    // authority — revoked in the persisted state AND masked atomically at render time.
     expect(runSessionSource).toMatch(/revokeEncounterOverrideIfUnauthorized/);
+    // Issue #1446 review fix (round 5): stream/session-scoped sync state is explicitly
+    // keyed to (campaignId, userId) — reset on a campaign or identity change, but NOT on
+    // an encounter-only switch (that classification lives in the `[eid]` effect above).
     expect(runSessionSource).toMatch(/campaignStreamKey = `\$\{cid\}:\$\{me\?\.user\.id \?\? ''\}`/);
+    // Issue #1446 review fix (final round): every override precondition — DM authority,
+    // identity freshness, campaign match, identity match — is enumerated once in
+    // encounterOverrideAuthorized and composed here as THE single gate, checked both at
+    // confirm time (canDmWrite/staleIdentity guard the offer and the click handler) and
+    // continuously (effectiveEncounterSyncOverride, re-derived every render).
     expect(runSessionSource).toMatch(/overrideAuthority\.staleIdentity/);
     expect(runSessionSource).toMatch(/encounterOverrideAuthorized\(\s*encounterSyncOverride,\s*overrideAuthority,?\s*\)/);
     expect(runSessionSource).toMatch(/confirmEncounterOverride\(overrideAuthority\.campaignId, overrideAuthority\.userId\)/);
     expect(runSessionSource).toMatch(/ownedCampaignStreamKey !== campaignStreamKey/);
-
-    const auth: EncounterOverrideAuthority = {
-      canDmWrite: true,
-      staleIdentity: false,
-      campaignId: 1,
-      userId: 2,
-    };
-    const activeOverride = confirmEncounterOverride(1, 2);
-    expect(encounterOverrideAuthorized(activeOverride, auth)).toBe(true);
-
-    const isAuth = encounterOverrideAuthorized(activeOverride, {
-      ...auth,
-      canDmWrite: false,
-    });
-    const revoked = revokeEncounterOverrideIfUnauthorized(activeOverride, isAuth);
-    expect(revoked).toEqual(ENCOUNTER_OVERRIDE_INACTIVE);
-
-    const key = encounterSyncOverrideBannerKey('offline');
-    expect(typeof key).toBe('string');
+    // Issue #1914: the scoped player override affordance and its wiring must also be
+    // present, not just the DM one above.
+    expect(runSessionSource).toMatch(/data-testid="encounter-sync-own-override-prompt"/);
+    expect(runSessionSource).toMatch(/data-testid="encounter-sync-own-override-confirm"/);
+    expect(runSessionSource).toMatch(/confirmEncounterOverride\(\s*overrideAuthority\.campaignId,\s*overrideAuthority\.userId,\s*'own-combatant',?\s*\)/);
+    expect(runSessionSource).toMatch(/overrideAuthority\.canPlayerWrite/);
+    expect(runSessionSource).toMatch(/gateForWrite/);
   });
 });
 
@@ -250,7 +258,7 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
   });
 
   test('encounterOverrideAuthorized enumerates every precondition in one place (issue #1446, final review round)', () => {
-    const base: EncounterOverrideAuthority = { canDmWrite: true, staleIdentity: false, campaignId: 1, userId: 42 };
+    const base: EncounterOverrideAuthority = { canDmWrite: true, canPlayerWrite: true, staleIdentity: false, campaignId: 1, userId: 42 };
     const granted = confirmEncounterOverride(1, 42);
 
     // All five preconditions met: authorized.
@@ -279,7 +287,7 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
     // Every precondition is a hard requirement — failing ANY one of them is enough to
     // deny authorization, not just a majority.
     expect(
-      encounterOverrideAuthorized(granted, { canDmWrite: false, staleIdentity: true, campaignId: 2, userId: 43 }),
+      encounterOverrideAuthorized(granted, { canDmWrite: false, canPlayerWrite: false, staleIdentity: true, campaignId: 2, userId: 43 }),
     ).toBe(false);
 
     // Degenerate case: an override granted with a null userId must NOT authorize against
@@ -290,7 +298,7 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
     // itself must refuse this on its own, not rely on canDmWrite to save it.
     const grantedNullIdentity = confirmEncounterOverride(1, null);
     expect(
-      encounterOverrideAuthorized(grantedNullIdentity, { canDmWrite: true, staleIdentity: false, campaignId: 1, userId: null }),
+      encounterOverrideAuthorized(grantedNullIdentity, { canDmWrite: true, canPlayerWrite: true, staleIdentity: false, campaignId: 1, userId: null }),
     ).toBe(false);
   });
 
@@ -306,7 +314,7 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
     // authorization gate RunSessionPage composes with the DM-authority check) refuses it
     // outright, independent of state.
     const granted = confirmEncounterOverride(1, 42);
-    const staleAuthority: EncounterOverrideAuthority = { canDmWrite: true, staleIdentity: true, campaignId: 1, userId: 42 };
+    const staleAuthority: EncounterOverrideAuthority = { canDmWrite: true, canPlayerWrite: true, staleIdentity: true, campaignId: 1, userId: 42 };
     expect(encounterOverrideAuthorized(granted, staleAuthority)).toBe(false);
     expect(revokeEncounterOverrideIfUnauthorized(granted, staleAuthority.canDmWrite && !staleAuthority.staleIdentity).active).toBe(
       false,
@@ -338,5 +346,159 @@ test.describe('encounter sync override + connecting grace (issue #1446)', () => 
     // no override-banner variant.
     expect(encounterSyncOverrideBannerKey('live')).toBeNull();
     expect(encounterSyncOverrideBannerKey('connecting')).toBeNull();
+  });
+});
+
+/**
+ * Issue #1914 — the scoped player override. A player has no path to the DM's table-wide
+ * "continue anyway", so their own combatant stayed read-only for the whole outage even
+ * though the server independently protects HP/death-save/condition writes with CAS. These
+ * cover the new `scope` tag, the `gateForWrite` write-class matrix, and — per the explicit
+ * warning that this is a shared-state-slot issue — the asymmetric case: `encounterActionsBlocked`
+ * (the DM-grade base every OTHER control still composes with) must NOT be satisfied by an
+ * active 'own-combatant' override, only by 'dm'.
+ */
+test.describe('scoped player override (issue #1914)', () => {
+  const dmAuthority: EncounterOverrideAuthority = { canDmWrite: true, canPlayerWrite: true, staleIdentity: false, campaignId: 1, userId: 42 };
+  const playerAuthority: EncounterOverrideAuthority = { canDmWrite: false, canPlayerWrite: true, staleIdentity: false, campaignId: 1, userId: 7 };
+
+  test('confirmEncounterOverride defaults to dm scope; the player confirm site is the only caller that passes own-combatant', () => {
+    expect(confirmEncounterOverride(1, 42)).toMatchObject({ active: true, scope: 'dm' });
+    expect(confirmEncounterOverride(1, 42, 'dm')).toMatchObject({ active: true, scope: 'dm' });
+    expect(confirmEncounterOverride(1, 7, 'own-combatant')).toMatchObject({ active: true, scope: 'own-combatant' });
+  });
+
+  test('encounterOverrideAuthorized: dm scope needs canDmWrite, own-combatant scope needs canPlayerWrite — a player can never obtain the dm scope', () => {
+    const dmGrant = confirmEncounterOverride(1, 7, 'dm');
+    const ownGrant = confirmEncounterOverride(1, 7, 'own-combatant');
+
+    // A pure player (no DM authority) is never authorized for the dm-scoped grant, even
+    // though every OTHER precondition (identity, campaign) matches — canPlayerWrite alone
+    // must never substitute for canDmWrite on the dm scope.
+    expect(encounterOverrideAuthorized(dmGrant, playerAuthority)).toBe(false);
+    // The SAME player IS authorized for the own-combatant-scoped grant.
+    expect(encounterOverrideAuthorized(ownGrant, playerAuthority)).toBe(true);
+
+    // The DM is authorized for a dm-scoped grant made FOR them (unchanged from #1446) via
+    // canDmWrite — a fresh grant so the campaign/userId tag matches `dmAuthority`.
+    const dmGrantForDm = confirmEncounterOverride(dmAuthority.campaignId, dmAuthority.userId, 'dm');
+    expect(encounterOverrideAuthorized(dmGrantForDm, dmAuthority)).toBe(true);
+
+    // Every other precondition (staleIdentity, campaign, identity match) still applies
+    // identically to the own-combatant scope — it is not a separate, weaker gate.
+    expect(encounterOverrideAuthorized(ownGrant, { ...playerAuthority, staleIdentity: true })).toBe(false);
+    expect(encounterOverrideAuthorized(ownGrant, { ...playerAuthority, campaignId: 2 })).toBe(false);
+    expect(encounterOverrideAuthorized(ownGrant, { ...playerAuthority, userId: 8 })).toBe(false);
+    expect(encounterOverrideAuthorized(ownGrant, { ...playerAuthority, canPlayerWrite: false })).toBe(false);
+  });
+
+  test('encounterActionsBlocked (the DM-grade base every non-own-combatant control composes with) ignores an active own-combatant override — the asymmetric-gate regression this issue warns about', () => {
+    const ownOverride = confirmEncounterOverride(1, 7, 'own-combatant');
+    const dmOverride = confirmEncounterOverride(1, 42, 'dm');
+
+    // A same-outage 'own-combatant' override must NOT blanket-unblock the DM-grade gate —
+    // next-turn, AoE declare, escalation die, and every other combatant's row all still
+    // read this function directly and must stay blocked.
+    for (const state of ['offline', 'reconnecting', 'stale', 'connecting'] as const) {
+      expect(encounterActionsBlocked(state, ownOverride)).toBe(true);
+    }
+    // The dm scope keeps unblocking it, exactly as before #1914.
+    for (const state of ['offline', 'reconnecting', 'stale', 'connecting'] as const) {
+      expect(encounterActionsBlocked(state, dmOverride)).toBe(false);
+    }
+    // Live is always unblocked regardless of scope.
+    expect(encounterActionsBlocked('live', ownOverride)).toBe(false);
+  });
+
+  test('gateForWrite: full write-class x ownership x sync-state x override-scope matrix', () => {
+    const cases: Array<{
+      writeClass: 'turn-topology' | 'own-combatant';
+      isOwnCombatant: boolean;
+      state: EncounterSyncState;
+      override: EncounterOverrideState;
+      expectBlocked: boolean;
+      label: string;
+    }> = [
+      // Live: nothing is ever blocked, regardless of class/ownership/override.
+      { writeClass: 'own-combatant', isOwnCombatant: true, state: 'live', override: ENCOUNTER_OVERRIDE_INACTIVE, expectBlocked: false, label: 'live, own, no override' },
+      { writeClass: 'turn-topology', isOwnCombatant: false, state: 'live', override: ENCOUNTER_OVERRIDE_INACTIVE, expectBlocked: false, label: 'live, topology, no override' },
+
+      // Outage, no override: everything blocked regardless of class/ownership.
+      { writeClass: 'own-combatant', isOwnCombatant: true, state: 'offline', override: ENCOUNTER_OVERRIDE_INACTIVE, expectBlocked: true, label: 'offline, own, no override' },
+      { writeClass: 'own-combatant', isOwnCombatant: false, state: 'offline', override: ENCOUNTER_OVERRIDE_INACTIVE, expectBlocked: true, label: 'offline, not-own, no override' },
+      { writeClass: 'turn-topology', isOwnCombatant: false, state: 'offline', override: ENCOUNTER_OVERRIDE_INACTIVE, expectBlocked: true, label: 'offline, topology, no override' },
+
+      // Outage, dm override active: EVERYTHING unblocked, regardless of class/ownership —
+      // unchanged #1446 behavior.
+      { writeClass: 'own-combatant', isOwnCombatant: true, state: 'offline', override: confirmEncounterOverride(1, 7, 'dm'), expectBlocked: false, label: 'offline, own, dm override' },
+      { writeClass: 'own-combatant', isOwnCombatant: false, state: 'offline', override: confirmEncounterOverride(1, 7, 'dm'), expectBlocked: false, label: 'offline, not-own, dm override' },
+      { writeClass: 'turn-topology', isOwnCombatant: false, state: 'offline', override: confirmEncounterOverride(1, 7, 'dm'), expectBlocked: false, label: 'offline, topology, dm override' },
+
+      // Outage, own-combatant override active: ONLY unblocks own-combatant writes on the
+      // OWNED row. Everything else — the other combatant's row, and turn-topology — stays
+      // blocked exactly as if no override existed at all.
+      { writeClass: 'own-combatant', isOwnCombatant: true, state: 'offline', override: confirmEncounterOverride(1, 7, 'own-combatant'), expectBlocked: false, label: 'offline, own, own-combatant override -> UNBLOCKED' },
+      { writeClass: 'own-combatant', isOwnCombatant: false, state: 'offline', override: confirmEncounterOverride(1, 7, 'own-combatant'), expectBlocked: true, label: 'offline, not-own, own-combatant override -> still blocked' },
+      { writeClass: 'turn-topology', isOwnCombatant: true, state: 'offline', override: confirmEncounterOverride(1, 7, 'own-combatant'), expectBlocked: true, label: 'offline, topology (even on own turn), own-combatant override -> still blocked' },
+      { writeClass: 'turn-topology', isOwnCombatant: false, state: 'offline', override: confirmEncounterOverride(1, 7, 'own-combatant'), expectBlocked: true, label: 'offline, topology, own-combatant override -> still blocked' },
+
+      // Same shape across every non-live state (reconnecting / stale / connecting).
+      { writeClass: 'own-combatant', isOwnCombatant: true, state: 'reconnecting', override: confirmEncounterOverride(1, 7, 'own-combatant'), expectBlocked: false, label: 'reconnecting, own, own-combatant override -> UNBLOCKED' },
+      { writeClass: 'own-combatant', isOwnCombatant: true, state: 'stale', override: confirmEncounterOverride(1, 7, 'own-combatant'), expectBlocked: false, label: 'stale, own, own-combatant override -> UNBLOCKED' },
+      { writeClass: 'own-combatant', isOwnCombatant: true, state: 'connecting', override: confirmEncounterOverride(1, 7, 'own-combatant'), expectBlocked: false, label: 'connecting, own, own-combatant override -> UNBLOCKED' },
+    ];
+
+    for (const c of cases) {
+      expect(gateForWrite(c.writeClass, { isOwnCombatant: c.isOwnCombatant }, c.state, c.override)).toBe(c.expectBlocked);
+    }
+  });
+
+  test('gateForWrite: end/next/undo turn stays fully blocked for a player even while their own-combatant override is active (acceptance criterion)', () => {
+    const ownOverride = confirmEncounterOverride(1, 7, 'own-combatant');
+    // Even on the player's OWN turn (isOwnCombatant: true) — turn-topology never reads
+    // ownership at all.
+    expect(gateForWrite('turn-topology', { isOwnCombatant: true }, 'offline', ownOverride)).toBe(true);
+    expect(gateForWrite('turn-topology', { isOwnCombatant: false }, 'offline', ownOverride)).toBe(true);
+  });
+
+  test('gateForWrite: an own-combatant override never unblocks a write against a combatant the confirming viewer does not own', () => {
+    const ownOverride = confirmEncounterOverride(1, 7, 'own-combatant');
+    expect(gateForWrite('own-combatant', { isOwnCombatant: false }, 'offline', ownOverride)).toBe(true);
+  });
+
+  test('encounterSyncOverrideBannerKey: own-combatant scope resolves distinct, scoped keys; dm scope (default) is unchanged', () => {
+    for (const state of ['offline', 'reconnecting', 'stale'] as const) {
+      const dmKey = encounterSyncOverrideBannerKey(state);
+      const dmKeyExplicit = encounterSyncOverrideBannerKey(state, 'dm');
+      const ownKey = encounterSyncOverrideBannerKey(state, 'own-combatant');
+      expect(dmKey).toBe(dmKeyExplicit);
+      expect(ownKey).not.toBe(dmKey);
+      expect(ownKey).toMatch(/^encounters\.sync\.bannerOverrideOwn/);
+    }
+    expect(encounterSyncOverrideBannerKey('connecting', 'own-combatant')).toBeNull();
+    expect(encounterSyncOverrideBannerKey('live', 'own-combatant')).toBeNull();
+  });
+
+  test('own-combatant override is revoked the instant player-write authority is lost, and consumed on stream recovery — same #1446 invariants as the dm scope', () => {
+    let override = confirmEncounterOverride(1, 7, 'own-combatant');
+    expect(override.active).toBe(true);
+
+    // Settling on every sync-state change is a no-op while still not live.
+    override = settleEncounterOverride(override, 'reconnecting');
+    expect(override.active).toBe(true);
+
+    // Losing player-write authority (e.g. demoted to spectator) revokes it — mirrors the
+    // dm scope's canDmWrite revocation, but keyed to canPlayerWrite instead.
+    const revoked = revokeEncounterOverrideIfUnauthorized(
+      override,
+      encounterOverrideAuthorized(override, { ...playerAuthority, canPlayerWrite: false }),
+    );
+    expect(revoked.active).toBe(false);
+
+    // A still-authorized own-combatant override is consumed once the stream is live again,
+    // exactly like the dm scope (session-scoped to ONE outage, not "forever").
+    let stillAuthorized = confirmEncounterOverride(1, 7, 'own-combatant');
+    stillAuthorized = settleEncounterOverride(stillAuthorized, 'live');
+    expect(stillAuthorized.active).toBe(false);
   });
 });

@@ -32,6 +32,7 @@ function combatant(overrides: Partial<Combatant> = {}): Combatant {
     rpMax: 0,
     eac: null,
     kac: null,
+    speed: null,
     hpTemp: 0,
     hpBand: null,
     deathState: 'none',
@@ -40,6 +41,7 @@ function combatant(overrides: Partial<Combatant> = {}): Combatant {
     conditions: [],
     ruleEntryId: null,
     sortOrder: 0,
+    manualOrder: null,
     tokenX: null,
     tokenY: null,
     tokenSize: 'medium',
@@ -56,6 +58,7 @@ function combatant(overrides: Partial<Combatant> = {}): Combatant {
     conditionInstances: [],
     legendaryActions: null,
     statblock: null,
+    statblockRevealed: false,
     ...overrides,
   };
 }

@@ -97,6 +97,16 @@ test.describe('encounter turn loop multi-client (issue #1465)', () => {
       // Step A: Player ends turn -> DM screen updates via SSE.
       await playerPage.getByTestId('workspace-end-turn').click();
 
+      // `workspace-end-turn` (TurnWorkspace.tsx) is conditionally rendered on
+      // `turn.canEndTurn`, not just disabled, so it fully unmounts once it stops being
+      // the player's turn. Confirm that transition actually happened on the player's own
+      // page before checking the DM page below — without this, a player page that never
+      // processed the Goblin-turn update at all would leave this same, never-hidden node
+      // in the DOM, and the final `toBeVisible()` re-check after Step B would trivially
+      // pass against that stale element without ever proving the DM->player SSE round
+      // trip in Step B actually happened.
+      await expect(playerPage.getByTestId('workspace-end-turn')).toBeHidden();
+
       // DM screen should automatically receive SSE update showing Goblin turn.
       await expect(dmPage.getByTestId(`combatant-row-${monster.id}`)).toHaveAttribute(
         'data-current-turn',
@@ -107,7 +117,20 @@ test.describe('encounter turn loop multi-client (issue #1465)', () => {
       await dmPage.getByTestId('encounter-header-next-turn').click();
 
       // Player screen should automatically receive SSE update giving turn back to Hero.
+      // The prior `toBeHidden()` above establishes this is a genuine reappearance, not a
+      // stale node that was visible the whole time.
       await expect(playerPage.getByTestId('workspace-end-turn')).toBeVisible();
+
+      // The DM page must ALSO have applied its own Step B advance before the race below —
+      // `.click()` only awaits the DOM event dispatch, not the mutation's response, so the
+      // DM's local `encounter.currentCombatantId` (which the Next Turn mutation reads to
+      // build `expectedCurrentCombatantId`) could still read stale Goblin here. Racing from
+      // that stale state would 409 on a mismatched expected-combatant rather than exercising
+      // the same-current-combatant double-advance guard the race exists to prove.
+      await expect(dmPage.getByTestId(`combatant-row-${heroCombatant.id}`)).toHaveAttribute(
+        'data-current-turn',
+        'true',
+      );
 
       // Step C: Concurrent race test — DM Next turn and Player End turn fired together.
       const playerEndBtn = playerPage.getByTestId('workspace-end-turn');

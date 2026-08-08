@@ -3,11 +3,13 @@
  * `useRoller` and SharedDiceLog call `beginRollAnimation` before POST and `showRoll`
  * after; RunSessionPage registers an apply-damage handler while an encounter is running.
  */
-import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { DiceRoll } from '@campfire/schema';
+import { d20Flavor } from '../lib/d20Flavor';
 import { looksLikeDamageRoll } from '../lib/looksLikeDamageRoll';
 import { expandDiceSidesFromExpr } from '../lib/parseDiceSidesFromExpr';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
+import { DICE_ROLL_REDUCED_MOTION_TUMBLE_MS, SETTLE_VIBRATION_PATTERN, tableAudioEngine, vibrateIfEnabled } from '../lib/tableAudio';
 import { buildOverlayDice, DiceRollOverlay, DICE_ROLL_MIN_TUMBLE_MS, type DiceRollOverlayPhase } from './DiceRollOverlay';
 import { RollResultToast } from './RollResultToast';
 import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
@@ -85,6 +87,9 @@ const noop: RollResultToastContextValue = {
 const RollResultToastContext = createContext<RollResultToastContextValue>(noop);
 
 export function RollResultToastProvider({ children }: { children: ReactNode }) {
+  const { me } = useAuth();
+  const tableAudioLevel = me?.user?.tableAudio ?? 'off';
+
   const [roll, setRoll] = useState<DiceRoll | null>(null);
   const [rollApplyHandler, setRollApplyHandler] = useState<ApplyDamageHandler | null>(null);
   // Issue #1904 review finding: set from ShowRollOptions.applyDisabled at showRoll time —
@@ -106,17 +111,49 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Issue #1920 — unlocks the single app-wide AudioContext on the first real user
+  // gesture (pointerdown/keydown) after tableAudio is enabled. Never runs before
+  // enabling, and never re-arms once already unlocked. This effect is the ONLY
+  // place in the app that calls the engine's unlock method — every other call
+  // site only plays cues, so the context has exactly one owner.
+  useEffect(() => {
+    if (tableAudioLevel === 'off' || tableAudioEngine.unlocked) return;
+    const handleGesture = () => {
+      tableAudioEngine.unlock();
+      window.removeEventListener('pointerdown', handleGesture);
+      window.removeEventListener('keydown', handleGesture);
+    };
+    window.addEventListener('pointerdown', handleGesture, { once: true });
+    window.addEventListener('keydown', handleGesture, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', handleGesture);
+      window.removeEventListener('keydown', handleGesture);
+    };
+  }, [tableAudioLevel]);
+
   const beginRollAnimation = useCallback((expr: string) => {
     clearSettleTimer();
     pendingShowRef.current = null;
-    if (prefersReducedMotion()) return;
     const sides = expandDiceSidesFromExpr(expr);
     if (sides.length === 0) return;
+    // Audio is independent of prefers-reduced-motion (that gates visuals only —
+    // see the module doc on ../lib/tableAudio), so this fires before the
+    // reduced-motion early-return below. The clatter WINDOW, however, is not
+    // independent of it: the default window is the overlay's tumble duration, and
+    // with no overlay the toast lands as soon as the server responds. Compress it
+    // so the clatter finishes before the result rather than under it.
+    const reducedMotion = prefersReducedMotion();
+    tableAudioEngine.playTumble(
+      tableAudioLevel,
+      undefined,
+      reducedMotion ? DICE_ROLL_REDUCED_MOTION_TUMBLE_MS : undefined,
+    );
+    if (reducedMotion) return;
     tumbleStartedAtRef.current = Date.now();
     const next: OverlayState = { sides, phase: 'tumbling' };
     overlayRef.current = next;
     setOverlay(next);
-  }, [clearSettleTimer]);
+  }, [clearSettleTimer, tableAudioLevel]);
 
   const cancelRollAnimation = useCallback(() => {
     clearSettleTimer();
@@ -126,10 +163,16 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   }, [clearSettleTimer]);
 
   const applyToast = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
+    // "Settle" cue + haptic: crit/fumble tones route via d20Flavor (plain rolls get
+    // clatter only, no extra settle cue); the vibration fires on every settle
+    // regardless of flavor, gated by the same preference plus prefers-reduced-motion
+    // (haptics are treated as motion — see ../lib/tableAudio's shouldVibrate doc).
+    tableAudioEngine.playSettleCue(d20Flavor(r), tableAudioLevel);
+    vibrateIfEnabled(SETTLE_VIBRATION_PATTERN, tableAudioLevel, prefersReducedMotion());
     setRoll(r);
     setRollApplyHandler(options?.onApply ?? null);
     setRollApplyDisabled(options?.applyDisabled === true);
-  }, []);
+  }, [tableAudioLevel]);
 
   const showRoll = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
     if (options?.onApply) setRollApplyHandler(options.onApply);
@@ -191,8 +234,11 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     dismiss();
   }, [roll, rollApplyHandler, rollApplyDisabled, dismiss]);
 
+  const isOwnRoll = roll != null && me?.user?.id != null && String(roll.rollerUserId) === String(me.user.id);
+
   const canApply =
     !rollApplyDisabled &&
+    isOwnRoll &&
     roll != null &&
     activeApplyHandler != null &&
     (rollApplyHandler != null || looksLikeDamageRoll(roll));
@@ -200,8 +246,6 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const overlayDice = overlay
     ? buildOverlayDice(overlay.sides, overlay.values, overlay.kept)
     : [];
-
-  const { me } = useAuth();
 
   return (
     <RollResultToastContext.Provider
@@ -213,6 +257,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
           dice={overlayDice}
           phase={overlay.phase}
           theme={me?.user?.diceTheme}
+          colorVisionAssist={me?.user?.colorVisionAssist ?? false}
           onSettled={handleOverlaySettled}
         />
       )}

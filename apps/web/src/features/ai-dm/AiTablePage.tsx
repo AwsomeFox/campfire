@@ -100,6 +100,7 @@ import { Toggle } from '../../components/Toggle';
 import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
 import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 import { formatUsdRangeValue } from './costEstimate';
+import { appendQuickRequest } from './quickRequest';
 import { CostDisclosure } from './CostDisclosure';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
@@ -1317,6 +1318,34 @@ export default function AiTablePage() {
               disabled={submitting}
               optional
             />
+          )}
+          {/*
+            #874 — Simplify / Recap / Repeat turn cue / Explain, as SHORTCUTS into the same
+            freeform field below, never a replacement for it. Each button only fills `input`;
+            nothing here submits, and nothing here narrows what the player may still type or
+            edit before sending. Hidden while the composer itself is locked, matching the
+            textarea's own disabled state below.
+          */}
+          {!locked && (
+            <div
+              className="flex gap-2 flex-wrap"
+              role="group"
+              aria-label={t('table.quickActions.groupLabel')}
+            >
+              {(['simplify', 'recap', 'repeatCue', 'explain'] as const).map((action) => (
+                <button
+                  key={action}
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ fontSize: 11.5, padding: '2px 8px' }}
+                  disabled={submitting}
+                  // APPENDS, never replaces — see appendQuickRequest's own comment for why.
+                  onClick={() => setInput((current) => appendQuickRequest(current, t(`table.quickActions.${action}Text`)))}
+                >
+                  {t(`table.quickActions.${action}`)}
+                </button>
+              ))}
+            </div>
           )}
           <div className="flex items-end gap-2">
             <Field

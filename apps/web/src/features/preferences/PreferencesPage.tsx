@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
-import type { DiceTheme, TextSize, TimeFormat, User } from '@campfire/schema';
+import type { DiceTheme, TableAudioLevel, TextSize, TimeFormat, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { MCP_CATALOG_COUNTS } from '../../lib/mcp-catalog.generated';
 import { joinPublicBase } from '../../lib/public-base';
@@ -79,6 +79,7 @@ export default function PreferencesPage() {
   const [appliedAccent, setAppliedAccent] = useState<string | null>(user?.accentColor ?? null);
   const [textSize, setTextSize] = useState<TextSize>(user?.textSize ?? 'default');
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(user?.timeFormat ?? 'system');
+  const [colorVisionAssist, setColorVisionAssist] = useState<boolean>(user?.colorVisionAssist ?? false);
   const [hexInput, setHexInput] = useState(user?.accentColor ?? '');
   const [hexError, setHexError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -102,6 +103,7 @@ export default function PreferencesPage() {
     setAppliedAccent(user.accentColor ?? null);
     setTextSize(user.textSize ?? 'default');
     setTimeFormat(user.timeFormat ?? 'system');
+    setColorVisionAssist(user.colorVisionAssist ?? false);
     setHexInput(user.accentColor ?? '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
@@ -128,12 +130,28 @@ export default function PreferencesPage() {
   const [selectedDiceTheme, setSelectedDiceTheme] = useState<DiceTheme>(
     () => me?.user?.diceTheme ?? 'nocturne',
   );
+  const [animateOthersRolls, setAnimateOthersRolls] = useState<boolean>(
+    () => me?.user?.animateOthersRolls ?? true,
+  );
+  // Issue #1920 — table audio & haptics: a single field covers on/off + 3-step
+  // volume, persisted immediately like diceTheme/animateOthersRolls above (not
+  // deferred to the profile Save button).
+  const [tableAudioLevel, setTableAudioLevel] = useState<TableAudioLevel>(
+    () => me?.user?.tableAudio ?? 'off',
+  );
+  const latestTableAudioRequest = useRef(0);
 
   useEffect(() => {
     if (me?.user?.diceTheme) {
       setSelectedDiceTheme(me.user.diceTheme);
     }
-  }, [me?.user?.diceTheme]);
+    if (me?.user?.animateOthersRolls !== undefined) {
+      setAnimateOthersRolls(me.user.animateOthersRolls);
+    }
+    if (me?.user?.tableAudio !== undefined) {
+      setTableAudioLevel(me.user.tableAudio);
+    }
+  }, [me?.user?.diceTheme, me?.user?.animateOthersRolls, me?.user?.tableAudio]);
 
   if (!user) {
     return (
@@ -148,7 +166,8 @@ export default function PreferencesPage() {
   const profileDirty =
     displayName !== (user.displayName ?? '') ||
     textSize !== (user.textSize ?? 'default') ||
-    timeFormat !== (user.timeFormat ?? 'system');
+    timeFormat !== (user.timeFormat ?? 'system') ||
+    colorVisionAssist !== (user.colorVisionAssist ?? false);
   const accentDirty = accentColor !== appliedAccent;
   const previewSeed = accentColor ?? DEFAULT_ACCENT;
 
@@ -170,6 +189,33 @@ export default function PreferencesPage() {
       // stale failure can never clobber a newer, successfully persisted choice.
       if (latestDiceThemeRequest.current === token) {
         setSelectedDiceTheme(previous);
+      }
+    }
+  }
+
+  async function toggleAnimateOthersRolls(checked: boolean) {
+    const previous = animateOthersRolls;
+    setAnimateOthersRolls(checked);
+    try {
+      await api.patch<User>(`${API}/me/preferences`, { animateOthersRolls: checked });
+      await refresh();
+    } catch {
+      setAnimateOthersRolls(previous);
+    }
+  }
+
+  async function selectTableAudioLevel(level: TableAudioLevel) {
+    const previous = tableAudioLevel;
+    setTableAudioLevel(level);
+    // Same token-guard pattern as selectDiceTheme above: a stale in-flight PATCH
+    // must not roll the control back over a newer selection that already settled.
+    const token = (latestTableAudioRequest.current += 1);
+    try {
+      await api.patch<User>(`${API}/me/preferences`, { tableAudio: level });
+      await refresh();
+    } catch {
+      if (latestTableAudioRequest.current === token) {
+        setTableAudioLevel(previous);
       }
     }
   }
@@ -265,10 +311,12 @@ export default function PreferencesPage() {
         displayName: displayName.trim(),
         textSize,
         timeFormat,
+        colorVisionAssist,
       });
       setDisplayName(updated.displayName ?? '');
       setTextSize(updated.textSize ?? 'default');
       setTimeFormat(updated.timeFormat ?? 'system');
+      setColorVisionAssist(updated.colorVisionAssist ?? false);
       await refresh();
       setSaved(true);
       if (savedFlashTimerRef.current) clearTimeout(savedFlashTimerRef.current);
@@ -512,6 +560,47 @@ export default function PreferencesPage() {
             🎲 {t('dice.testRollButton', 'Test Roll (1d20)')}
           </button>
         </div>
+        <div className="pt-3 border-t border-muted/20 flex items-center justify-between">
+          <div>
+            <label htmlFor="prefs-animate-others" className="text-sm font-medium cursor-pointer block">
+              {t('preferences.animateOthersRolls')}
+            </label>
+            <p className="text-xs text-muted m-0">
+              {t('preferences.animateOthersRollsDescription')}
+            </p>
+          </div>
+          <input
+            id="prefs-animate-others"
+            type="checkbox"
+            checked={animateOthersRolls}
+            aria-label={t('preferences.animateOthersRollsLabel')}
+            onChange={(e) => toggleAnimateOthersRolls(e.target.checked)}
+            className="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+          />
+        </div>
+        <div className="pt-3 border-t border-muted/20 flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <label htmlFor="prefs-table-audio" className="text-sm font-medium cursor-pointer block">
+              {t('preferences.tableAudio')}
+            </label>
+            <p className="text-xs text-muted m-0">
+              {t('preferences.tableAudioDescription')}
+            </p>
+          </div>
+          <select
+            id="prefs-table-audio"
+            className="input"
+            style={{ maxWidth: 160 }}
+            value={tableAudioLevel}
+            aria-label={t('preferences.tableAudioLabel')}
+            onChange={(e) => selectTableAudioLevel(e.target.value as TableAudioLevel)}
+          >
+            <option value="off">{t('preferences.tableAudioOff')}</option>
+            <option value="low">{t('preferences.tableAudioLow')}</option>
+            <option value="medium">{t('preferences.tableAudioMedium')}</option>
+            <option value="high">{t('preferences.tableAudioHigh')}</option>
+          </select>
+        </div>
       </Card>
 
       <Card className="flex flex-col gap-4">
@@ -596,6 +685,22 @@ export default function PreferencesPage() {
         </div>
         <p className="text-muted reading-supporting" style={{ margin: 0 }}>
           {t('preferences.timeFormatNote')}
+        </p>
+      </Card>
+
+      <Card density="compact" elev="sm">
+        <span className="card-kicker">{t('preferences.colorVisionAssist')}</span>
+        <label className="flex items-center gap-2" htmlFor="prefs-color-vision-assist" style={{ fontSize: 13.5 }}>
+          <input
+            id="prefs-color-vision-assist"
+            type="checkbox"
+            checked={colorVisionAssist}
+            onChange={(e) => setColorVisionAssist(e.target.checked)}
+          />
+          {t('preferences.colorVisionAssistLabel')}
+        </label>
+        <p className="text-muted reading-supporting" style={{ margin: 0 }}>
+          {t('preferences.colorVisionAssistNote')}
         </p>
       </Card>
 

@@ -153,6 +153,33 @@ async function waitForAnnouncement(page: Page, text: string) {
   await expect.poll(async () => (await announcements(page)).some((message) => message.includes(text))).toBe(true);
 }
 
+// The `/events` GET response arriving is not the same moment the client has finished
+// processing it and (if this were a regression) re-appended a duplicate announcement —
+// that happens asynchronously, after the response resolves, on the client's own timeline.
+// Sample the filtered announcement count until it holds steady for `quietMs`: a genuine
+// duplicate shows up as the count changing (never settling in place, or settling one
+// higher) rather than as an assertion racing a sleep that may be too short on slow CI.
+async function stableFilteredAnnouncementCount(
+  page: Page,
+  predicate: (message: string) => boolean,
+  { quietMs = 150, timeoutMs = 3000 } = {},
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let last = (await announcements(page)).filter(predicate).length;
+  let stableSince = Date.now();
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(50);
+    const current = (await announcements(page)).filter(predicate).length;
+    if (current !== last) {
+      last = current;
+      stableSince = Date.now();
+      continue;
+    }
+    if (Date.now() - stableSince >= quietMs) return last;
+  }
+  return last;
+}
+
 test.describe('combat log accessibility — remote clients', () => {
   test('announces remote HP, condition, turn, and death events once without leaking monster totals', async ({ page: dmPage, browser }) => {
     const fixture = await createRunningEncounter(dmPage, 'Accessible remote fight');
@@ -181,24 +208,30 @@ test.describe('combat log accessibility — remote clients', () => {
       expect(afterDamage.join(' ')).not.toContain('9 of 10');
       expect(afterDamage.join(' ')).not.toContain('hit points');
 
-      // An unrelated encounter update refetches the same event list. The event ID cursor
-      // must suppress both duplicate combat-log speech and the former HP-diff speech.
-      let eventReads = 0;
-      viewerPage.on('request', (request) => {
-        if (request.method() === 'GET' && request.url().endsWith(`/encounters/${fixture.encounterId}/events`)) eventReads += 1;
-      });
-      const readsBefore = eventReads;
-      const refreshed = await dmPage.request.patch(`/api/v1/encounters/${fixture.encounterId}`, { data: { gridSnap: false } });
-      expect(refreshed.ok()).toBe(true);
-      await expect.poll(() => eventReads).toBeGreaterThan(readsBefore);
-      await expect.poll(async () => (await announcements(viewerPage)).filter((message) => message.includes('Outcome: took 1 damage')).length).toBe(1);
-
+      // A later encounter update triggers a genuinely new `/events` fetch. `RunSessionPage`
+      // sends `If-None-Match` keyed on the last-seen event id, so an update that appends NO
+      // new event (e.g. an unrelated `gridSnap` toggle) 304s — the cached array keeps its
+      // exact object reference, the announcer effect's dependency never changes, and the
+      // effect simply never reruns, so no duplicate could ever appear regardless of whether
+      // the ID-cursor logic itself is sound. That would make this guard pass trivially.
+      // Use the condition PATCH below (already required for the next assertion) instead: it
+      // appends a real new event, forcing a 200 response with a brand-new array reference —
+      // the announcer effect reruns over the FULL history including the already-announced
+      // damage event, and only the ID cursor stops it from re-announcing that old entry.
       const conditioned = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
         { data: { addConditions: ['Prone'] } },
       );
       expect(conditioned.ok()).toBe(true);
       await waitForAnnouncement(viewerPage, 'Outcome: gained Prone');
+      const stableDamageCount = await stableFilteredAnnouncementCount(viewerPage, (message) =>
+        message.includes('Outcome: took 1 damage'),
+      );
+      expect(stableDamageCount).toBe(1);
+      const proneCount = await stableFilteredAnnouncementCount(viewerPage, (message) =>
+        message.includes('Outcome: gained Prone'),
+      );
+      expect(proneCount).toBe(1);
 
       const announcementCountBeforeTurn = (await announcements(viewerPage)).length;
       const turned = await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/next-turn`);

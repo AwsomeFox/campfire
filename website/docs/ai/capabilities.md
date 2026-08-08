@@ -1,7 +1,7 @@
 # What an AI can do
 
 Once [connected](connect.md), an AI assistant reaches Campfire through its **MCP
-server** (264 tools) and REST API. What it's allowed to do is capped by two
+server** (270 tools) and REST API. What it's allowed to do is capped by two
 independent, server-enforced token dimensions — a **read scope** (dm / player /
 viewer) and a **write mode** (direct / propose / read-only) — exactly like a human
 of that role.
@@ -528,9 +528,20 @@ recap proposal also records which provider, model, endpoint scope, and source ID
 it, and whether the generation was an external send at all.
 
 **Dice rolls and encounter events are not consent-gated** — they are mechanical play
-records rather than authored prose. The one member-identifying field a roll carries, the
-roller's display name, *is* redacted for a roller who has not consented; the in-fiction
-character name is campaign canon and is kept.
+records rather than authored prose, and combatants are campaign entities, not user
+accounts. Each still has its one member-identifying field handled, but differently, because
+one has a narrative fallback and the other does not:
+
+- A dice roll's roller display name *is* redacted for a roller who has not consented,
+  falling back to the in-fiction character name — campaign canon the DM owns — or
+  "Unknown". The roll itself (and the character name) is always kept either way.
+- An encounter event's acting member's account id (`performedBy.userId`) carries no
+  narrative value a recap ever uses — nothing renders it — so it is stripped
+  unconditionally,
+  regardless of consent, rather than redacted per member. The mechanical trail itself
+  (round, type, combatant/character names, damage/heal/condition detail) is never dropped:
+  gating it on consent would gut recap quality for exactly the fights a recap is about,
+  for no privacy gain, since none of it identifies a member's real account.
 
 **Who can see a member's consent state.** The DM sees every member's, because they need it
 to understand why a recap withheld material. Each member sees their own. Other players do

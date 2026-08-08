@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantReorderDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -57,8 +57,14 @@ export class CampaignEncountersController {
   @ApiOperation({
     summary: 'Generate an encounter from the compendium (issue #304)',
     description:
-      'Assembles a balanced monster group from installed rule packs to hit a target 5e difficulty band for the ' +
-      'party (issue #58 math). Deterministic — pass `seed` to reproduce, omit it to get a fresh group (the seed is ' +
+      'Assembles a balanced monster group from installed rule packs, SIZED by a 5e-shaped count/CR ' +
+      'heuristic (issue #58 math) toward the target band you pass — for every rule system. The band ' +
+      'is accepted and used for sizing regardless of system, but the REPORTED `difficulty` is only ' +
+      'that system\'s own audited math when `difficultySupport` is `supported` (5e or an ' +
+      'empty/homebrew slug). A registered non-5e system (PF2e, OSR, …) returns ' +
+      '`difficultySupport: \'heuristic\'` with `difficulty.status: \'unsupported\'` and a null band — ' +
+      'the ABSENCE of a rating, not a 5e-shaped one, so do not report a band for it (issue #1928). ' +
+      'Deterministic — pass `seed` to reproduce, omit it to get a fresh group (the seed is ' +
       'returned so you can re-roll or reproduce). Party is inferred from the campaign\'s active PCs unless `party` ' +
       '(explicit PC levels) is given. Read-only by default (200, requires membership — any member/AI may preview): ' +
       'nothing is persisted, so commit the returned monsters via POST /encounters + add-combatant (the normal write ' +
@@ -66,7 +72,14 @@ export class CampaignEncountersController {
       'and lands a hidden, `preparing` encounter (issue #262).',
   })
   @ApiQuery({ name: 'commit', required: false, type: Boolean, description: 'When true, persist the suggestion as a real (hidden, preparing) encounter — requires dm + write mode.' })
-  @ApiResponse({ status: 200, description: 'Read-only suggestion (monster lines + difficulty + seed), OR { encounter, suggestion } when commit=true.' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Read-only suggestion (monster lines + difficulty + `difficultySupport` + `matchedBand` + seed), ' +
+      'OR { encounter, suggestion } when commit=true. `matchedBand` describes the 5e-shaped SIZING ' +
+      'pass only and can be true beside an `unsupported` difficulty — never report it as an achieved ' +
+      'difficulty when `difficultySupport` is `heuristic`.',
+  })
   @ApiResponse({ status: 403, description: 'commit=true requires the dm role.' })
   async generate(
     @Param('campaignId', ParseIntPipe) campaignId: number,
@@ -97,9 +110,20 @@ export class CampaignEncountersController {
       'warnings (role duplication, action-economy mismatch, missing statblocks, unsupported-system math, ' +
       'swinginess). Pass back `roster` (the returned plan) with a `tune` op to reroll all/one slot, swap, adjust ' +
       'count, or pin — deterministic by the per-slot seeds so pinned slots survive re-rolls. Requires campaign ' +
-      'membership; any member/AI may preview. Nothing is persisted — commit via POST .../encounters/commit.',
+      'membership; any member/AI may preview. Nothing is persisted — commit via POST .../encounters/commit. ' +
+      'Same honesty contract as /generate (issue #1928): the target difficulty SIZES the roster for every ' +
+      'system, but the REPORTED `difficulty` is that system\'s own audited math only under ' +
+      '`difficultySupport: \'supported\'`. A registered non-5e system returns `\'heuristic\'` with ' +
+      '`difficulty.status: \'unsupported\'` and a null band — the absence of a rating, not a 5e-shaped one.',
   })
-  @ApiResponse({ status: 200, description: 'Read-only preview: roster + inspection + difficulty explanation + warnings + fallbacks.' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Read-only preview: roster + inspection + difficulty explanation + `difficultySupport` + ' +
+      '`matchedBand` + warnings + fallbacks. `matchedBand` describes the 5e-shaped SIZING pass only and ' +
+      'can be true beside an `unsupported` difficulty — never report it as an achieved difficulty when ' +
+      '`difficultySupport` is `heuristic`.',
+  })
   async preview(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: EncounterPreviewDto,
@@ -525,6 +549,52 @@ export class EncountersController {
     return { ok: true };
   }
 
+  @Post(':id/aoe-templates')
+  @ApiOperation({
+    summary: 'Declare an AoE template',
+    description: 'Any writing DM or player may declare one template. The server records a player caller as declarer; DM templates remain unattributed and callers cannot supply attribution.',
+  })
+  @ApiResponse({ status: 201, description: 'Created template.' })
+  async declareAoeTemplate(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AoeTemplateDeclareDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    // Do not run the archive gate before the service's hidden-encounter check:
+    // a non-DM must receive the same 404 for a hidden encounter and a missing id.
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.declareAoeTemplate(id, body, user, role);
+  }
+
+  @Patch(':id/aoe-templates/:templateId')
+  @ApiOperation({ summary: 'Update an AoE template', description: 'A player may change only their own declaration; a DM may change any template while preserving its declarer.' })
+  @ApiResponse({ status: 200, description: 'Updated template.' })
+  async updateAoeTemplate(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('templateId') templateId: string,
+    @Body() body: AoeTemplateUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.updateAoeTemplate(id, templateId, body, user, role);
+  }
+
+  @Delete(':id/aoe-templates/:templateId')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Remove an AoE template', description: 'A player may remove only their own declaration; a DM may remove any template.' })
+  @ApiResponse({ status: 200, description: 'Removed template.' })
+  async removeAoeTemplate(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('templateId') templateId: string,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.removeAoeTemplate(id, templateId, user, role);
+  }
+
   @Get(':id/events')
   @ApiOperation({
     summary: "List an encounter's persistent combat log",
@@ -606,6 +676,69 @@ export class EncountersController {
     return this.encounters.updateCombatant(id, cid, body, user, role);
   }
 
+  @Post(':id/combatants/:cid/resources')
+  @ApiOperation({
+    summary: 'Spend or restore one combatant resource or spell-slot level (issue #1909)',
+    description:
+      'dm or the owning player (of a character-linked combatant); a statblock combatant (no linked character) is ' +
+      'dm-only, matching PATCH .../combatants/:cid\'s statblock rule. Exactly one of `key` (feature resource) or ' +
+      '`spellLevel` (1-9) plus a `delta` (default +1). `key` must name a resource that already exists on the ' +
+      'combatant/character — an unknown key 400s naming it, the same as an out-of-range `spellLevel`; this never ' +
+      'creates a new resource. Delta-based and transactional: unlike a whole-statblock or ' +
+      'whole-character PATCH built from a stale client read, this reads the row fresh inside the write, so two ' +
+      'concurrent single-pip spends on DIFFERENT resources on the SAME sheet/statblock both persist. Optional ' +
+      '`expectedUsed`: the resource\'s `used` this caller last rendered — if another writer already changed it, ' +
+      'the request 409s instead of silently applying `delta` on top of that new value (protects an ABSOLUTE pip ' +
+      'intent converted client-side to a relative delta; omit for a purely relative intent). Records a ' +
+      '`resource_changed` encounter event.',
+  })
+  @ApiResponse({
+    status: 201,
+    description:
+      'The combatant. For a statblock combatant (no linked character) this reflects the committed spend/restore — ' +
+      'the statblock lives on the combatant row itself. For a character-linked combatant the resource lives on the ' +
+      'CHARACTER sheet instead, which this response does not re-read (a Combatant has no resources/spellSlots ' +
+      'field) — read GET /characters/:id separately to confirm the committed value.',
+  })
+  @ApiResponse({ status: 400, description: 'Overspend/over-restore outside [0, max]; `key` names a resource that does not already exist on the combatant/character; or the combatant has no sheet/inline-statblock resources.' })
+  @ApiResponse({ status: 409, description: '`expectedUsed` no longer matches the resource\'s current `used` — another writer changed it first.' })
+  @ApiResponse({ status: 403, description: 'Not the dm or the owning player, or a non-dm targeting a statblock combatant.' })
+  async adjustCombatantResource(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: CombatantResourceAdjustDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id, true);
+    // Issue #1909 review (Devin): `requireRole(..., 'player')` below throws 403 for a
+    // viewer BEFORE the service's own `isVisibleTo` gate is ever reached — a viewer hitting
+    // a HIDDEN encounter's real id would get 403, distinguishable from the 404 a nonexistent
+    // id gets (an enumeration oracle). Pre-check visibility at the VIEWER floor first, same
+    // as the sibling death-save/roll-initiative routes just below, so a hidden encounter is
+    // 404 for every non-DM regardless of whether they'd otherwise pass the player-role gate.
+    //
+    // Issue #1909 review round 2 (Codex): the ORIGINAL fix above still called
+    // `requireRole(..., 'viewer')` with no `allowArchived`, so `assertWritable` 403'd EVERY
+    // member on a paused/completed campaign before this line's `isVisibleTo` check could
+    // ever run — reopening the same oracle, now keyed on campaign archival instead of role:
+    // a hidden encounter that exists 403'd, a nonexistent id still 404'd. `allowArchived:
+    // true` on both this visibility precheck and the role gate below (mirroring
+    // `rollDeathSave`/`rollCombatantInitiative` exactly, including retaining a soft-deleted
+    // encounter row via `getRowOrThrow(id, true)` for a same-key replay) restores the
+    // archived-agnostic 404 here; the service's own transactional
+    // `assertCampaignWritableInTx` (added in an earlier round of this same PR) still
+    // rejects a FRESH write against an archived campaign, so archived-campaign writes stay
+    // correctly blocked — just no longer distinguishably from "doesn't exist" at this gate.
+    await this.access.requireMember(user, row.campaignId, { allowArchived: true });
+    if (!isVisibleTo({ hidden: row.hidden }, await this.access.requireRole(user, row.campaignId, 'viewer', { allowArchived: true }))) {
+      throw new NotFoundException(`Encounter ${id} not found`);
+    }
+    // A same-key retry only replays an already-committed response. Let the service
+    // distinguish that safe read from a fresh write after membership is established.
+    const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
+    return this.encounters.adjustCombatantResource(id, cid, body, user, role);
+  }
+
   @Post(':id/combatants/:cid/death-save')
   @ApiOperation({
     summary: 'Roll a death save',
@@ -665,6 +798,33 @@ export class EncountersController {
     // distinguish that safe read from a fresh write after membership is established.
     const role = await this.access.requireRole(user, row.campaignId, 'player', { allowArchived: true });
     return this.encounters.rollCombatantInitiative(id, cid, body.idempotencyKey, body.overwrite, user, role);
+  }
+
+  @Post(':id/combatants/:cid/reorder')
+  @ApiOperation({
+    summary: 'Manually reorder a combatant in initiative (issue #1923)',
+    description:
+      'dm role required. Moves the combatant to land immediately after `afterCombatantId` (or `\'top\'` to become first) ' +
+      'under the same order `sortCombatants` renders. Within a tied initiative value only `sortOrder` changes; a move ' +
+      'that crosses initiative values also sets the moved combatant\'s `initiative` between its new neighbors and ' +
+      'clears the now-stale `initiativeBreakdown`. Clears `turnState.delaying` on the moved combatant if set — this is ' +
+      'Delay\'s only mechanical resolution. `expectedTurnVersion` is a compare-and-set against the encounter\'s current ' +
+      '`turnVersion`.',
+  })
+  @ApiResponse({ status: 201, description: 'Updated combatant.' })
+  @ApiResponse({ status: 400, description: 'afterCombatantId references the moved combatant itself.' })
+  @ApiResponse({ status: 403, description: 'Not the DM, or the moved combatant is the current actor.' })
+  @ApiResponse({ status: 404, description: 'Encounter or afterCombatantId combatant not found.' })
+  @ApiResponse({ status: 409, description: 'expectedTurnVersion no longer matches — the turn advanced since this order was loaded.' })
+  async reorderCombatant(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: CombatantReorderDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.reorderCombatant(id, cid, body, user, role);
   }
 
   @Post(':id/token-batches/preview') @HttpCode(200)
@@ -740,7 +900,7 @@ export class EncountersController {
       'device advancing simultaneously gets a 409 rather than silently skipping a combatant.',
   })
   @ApiResponse({ status: 201, description: 'Encounter with advanced round/turnIndex (or the replayed original response for a retried idempotencyKey).' })
-  @ApiResponse({ status: 400, description: 'Encounter is not running.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not running, or has no combatants (issue #2091) — end the encounter instead of advancing an empty fight.' })
   @ApiResponse({ status: 409, description: 'The turn already advanced (expectedCurrentCombatantId CAS), or the idempotencyKey was reused for a different action.' })
   async nextTurn(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterNextTurnDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
@@ -902,9 +1062,21 @@ export class EncountersController {
       'monster/NPC action is DM-only) but may target anyone — so a player can finish an attack against a monster ' +
       'end-to-end. Pass `commit: true` to apply atomically in the same call when the campaign policy permits (automatic); ' +
       'otherwise the result is a declaration the DM applies (dm-confirmed / player-declares). An unsupported action shape ' +
-      'is a 400 (fall back to its statblock — never silent math).',
+      'is a 400 (fall back to its statblock — never silent math). Every response carries ' +
+      '`systemMathSupported` and `mathProfile` (issue #1928): the flag is false whenever this ' +
+      'campaign’s rule system has NOT been audited end-to-end against the resolver’s maths, and it ' +
+      'does NOT tell you which maths ran — OSR and Open Legend supply their own `resolveAttack` ' +
+      '(descending-AC comparison, exploding dice pools) and are still reported false. Read ' +
+      '`mathProfile` for what actually executed: it names the audited profile in force, or is null. ' +
+      'Label, don’t block — resolution still runs and, under `commit: true`, still applies.',
   })
-  @ApiResponse({ status: 200, description: 'The resolution preview (and applied result + undo token when committed).' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'The resolution preview (and applied result + undo token when committed), including ' +
+      '`systemMathSupported` / `mathProfile` — see the operation description before presenting a ' +
+      'result as system-correct.',
+  })
   @ApiResponse({ status: 400, description: 'The action has no resolvable structured spec, or a target has no known AC/DC.' })
   @ApiResponse({ status: 403, description: 'A player resolving a monster/NPC action or another player’s character.' })
   @HttpCode(200)
@@ -968,4 +1140,3 @@ export class EncountersController {
     return this.encounters.quickRoll(id, body, user, role);
   }
 }
-

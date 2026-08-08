@@ -6,9 +6,11 @@ import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './tes
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { startFakeDdb, PUBLIC_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
 import { MCP_CATALOG_COUNTS, MCP_TOOL_NAMES } from '../src/modules/mcp/mcp-catalog';
+import { McpToolsService } from '../src/modules/mcp/mcp-tools';
 import { OPEN_LEGEND_PACK_SLUG, PF2E_PACK_SLUG } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns } from '../src/db/schema';
+import { auditLog, campaigns } from '../src/db/schema';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 
 interface TextContent {
   type: 'text';
@@ -142,6 +144,23 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(awardProps.characterIds.type).toBe('array');
     expect(awardProps.includeNonActive.type).toBe('boolean');
     expect(awardProps.includeNonActive.description).toContain('explicit opt-in');
+
+    const declareAoe = tools.find((t) => t.name === 'declare_aoe_template');
+    expect(declareAoe?.inputSchema).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: expect.arrayContaining(['operation', 'encounterId', 'templateId']),
+    });
+    const rules = (declareAoe?.inputSchema.allOf ?? []) as Array<{ if?: { properties?: { operation?: { const?: string } } }; then?: { required?: string[]; anyOf?: Array<{ required?: string[] }> } }>;
+    const createRule = rules.find((rule) => rule.if?.properties?.operation?.const === 'create');
+    const updateRule = rules.find((rule) => rule.if?.properties?.operation?.const === 'update');
+    expect(createRule?.then?.required).toEqual(expect.arrayContaining(['shape', 'x', 'y', 'sizeFt']));
+    expect(updateRule?.then?.anyOf).toEqual(expect.arrayContaining([{ required: ['x'] }]));
+    const driverSchema = ctx.app
+      .get(McpToolsService)
+      .buildToolset({ id: 'mcp-aoe-schema', name: 'MCP AoE schema', devRole: 'dm', serverRole: 'admin', tokenContext: undefined })
+      .get('declare_aoe_template')?.inputSchema;
+    expect(driverSchema).toEqual(declareAoe?.inputSchema);
   });
 
   it('runs the campaign-library taxonomy, search, bulk, undo, and template flow through MCP', async () => {
@@ -699,12 +718,47 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const dmClient = await mcpClient(dmToken);
     const viewerClient = await mcpClient(viewerToken);
 
-    const createCamp = parseResult(
-      await dmClient.callTool({
-        name: 'create_campaign',
-        arguments: { name: 'MCP Archmage Table', ruleSystem: 'archmage' },
-      }),
-    ) as { id: number };
+    // `ruleSystem` must name an INSTALLED rule-pack slug (CampaignsService.validateRuleSystem)
+    // — this suite's beforeAll only installs the Open5e (5e) pack, so 'archmage' must be
+    // installed here first or every campaign write below 400s.
+    const archmagePackUpload = await dmAgent.post('/api/v1/rules/packs/upload').send({
+      source: 'upload',
+      pack: { slug: 'archmage', name: 'MCP 13th Age Fixtures', version: '1', license: 'CC0' },
+      entries: [{ slug: 'mcp-archmage-fixture', name: 'MCP Archmage Fixture Monster', type: 'monster', body: '13th Age fixture monster.' }],
+    });
+    expect(archmagePackUpload.status).toBe(202);
+    const archmageJobId = archmagePackUpload.body.id as string;
+    const archmageJobStart = Date.now();
+    for (;;) {
+      const jobRes = await dmAgent.get(`/api/v1/rules/packs/install-jobs/${archmageJobId}`);
+      if (jobRes.body.status === 'completed' || jobRes.body.status === 'failed') {
+        expect(jobRes.body.status).toBe('completed');
+        break;
+      }
+      if (Date.now() - archmageJobStart > 10_000) throw new Error(`archmage pack install job did not finish (last ${jobRes.body.status})`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    // `create_campaign` only accepts { name, description } and discards any other argument
+    // (`CampaignCreate.parse({ name, ...description })` never sees `ruleSystem`), so it
+    // cannot make this an Archmage campaign directly. `update_campaign` DOES validate and
+    // persist `ruleSystem` — use it, and assert success, so the rest of this test genuinely
+    // runs against a 13th Age campaign instead of silently exercising the default 5e adapter's
+    // error path.
+    const createCampRaw = await dmClient.callTool({
+      name: 'create_campaign',
+      arguments: { name: 'MCP Archmage Table' },
+    });
+    expect(createCampRaw.isError).toBeFalsy();
+    const createCamp = parseResult(createCampRaw) as { id: number };
+
+    const setRuleSystemRaw = await dmClient.callTool({
+      name: 'update_campaign',
+      arguments: { campaignId: createCamp.id, ruleSystem: 'archmage' },
+    });
+    expect(setRuleSystemRaw.isError).toBeFalsy();
+    const updatedCampaign = parseResult(setRuleSystemRaw) as { ruleSystem: string };
+    expect(updatedCampaign.ruleSystem).toBe('archmage');
 
     const enc = parseResult(
       await dmClient.callTool({
@@ -713,23 +767,36 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       }),
     ) as { id: number };
 
-    await dmClient.callTool({
+    const addCombatantRaw = await dmClient.callTool({
       name: 'add_combatant',
       arguments: { encounterId: enc.id, kind: 'monster', name: 'MCP Manticore', hpMax: 40 },
     });
-    await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
-    await dmClient.callTool({ name: 'start_encounter', arguments: { encounterId: enc.id } });
+    expect(addCombatantRaw.isError).toBeFalsy();
+    const rollInitiativeRaw = await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    expect(rollInitiativeRaw.isError).toBeFalsy();
+    // The catalogued/registered MCP tool is `begin_encounter`, not `start_encounter` (which
+    // does not exist — see mcp-catalog.ts and every other MCP encounter-lifecycle test in this
+    // file). Calling a nonexistent tool name returns an unknown-tool error and never actually
+    // starts the encounter; assert isError is falsy so a regression here fails loudly instead
+    // of letting `set_escalation_die` below silently exercise a still-`preparing` encounter.
+    const beginEncounterRaw = await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
+    expect(beginEncounterRaw.isError).toBeFalsy();
 
-    // DM can update escalation die
-    const setRes = parseResult(
-      await dmClient.callTool({
-        name: 'set_escalation_die',
-        arguments: { encounterId: enc.id, held: true, override: 5 },
-      }),
-    ) as Record<string, unknown>;
-    expect(setRes).toMatchObject({
-      escalationDie: expect.objectContaining({ held: true, override: 5 }),
+    // DM can update escalation die — assert the write actually succeeded and returned the
+    // requested override, not just that the (possibly-error) JSON payload is truthy.
+    const setResRaw = await dmClient.callTool({
+      name: 'set_escalation_die',
+      arguments: { encounterId: enc.id, held: true, override: 5 },
     });
+    expect(setResRaw.isError).toBeFalsy();
+    const setRes = parseResult(setResRaw) as {
+      escalationDie: number;
+      escalationDieHeld: boolean;
+      escalationDieOverride: number | null;
+    };
+    expect(setRes.escalationDieOverride).toBe(5);
+    expect(setRes.escalationDie).toBe(5);
+    expect(setRes.escalationDieHeld).toBe(true);
 
     // Non-DM is refused
     const denied = await viewerClient.callTool({
@@ -829,6 +896,43 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // Rolling it twice is rejected.
     const again = await dmClient.callTool({ name: 'resolve_check_request', arguments: { requestId } });
     expect(again.isError).toBe(true);
+  });
+
+  it('group checks (issue #1943): request_check with several characterIds returns one shared groupId; list_check_requests surfaces it identically', async () => {
+    const dmClient = await mcpClient(dmToken);
+
+    const first = parseResult(
+      await dmClient.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, name: 'MCP Group Target 1', level: 3, stats: { DEX: 14 }, saveProficiencies: ['DEX'] },
+      }),
+    ) as { id: number };
+    const second = parseResult(
+      await dmClient.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, name: 'MCP Group Target 2', level: 3, stats: { DEX: 12 }, saveProficiencies: ['DEX'] },
+      }),
+    ) as { id: number };
+
+    // REST and MCP both return the domain CheckRequest object straight from the same service
+    // method, so groupId parity is automatic once the schema/service carry it — this pins that.
+    const requested = parseResult(
+      await dmClient.callTool({
+        name: 'request_check',
+        arguments: { campaignId, characterIds: [first.id, second.id], checkId: 'save:DEX', dc: 10 },
+      }),
+    ) as Array<{ id: number; characterId: number; groupId: string | null }>;
+    expect(requested).toHaveLength(2);
+    const groupIds = new Set(requested.map((r) => r.groupId));
+    expect(groupIds.size).toBe(1);
+    const [groupId] = [...groupIds];
+    expect(groupId).toEqual(expect.any(String));
+
+    const list = parseResult(
+      await dmClient.callTool({ name: 'list_check_requests', arguments: { campaignId, status: 'pending' } }),
+    ) as Array<{ id: number; groupId: string | null }>;
+    const listedGroupIds = list.filter((r) => requested.some((req) => req.id === r.id)).map((r) => r.groupId);
+    expect(listedGroupIds).toEqual([groupId, groupId]);
   });
 
   it('scheduling (issue #257): dm schedules a session, viewer RSVPs, viewer cannot cancel', async () => {
@@ -1191,6 +1295,186 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(ended.status).toBe('ended');
   });
 
+  it('declare_aoe_template creates or patches without caller-controlled attribution and remove_aoe_template shares REST lifecycle semantics', async () => {
+    const client = await mcpClient(dmToken);
+    const encounter = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Player AoE', hidden: false } }),
+    ) as { id: number };
+    const declaration = { operation: 'create' as const, encounterId: encounter.id, templateId: 'mcp-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45, color: '#663399' };
+
+    const created = parseResult(await client.callTool({ name: 'declare_aoe_template', arguments: declaration })) as {
+      id: string;
+      x: number;
+      declaredByUserId: string | null;
+    };
+    expect(created).toMatchObject({ id: 'mcp-cone', x: 20 });
+    expect(created.declaredByUserId).toBeNull();
+
+    const moved = parseResult(
+      await client.callTool({ name: 'declare_aoe_template', arguments: { operation: 'update', encounterId: encounter.id, templateId: 'mcp-cone', x: 60 } }),
+    ) as { id: string; x: number; angleDeg: number; color: string | null; declaredByUserId: string | null };
+    expect(moved).toMatchObject({ id: 'mcp-cone', x: 60, angleDeg: 45, color: '#663399', declaredByUserId: created.declaredByUserId });
+
+    const beforeRetry = await dmAgent.get(`/api/v1/encounters/${encounter.id}`);
+    expect(beforeRetry.status).toBe(200);
+    const retried = parseResult(
+      await client.callTool({ name: 'declare_aoe_template', arguments: { operation: 'update', encounterId: encounter.id, templateId: 'mcp-cone', x: 60 } }),
+    ) as { id: string; x: number };
+    expect(retried).toMatchObject({ id: 'mcp-cone', x: 60 });
+    expect((await dmAgent.get(`/api/v1/encounters/${encounter.id}`)).body.updatedAt).toBe(beforeRetry.body.updatedAt);
+    const aoeActions = (await ctx.app.get<DrizzleDb>(DB).select().from(auditLog).where(eq(auditLog.entityId, encounter.id)))
+      .map((row) => row.action)
+      .filter((action) => action.startsWith('encounter.aoe.'));
+    expect(aoeActions).toEqual(['encounter.aoe.declare', 'encounter.aoe.update']);
+
+    const spoof = await client.callTool({
+      name: 'declare_aoe_template',
+      arguments: { ...declaration, declaredByUserId: 'somebody-else' },
+    });
+    expect(spoof.isError).toBe(true);
+    expect(parseResult(spoof)).toMatchObject({ error: { status: 400, code: 'validation_failed' } });
+
+    const incompleteCreate = await client.callTool({
+      name: 'declare_aoe_template',
+      arguments: { operation: 'create', encounterId: encounter.id, templateId: 'mcp-incomplete', x: 60 },
+    });
+    expect(incompleteCreate.isError).toBe(true);
+    expect(parseResult(incompleteCreate)).toMatchObject({ error: { status: 400, code: 'validation_failed' } });
+
+    const missingUpdate = await client.callTool({
+      name: 'declare_aoe_template',
+      arguments: { operation: 'update', encounterId: encounter.id, templateId: 'mcp-missing', x: 60 },
+    });
+    expect(missingUpdate.isError).toBe(true);
+    expect(parseResult(missingUpdate)).toMatchObject({ error: { status: 404 } });
+
+    expect(
+      parseResult(await client.callTool({ name: 'remove_aoe_template', arguments: { encounterId: encounter.id, templateId: 'mcp-cone' } })),
+    ).toEqual({ ok: true });
+  });
+
+  it('ping_map mirrors REST: stamped sender + label/color, viewer 403, hidden 404/no-fan-out (issue #1937)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const encounter = parseResult(
+      await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Ping Fight', hidden: false } }),
+    ) as { id: number };
+
+    const broadcasts: Array<{
+      type: string;
+      encounterId?: number;
+      ping?: { x: number; y: number; label: string | null; color: string | null; senderId: string | null; senderName: string | null };
+    }> = [];
+    const subscription = ctx.app.get(CampaignEventsService).streamFor(campaignId).subscribe((event) => broadcasts.push(event));
+
+    try {
+      const pinged = await dmClient.callTool({
+        name: 'ping_map',
+        arguments: { encounterId: encounter.id, x: 40, y: 60, label: 'Danger', color: '#ff0000' },
+      });
+      expect(pinged.isError).toBeFalsy();
+      expect(parseResult(pinged)).toEqual({ ok: true });
+
+      const pingEvents = broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === encounter.id);
+      expect(pingEvents).toHaveLength(1);
+      expect(pingEvents[0].ping).toMatchObject({ x: 40, y: 60, label: 'Danger', color: '#ff0000' });
+      // The server always stamps the CALLER's own identity — the tool has no senderId/
+      // senderName argument at all, so there is nothing for a caller to spoof through.
+      expect(pingEvents[0].ping?.senderId).toBeTruthy();
+      expect(pingEvents[0].ping?.senderName).toBeTruthy();
+
+      // Every tool's args are strict (issue #567) — an unknown key like a caller-supplied
+      // senderId is a validation error, not a silently-dropped spoof attempt.
+      const spoof = await dmClient.callTool({
+        name: 'ping_map',
+        arguments: { encounterId: encounter.id, x: 10, y: 10, senderId: 'someone-else' },
+      });
+      expect(spoof.isError).toBe(true);
+      expect(parseResult(spoof)).toMatchObject({ error: { status: 400, code: 'validation_failed' } });
+
+      // A viewer-scoped PAT is below the ping route's player-role floor (issue #1636 parity):
+      // 403, and nothing new is broadcast.
+      const viewerClient = await mcpClient(viewerToken);
+      const viewerPing = await viewerClient.callTool({ name: 'ping_map', arguments: { encounterId: encounter.id, x: 20, y: 20 } });
+      expect(viewerPing.isError).toBe(true);
+      expect(parseResult(viewerPing)).toMatchObject({ error: { status: 403 } });
+      expect(broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === encounter.id)).toHaveLength(1);
+
+      // Hidden encounter: a non-DM caller gets 404 (never 403), so a hidden fight's existence
+      // never leaks (issue #869). The DM's own ping on it still succeeds but is never fanned
+      // out to the campaign stream (issue #754).
+      const hidden = parseResult(
+        await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Hidden Ping Fight', hidden: true } }),
+      ) as { id: number };
+      const hiddenViewerPing = await viewerClient.callTool({ name: 'ping_map', arguments: { encounterId: hidden.id, x: 30, y: 30 } });
+      expect(hiddenViewerPing.isError).toBe(true);
+      expect(parseResult(hiddenViewerPing)).toMatchObject({ error: { status: 404 } });
+
+      const hiddenDmPing = await dmClient.callTool({ name: 'ping_map', arguments: { encounterId: hidden.id, x: 30, y: 30 } });
+      expect(hiddenDmPing.isError).toBeFalsy();
+      expect(parseResult(hiddenDmPing)).toEqual({ ok: true });
+      expect(broadcasts.filter((event) => event.type === 'encounter.ping' && event.encounterId === hidden.id)).toHaveLength(0);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('get_encounter keeps a player declaration visible in unrevealed fog exactly like REST', async () => {
+    const playerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-aoe-fog-player', scope: 'player', campaignId, writeScope: 'direct' });
+    expect(playerTokenRes.status).toBe(201);
+    const playerClient = await mcpClient(playerTokenRes.body.token);
+    const dmClient = await mcpClient(dmToken);
+    const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP fog owner AoE', hidden: false } })) as { id: number };
+    const declared = await playerClient.callTool({ name: 'declare_aoe_template', arguments: { operation: 'create', encounterId: encounter.id, templateId: 'fog-owner', shape: 'circle', x: 20, y: 20, sizeFt: 10 } });
+    expect(declared.isError).toBeFalsy();
+    expect((await dmAgent.patch(`/api/v1/encounters/${encounter.id}`).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 20, h: 20 }] } })).status).toBe(200);
+
+    const mcpEncounter = parseResult(await playerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } })) as { aoe: Array<{ id: string }> };
+    const restEncounter = await request(ctx.app.getHttpServer()).get(`/api/v1/encounters/${encounter.id}`).set('Authorization', `Bearer ${playerTokenRes.body.token}`);
+    expect(restEncounter.status).toBe(200);
+    expect(mcpEncounter.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'fog-owner' })]));
+    expect(restEncounter.body.aoe).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'fog-owner' })]));
+  });
+
+  it('declare_aoe_template keeps a hidden existing DM template non-enumerating for a player', async () => {
+    const playerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-hidden-existing-aoe', scope: 'player', campaignId, writeScope: 'direct' });
+    expect(playerTokenRes.status).toBe(201);
+    const playerClient = await mcpClient(playerTokenRes.body.token);
+    const dmClient = await mcpClient(dmToken);
+    const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP hidden existing AoE', hidden: false } })) as { id: number };
+    expect((await dmClient.callTool({ name: 'declare_aoe_template', arguments: { operation: 'create', encounterId: encounter.id, templateId: 'dm-hidden', shape: 'circle', x: 20, y: 20, sizeFt: 10 } })).isError).toBeFalsy();
+    expect((await dmAgent.patch(`/api/v1/encounters/${encounter.id}`).send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 20, h: 20 }] } })).status).toBe(200);
+
+    const upsert = await playerClient.callTool({ name: 'declare_aoe_template', arguments: { operation: 'update', encounterId: encounter.id, templateId: 'dm-hidden', x: 60 } });
+    expect(upsert.isError).toBe(true);
+    expect(parseResult(upsert)).toMatchObject({ error: { status: 404 } });
+  });
+
+  it('keeps hidden archived encounters non-enumerating for AoE MCP writes', async () => {
+    const archivedCampaign = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP hidden archived AoE' });
+    expect(archivedCampaign.status).toBe(201);
+    const scopedToken = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-hidden-archived-aoe', scope: 'player', campaignId: archivedCampaign.body.id, writeScope: 'direct' });
+    expect(scopedToken.status).toBe(201);
+    const client = await mcpClient(scopedToken.body.token);
+    const creator = await mcpClient(dmToken);
+    const hiddenResult = await creator.callTool({
+      name: 'create_encounter',
+      arguments: { campaignId: archivedCampaign.body.id, name: 'MCP hidden AoE', hidden: true },
+    });
+    expect(hiddenResult.isError).toBeFalsy();
+    const hidden = parseResult(hiddenResult) as { id: number };
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, archivedCampaign.body.id));
+
+    const declaration = { operation: 'create' as const, encounterId: hidden.id, templateId: 'hidden-cone', shape: 'cone', x: 20, y: 30, sizeFt: 15, angleDeg: 45 };
+    const declared = await client.callTool({ name: 'declare_aoe_template', arguments: declaration });
+    expect(declared.isError).toBe(true);
+    expect(parseResult(declared)).toMatchObject({ error: { status: 404 } });
+
+    const removed = await client.callTool({ name: 'remove_aoe_template', arguments: { encounterId: hidden.id, templateId: 'hidden-cone' } });
+    expect(removed.isError).toBe(true);
+    expect(parseResult(removed)).toMatchObject({ error: { status: 404 } });
+  });
+
   it('roll_death_save replays the original MCP outcome for a lost-response retry', async () => {
     const character = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/characters`)
@@ -1447,6 +1731,44 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     await dmClient.callTool({ name: 'end_encounter', arguments: { encounterId: encounter.id } });
   });
 
+  it('player end_turn replays its own receipt after advancing (issue #1971)', async () => {
+    const user = await dmAgent.post('/api/v1/users').send({ username: 'mcp-1971-player', password: 'player-password-1', serverRole: 'user' });
+    expect(user.status).toBe(201);
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: user.body.id, role: 'player' });
+    const character = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'MCP Replay Hero', hpMax: 20, hpCurrent: 20, ownerUserId: String(user.body.id) });
+    const playerAgent = request.agent(ctx.app.getHttpServer());
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-1971-player', password: 'player-password-1' });
+    const token = await playerAgent.post('/api/v1/tokens').send({ name: 'mcp-1971-player', scope: 'player', writeScope: 'direct', campaignId });
+    const playerClient = await mcpClient(token.body.token);
+    const dmClient = await mcpClient(dmToken);
+    let createdEncounterId: number | undefined;
+    try {
+      await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: false, dmControlsTurns: false });
+      const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP player replay', hidden: false } })) as { id: number; combatants: Array<{ id: number; characterId: number | null }> };
+      createdEncounterId = encounter.id;
+      const hero = encounter.combatants.find((c) => c.characterId === character.body.id)!;
+      const monster = parseResult(await dmClient.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', name: 'Replay Goblin', hpMax: 5 } })) as { id: number };
+      for (const c of encounter.combatants) {
+        await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: c.id, initiative: 0 } });
+      }
+      await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: hero.id, initiative: 99 } });
+      await dmClient.callTool({ name: 'update_combatant', arguments: { encounterId: encounter.id, combatantId: monster.id, initiative: 50 } });
+      await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: encounter.id } });
+      const args = { encounterId: encounter.id, expectedCurrentCombatantId: hero.id, idempotencyKey: 'mcp-player-end-turn-1971' };
+      const first = await playerClient.callTool({ name: 'end_turn', arguments: args });
+      expect(first.isError).toBeFalsy();
+      expect((parseResult(first) as { currentCombatantId: number | null }).currentCombatantId).toBe(monster.id);
+      const replay = await playerClient.callTool({ name: 'end_turn', arguments: args });
+      expect(replay.isError).toBeFalsy();
+      expect(parseResult(replay)).toEqual(parseResult(first));
+    } finally {
+      if (createdEncounterId) {
+        await dmClient.callTool({ name: 'delete_encounter', arguments: { encounterId: createdEncounterId } }).catch(() => {});
+      }
+      await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ requireDmTurnConfirmation: true, dmControlsTurns: true });
+    }
+  });
+
   it('get_encounter redacts monster HP for a non-DM viewer PAT (issue #256)', async () => {
     // DM seeds an encounter with a monster carrying exact HP.
     const dmC = await mcpClient(dmToken);
@@ -1480,6 +1802,69 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const viewerOgre = viewerView.combatants.find((c) => c.name === 'Hidden Ogre')!;
     expect(viewerOgre.hpCurrent).toBeNull();
     expect(viewerOgre.hpBand).toBeTruthy();
+  });
+
+  it('update_encounter sets monsterHpDisplay; a viewer-scoped get_encounter honors exact and hidden modes (issue #1925)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const viewerC = await mcpClient(viewerToken);
+    const enc = parseResult(
+      await dmC.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId, name: '1925 HP Dial', hidden: false },
+      }),
+    ) as { id: number };
+    const added = await dmC.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: enc.id, kind: 'monster', name: 'Dial Wraith', hpMax: 50 },
+    });
+    expect(added.isError).toBeFalsy();
+
+    // Default is 'band' — unchanged behavior.
+    const bandView = parseResult(
+      await dmC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { monsterHpDisplay: string };
+    expect(bandView.monsterHpDisplay).toBe('band');
+
+    // A non-DM PAT cannot set the mode (the whole update_encounter tool is DM-only).
+    const viewerAttempt = await viewerC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'exact' },
+    });
+    expect(viewerAttempt.isError).toBe(true);
+
+    // DM sets 'exact' — a viewer-scoped PAT now gets real numbers.
+    const exactUpdate = await dmC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'exact' },
+    });
+    expect(exactUpdate.isError).toBeFalsy();
+    expect((parseResult(exactUpdate) as { monsterHpDisplay: string }).monsterHpDisplay).toBe('exact');
+    const exactViewerView = parseResult(
+      await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { monsterHpDisplay: string; combatants: Array<{ name: string; hpCurrent: number | null; hpMax: number | null }> };
+    expect(exactViewerView.monsterHpDisplay).toBe('exact');
+    const exactWraith = exactViewerView.combatants.find((c) => c.name === 'Dial Wraith')!;
+    expect(exactWraith.hpCurrent).toBe(50);
+    expect(exactWraith.hpMax).toBe(50);
+
+    // DM sets 'hidden' — the viewer-scoped PAT gets neither the number nor the band.
+    const hiddenUpdate = await dmC.callTool({
+      name: 'update_encounter',
+      arguments: { encounterId: enc.id, monsterHpDisplay: 'hidden' },
+    });
+    expect(hiddenUpdate.isError).toBeFalsy();
+    const hiddenViewerRes = await viewerC.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } });
+    expect(hiddenViewerRes.isError).toBeFalsy();
+    const hiddenViewerView = parseResult(hiddenViewerRes) as {
+      monsterHpDisplay: string;
+      combatants: Array<{ name: string; hpCurrent: number | null; hpMax: number | null; hpBand: string | null }>;
+    };
+    expect(hiddenViewerView.monsterHpDisplay).toBe('hidden');
+    const hiddenWraith = hiddenViewerView.combatants.find((c) => c.name === 'Dial Wraith')!;
+    expect(hiddenWraith.hpCurrent).toBeNull();
+    expect(hiddenWraith.hpMax).toBeNull();
+    expect(hiddenWraith.hpBand).toBeNull();
+    expect(JSON.stringify(hiddenViewerRes)).not.toMatch(/"hpCurrent":\s*50/);
   });
 
   it('list_encounter_events returns the persisted combat log with stable ids (issue #1068)', async () => {
@@ -2080,6 +2465,36 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(listAfter.body.some((c: { id: number }) => c.id === newCampaignId)).toBe(false);
   });
 
+  // Issue #1910: upsert_character derives its input shape from CharacterUpdate/CharacterCreate,
+  // so speed rides that existing spread with no new tool — this proves it actually round-trips
+  // (create -> update -> clear back to null) rather than only typechecking.
+  it('upsert_character round-trips speed and clears it back to null (issue #1910)', async () => {
+    const client = await mcpClient(dmToken);
+    const created = parseResult(
+      await client.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, name: 'MCP Sprinter', hpMax: 10, speed: 35 },
+      }),
+    ) as { id: number; speed: number | null };
+    expect(created.speed).toBe(35);
+
+    const updated = parseResult(
+      await client.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, characterId: created.id, speed: 40 },
+      }),
+    ) as { speed: number | null };
+    expect(updated.speed).toBe(40);
+
+    const cleared = parseResult(
+      await client.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, characterId: created.id, speed: null },
+      }),
+    ) as { speed: number | null };
+    expect(cleared.speed).toBeNull();
+  });
+
   it('quest objective update/remove and location discovery and note/session edit+delete round-trip over MCP', async () => {
     const client = await mcpClient(dmToken);
 
@@ -2611,7 +3026,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const dmClient = await mcpClient(dmToken);
     const createResult = await dmClient.callTool({
       name: 'create_encounter',
-      arguments: { campaignId, name: 'MCP Vocab Fight' },
+      arguments: { campaignId, name: 'MCP Vocab Fight', hidden: false },
     });
     const encounter = parseResult(createResult) as {
       id: number;
@@ -2670,6 +3085,71 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     );
   });
 
+  // Issue #1926: update_combatant sets the DM-only statblockRevealed flag, and a
+  // player/viewer-scoped get_encounter reflects the same server-enforced redaction
+  // REST uses (both routes share EncountersService.getWithCombatantsOrThrow).
+  it('update_combatant sets statblockRevealed (DM-only); a viewer-scoped get_encounter withholds the statblock until then', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+    const playerTokenRes = await dmAgent
+      .post('/api/v1/tokens')
+      .send({ name: 'mcp-1926-player', scope: 'player', campaignId, writeScope: 'direct' });
+    expect(playerTokenRes.status).toBe(201);
+    const playerClient = await mcpClient(playerTokenRes.body.token);
+
+    const encounter = parseResult(
+      await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Reveal Fight', hidden: false } }),
+    ) as { id: number };
+
+    const added = parseResult(
+      await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId: encounter.id,
+          kind: 'monster',
+          name: 'MCP Troll',
+          hpMax: 20,
+          statblock: { ac: 14, hp: 20, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
+        },
+      }),
+    ) as { id: number };
+
+    const beforeReveal = parseResult(
+      await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: unknown }> };
+    const beforeBoss = beforeReveal.combatants.find((c) => c.id === added.id)!;
+    expect(beforeBoss.statblockRevealed).toBe(false);
+    expect(beforeBoss.statblock).toBeNull();
+    expect(JSON.stringify(beforeBoss)).not.toMatch(/mcp secret notes/);
+
+    const rejected = await playerClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: added.id, statblockRevealed: true },
+    });
+    expect(rejected.isError).toBe(true);
+    const rejectedBody = parseResult(rejected) as { error?: { status?: number; code?: string } };
+    expect(rejectedBody.error?.status).toBe(403);
+    expect(rejectedBody.error?.code).toBe('COMBATANT_FIELD_DM_ONLY');
+
+    const revealed = parseResult(
+      await dmClient.callTool({
+        name: 'update_combatant',
+        arguments: { encounterId: encounter.id, combatantId: added.id, statblockRevealed: true },
+      }),
+    ) as { statblockRevealed: boolean };
+    expect(revealed.statblockRevealed).toBe(true);
+
+    const afterReveal = parseResult(
+      await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number; hp: number | null } | null }> };
+    const afterBoss = afterReveal.combatants.find((c) => c.id === added.id)!;
+    expect(afterBoss.statblockRevealed).toBe(true);
+    expect(afterBoss.statblock).not.toBeNull();
+    expect(afterBoss.statblock!.ac).toBe(14);
+    expect(afterBoss.statblock!.hp).toBeNull();
+    expect(JSON.stringify(afterBoss)).not.toContain('"hp":20');
+  });
+
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {
     const client = await mcpClient(dmToken);
 
@@ -2685,6 +3165,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const suggestion = parseResult(gen) as {
       combatants: Array<{ ruleEntryId: number; count: number; xp: number }>;
       difficulty: { band: string };
+      difficultySupport: string;
       targetBand: string;
       matchedBand: boolean;
       seed: number;
@@ -2692,6 +3173,9 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(suggestion.targetBand).toBe('deadly');
     expect(suggestion.matchedBand).toBe(true);
     expect(suggestion.difficulty.band).toBe('deadly');
+    // Issue #1928: this campaign's ruleSystem falls back to 5e — the same math produced the
+    // band above, so it is honestly reported as 'supported', not a heuristic guess.
+    expect(suggestion.difficultySupport).toBe('supported');
     expect(suggestion.combatants.length).toBeGreaterThan(0);
     expect(suggestion.combatants.every((c) => c.xp > 0)).toBe(true);
     expect(suggestion.seed).toBe(42);
@@ -2732,6 +3216,53 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const suggestion = parseResult(gen) as { targetBand: string; seed: number };
     expect(suggestion.targetBand).toBe('easy');
     expect(suggestion.seed).toBe(1);
+  });
+
+  /**
+   * Issue #1928 — REST/MCP parity for resolve_action's honesty fields. resolve_action's
+   * handler `return`s `this.actionResolver.resolve(...)` directly (mcp-tools.ts) and the
+   * `tool()` wrapper's `ok(data)` JSON.stringifies whatever the handler returned with no
+   * field allowlist/outputSchema — so this is a real, over-the-wire proof the two new fields
+   * survive the MCP transport, not just a read of the source.
+   */
+  it('resolve_action carries systemMathSupported/mathProfile over MCP for a non-5e campaign (issue #1928)', async () => {
+    const client = await mcpClient(dmToken);
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP PF2e Resolver' });
+    const pf2eCampaignId = campRes.body.id as number;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: PF2E_PACK_SLUG }).where(eq(campaigns.id, pf2eCampaignId));
+
+    const enc = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId: pf2eCampaignId, name: 'MCP PF2e Fight', hidden: false } }),
+    ) as { id: number };
+    const actor = parseResult(
+      await client.callTool({ name: 'add_combatant', arguments: { encounterId: enc.id, kind: 'monster', name: 'Attacker', hpMax: 20 } }),
+    ) as { id: number };
+    const target = parseResult(
+      await client.callTool({ name: 'add_combatant', arguments: { encounterId: enc.id, kind: 'monster', name: 'Defender', hpMax: 20 } }),
+    ) as { id: number };
+
+    const resolved = await client.callTool({
+      name: 'resolve_action',
+      arguments: {
+        encounterId: enc.id,
+        actorCombatantId: actor.id,
+        spec: {
+          mode: 'save',
+          save: { ability: 'DEX', dc: { kind: 'fixed', dc: 15 } },
+          cost: { slot: 'action', count: 1 },
+          targets: { count: 1, allow: 'any' },
+          outcomes: { failure: { damage: [{ flat: 4, type: 'force' }] }, success: { halfDamage: true } },
+        },
+        targetIds: [target.id],
+        commit: true,
+      },
+    });
+    expect(resolved.isError).toBeFalsy();
+    const result = parseResult(resolved) as { applied: boolean; systemMathSupported: boolean; mathProfile: string | null };
+    expect(result.applied).toBe(true); // never refused — label, don't block
+    expect(result.systemMathSupported).toBe(false);
+    expect(result.mathProfile).toBeNull();
   });
 
   it('get_session_recaps / read_audit_log push limit/offset into SQL (issue #71)', async () => {
@@ -3109,6 +3640,50 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const after = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId: trashedCampaignId } });
     expect(after.isError).toBeFalsy();
   });
+
+  it('#2016: update_campaign_status un-pausing back to active is denied over MCP once the active-per-user ceiling is full, matching REST', async () => {
+    // dmAgent (mcp-dm) already owns one active campaign from beforeAll ("MCP Campaign") — a
+    // ceiling of 1 is already fully consumed by it, so reactivating a SECOND owned campaign
+    // must be refused without ever creating a third.
+    const paused = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Reactivation Ceiling' });
+    const pausedId = paused.body.id as number;
+    expect((await dmAgent.patch(`/api/v1/campaigns/${pausedId}`).send({ status: 'paused' })).status).toBe(200);
+
+    await dmAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: 1 });
+    try {
+      const client = await mcpClient(dmToken);
+      const denied = await client.callTool({
+        name: 'update_campaign_status',
+        arguments: { campaignId: pausedId, status: 'active' },
+      });
+      expect(denied.isError).toBe(true);
+      const parsed = parseResult(denied) as { error: { status: number; code: string } };
+      expect(parsed.error.status).toBe(403);
+      expect(parsed.error.code).toBe('limit_active_per_user');
+
+      // Same underlying service method reached through REST — proves this is not an
+      // MCP-only gap (AGENTS.md: REST/MCP parity for a shared capability).
+      const restDenied = await dmAgent.patch(`/api/v1/campaigns/${pausedId}`).send({ status: 'active' });
+      expect(restDenied.status).toBe(403);
+      expect(restDenied.body.code).toBe('limit_active_per_user');
+    } finally {
+      await dmAgent.patch('/api/v1/settings').send({ maxActiveCampaignsPerUser: null });
+    }
+  });
+
+  // NOTE (issue #2016): there is no MCP-level `restore_campaign` reactivation-ceiling test
+  // here, deliberately. `restore_campaign`'s own access check
+  // (`this.access.requireRole(user, campaignId, 'dm', { allowArchived: true })`) omits
+  // `allowTrashed: true`, so `requireMember` 404s a genuinely trashed campaign before the
+  // tool ever reaches `CampaignsService.restore()` — a pre-existing gap unrelated to this
+  // issue's governance change (confirmed unaffected by this branch: `git diff origin/main --
+  // mcp-tools.ts` is empty). The ceiling fix itself lives entirely in
+  // `CampaignsService.restore()`, which `restore_campaign` and `POST /campaigns/:id/restore`
+  // both call with no divergent logic (see mcp-tools.ts), so REST e2e coverage of `restore()`
+  // in campaign-governance.e2e-spec.ts plus the governance unit tests already prove the fix;
+  // wiring a trashed-campaign MCP call through would only exercise the unrelated access bug.
+  // Filed for separate follow-up rather than expanded here (AGENTS.md: one coherent issue
+  // per PR).
 
   it('request without Authorization gets 401; GET gets 405', async () => {
     const noAuth = await request(ctx.app.getHttpServer())
@@ -3851,6 +4426,128 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
   });
 
+  describe('issue #1993 — co-DM external-AI provenance is explicit on the MCP surface too', () => {
+    let consentCampaignId: number;
+
+    beforeAll(async () => {
+      const created = await dmAgent.post('/api/v1/campaigns').send({ name: 'MCP Co-DM Consent #1993' });
+      expect(created.status).toBe(201);
+      consentCampaignId = created.body.id;
+
+      const flagRes = await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: true });
+      expect(flagRes.status).toBe(200);
+
+      const seatRes = await dmAgent
+        .put(`/api/v1/campaigns/${consentCampaignId}/ai-dm`)
+        .send({ enabled: true, tokenBudget: 1_000_000 });
+      expect(seatRes.status).toBe(200);
+
+      // A STORED provider config (mock providerType) drives the real `createAiProvider`
+      // branch — the one #1993's `externalSend` must report `true` for — as opposed to the
+      // injected AI_DM_PROVIDER seam the rest of this file's draft_content tests never
+      // configure past (#501's co-dm.e2e-spec.ts established this technique).
+      const providerRes = await dmAgent
+        .put(`/api/v1/campaigns/${consentCampaignId}/ai-provider`)
+        .send({ providerType: 'mock', model: 'mock-1', apiKey: 'sk-test-key-1234' });
+      expect(providerRes.status).toBe(200);
+    });
+
+    afterAll(async () => {
+      // Restore the global flag so later tests in this file see the feature disabled,
+      // matching the convention the #261 seat-redaction test above already establishes.
+      const restoreRes = await dmAgent.patch('/api/v1/settings').send({ experimentalAiDm: false });
+      expect(restoreRes.status).toBe(200);
+    });
+
+    /**
+     * The factory-built mock provider echoes the last user message (co-dm.e2e-spec.ts,
+     * #501), so putting the draft JSON straight in the prompt drives the real configured
+     * path deterministically without a network call.
+     */
+    const draftNpc = (name: string) =>
+      mcpClient(dmToken).then((client) =>
+        client.callTool({
+          name: 'draft_content',
+          arguments: { campaignId: consentCampaignId, target: 'npc', prompt: JSON.stringify({ name }) },
+        }),
+      );
+
+    it('records consent.externalSend=true and the live campaignPolicy for a genuinely external draft', async () => {
+      const res = await draftNpc('MCP Consent Warden');
+      expect(res.isError).toBeFalsy();
+      const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+      const provenance = proposal.generationProvenance as {
+        consent?: {
+          campaignPolicy: string;
+          externalSend: boolean;
+          includedInboxCount: number;
+          excludedInboxByConsent: number;
+          excludedInboxPrivate: number;
+        };
+      };
+      expect(provenance.consent).toBeTruthy();
+      expect(provenance.consent!.campaignPolicy).toBe('member_consent'); // campaign default
+      expect(provenance.consent!.externalSend).toBe(true);
+      // Nothing member-authored is ever assembled on this path (issue #1993 finding) —
+      // the counts are structurally zero, not merely zero this run.
+      expect(provenance.consent!.includedInboxCount).toBe(0);
+      expect(provenance.consent!.excludedInboxByConsent).toBe(0);
+      expect(provenance.consent!.excludedInboxPrivate).toBe(0);
+    });
+
+    /**
+     * Review finding (post-#2041): co-DM's first fix set `externalSend = true` whenever a
+     * provider config resolved, ignoring `AI_PROVIDER_ENDPOINT_IS_LOCAL` — the operator's
+     * explicit declaration that the configured endpoint is on-box (e.g. an Ollama install),
+     * documented in `website/docs/getting-started/installation.md`. That misreported a
+     * purely local generation as external. Scribe/inbox-sweep already honored this flag;
+     * co-DM now shares the same `resolveAiProvenanceEgress` helper, so this must hold on the
+     * MCP surface too, not only REST.
+     */
+    it('records consent.externalSend=false when the operator has declared the endpoint local (AI_PROVIDER_ENDPOINT_IS_LOCAL)', async () => {
+      const priorLocalFlag = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+      process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'true';
+      try {
+        const res = await draftNpc('MCP On-Box Warden');
+        expect(res.isError).toBeFalsy();
+        const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+        const consent = (proposal.generationProvenance as { consent?: { externalSend: boolean } }).consent;
+        expect(consent).toBeTruthy();
+        // A provider IS configured (genuinely serving the draft) but the operator declared
+        // the endpoint local, so nothing left the deployment.
+        expect(consent!.externalSend).toBe(false);
+      } finally {
+        if (priorLocalFlag === undefined) delete process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
+        else process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = priorLocalFlag;
+      }
+    });
+
+    it('reports campaignPolicy="disabled" truthfully — never fabricated as member_consent, never omitted', async () => {
+      const policyRes = await dmAgent
+        .patch(`/api/v1/campaigns/${consentCampaignId}`)
+        .send({ aiExternalContentPolicy: 'disabled' });
+      expect(policyRes.status).toBe(200);
+      expect(policyRes.body.aiExternalContentPolicy).toBe('disabled');
+
+      const res = await draftNpc('MCP Disabled-Policy Warden');
+      expect(res.isError).toBeFalsy();
+      const proposal = (parseResult(res) as { proposals: Array<{ generationProvenance: Record<string, unknown> }> }).proposals[0];
+      const consent = (proposal.generationProvenance as { consent?: { campaignPolicy: string; externalSend: boolean } }).consent;
+      expect(consent).toBeTruthy();
+      expect(consent!.campaignPolicy).toBe('disabled');
+      // The disabled policy governs member-authored content this path never carries — the
+      // draft itself is not refused (see co-dm.service.ts's `buildGenerationProvenance` doc
+      // comment for the audited finding this reflects), only truthfully recorded.
+      expect(consent!.externalSend).toBe(true);
+
+      // Restore the default policy so it cannot leak into a later test on this campaign.
+      const restorePolicy = await dmAgent
+        .patch(`/api/v1/campaigns/${consentCampaignId}`)
+        .send({ aiExternalContentPolicy: 'member_consent' });
+      expect(restorePolicy.status).toBe(200);
+    });
+  });
+
   describe('issue #683 — MCP parity for invites, notifications, proposals, trash, reopen, spell slots, attachments', () => {
     it('invite lifecycle: create, list, preview, revoke', async () => {
       const client = await mcpClient(dmToken);
@@ -4097,6 +4794,253 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect((denied.content as TextContent[])[0].text).toContain('403');
     });
 
+    // Issue #1909: adjust_combatant_resource — the delta-based, transactional counterpart
+    // to update_combatant's whole-statblock write, extended (unlike adjust_spell_slots/
+    // adjust_character_resource above) to a monster/NPC statblock combatant with no linked
+    // character sheet at all.
+    it('adjust_combatant_resource spends and restores a statblock combatant\'s feature resource and spell slot, records a resource_changed event, and REST reads back the same statblock', async () => {
+      const client = await mcpClient(dmToken);
+      const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: '1909 Monster Fight' });
+      const encounterId = encRes.body.id as number;
+
+      const addResult = await client.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId,
+          kind: 'monster',
+          name: 'MCP Monk Boss',
+          hpMax: 20,
+          statblock: {
+            resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } },
+            spellSlots: { '2': { max: 2, used: 0 } },
+          },
+        },
+      });
+      expect(addResult.isError).toBeFalsy();
+      const combatantId = (parseResult(addResult) as { id: number }).id;
+
+      const spent = parseResult(
+        await client.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+        }),
+      ) as { statblock: { resources: Record<string, { used: number }> } };
+      expect(spent.statblock.resources.kiPoints.used).toBe(1);
+
+      const slotSpent = parseResult(
+        await client.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId, combatantId, spellLevel: 2, delta: 1 },
+        }),
+      ) as { statblock: { spellSlots: Record<string, { used: number }> } };
+      expect(slotSpent.statblock.spellSlots['2'].used).toBe(1);
+
+      // Overspend is a real error, not a clamp — same rule every other bounded resource
+      // write in this schema follows (spell slots, character resources).
+      const overspend = await client.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'kiPoints', delta: 100 },
+      });
+      expect(overspend.isError).toBe(true);
+
+      // REST reads back the SAME statblock the MCP tool wrote — one domain behind both surfaces.
+      const restEncounter = await dmAgent.get(`/api/v1/encounters/${encounterId}`);
+      const restCombatant = (restEncounter.body.combatants as Array<{ id: number; statblock: { resources: Record<string, { used: number }> } }>).find(
+        (c) => c.id === combatantId,
+      );
+      expect(restCombatant?.statblock.resources.kiPoints.used).toBe(1);
+
+      const events = await dmAgent.get(`/api/v1/encounters/${encounterId}/events`);
+      expect((events.body as Array<{ type: string }>).some((e) => e.type === 'resource_changed')).toBe(true);
+    });
+
+    it('adjust_combatant_resource: a statblock combatant is dm-only — a viewer-scoped PAT is refused', async () => {
+      // hidden: false — this test isolates the statblock DM-only rule, not hidden-encounter
+      // secrecy (a hidden encounter would 404 a viewer before ever reaching that rule; see
+      // the dedicated hidden-encounter viewer test below).
+      const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: '1909 Viewer Denied', hidden: false });
+      const encounterId = encRes.body.id as number;
+      const dmClient = await mcpClient(dmToken);
+      const addResult = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId,
+          kind: 'monster',
+          name: 'MCP Viewer-Denied Boss',
+          hpMax: 10,
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+        },
+      });
+      const combatantId = (parseResult(addResult) as { id: number }).id;
+
+      const viewerClient = await mcpClient(viewerToken);
+      const denied = await viewerClient.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+      });
+      expect(denied.isError).toBe(true);
+      expect((denied.content as TextContent[])[0].text).toContain('403');
+    });
+
+    // Review finding (Codex): a hidden/prep encounter auto-adds combatants for a party's
+    // existing characters, so the owning player's OWN character-linked combatant is
+    // otherwise reachable through this tool even though get_encounter (and every sibling
+    // read/roll tool) treats a hidden encounter as nonexistent for them. isError with a 404,
+    // not a 403 (a 403 would itself leak that a hidden encounter exists), matching
+    // roll_combatant_initiative's own hidden-encounter parity test.
+    it('adjust_combatant_resource: a hidden encounter is nonexistent (404) for the owning player, matching get_encounter', async () => {
+      const createPlayer = await dmAgent
+        .post('/api/v1/users')
+        .send({ username: 'mcp-1909-player', password: 'player-password-1', serverRole: 'user' });
+      expect(createPlayer.status).toBe(201);
+      const playerId = createPlayer.body.id as number;
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+        name: 'MCP Hidden-Fight Hero',
+        hpMax: 20,
+        hpCurrent: 20,
+        ownerUserId: String(playerId),
+        resources: { hiddenFightResource: { max: 1, used: 0, name: 'Hidden Fight Resource', recharge: 'short-rest' } },
+      });
+      expect(charRes.status).toBe(201);
+
+      const playerAgent = request.agent(ctx.app.getHttpServer());
+      await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-1909-player', password: 'player-password-1' });
+      const mint = await playerAgent
+        .post('/api/v1/tokens')
+        .send({ name: 'mcp-1909-player', scope: 'player', writeScope: 'direct', campaignId });
+      expect(mint.status).toBe(201);
+      const playerClient = await mcpClient(mint.body.token);
+
+      const encRes = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .send({ name: 'MCP Hidden Secrecy Fight', hidden: true });
+      expect(encRes.status).toBe(201);
+      expect(encRes.body.hidden).toBe(true);
+      const encounterId = encRes.body.id as number;
+      const combatantId = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === charRes.body.id,
+      )?.id;
+      expect(combatantId).toBeDefined();
+
+      // get_encounter already 404s the owning player wholesale (issue #262) — the new tool
+      // must match, not 403.
+      const getEncounter = await playerClient.callTool({ name: 'get_encounter', arguments: { encounterId } });
+      expect(getEncounter.isError).toBe(true);
+      expect((getEncounter.content as TextContent[])[0].text).toContain('404');
+
+      const denied = await playerClient.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'hiddenFightResource', delta: 1 },
+      });
+      expect(denied.isError).toBe(true);
+      expect((denied.content as TextContent[])[0].text).toContain('404');
+
+      // The DM (who can see the hidden encounter) is unaffected by the gate.
+      const dmClient2 = await mcpClient(dmToken);
+      const dmAdjust = await dmClient2.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'hiddenFightResource', delta: 1 },
+      });
+      expect(dmAdjust.isError).toBeFalsy();
+    });
+
+    // Review finding (Devin, catching that the owning-player test above did not close the
+    // gap): `requireRole(..., 'player')` throws 403 for a viewer BEFORE the tool's own
+    // `isVisibleTo` gate is ever reached, so a viewer hitting a HIDDEN encounter's REAL id
+    // got 403 — distinguishable from the 404 a NONEXISTENT id gets. The tool now
+    // pre-checks visibility at the viewer floor first, mirroring roll_combatant_initiative.
+    it("adjust_combatant_resource: a viewer gets 404 for a HIDDEN encounter's real id — indistinguishable from a nonexistent id (issue #1909 review)", async () => {
+      const encRes = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .send({ name: 'MCP Viewer Hidden Secrecy', hidden: true });
+      expect(encRes.status).toBe(201);
+      const encounterId = encRes.body.id as number;
+      const dmClient = await mcpClient(dmToken);
+      const addResult = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId,
+          kind: 'monster',
+          name: 'MCP Viewer Secrecy Boss',
+          hpMax: 10,
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+        },
+      });
+      const combatantId = (parseResult(addResult) as { id: number }).id;
+
+      const viewerClient = await mcpClient(viewerToken);
+      const realId = await viewerClient.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+      });
+      expect(realId.isError).toBe(true);
+      expect((realId.content as TextContent[])[0].text).toContain('404');
+
+      // Indistinguishable from a genuinely nonexistent encounter — not just "404 somewhere".
+      const nonexistent = await viewerClient.callTool({
+        name: 'adjust_combatant_resource',
+        arguments: { encounterId: 999999999, combatantId, key: 'kiPoints', delta: 1 },
+      });
+      expect(nonexistent.isError).toBe(true);
+      expect((nonexistent.content as TextContent[])[0].text).toContain('404');
+    });
+
+    // Review finding (Codex): REST/MCP parity counterpart to the controller's identical
+    // fix — the tool's viewer-role visibility precheck had no `allowArchived`, so on a
+    // paused/completed campaign `assertWritable` 403'd every member before `isVisibleTo`
+    // ever ran, reopening the hidden-encounter oracle keyed on campaign archival instead of
+    // role: a hidden encounter that exists 403'd, a nonexistent id still 404'd.
+    it("adjust_combatant_resource: a hidden encounter on an ARCHIVED campaign 404s a viewer identically to a nonexistent id (issue #1909 review)", async () => {
+      const encRes = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .send({ name: 'MCP Archived Hidden Secrecy', hidden: true });
+      expect(encRes.status).toBe(201);
+      const encounterId = encRes.body.id as number;
+      const dmClient = await mcpClient(dmToken);
+      const addResult = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: {
+          encounterId,
+          kind: 'monster',
+          name: 'MCP Archived Secrecy Boss',
+          hpMax: 10,
+          statblock: { resources: { kiPoints: { max: 3, used: 0, name: 'Ki Points', recharge: 'short-rest' } }, spellSlots: {} },
+        },
+      });
+      const combatantId = (parseResult(addResult) as { id: number }).id;
+
+      expect((await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'paused' })).status).toBe(200);
+      try {
+        const viewerClient = await mcpClient(viewerToken);
+        const realId = await viewerClient.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+        });
+        const nonexistent = await viewerClient.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId: 999999999, combatantId, key: 'kiPoints', delta: 1 },
+        });
+
+        expect(realId.isError).toBe(true);
+        expect((realId.content as TextContent[])[0].text).toContain('404');
+        expect(nonexistent.isError).toBe(true);
+        expect((nonexistent.content as TextContent[])[0].text).toContain('404');
+
+        // The DM (who CAN see this hidden encounter) still hits the service's own
+        // transactional archived-campaign rejection for a fresh write.
+        const dmResult = await dmClient.callTool({
+          name: 'adjust_combatant_resource',
+          arguments: { encounterId, combatantId, key: 'kiPoints', delta: 1 },
+        });
+        expect(dmResult.isError).toBe(true);
+        expect((dmResult.content as TextContent[])[0].text).toContain('403');
+      } finally {
+        expect((await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'active' })).status).toBe(200);
+      }
+    });
+
     // Issue #1643 — "verify what already works first": before this PR, exhaustion was
     // storable (ConditionInstance.stacks, #1047/#1073) but nothing could actually MOVE
     // the level on a character sheet — set_character_conditions only adds/removes a bare
@@ -4284,6 +5228,73 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
       const deleted = await client.callTool({ name: 'delete_attachment', arguments: { attachmentId } });
       expect(deleted.isError).toBeFalsy();
+    });
+  });
+
+  describe('issue #1923 — reorder_combatant MCP parity', () => {
+    it('DM reorders a tied combatant to the top; sortOrder flips, initiative stays tied; a player scope is refused', async () => {
+      // Issue #744: only one running encounter is authoritative per campaign. This
+      // campaignId is shared across the whole file — end whatever an earlier test left
+      // running before starting a fresh one, or /start 409s.
+      const running = await dmAgent.get(`/api/v1/campaigns/${campaignId}/encounters`).query({ status: 'running' });
+      for (const e of running.body as Array<{ id: number }>) {
+        await dmAgent.post(`/api/v1/encounters/${e.id}/end`);
+      }
+      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'MCP Reorder Drill', hidden: false });
+      expect(created.status).toBe(201);
+      const encounterId = created.body.id as number;
+      // Fighter and Rogue share the same DEX mod, so the 5e default tiebreak for their
+      // tied initiative total degenerates to plain sortOrder (add order: Fighter first) —
+      // the DM overrides that with a manual reorder, exactly the "the table wants the
+      // rogue first" scenario (#1923).
+      const fighter = await dmAgent.post(`/api/v1/encounters/${encounterId}/combatants`).send({ kind: 'monster', name: 'Fighter Stand-in', hpMax: 12, initMod: 1 });
+      const rogue = await dmAgent.post(`/api/v1/encounters/${encounterId}/combatants`).send({ kind: 'monster', name: 'Rogue Stand-in', hpMax: 10, initMod: 1 });
+      const fighterId = fighter.body.id as number;
+      const rogueId = rogue.body.id as number;
+      await dmAgent.patch(`/api/v1/encounters/${encounterId}/combatants/${fighterId}`).send({ initiative: 14 });
+      await dmAgent.patch(`/api/v1/encounters/${encounterId}/combatants/${rogueId}`).send({ initiative: 14 });
+      // The shared campaignId's party may have grown across earlier tests in this file;
+      // `create()` auto-adds every active party character as a combatant, and /start 400s
+      // unless EVERY combatant has initiative. Bulk roll-initiative only fills still-null
+      // values (Fighter/Rogue above are already set, so their 14s are untouched) — this
+      // fills in whatever party members rode along, regardless of how many there are.
+      await dmAgent.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
+      const started = await dmAgent.post(`/api/v1/encounters/${encounterId}/start`);
+      expect(started.status).toBe(201);
+      const beforeOrder = (started.body.combatants as Array<{ id: number }>).map((c) => c.id);
+      expect(beforeOrder.indexOf(fighterId)).toBeLessThan(beforeOrder.indexOf(rogueId));
+      const turnVersion = started.body.turnVersion as number;
+
+      // Move Rogue to land immediately BEFORE Fighter — i.e. after whatever currently
+      // precedes Fighter (or 'top' if Fighter already leads). This keeps Fighter as
+      // Rogue's new NEXT neighbor regardless of how many other combatants (an
+      // auto-added party, possibly with a higher rolled initiative) sit ahead of the
+      // tied pair in this shared campaign — Fighter's own initiative (14) is what makes
+      // this a same-tie move, not raw position.
+      const fighterIndex = beforeOrder.indexOf(fighterId);
+      const afterArg: number | 'top' = fighterIndex > 0 ? beforeOrder[fighterIndex - 1] : 'top';
+
+      const client = await mcpClient(dmToken);
+      const reordered = parseResult(
+        await client.callTool({
+          name: 'reorder_combatant',
+          arguments: { encounterId, combatantId: rogueId, afterCombatantId: afterArg, expectedTurnVersion: turnVersion },
+        }),
+      ) as { id: number; initiative: number };
+      expect(reordered.id).toBe(rogueId);
+      expect(reordered.initiative).toBe(14); // same-tie move — initiative untouched
+
+      const rest = await dmAgent.get(`/api/v1/encounters/${encounterId}`);
+      const afterOrder = (rest.body.combatants as Array<{ id: number }>).map((c) => c.id);
+      expect(afterOrder.indexOf(rogueId)).toBeLessThan(afterOrder.indexOf(fighterId));
+
+      const playerTokenRes = await dmAgent.post('/api/v1/tokens').send({ name: 'mcp-1923-reorder-player', scope: 'player', writeScope: 'direct', campaignId });
+      const playerClient = await mcpClient(playerTokenRes.body.token);
+      const refused = await playerClient.callTool({
+        name: 'reorder_combatant',
+        arguments: { encounterId, combatantId: fighterId, afterCombatantId: 'top', expectedTurnVersion: turnVersion },
+      });
+      expect(refused.isError).toBe(true);
     });
   });
 });

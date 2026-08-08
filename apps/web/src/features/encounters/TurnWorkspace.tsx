@@ -16,29 +16,43 @@ import { useTranslation } from 'react-i18next';
  * and the suggested-action search is a labelled text input. Keyboard/mobile flows reuse the
  * app's standard focusable controls (no custom key handling that would trap focus).
  */
-import { useEffect, useMemo, useState } from 'react';
-import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec } from '@campfire/schema';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec, CustomMechanicsProfile } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '../../app/auth';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { isImeComposing } from '../../lib/compositionSafeSubmit';
+import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
+import { tableAudioEngine, vibrateIfEnabled, YOUR_TURN_VIBRATION_PATTERN } from '../../lib/tableAudio';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
+import { GatedControl } from '../../components/GatedControl';
 import { SpellbookPanel, hasSpellbookContent, type SpellItem, type SpellSlotMap, type SpellCastContext } from './SpellbookPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuickRollButtons } from './QuickRollButtons';
+import { turnEndGateReason, turnEndStandingReason } from './turnEndGate';
+import { RulesHintPopover } from '../../components/RulesHintPopover';
+import { standardActionHintKey, rulesHintCompendiumHref } from '../../lib/rulesHints';
 
+/** Ties the End-turn button to its standing dmControlsTurns line for assistive tech. */
+const TURN_END_STANDING_ID = 'turn-end-standing-reason';
+
+// Issue #1939: each chip's plain-language explanation moved from a hover-only `desc` /
+// `title=` tooltip to an adapter-scoped, accessible RulesHintPopover (see rulesHints.ts) —
+// invisible on touch and to keyboard/screen-reader users, and this array's copy was 5e text
+// hardcoded regardless of the active rule system.
 const STANDARD_ACTIONS = [
-  { id: 'attack', label: 'Attack', icon: 'crossed-swords', desc: 'Attack a target' },
-  { id: 'dash', label: 'Dash', icon: 'running-shoe', desc: 'Move your speed again' },
-  { id: 'dodge', label: 'Dodge', icon: 'shield', desc: 'Focus on avoiding attacks' },
-  { id: 'disengage', label: 'Disengage', icon: 'evasion', desc: 'Move without provoking opportunity attacks' },
-  { id: 'help', label: 'Help', icon: 'help', desc: 'Grant advantage to an ally' },
-  { id: 'hide', label: 'Hide', icon: 'hood', desc: 'Attempt to hide from enemies' },
-  { id: 'ready', label: 'Ready', icon: 'stopwatch', desc: 'Prepare an action for a specific trigger' },
-  { id: 'search', label: 'Search', icon: 'magnifying-glass', desc: 'Devote your attention to finding something' },
-  { id: 'use', label: 'Use Object', icon: 'grab', desc: 'Interact with a complex object' }
+  { id: 'attack', label: 'Attack', icon: 'crossed-swords' },
+  { id: 'dash', label: 'Dash', icon: 'running-shoe' },
+  { id: 'dodge', label: 'Dodge', icon: 'shield' },
+  { id: 'disengage', label: 'Disengage', icon: 'evasion' },
+  { id: 'help', label: 'Help', icon: 'help' },
+  { id: 'hide', label: 'Hide', icon: 'hood' },
+  { id: 'ready', label: 'Ready', icon: 'stopwatch' },
+  { id: 'search', label: 'Search', icon: 'magnifying-glass' },
+  { id: 'use', label: 'Use Object', icon: 'grab' }
 ];
 
 interface TurnWorkspaceProps {
@@ -49,10 +63,27 @@ interface TurnWorkspaceProps {
   turn: TurnWorkspaceData | undefined;
   isDm: boolean;
   ruleSystem?: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   /** Current combatant turn state (delay / ready) from the encounter roster. */
   currentTurnState?: CombatantTurnState;
-  /** When true, conflict-prone turn controls stay disabled (issue #471). */
+  /**
+   * When true, conflict-prone OWN-COMBATANT turn controls stay disabled (issue #471,
+   * scoped by #1914): action-economy slots, the standard-action bar, spellbook, delay/ready,
+   * active-effect removal, and the in-workspace death-save roll. These are all
+   * server-redacted to the DM or the current combatant's OWNER, so whenever a non-DM viewer
+   * sees any of them it is already their own turn — the parent may relax this below the
+   * table-wide sync gate via a same-outage 'own-combatant' override without touching
+   * anything beyond that. Deliberately NOT used for End-turn — see {@link endTurnBlocked}.
+   */
   actionsDisabled?: boolean;
+  /**
+   * Issue #1914: the End-turn control's OWN gate — end/next/undo turn is a turn-topology
+   * write, unblockable only by the table-wide DM-grade override, never by the
+   * 'own-combatant' scope `actionsDisabled` above may be relaxed by. Falls back to
+   * `actionsDisabled` when omitted so an un-migrated caller keeps its prior (single-flag)
+   * behavior.
+   */
+  endTurnBlocked?: boolean;
   /** Keeps the death-save action single-flight while its authoritative request is in flight. */
   deathSavePending?: boolean;
   /** Resolves the in-flight state for the actor returned by the turn query. */
@@ -65,12 +96,21 @@ interface TurnWorkspaceProps {
    *  is authoritative when the parent's encounter cache is briefly stale. */
   onEndTurn?: (expectedCurrentCombatantId: number) => void;
   endTurnBusy?: boolean;
+  /** #599: mirrors the server's assertNoSafetyHold rejection on endTurn — no server change,
+   *  just surfacing the same table-wide safety-hold state (already visible via SafetyHoldBar)
+   *  as a reason on the control it actually blocks. */
+  safetyHoldActive?: boolean;
   gridUnit?: string | null;
   gridScale?: number | null;
   /** Issue #1900: spend (+1) or restore (-1) one spell-slot level for the current combatant's
    *  character, via the parent's POST :id/spell-slots mutation. Undefined when the viewer
    *  isn't authorized to cast for this actor right now (mirrors onUseSuggestedAction's gate). */
   onUpdateSpellSlot?: (level: number | undefined, delta: number, castContext?: SpellCastContext) => void;
+  /** Issue #1939: campaign id for the standard-action rules-hint popovers' "Full rule" link. */
+  campaignId?: number;
+  /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
+   *  entries — gates the "Full rule" link on standard-action rules-hint popovers. */
+  rulesHintCompendiumAvailable?: boolean;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -123,28 +163,38 @@ export function TurnWorkspace({
   turn,
   isDm,
   ruleSystem,
+  customMechanicsProfile,
   currentTurnState,
   actionsDisabled = false,
+  endTurnBlocked = actionsDisabled,
   deathSavePending = false,
   isCombatantPending,
   onRollDeathSave,
   onUseSuggestedAction,
   onEndTurn,
   endTurnBusy = false,
+  safetyHoldActive = false,
   gridUnit,
   gridScale,
   onUpdateSpellSlot,
+  campaignId,
+  rulesHintCompendiumAvailable = false,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const announce = useAnnounce();
+  const { me } = useAuth();
+  const tableAudioLevel = me?.user?.tableAudio ?? 'off';
   const [actionFilter, setActionFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [readiedDraft, setReadiedDraft] = useState(currentTurnState?.readied ?? '');
   const [activeTab, setActiveTab] = useState<'action' | 'bonus' | 'reaction' | 'other'>('action');
   const [showSpellbook, setShowSpellbook] = useState(false);
 
-  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const adapter = useMemo(
+    () => ruleSystemAdapter(ruleSystem, customMechanicsProfile),
+    [ruleSystem, customMechanicsProfile],
+  );
   const hasDeathSaves = hasDeathSavesForAdapter(adapter);
 
   const settle = () => {
@@ -179,6 +229,22 @@ export function TurnWorkspace({
       });
     }
   }, [announce, encounterId, isYourTurn, currentId, currentName, turnRound]);
+
+  // Issue #1920 — table audio chime + haptic on the same your-turn edge as the
+  // announce above, deduped the same way (a key per encounter+actor+round) so a
+  // background refetch that resolves the same turn again doesn't replay it.
+  // tableAudioEngine.playTurnChime is itself a no-op when the preference is off
+  // or the AudioContext hasn't been gesture-unlocked yet (see RollResultToastContext,
+  // the only place that ever calls tableAudioEngine.unlock()).
+  const lastTurnCueKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isYourTurn || currentId == null) return;
+    const key = `your-turn:${encounterId}:${currentId}:${turnRound}`;
+    if (lastTurnCueKeyRef.current === key) return;
+    lastTurnCueKeyRef.current = key;
+    tableAudioEngine.playTurnChime(tableAudioLevel);
+    vibrateIfEnabled(YOUR_TURN_VIBRATION_PATTERN, tableAudioLevel, prefersReducedMotion());
+  }, [encounterId, isYourTurn, currentId, turnRound, tableAudioLevel]);
 
   useEffect(() => {
     setReadiedDraft(currentTurnState?.readied ?? '');
@@ -358,6 +424,12 @@ export function TurnWorkspace({
                 <SlotChip
                   key={slot.key}
                   slot={slot}
+                  // Deliberately NOT gated on `turn.canEndTurn` (issue #1933 review). Under
+                  // `dmControlsTurns` a player cannot ADVANCE the turn, but the server still
+                  // accepts their own `/turn-state` writes — movement, action slots — and the
+                  // standard-action bar, spell slots and concentration controls beside these
+                  // chips stay usable. Keying them to the end-turn permission would disable
+                  // half the workspace for exactly the players it belongs to.
                   disabled={controlsDisabled}
                   unit={unit}
                   step={step}
@@ -368,40 +440,57 @@ export function TurnWorkspace({
             })()}
           </div>
           <div className="flex gap-1.5 mt-3 overflow-x-auto py-1 max-w-full flex-wrap sm:flex-nowrap" data-testid="standard-actions-bar">
-            {STANDARD_ACTIONS.map((act) => (
-              <button
-                key={act.id}
-                type="button"
-                title={act.desc}
-                aria-label={act.label}
-                disabled={actionDisabled}
-                className="btn btn-ghost flex flex-col items-center justify-center gap-1 min-h-[44px] min-w-[44px] sm:min-w-[56px] p-2"
-                onClick={() => {
-                  const currentName = turn.current?.name ?? 'Combatant';
-                  if (act.id === 'attack') {
-                    announce(`${currentName} action: Attack`);
-                    const el = document.getElementById('turn-suggested-actions-search');
-                    if (el) {
-                      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                      el.focus();
-                    }
-                  } else if (act.id === 'ready') {
-                    announce(`${currentName} action: Ready`);
-                    const el = document.getElementById('turn-readied-input');
-                    if (el) {
-                      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                      el.focus();
-                    }
-                  } else {
-                    announce(`${currentName} action: ${act.label}`);
-                    turnState.mutate({ useSlot: 'action' });
-                  }
-                }}
-              >
-                <GameIcon slug={act.icon} size={20} />
-                <span className="text-[10px] hidden sm:block">{act.label}</span>
-              </button>
-            ))}
+            {STANDARD_ACTIONS.map((act) => {
+              // Issue #1939: undefined on any adapter without an authored hint (every
+              // non-5e system today) — no affordance renders, never 5e text on another system.
+              const hintKey = standardActionHintKey(adapter.id, act.id);
+              return (
+                <div key={act.id} className="flex flex-col items-center gap-0.5">
+                  <button
+                    type="button"
+                    aria-label={act.label}
+                    disabled={actionDisabled}
+                    className="btn btn-ghost flex flex-col items-center justify-center gap-1 min-h-[44px] min-w-[44px] sm:min-w-[56px] p-2"
+                    onClick={() => {
+                      const currentName = turn.current?.name ?? 'Combatant';
+                      if (act.id === 'attack') {
+                        announce(`${currentName} action: Attack`);
+                        const el = document.getElementById('turn-suggested-actions-search');
+                        if (el) {
+                          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          el.focus();
+                        }
+                      } else if (act.id === 'ready') {
+                        announce(`${currentName} action: Ready`);
+                        const el = document.getElementById('turn-readied-input');
+                        if (el) {
+                          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          el.focus();
+                        }
+                      } else {
+                        announce(`${currentName} action: ${act.label}`);
+                        turnState.mutate({ useSlot: 'action' });
+                      }
+                    }}
+                  >
+                    <GameIcon slug={act.icon} size={20} />
+                    <span className="text-[10px] hidden sm:block">{act.label}</span>
+                  </button>
+                  {hintKey && (
+                    <RulesHintPopover
+                      termId={act.id}
+                      termLabel={act.label}
+                      hintKey={hintKey}
+                      compendiumHref={
+                        rulesHintCompendiumAvailable && campaignId != null
+                          ? rulesHintCompendiumHref(campaignId, act.label)
+                          : undefined
+                      }
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
       )}
@@ -637,23 +726,98 @@ export function TurnWorkspace({
         </section>
       )}
 
-      {/* End turn — a player may end their own turn when allowed; the DM always may. */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {turn.canEndTurn ? (
-          <Btn
-            disabled={controlsDisabled}
-            onClick={() => onEndTurn?.(turn.current!.combatantId)}
-            data-testid="workspace-end-turn"
-          >
-            {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
-          </Btn>
-        ) : turn.isYourTurn && turn.dmControlsTurns ? (
-          <span className="text-sm text-muted">{t('encounters.workspace.dmAdvancesTurns')}</span>
-        ) : null}
-        {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
-          <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>
-        )}
-      </div>
+      {/* End turn — a player may end their own turn when allowed; the DM always may.
+          Issue #1933: this used to unmount the button entirely and swap in static hint
+          text whenever `dmControlsTurns` blocked a player, and never accounted for a
+          safety hold at all (the server rejects it — assertNoSafetyHold — but the button
+          stayed live and just failed on click). Both are now surfaced as a mounted,
+          disabled button with a GatedControl reason instead: the control a player would
+          reach for stays in the same place, explaining itself, rather than disappearing.
+          `turnEndGateReason` decides APPLICABILITY (is this viewer's control at all — DM
+          or the turn's owner) before layering on any reason, so a plain onlooker still
+          gets nothing, hold or no hold — see that function's doc comment. */}
+      {(() => {
+        // Issue #1914: End-turn is a turn-topology write — it uses `endTurnBlocked` (the
+        // unrelaxed DM-grade gate), NOT `actionsDisabled` (which a same-outage
+        // 'own-combatant' override may have already relaxed for the OTHER controls in this
+        // workspace). Reusing `actionsDisabled` here would have let a player's own-combatant
+        // confirmation silently unblock ending their own turn too — exactly the "guard
+        // applied to one branch but not its mirror" shape this issue calls out.
+        const endTurnControlsDisabled = busy || endTurnBlocked;
+        const gateReasonKey = turnEndGateReason({
+          canEndTurn: turn.canEndTurn,
+          isYourTurn: turn.isYourTurn,
+          dmControlsTurns: turn.dmControlsTurns,
+          safetyHoldActive,
+          syncBlocked: endTurnBlocked,
+        });
+        // Suppressed while this player's own end-turn is in flight (issue #1933 review):
+        // GatedControl strips the native `disabled` whenever a reason is present, so the
+        // button would announce "the table is paused" during the moment the truth is "your
+        // click is still going". Same rule as `gateReasonText`'s busy argument.
+        //
+        // Deliberately `endTurnBusy`, NOT the broader `busy` (= endTurnBusy ||
+        // turnState.isPending). `turnState` covers every action-economy toggle,
+        // concentration clear and readied/delay edit, so suppressing on it would blank the
+        // reason during unrelated saves — leaving a player under `dmControlsTurns` with a
+        // mounted, disabled, unexplained button, which is the exact state this issue exists
+        // to eliminate. A viewer who cannot end the turn can never have an end-turn request
+        // in flight, so the narrow flag loses nothing.
+        const gateReason = gateReasonKey && !endTurnBusy ? t(`run.gate.${gateReasonKey}`) : undefined;
+        // Applicability still keys off the UNsuppressed reason, so an in-flight request
+        // never makes the button vanish for a player who had one.
+        const showButton = turn.canEndTurn || gateReasonKey != null;
+        // `dmControlsTurns` is a campaign SETTING, not a passing condition — it holds for the
+        // whole fight and is the answer to "why can I never end my own turn here". Before
+        // GatedControl it had a permanently visible line; folding it into the priority-ranked
+        // resolver put it behind hover/focus/tap, leaving a sighted mouse user with a dead
+        // control and no explanation (issue #1933 review). Same category as the Start
+        // button's roster hints, so it gets the same standing treatment.
+        const standingKey = turnEndStandingReason({
+          canEndTurn: turn.canEndTurn,
+          isYourTurn: turn.isYourTurn,
+          dmControlsTurns: turn.dmControlsTurns,
+        });
+        const standingReason = standingKey ? t(`run.gate.${standingKey}`) : undefined;
+        // Don't let GatedControl emit a second, visually-hidden copy of a sentence the line
+        // below is already showing — that double-announces to a screen reader and makes
+        // getByText resolve to two nodes (the same trap the header hit).
+        const tooltipReason = gateReasonKey === standingKey ? undefined : gateReason;
+        return (
+          <div className="flex items-center gap-2 flex-wrap">
+            {showButton && (
+              <GatedControl reason={tooltipReason}>
+                <Btn
+                  // `|| !turn.canEndTurn` is load-bearing, not belt-and-braces: `GatedControl`
+                  // only swallows the click while a `reason` is present, and the dedupe just
+                  // above deliberately passes `undefined` when the standing line already says
+                  // it — which takes GatedControl's passthrough branch and leaves the child
+                  // fully live. `endTurnControlsDisabled` is `busy || endTurnBlocked` and knows
+                  // nothing about permission, so without this a player under `dmControlsTurns`
+                  // could press End turn and get a bare server rejection (issue #1933 review).
+                  //
+                  // The general rule this cost us: the wrapper is an AFFORDANCE, not an
+                  // authorization. A control's own `disabled` has to be correct on its own.
+                  // Scope it to this button only — the action-economy chips above are a
+                  // different permission and must stay live for this same player.
+                  disabled={endTurnControlsDisabled || !turn.canEndTurn}
+                  onClick={() => onEndTurn?.(turn.current!.combatantId)}
+                  aria-describedby={standingReason ? TURN_END_STANDING_ID : undefined}
+                  data-testid="workspace-end-turn"
+                >
+                  {turn.isYourTurn ? t('encounters.workspace.endMyTurn') : t('encounters.workspace.endTurn')}
+                </Btn>
+              </GatedControl>
+            )}
+            {standingReason && (
+              <span id={TURN_END_STANDING_ID} className="text-sm text-muted">{standingReason}</span>
+            )}
+            {turn.isYourTurn && turn.requireDmTurnConfirmation && !isDm && (
+              <span className="text-sm text-muted">{t('encounters.workspace.endingTurnAsksDm')}</span>
+            )}
+          </div>
+        );
+      })()}
     </Card>
   );
 }

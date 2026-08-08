@@ -17,7 +17,7 @@
  * server's dead/absent-default gate — a source that needs a mirror URL is
  * surfaced honestly with a URL field rather than a broken install button.
  */
-import type { RulePackInstallSection, RulePackInstallSource, OsrInstallSystem } from '@campfire/schema';
+import type { RulePackInstallSection, RulePackInstallSource, OsrInstallSystem, CustomMechanicsProfile, RuleSystemAdapter } from '@campfire/schema';
 import {
   actionEconomyForAdapter,
   ddbImportSupported,
@@ -47,6 +47,10 @@ export const SECTION_LABELS: Record<RulePackInstallSection, string> = {
   classes: 'Classes',
   races: 'Races',
   feats: 'Feats',
+  // Open5e mundane gear (issue #2096) — distinct from `items`, which is that API's
+  // magic-item list.
+  weapons: 'Weapons',
+  armor: 'Armor',
   equipment: 'Equipment',
   starships: 'Starships',
   vehicles: 'Vehicles',
@@ -126,6 +130,13 @@ export interface RuleSystemMeta {
 }
 
 const FIVE_E_SECTIONS: RulePackInstallSection[] = ['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'];
+/**
+ * Open5e only (issue #2096). Its `items` section maps to the API's /magicitems/ path, so
+ * mundane gear needs the two extra sections the Open5e importer added. Deliberately NOT
+ * folded into FIVE_E_SECTIONS: that list is shared with Pathfinder 1e, whose importer has
+ * no weapons/armor sections and would 400 on either.
+ */
+const OPEN5E_SECTIONS: RulePackInstallSection[] = [...FIVE_E_SECTIONS, 'weapons', 'armor'];
 const AON_SECTIONS: RulePackInstallSection[] = [
   'creatures',
   'spells',
@@ -157,7 +168,7 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     license: 'Open5e · OGL 1.0a',
     blurb: 'The D&D 5e System Reference Document pulled from the open Open5e API.',
     mechanics: 'Initiative d20 + DEX · ability mod ⌊(score−10)/2⌋ · fixed DCs · 5e conditions · pass/fail.',
-    sections: FIVE_E_SECTIONS,
+    sections: OPEN5E_SECTIONS,
     packSlug: 'open5e-srd',
     requiresUrl: SOURCES_REQUIRING_URL.has('open5e'),
   },
@@ -290,12 +301,25 @@ export function mechanicsForPackSlug(slug: string | null | undefined): string | 
 }
 
 /**
+ * Helper to resolve the rule system adapter for a campaign object, including its
+ * optional custom mechanics profile (issue #2003).
+ */
+export function ruleSystemAdapterForCampaign(
+  campaign?: { ruleSystem?: string | null; customMechanicsProfile?: CustomMechanicsProfile | null } | null,
+): RuleSystemAdapter {
+  return ruleSystemAdapter(campaign?.ruleSystem, campaign?.customMechanicsProfile);
+}
+
+/**
  * The rule-system label a campaign's `ruleSystem` slug resolves to for COMBAT — via the
  * schema's adapter registry, which falls back to D&D 5e for any unknown/removed slug. Use
  * this to explain what an unrecognised (e.g. uninstalled) slug actually behaves as.
  */
-export function ruleSystemAdapterLabel(slug: string | null | undefined): string {
-  return ruleSystemAdapter(slug ?? '').label;
+export function ruleSystemAdapterLabel(
+  slug: string | null | undefined,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
+): string {
+  return ruleSystemAdapter(slug ?? '', customMechanicsProfile).label;
 }
 
 export type RulesetCapabilityStatus = 'available' | 'fallback' | 'limited' | 'unavailable';

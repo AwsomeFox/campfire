@@ -25,6 +25,7 @@ import {
   formatCheckBreakdown,
   isResolvableSpec,
   STARFINDER_ADAPTER_ID,
+  type CustomMechanicsProfile,
 } from '@campfire/schema';
 import {
   SPELL_LEVELS,
@@ -107,6 +108,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 export function CharacterStatCard({
   character,
   ruleSystem,
+  customMechanicsProfile,
   defaultOpen = false,
   openOnActiveTurn = false,
   campaignId,
@@ -118,6 +120,7 @@ export function CharacterStatCard({
 }: {
   character: Character;
   ruleSystem: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   defaultOpen?: boolean;
   /** Open when this character becomes the active combatant, without collapsing it on later turns. */
   openOnActiveTurn?: boolean;
@@ -151,7 +154,7 @@ export function CharacterStatCard({
     focusManagement: false,
     regionLabel: `${character.name} character sheet`,
   });
-  const adapter = ruleSystemAdapter(ruleSystem);
+  const adapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
   const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const roller = useRoller(campaignId ?? 0, onError ?? NOOP);
   const interactive = campaignId != null;

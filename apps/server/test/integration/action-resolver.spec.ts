@@ -165,6 +165,52 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() => service.listUsableActions(encounterId, actor, bob, 'player')).toThrow(/your own character/i);
   });
 
+  // Issue #1921: listUsableActions surfaces remaining-uses state, and it tracks a real spend.
+  it('#1921: listUsableActions reports uses:null for an at-will action and the live pool for a recharge action', () => {
+    const { orm, service, encounterId } = seed();
+    const [monster] = orm
+      .insert(combatants)
+      .values({
+        encounterId,
+        kind: 'monster',
+        name: 'Listed Drake',
+        initiative: 5,
+        hpCurrent: 80,
+        hpMax: 80,
+        sortOrder: 3,
+        statblockJson: JSON.stringify({
+          ac: 18,
+          abilityScores: { STR: 22, DEX: 10, CON: 18, INT: 10, WIS: 12, CHA: 14 },
+          actions: [
+            { name: 'Claw', kind: 'action', spec: { mode: 'attack', attack: { bonus: '+5' }, cost: { slot: '', count: 0 }, targets: { count: 0, allow: 'enemy' }, outcomes: {} } },
+            {
+              name: 'Breath Weapon',
+              kind: 'action',
+              spec: {
+                mode: 'attack',
+                attack: { bonus: '+9' },
+                cost: { slot: '', count: 0 },
+                uses: { recharge: 'recharge-5-6' },
+                targets: { count: 0, allow: 'enemy' },
+                outcomes: {},
+              },
+            },
+          ],
+        }),
+      })
+      .returning()
+      .all();
+
+    const before = service.listUsableActions(encounterId, monster.id, dmUser, 'dm');
+    expect(before.find((a) => a.name === 'Claw')!.uses).toBeNull();
+    expect(before.find((a) => a.name === 'Breath Weapon')!.uses).toEqual({ max: 1, recharge: 'recharge-5-6', spent: 0, available: 1 });
+
+    service.resolve(encounterId, ActionResolveRequest.parse({ actorCombatantId: monster.id, actionIndex: 1, targetIds: [], commit: true }), dmUser, 'dm');
+
+    const after = service.listUsableActions(encounterId, monster.id, dmUser, 'dm');
+    expect(after.find((a) => a.name === 'Breath Weapon')!.uses).toEqual({ max: 1, recharge: 'recharge-5-6', spent: 1, available: 0 });
+  });
+
   // Issue #1326 — equipped inventory items surface as usable actions, merged after the
   // manually-authored sheet actions, and are resolvable/applyable through the SAME pipeline.
   const dagger = {
@@ -184,7 +230,7 @@ describe('action resolver (real SQLite, service layer)', () => {
 
   function addInventoryItem(
     orm: ReturnType<typeof build>['orm'],
-    opts: { campaignId: number; characterId: number; equipped: boolean; equipSlot?: string | null; equippedAction?: unknown },
+    opts: { campaignId: number; characterId: number; name?: string; equipped: boolean; equipSlot?: string | null; equippedAction?: unknown },
   ) {
     const ts = new Date().toISOString();
     const [row] = orm
@@ -193,7 +239,7 @@ describe('action resolver (real SQLite, service layer)', () => {
         campaignId: opts.campaignId,
         ownerType: 'character',
         characterId: opts.characterId,
-        name: 'Dagger',
+        name: opts.name ?? 'Dagger',
         qty: 1,
         equipped: opts.equipped,
         equipSlot: opts.equipSlot ?? null,
@@ -219,6 +265,16 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(equippedAction.name).toBe('Dagger');
     expect(equippedAction.mode).toBe('attack');
     expect(equippedAction.resolvable).toBe(true);
+  });
+
+  it('#1960: equipped item action source preserves long item names up to 200 chars', () => {
+    const { orm, service, campaignId, encounterId, actor, aliceChar } = seed();
+    const longItemName = 'Longsword of Extraordinary Ancient Dragon Slaying and Arcane Might';
+    addInventoryItem(orm, { campaignId, characterId: aliceChar.id, name: longItemName, equipped: true, equipSlot: 'main-hand', equippedAction: dagger });
+
+    const list = service.listUsableActions(encounterId, actor, alice, 'player');
+    const equippedAction = list[3];
+    expect(equippedAction.source).toBe(`equipped: ${longItemName}`);
   });
 
   it('#1326: unequipping the item removes its action from listUsableActions', () => {
@@ -480,6 +536,126 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(state.used.movement).toBeUndefined();
   });
 
+  // Issue #1910 round 5 review (Devin): getTurnWorkspace's DISPLAY resolved a per-combatant
+  // movement max (the combatant's own speed snapshot, or the adapter default), but this
+  // apply_action spend/guard path still bounded every movement cost by the flat adapter
+  // constant regardless of that snapshot — a speed-40 PC was told 40 ft and rejected past 30.
+  // Proves BOTH directions of the enforcement gap: a faster-than-default PC gets MORE room
+  // than the old flat 30 (not rejected at a 35-ft total), and is still capped at their OWN
+  // speed (rejected past 40, not unbounded).
+  it('#1910: a combatant with a 40-ft speed snapshot is not rejected at the adapter default of 30, but is still capped at their own 40', () => {
+    const { orm, service, encounterId, actor } = seed();
+    orm.update(combatants).set({ speed: 40 }).where(eq(combatants.id, actor)).run();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Tactical Step',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        cost: { slot: 'movement', count: 10 },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+
+    // 25 + 10 = 35, past the old flat 30 cap but within this PC's own 40 — must succeed.
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 25 }) }).where(eq(combatants.id, actor)).run();
+    const applied = service.resolve(encounterId, req, alice, 'player');
+    expect(applied.applied).toBe(true);
+    let state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(35);
+
+    // 35 + 10 = 45, past this PC's own 40 — must still be rejected, at 40 not 30.
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect((threw as { getResponse?: () => unknown }).getResponse?.()).toMatchObject({
+      code: 'action_economy_exhausted',
+      slot: 'movement',
+      remaining: 5,
+      max: 40,
+    });
+    state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(35); // the rejected spend did not write
+  });
+
+  it('#1910: a combatant with a 25-ft speed snapshot is rejected past their own 25, not the adapter default of 30', () => {
+    const { orm, service, encounterId, actor } = seed();
+    orm.update(combatants).set({ speed: 25 }).where(eq(combatants.id, actor)).run();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Tactical Step',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        cost: { slot: 'movement', count: 10 },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+
+    // 20 + 10 = 30 — within the OLD flat adapter cap, but past this PC's own 25.
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 20 }) }).where(eq(combatants.id, actor)).run();
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect((threw as { getResponse?: () => unknown }).getResponse?.()).toMatchObject({
+      code: 'action_economy_exhausted',
+      slot: 'movement',
+      remaining: 5,
+      max: 25,
+    });
+    const state = CombatantTurnState.parse(
+      JSON.parse(orm.select().from(combatants).where(eq(combatants.id, actor)).get()!.turnState ?? '{}'),
+    );
+    expect(state.movementUsedFt).toBe(20); // the rejected spend did not write
+  });
+
+  it('#1910: a combatant with no speed snapshot (null) is still bounded by the adapter default of 30, unchanged from pre-#1910 behavior', () => {
+    const { orm, service, encounterId, actor } = seed();
+    expect(orm.select({ speed: combatants.speed }).from(combatants).where(eq(combatants.id, actor)).get()!.speed).toBeNull();
+    const req = ActionResolveRequest.parse({
+      actorCombatantId: actor,
+      actionName: 'Tactical Step',
+      spec: {
+        mode: 'attack',
+        attack: { bonus: '+7' },
+        cost: { slot: 'movement', count: 10 },
+        targets: { count: 0, allow: 'enemy' },
+        outcomes: {},
+      },
+      targetIds: [],
+      commit: true,
+    });
+    orm.update(combatants).set({ turnState: JSON.stringify({ used: {}, movementUsedFt: 25 }) }).where(eq(combatants.id, actor)).run();
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, alice, 'player');
+    } catch (e) {
+      threw = e;
+    }
+    expect((threw as { getResponse?: () => unknown }).getResponse?.()).toMatchObject({
+      code: 'action_economy_exhausted',
+      slot: 'movement',
+      remaining: 5,
+      max: 30,
+    });
+  });
+
   it('#1637: inline statblock monsters with legendary actions can spend and refund that slot', () => {
     const { orm, service, encounterId } = seed();
     const [legendaryMonster] = orm
@@ -566,6 +742,94 @@ describe('action resolver (real SQLite, service layer)', () => {
     const body = (threw as { getResponse?: () => unknown }).getResponse?.();
     expect(body).toMatchObject({ code: 'action_economy_exhausted', slot: 'legendary', remaining: 0, max: 0 });
     expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.turnState ?? '{}').used?.legendary ?? 0).toBe(0);
+  });
+
+  // Issue #1921: limited-use/recharge action pools — persisted spend, rejection of a second
+  // apply while exhausted, and undo refund.
+  function seedRechargeMonster(orm: ReturnType<typeof build>['orm'], encounterId: number) {
+    const [monster] = orm
+      .insert(combatants)
+      .values({
+        encounterId,
+        kind: 'monster',
+        name: 'Recharge Drake',
+        initiative: 5,
+        hpCurrent: 80,
+        hpMax: 80,
+        sortOrder: 3,
+        statblockJson: JSON.stringify({
+          ac: 18,
+          abilityScores: { STR: 22, DEX: 10, CON: 18, INT: 10, WIS: 12, CHA: 14 },
+          actions: [
+            {
+              name: 'Breath Weapon',
+              kind: 'action',
+              spec: {
+                mode: 'attack',
+                attack: { bonus: '+9' },
+                // No action-economy cost (isolates the uses-pool check from the
+                // per-turn action-economy check — a second call in the same test
+                // would otherwise be rejected by economy exhaustion first).
+                cost: { slot: '', count: 0 },
+                uses: { recharge: 'recharge-5-6' },
+                targets: { count: 0, allow: 'enemy' },
+                outcomes: {},
+              },
+            },
+          ],
+        }),
+      })
+      .returning()
+      .all();
+    return monster.id;
+  }
+
+  it('#1921: applying a recharge action twice is refused once spent, naming the recharge condition', () => {
+    const { orm, service, encounterId } = seed();
+    const monsterId = seedRechargeMonster(orm, encounterId);
+    const req = ActionResolveRequest.parse({ actorCombatantId: monsterId, actionIndex: 0, targetIds: [], commit: true });
+
+    const first = service.resolve(encounterId, req, dmUser, 'dm');
+    expect(first.applied).toBe(true);
+    const row = orm.select().from(combatants).where(eq(combatants.id, monsterId)).get()!;
+    const uses = JSON.parse(row.actionUses ?? '{}');
+    const usesKeys = Object.keys(uses);
+    expect(usesKeys).toHaveLength(1);
+    expect(usesKeys[0]).toMatch(/^statblock:/);
+    expect(uses[usesKeys[0]]).toEqual({ spent: 1 });
+
+    let threw: unknown;
+    try {
+      service.resolve(encounterId, req, dmUser, 'dm');
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeDefined();
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'action_uses_exhausted', max: 1, remaining: 0 });
+    expect((body as { message: string }).message).toContain('Recharge 5–6');
+  });
+
+  it('#1921: undo refunds a spent recharge action back to usable', () => {
+    const { orm, service, encounterId } = seed();
+    const monsterId = seedRechargeMonster(orm, encounterId);
+    const req = ActionResolveRequest.parse({ actorCombatantId: monsterId, actionIndex: 0, targetIds: [], commit: true });
+
+    const applied = service.resolve(encounterId, req, dmUser, 'dm');
+    expect(applied.applied).toBe(true);
+    const spentRow = orm.select().from(combatants).where(eq(combatants.id, monsterId)).get()!;
+    const spentUses = JSON.parse(spentRow.actionUses ?? '{}');
+    const usesKey = Object.keys(spentUses)[0];
+    expect(spentUses[usesKey].spent).toBe(1);
+
+    service.undo(encounterId, applied.undoToken!, dmUser, 'dm');
+    const refundedRow = orm.select().from(combatants).where(eq(combatants.id, monsterId)).get()!;
+    const refundedUses = JSON.parse(refundedRow.actionUses ?? '{}');
+    expect(refundedUses[usesKey].spent).toBe(0);
+
+    // Usable again after the refund — a third resolve+apply succeeds.
+    const secondApply = service.resolve(encounterId, req, dmUser, 'dm');
+    expect(secondApply.applied).toBe(true);
   });
 
   it('OSR descending-AC attack evidence shows the effective ascending threshold, not native descending AC as the threshold', () => {

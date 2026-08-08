@@ -44,17 +44,21 @@ import {
   takeLocalDiceAnnouncements,
 } from './localDiceAnnouncements';
 import { useCampaign } from '../../app/CampaignContext';
+import { useAuth } from '../../app/auth';
+import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
+import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 
-const POLL_MS = 5000;
-
-
+const DEGRADED_POLL_MS = 60000;
 
 export function SharedDiceLog({ campaignId, compact = false }: { campaignId: number; compact?: boolean }) {
   useTimeTick();
   const { t } = useTranslation();
+  const { me } = useAuth();
   const { canMemberWrite } = useCampaignAccessFor(campaignId);
   const campaign = useCampaign(campaignId);
-  const supportsActionDice = Boolean(ruleSystemAdapter(campaign?.ruleSystem).attributeDicePool);
+  const supportsActionDice = Boolean(
+    ruleSystemAdapter(campaign?.ruleSystem, campaign?.customMechanicsProfile).attributeDicePool,
+  );
   const limit = compact ? 4 : 8;
   const [expr, setExpr] = useState('1d20');
   const [physical, setPhysical] = useState<PhysicalRollFormFields>(EMPTY_PHYSICAL_ROLL_FORM);
@@ -62,13 +66,10 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const [loggingPhysical, setLoggingPhysical] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rolls, setRolls] = useState<DiceRoll[]>([]);
-  // Id of the roll the local user just made — only that total tumbles in, so
-  // polled-in rolls from other players don't animate on every 5s refresh.
+  const [sseStatus, setSseStatus] = useState<CampaignEventsStatus | null>(null);
+  // Id of the roll the local user (or fresh spectator roll) just made/received.
   const [justRolledId, setJustRolledId] = useState<number | null>(null);
-  // Durable retention ceiling disclosed by the server (#614): the number of
-  // rolls a campaign keeps before the oldest are pruned, or null when history
-  // is never pruned ("keep all"). Used to render the honest "Showing the latest
-  // N rolls" footnote; undefined until the first successful feed fetch.
+  // Durable retention ceiling disclosed by the server (#614).
   const [retention, setRetention] = useState<number | null | undefined>(undefined);
   const announce = useAnnounce();
   const { beginRollAnimation, cancelRollAnimation, showRoll } = useRollResultToast();
@@ -84,10 +85,14 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   } | null>(null);
   /** Which campaign the in-memory `rolls` array came from (guards campaign switches). */
   const rollsCampaignIdRef = useRef<number | null>(null);
+  const knownRollIdsRef = useRef<Set<number>>(new Set());
+  const isInitialLoadRef = useRef<boolean>(true);
 
   useEffect(() => {
     rollAnnouncementRef.current = null;
     rollsCampaignIdRef.current = null;
+    knownRollIdsRef.current = new Set();
+    isInitialLoadRef.current = true;
     setRolls([]);
     setRetention(undefined);
     setJustRolledId(null);
@@ -136,6 +141,38 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     try {
       const { data, headers } = await getWithHeaders<DiceRoll[]>(`${API}/campaigns/${campaignId}/rolls?limit=${limit}`);
       rollsCampaignIdRef.current = campaignId;
+
+      if (isInitialLoadRef.current) {
+        for (const r of data) knownRollIdsRef.current.add(r.id);
+        isInitialLoadRef.current = false;
+      } else {
+        const newlyArrived = data.filter((r) => !knownRollIdsRef.current.has(r.id));
+        for (const r of data) knownRollIdsRef.current.add(r.id);
+
+        if (newlyArrived.length > 0) {
+          const now = Date.now();
+          const freshNonOwn = newlyArrived.filter((r) => {
+            if (isManualDiceRoll(r)) return false;
+            if (me?.user?.id != null && String(r.rollerUserId) === String(me.user.id)) return false;
+            const rollTime = new Date(r.createdAt).getTime();
+            if (Number.isNaN(rollTime) || now - rollTime >= 8000) return false;
+            return true;
+          });
+
+          // Bursts >2 coalesce to feed tumble-in only (no spectator overlay).
+          if (freshNonOwn.length > 0 && freshNonOwn.length <= 2) {
+            const allowAnimation = me?.user?.animateOthersRolls !== false && !prefersReducedMotion();
+            for (const r of freshNonOwn) {
+              setJustRolledId(r.id);
+              if (allowAnimation) {
+                beginRollAnimation(r.expr);
+                showRoll(r, { applyDisabled: true });
+              }
+            }
+          }
+        }
+      }
+
       setRolls(data);
       // Retention is disclosed per-response so it tracks the server's current
       // policy (incl. the "unlimited" keep-all mode) without a separate call.
@@ -144,19 +181,38 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     } catch {
       /* keep last-known feed; next poll retries */
     }
-  }, [campaignId, limit]);
+  }, [campaignId, limit, me?.user?.id, me?.user?.animateOthersRolls, beginRollAnimation, showRoll]);
 
-  // Initial fetch + poll while the tab is visible, so other members' rolls show up
-  // without a manual reload (mirrors RunSessionPage's encounter polling).
+  useCampaignEvents(Number.isFinite(campaignId) ? campaignId : undefined, {
+    onEvent: (event) => {
+      if (event.type === 'dice.rolled') {
+        void load();
+      }
+    },
+    onReconnect: () => {
+      void load();
+    },
+    onStreamRecovery: () => {
+      void load();
+    },
+    onStatusChange: (status) => {
+      setSseStatus(status);
+    },
+  });
+
+  // Initial fetch + degraded poll fallback (~60s) when stream drops.
+  // Demote 5s poll when the stream is healthy (connected).
   useEffect(() => {
     void load();
+    if (sseStatus === 'connected') return;
+
     const tick = () => {
       if (document.visibilityState !== 'visible') return;
       void load();
     };
-    const handle = setInterval(tick, POLL_MS);
+    const handle = setInterval(tick, DEGRADED_POLL_MS);
     return () => clearInterval(handle);
-  }, [load]);
+  }, [load, sseStatus]);
 
   // Single roll-submit path, shared by the tap-to-build tray (issue #38) and the
   // advanced expression box. Kept intact so the shared-log/animation work (#35, #67)
@@ -164,13 +220,6 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   // the tray can surface a per-roll result (e.g. the kept die on an advantage roll).
   const submitExpr = useCallback(
     async (raw: string, label?: string): Promise<DiceRoll | null> => {
-      // Issue #633: canonicalize the expression before submit so non-ASCII
-      // decimal digits (Arabic-Indic ٠-٩, Persian ۰-۹, Devanagari ०-९) typed or
-      // pasted by international rollers are normalized to ASCII and lowercase,
-      // matching the server's ASCII-only DiceExprPattern. The server remains
-      // the authority on shape (zod regex) and bounds (parseCompoundDiceExpr);
-      // this is purely input normalization, documented at DiceExprPattern in
-      // @campfire/schema.
       const cleaned = canonicalizeDiceExpr(raw.trim());
       if (!cleaned) return null;
       setRolling(true);
@@ -178,6 +227,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       beginRollAnimation(cleaned);
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: cleaned, label });
+        knownRollIdsRef.current.add(result.id);
         const batch = formatDiceRollAnnouncementBatch([result], t);
         if (batch) {
           rememberLocalDiceAnnouncement(campaignId, result.id);
@@ -218,6 +268,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       beginRollAnimation(openLegendActionRollAnimationExpr(payload.score));
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll/action`, payload);
+        knownRollIdsRef.current.add(result.id);
         const batch = formatDiceRollAnnouncementBatch([result], t);
         if (batch) {
           rememberLocalDiceAnnouncement(campaignId, result.id);
@@ -257,6 +308,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
 
   const prependRoll = useCallback(
     (result: DiceRoll) => {
+      knownRollIdsRef.current.add(result.id);
       const batch = formatDiceRollAnnouncementBatch([result], t);
       if (batch) {
         rememberLocalDiceAnnouncement(campaignId, result.id);

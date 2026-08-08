@@ -22,6 +22,7 @@ import {
   type AbilityRepresentation,
   type StatblockPresentation,
   type StatblockPresentationLabel,
+  type CustomMechanicsProfile,
 } from '@campfire/schema';
 
 const SPEED_LABEL = { full: 'Speed' } as const;
@@ -173,7 +174,11 @@ function normalize(data: unknown): Record<string, unknown> | null {
   return null;
 }
 
-export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null): MonsterStatblock | null {
+export function parseMonsterStatblock(
+  data: unknown,
+  ruleSystem?: string | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
+): MonsterStatblock | null {
   const d = normalize(data);
   if (!d) return null;
 
@@ -181,7 +186,7 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
   // adapter (issue #70), resolved from the active campaign's `ruleSystem` (issue #234)
   // rather than defaulted at the call site. Default (5e) reproduces the prior behavior
   // exactly for imported/Open5e monsters, which store camelCase fields.
-  const adapter = ruleSystemAdapter(ruleSystem);
+  const adapter = ruleSystemAdapter(ruleSystem, customMechanicsProfile);
   // Presentation is resolved separately from mechanical mapping so unknown/homebrew packs
   // keep 5e-shaped field mapping but show neutral Rating/Defense labels (issue #763).
   const presentation = statblockPresentation(ruleSystem);
@@ -244,8 +249,37 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
 }
 
 /** True when `data` yields at least one renderable statblock field. */
-export function hasMonsterStatblock(data: unknown, ruleSystem?: string | null): boolean {
-  return parseMonsterStatblock(data, ruleSystem) !== null;
+export function hasMonsterStatblock(
+  data: unknown,
+  ruleSystem?: string | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
+): boolean {
+  return parseMonsterStatblock(data, ruleSystem, customMechanicsProfile) !== null;
+}
+
+/**
+ * Whether a rule ENTRY should render as a creature statblock.
+ *
+ * {@link hasMonsterStatblock} inspects data only, and is deliberately permissive so a
+ * sparse creature still renders. That makes it the wrong question to ask about an entry:
+ * `Pf2eAdapter.mapStatblock` maps generic `traits` onto `creatureType` and `level` onto
+ * `challengeRating`, so ANY PF2e/SF2e row carrying either — every item, spell and feat the
+ * importer produces — satisfies it on a campaign whose `ruleSystem` selects that adapter.
+ * Callers that gated a creature-only view on the data predicate alone therefore swallowed
+ * non-creature entries and hid their own stats.
+ *
+ * The entry's `type` is the authoritative answer and every importer sets it, so require it
+ * here. Hazards, vehicles and gear fall through to the {@link EntryFacts} fact list, which
+ * can show the fields a creature statblock has no slot for (stealth DC, disable check,
+ * price, damage).
+ */
+export function entryRendersMonsterStatblock(
+  entryType: string | null | undefined,
+  data: unknown,
+  ruleSystem?: string | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
+): boolean {
+  return entryType === 'monster' && hasMonsterStatblock(data, ruleSystem, customMechanicsProfile);
 }
 
 /**
@@ -345,8 +379,18 @@ function NamedSection({ title, entries, headingLevel }: { title: string; entries
  * statblock fields and ability modifiers. Unrecognized / empty rule systems
  * keep 5e-shaped field mapping but use neutral Rating/Defense labels (#763).
  */
-export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknown; ruleSystem?: string | null; headingLevel?: 2 | 3 | 4 }) {
-  const block = parseMonsterStatblock(data, ruleSystem);
+export function StatBlock({
+  data,
+  ruleSystem,
+  customMechanicsProfile,
+  headingLevel = 2,
+}: {
+  data: unknown;
+  ruleSystem?: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
+  headingLevel?: 2 | 3 | 4;
+}) {
+  const block = parseMonsterStatblock(data, ruleSystem, customMechanicsProfile);
   if (!block) return null;
 
   const { presentation } = block;

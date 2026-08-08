@@ -1,6 +1,61 @@
 {
   "encounters": {
     "title": "Encounters",
+    "combatLogHeading": "Combat log",
+    "actions": {
+      "title": "Actions",
+      "use": "Use",
+      "useGroup": "Run for group",
+      "uses": {
+        "rechargeSingle": "Recharge {{min}}",
+        "recharge": "Recharge {{min}}–{{max}}",
+        "spent": "spent",
+        "perDay": "{{max}}/day",
+        "left": "{{count}} left",
+        "left_other": "{{count}} left",
+        "disabledReason": "No uses remaining ({{label}})"
+      }
+    },
+    "vitals": {
+      "editMaxHp": "Edit max HP",
+      "maxHp": "Max HP",
+      "setMax": "Set Max",
+      "deathSaves": "Death Saves",
+      "dyingStrip": "You are dying — {{successes}} successes / {{failures}} failures",
+      "rollDeathSave": "Roll a death save"
+    },
+    "deathSave": {
+      "outcome": {
+        "revive": "Natural 20 — back on your feet!",
+        "dead": "Died.",
+        "stabilized": "Stabilized.",
+        "success": "Success (rolled {{natural}}).",
+        "failure": "Failure (rolled {{natural}})."
+      },
+      "spectatorToast": "{{name}} death save: {{outcome}} (rolled {{natural}})",
+      "spectatorOutcomeSuccess": "success",
+      "spectatorOutcomeFailure": "failure"
+    },
+    "turnTimer": {
+      "elapsed": "Turn elapsed {{elapsed}}",
+      "elapsedOfLimit": "Turn elapsed {{elapsed}} of {{limit}}",
+      "settingsLabel": "Turn timer settings",
+      "settingsTitle": "Turn timer",
+      "settingsHint": "Social pacing cue only — never auto-advances or blocks anyone.",
+      "off": "Off",
+      "presetSeconds": "{{seconds}}s"
+    },
+    "initiativeChipLabel": "Initiative: {{value}}",
+    "reorder": {
+      "menuLabel": "Reorder {{name}} in initiative",
+      "moveUp": "Move up",
+      "moveDown": "Move down",
+      "moveAfterLabel": "Move after…",
+      "top": "the top",
+      "go": "Move",
+      "delayingBadge": "Delaying",
+      "announcement": "Moved {{name}} in the initiative order."
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
@@ -27,6 +82,8 @@
       "title": "No encounters yet",
       "hintDm": "Start one when combat kicks off.",
       "hintPlayer": "The DM hasn't started one yet.",
+      "sampleFight": "Try a sample fight",
+      "sampleFightLoading": "Seeding…",
       "noCombatants": "No combatants yet",
       "noCombatantsHintDmActive": "Add the party from the Party tab, then enemies.",
       "noCombatantsHintDmNoParty": "Add combatants below — this campaign has no active party to auto-add.",
@@ -36,6 +93,15 @@
       "checking": "Checking committed state — confirming whether that change was saved before you act again.",
       "done": "Checked. Displayed state now matches the server."
     },
+    "monsterHpDisplay": {
+      "label": "Monster HP shown to players",
+      "band": "Band",
+      "exact": "Exact",
+      "hidden": "Hidden",
+      "bandDescription": "Coarse status only (Healthy/Bloodied/Critical/Down) — no exact numbers.",
+      "exactDescription": "Ship the real hit-point numbers to players.",
+      "hiddenDescription": "No numbers or status — a downed monster still shows Down."
+    },
     "sync": {
       "overridePrompt": "You may be working from stale state.",
       "overrideConfirm": "Continue anyway",
@@ -43,11 +109,24 @@
       "bannerOverrideOffline": "Offline — showing last-known encounter. Acting on possibly stale data until sync returns.",
       "bannerOverrideReconnecting": "Reconnecting — acting on possibly stale data until live again.",
       "bannerOverrideStale": "Live updates interrupted — acting on possibly stale data until resynced.",
-      "controlsPaused": "Paused — reconnecting to live updates."
+      "controlsPaused": "Paused — reconnecting to live updates.",
+      "ownOverridePrompt": "Live sync is down. You can still update your own combatant — the server will reject it if someone else changed it first.",
+      "ownOverrideConfirm": "Continue anyway",
+      "ownOverrideActive": "Your combatant only — acting on possibly stale data until sync returns. Other actions stay paused.",
+      "bannerOverrideOwnOffline": "Offline — showing last-known encounter. You can still update your own combatant until sync returns.",
+      "bannerOverrideOwnReconnecting": "Reconnecting — you can still update your own combatant until live again.",
+      "bannerOverrideOwnStale": "Live updates interrupted — you can still update your own combatant until resynced."
+    },
+    "feedback": {
+      "down": "DOWN",
+      "revive": "UP",
+      "hurt": "Hurt",
+      "recover": "Recovered"
     },
     "errors": {
       "load": "Couldn't load encounters.",
       "create": "Couldn't create the encounter.",
+      "sampleFight": "Couldn't seed the sample fight.",
       "preview": "Couldn't build a preview.",
       "commit": "Couldn't commit the encounter.",
       "loadEncounter": "Couldn't load this encounter.",
@@ -57,6 +136,7 @@
       "actionFailed": "That action failed.",
       "sendCheck": "Couldn't send the check request.",
       "rollCheck": "Couldn't roll the check.",
+      "loadChecks": "Couldn't load the check catalog for every selected character.",
       "resolveAction": "Couldn't resolve that action.",
       "applyAction": "Couldn't apply that action.",
       "loadAftermath": "Couldn't load the aftermath workflow.",
@@ -138,6 +218,37 @@
         "failed": "Couldn't prepare optimised sizes for this map — it is still shown at full size.",
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
+      },
+      "aoe": {
+        "label": "AoE",
+        "addCircle": "Add a circular burst",
+        "addCone": "Add a cone",
+        "addLine": "Add a line",
+        "clearPlayers": "Clear player templates",
+        "clearPlayersHint": "Remove every player-declared template",
+        "declaredBy": "Declared by {{name}}"
+      },
+      "ping": {
+        "menuLabel": "Ping intent",
+        "keyboardHint": "Shift+Enter opens the Look, Danger, or Move here menu.",
+        "intents": {
+          "look": "Look",
+          "danger": "Danger",
+          "move": "Move here"
+        },
+        "surfaceAriaLabel": "Ping the map center for everyone. {{hint}} Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.",
+        "toolHelp": "Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone. {{hint}}",
+"log": {
+          "unknownSender": "Someone",
+          "labeled": "{{name}} pings: {{label}}",
+          "plain": "{{name}} pinged the map"
+        }
+      },
+      "dragDistance": {
+        "budget": "used {{used}} of {{max}} {{unit}}",
+        "overSpeed": "over speed",
+        "movedMessage": "Moved {{feet}} {{unit}}.",
+        "undoneMessage": "Move undone."
       }
     },
     "workspace": {
@@ -187,22 +298,76 @@
         "pending": "Reopening encounter…"
       },
       "addCombatant": "Add combatant",
-      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
+      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here.",
+      "library": {
+        "hpNotSet": "HP not set",
+        "hpValue": "{{hp}} HP",
+        "hpOverrideLabel": "Set HP to add",
+        "hpOverridePlaceholder": "HP",
+        "addWithHp": "Add"
+      }
     },
     "actionFlow": {
-      "noTargets": "No legal targets."
+      "noTargets": "No legal targets.",
+      "systemMathNotice": "Resolved with math that hasn't been audited for your system — verify the result."
+    },
+    "groupAction": {
+      "heading": "{{actorName}} · {{actionName}} · group",
+      "regionLabel": "Run {{actionName}} for the group",
+      "dismissLabel": "Cancel group action",
+      "cancel": "Cancel",
+      "loadingCandidates": "Checking the roster for matching combatants…",
+      "noCandidates": "No other living combatants match this action.",
+      "runForAllCount": "Run for all {{count}}",
+      "targetShared": "Shared target",
+      "targetPerActor": "Target individually",
+      "pickTargets": "Pick target(s) ({{selected}}/{{max}})",
+      "roll": "Roll for group",
+      "rolling": "Rolling…",
+      "announceComplete": "{{applied}} of {{total}} applied.",
+      "stoppedEarly": "Stopped after a failure — {{applied}} applied, {{notRun}} not run.",
+      "status": {
+        "applied": "Applied",
+        "skipped": "Skipped — no action left",
+        "failed": "Failed",
+        "notRun": "Not run",
+        "skippedNoUses": "Skipped — no uses left"
+      },
+      "undo": "Undo",
+      "undone": "Undone",
+      "undoAll": "Undo all",
+      "undoingAll": "Undoing…",
+      "undoAllFailed": "Some undos failed — reload to check the encounter state.",
+      "close": "Close"
     },
     "checks": {
       "requestCheck": "Request a check",
-      "character": "Character",
-      "chooseCharacter": "Choose a character…",
+      "targets": "Targets",
+      "wholeParty": "Whole party ({{count}})",
+      "wholePartyTooLarge": "Too many active characters for one tap ({{count}}/{{max}}) — select targets individually.",
+      "manualSelectionTooLarge": "Too many targets selected ({{count}}/{{max}}) — deselect some to send this request.",
+      "noCharacters": "No characters to target.",
       "check": "Check",
       "chooseCheck": "Choose a check…",
-      "pickCharacterFirst": "Pick a character first",
+      "noCommonCheck": "No check every selected target can roll",
+      "noCommonCheckHint": "The selected targets have no check in common — pick fewer targets, or send separate requests.",
+      "retryLoadChecks": "Retry",
+      "pickCharacterFirst": "Pick a target first",
       "dc": "DC",
       "consequenceOptional": "Consequence (optional)",
       "rolled": "Rolled ",
-      "consequence": "Consequence: "
+      "consequence": "Consequence: ",
+      "board": {
+        "title": "Group checks",
+        "tallyPassed": "{{pass}} of {{total}} passed",
+        "tallyResolved": "{{resolved}} of {{total}} resolved",
+        "pending": "Pending",
+        "passed": "Passed",
+        "failed": "Failed",
+        "resolved": "Resolved",
+        "majoritySucceeds": "Group succeeds (half or more)",
+        "possiblyIncomplete": "Some members may not be shown (too old to load in full)"
+      }
     },
     "wizard": {
       "step1": "1. Parameters",
@@ -210,8 +375,13 @@
       "step3": "3. Save encounter",
       "noCreatures": "No creatures — adjust the filters and regenerate, or add one.",
       "none": "— none —",
-      "noStatblock": "No statblock detail — HP/CR may be incomplete."
+      "noStatblock": "No statblock detail — HP/CR may be incomplete.",
+      "heuristicDifficultyBadge": "Target band: heuristic",
+      "heuristicDifficultyHint": "Target band sized by D&D 5e's XP budget — this rule system has no difficulty math of its own.",
+      "homebrewBadge": "Homebrew"
     },
+    "duplicate": "Duplicate",
+    "duplicateCombatant": "Duplicate {{name}}",
     "resourceTracker": {
       "title": "Resource Tracker",
       "features": "Features",
@@ -224,6 +394,119 @@
       "updateSlotError": "Couldn't update the spell slot.",
       "ambiguousResolved": "We couldn't confirm that action completed at the time, but the values shown are now up to date — check them before retrying.",
       "setUsedTitle": "Set used to {{val}}"
+    },
+    "adapterResource": {
+      "hitDice": "Hit Dice",
+      "rage": "Rage",
+      "actionSurge": "Action Surge",
+      "kiPoints": "Focus / Ki Points",
+      "recharge": "Recharge Feature",
+      "inspiration": "Inspiration",
+      "focusPoints": "Focus Points",
+      "heroPoints": "Hero Points"
+    },
+    "adapterCondition": {
+      "Blinded": "Blinded",
+      "Charmed": "Charmed",
+      "Deafened": "Deafened",
+      "Exhaustion": "Exhaustion",
+      "Frightened": "Frightened",
+      "Grappled": "Grappled",
+      "Incapacitated": "Incapacitated",
+      "Invisible": "Invisible",
+      "Paralyzed": "Paralyzed",
+      "Petrified": "Petrified",
+      "Poisoned": "Poisoned",
+      "Prone": "Prone",
+      "Restrained": "Restrained",
+      "Stunned": "Stunned",
+      "Unconscious": "Unconscious"
+    },
+    "rulesLookup": {
+      "heading": "Rules quick lookup",
+      "placeholder": "Search rules & homebrew…",
+      "searchLabel": "Search rules and homebrew",
+      "noResults": "No matching rules found.",
+      "noDetails": "No details available for this entry.",
+      "recentLookups": "Recent lookups",
+      "homebrewBadge": "Homebrew",
+      "toggleExpand": "Expand rules quick lookup",
+      "toggleCollapse": "Collapse rules quick lookup",
+      "show": "Show",
+      "hide": "Hide",
+      "loading": "Searching…",
+      "typeToSearch": "Start typing to search rules & homebrew…",
+      "searchError": "Failed to search rules."
+    },
+    "statblock": {
+      "reveal": "Reveal",
+      "revealed": "Revealed",
+      "revealToPlayers": "Reveal statblock to players",
+      "hideFromPlayers": "Hide statblock from players",
+      "revealedSummary": "Statblock (revealed to players)",
+      "killPrompt": "{{name}} dropped to 0 HP — reveal its statblock to players?",
+      "dismiss": "Dismiss",
+      "dismissKillPrompt": "Dismiss the statblock reveal prompt",
+      "maxHp": "Max HP",
+      "hpUnknown": "Unknown"
+    },
+    "whisper": {
+      "button": "Whisper",
+      "buttonLabel": "Whisper to {{name}}",
+      "panelTitle": "Quick Whisper to Player",
+      "recipientLabel": "Recipient",
+      "selectRecipient": "Select a player…",
+      "messageLabel": "Whisper message",
+      "title": "Whisper to {{name}}",
+      "placeholder": "Type a private whisper…",
+      "send": "Send whisper",
+      "cancel": "Cancel",
+      "sent": "Whisper sent to {{name}}",
+      "error": "Couldn't send whisper."
+    },
+    "rulesHints": {
+      "triggerAria": "Rules hint for {{term}}",
+      "regionLabel": "Rules hint: {{term}}",
+      "fullRule": "Full rule",
+      "dnd5e": {
+        "actions": {
+          "attack": "Make one weapon or unarmed strike against a target in range. A class feature like Extra Attack can grant more than one.",
+          "dash": "Gain extra movement equal to your speed for this turn.",
+          "dodge": "Until your next turn, any attack roll against you has disadvantage if you can see the attacker, and you have advantage on Dexterity saving throws.",
+          "disengage": "Your movement doesn't provoke opportunity attacks for the rest of this turn.",
+          "help": "Grant an ally advantage on their next ability check to complete a task, or set up their next melee attack against a creature within 5 feet of you.",
+          "hide": "Make a Dexterity (Stealth) check to try to hide, becoming unseen by creatures that fail to spot you.",
+          "ready": "Choose a trigger and an action or movement to take in response to it, using your reaction when the trigger occurs.",
+          "search": "Devote your attention to finding something, usually with a Wisdom (Perception) or Intelligence (Investigation) check.",
+          "use": "Interact with a second object or feature of the environment beyond the one free interaction you already get on your turn."
+        },
+        "conditions": {
+          "blinded": "Can't see and automatically fails any check that requires sight. Attack rolls against the creature have advantage, and its own attack rolls have disadvantage.",
+          "charmed": "Can't attack the charmer or target it with harmful abilities or magic, and the charmer has advantage on social checks against it.",
+          "deafened": "Can't hear and automatically fails any check that requires hearing.",
+          "exhaustion": "A cumulative penalty track from level 1 to 6 — each level worsens ability checks, speed, and more, and reaching level 6 is fatal.",
+          "frightened": "Has disadvantage on ability checks and attack rolls while the source of its fear is within line of sight, and can't willingly move closer to it.",
+          "grappled": "Speed becomes 0 and can't benefit from any speed bonus; ends if the grappler is incapacitated or the creature is removed from its reach.",
+          "incapacitated": "Can't take actions or reactions.",
+          "invisible": "Impossible to see without special senses, and heavily obscured for hiding purposes. Attack rolls against it have disadvantage, and its own attack rolls have advantage.",
+          "paralyzed": "Incapacitated and can't move or speak, and automatically fails Strength and Dexterity saves. Attacks against it have advantage, and any hit from within 5 feet is a critical hit.",
+          "petrified": "Transformed, along with any nonmagical items it's wearing or carrying, into a solid substance; incapacitated, and resistant to all damage and immune to poison and disease.",
+          "poisoned": "Has disadvantage on attack rolls and ability checks.",
+          "prone": "Can only crawl unless it stands up. Has disadvantage on attack rolls; melee attacks against it have advantage, and ranged attacks against it have disadvantage.",
+          "restrained": "Speed becomes 0. Attack rolls against it have advantage, its own attack rolls have disadvantage, and it has disadvantage on Dexterity saves.",
+          "stunned": "Incapacitated, can't move, and can speak only falteringly; automatically fails Strength and Dexterity saves, and attacks against it have advantage.",
+          "unconscious": "Incapacitated, can't move or speak, and is unaware of its surroundings. Drops what it's holding and falls prone; attacks against it have advantage, and any hit from within 5 feet is a critical hit."
+        }
+      }
+    },
+    "specialResource": {
+      "award": "Award {{name}}",
+      "awardedAnnounce": "{{name}} awarded to {{combatantName}}",
+      "spend": "Spend {{name}}",
+      "spendConfirm": "Spend {{name}}?",
+      "spentToast": "{{name}} spent",
+      "available": "{{available}} of {{max}} {{name}} available",
+      "receivedAnnounce": "You received {{name}}!"
     }
   }
 }

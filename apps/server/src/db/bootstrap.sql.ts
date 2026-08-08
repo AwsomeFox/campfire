@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   session_count INTEGER NOT NULL DEFAULT 0,
   latest_session_number INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
+  -- Issue #1502: per-campaign homebrew mechanics profile (JSON), or NULL when unset.
+  custom_mechanics_profile TEXT,
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,
   ics_token_expires_at TEXT,
@@ -154,6 +156,23 @@ CREATE TABLE IF NOT EXISTS campaigns (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #846: append-only lifecycle-status provenance. One row per status change
+-- (active<->paused<->completed); the newest row is the current provenance shown in
+-- the archived banner/settings. actor_user_id is durable; actor_name is a snapshot.
+-- reason is DM-only and never shown to players. Cascades with the campaign.
+CREATE TABLE IF NOT EXISTS campaign_status_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  actor_user_id TEXT NOT NULL,
+  actor_name TEXT NOT NULL,
+  from_status TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_status_transitions_campaign
+  ON campaign_status_transitions(campaign_id, created_at);
+
 CREATE TABLE IF NOT EXISTS characters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -169,6 +188,9 @@ CREATE TABLE IF NOT EXISTS characters (
   ac INTEGER,
   eac INTEGER,
   kac INTEGER,
+  -- Issue #1910: movement speed. NULL = unset; the turn workspace falls back to the
+  -- rule system adapter's movement-slot max (30 ft for 5e).
+  speed INTEGER,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
   sp_current INTEGER NOT NULL DEFAULT 0,
@@ -915,6 +937,10 @@ CREATE TABLE IF NOT EXISTS users (
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
   dice_theme TEXT NOT NULL DEFAULT 'nocturne',
+  animate_others_rolls INTEGER NOT NULL DEFAULT 1,
+  can_create_campaigns INTEGER NOT NULL DEFAULT 0,
+  color_vision_assist INTEGER NOT NULL DEFAULT 0,
+  table_audio TEXT NOT NULL DEFAULT 'off',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -943,6 +969,21 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Issue #851 — the safe request/approval flow for a restricted campaign-creation
+-- policy. Mirrors password_reset_requests above: a user files a 'pending' row, an
+-- admin approves or denies it (approving flips users.can_create_campaigns to 1).
+CREATE TABLE IF NOT EXISTS campaign_creation_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  note TEXT NOT NULL DEFAULT '',
+  requested_at TEXT NOT NULL,
+  decided_at TEXT,
+  decided_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_creation_requests_user
+  ON campaign_creation_requests(user_id, status);
 
 -- Single-row install-identity table (issue #723): the per-install UUID
 -- (stable across backup/restore — it lives INSIDE the restored DB) and a
@@ -1325,10 +1366,13 @@ CREATE TABLE IF NOT EXISTS encounters (
   grid_rotation REAL NOT NULL DEFAULT 0,
   grid_opacity REAL NOT NULL DEFAULT 0.35,
   hidden INTEGER NOT NULL DEFAULT 0,
+  monster_hp_display TEXT NOT NULL DEFAULT 'band',
   ended_at TEXT,
   aftermath_dismissed_at TEXT,
   aftermath_xp_awarded_at TEXT,
   aftermath_loot TEXT,
+  turn_started_at TEXT,
+  turn_timer_seconds INTEGER NOT NULL DEFAULT 0,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -1455,7 +1499,8 @@ CREATE TABLE IF NOT EXISTS check_requests (
   requested_by_name TEXT NOT NULL DEFAULT '',
   roll_id INTEGER,
   created_at TEXT NOT NULL,
-  resolved_at TEXT
+  resolved_at TEXT,
+  group_id TEXT -- issue #1943: shared across every row one requestChecks() call creates
 );
 
 CREATE TABLE IF NOT EXISTS inventory_items (
@@ -1517,6 +1562,7 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
   last_turn_at TEXT,
   proactive_settings TEXT DEFAULT '{}',
   style_presets TEXT DEFAULT '{}',
+  comprehension_profile TEXT DEFAULT '{}',
   action_queue_depth INTEGER DEFAULT 8,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -1762,6 +1808,7 @@ CREATE TABLE IF NOT EXISTS combatants (
   character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
   npc_id INTEGER REFERENCES npcs(id) ON DELETE SET NULL,
   npc_disposition_snapshot TEXT,
+  npc_identity_source_id INTEGER,
   name TEXT NOT NULL,
   initiative INTEGER,
   init_mod INTEGER NOT NULL DEFAULT 0,
@@ -1775,6 +1822,9 @@ CREATE TABLE IF NOT EXISTS combatants (
   rp_max INTEGER NOT NULL DEFAULT 0,
   eac INTEGER,
   kac INTEGER,
+  -- Issue #1910: add-time snapshot of the linked character's speed. NULL for
+  -- monster/npc combatants and for combatants added before this column existed.
+  speed INTEGER,
   hp_temp INTEGER NOT NULL DEFAULT 0,
   death_state TEXT NOT NULL DEFAULT 'none',
   death_save_successes INTEGER NOT NULL DEFAULT 0,
@@ -1782,6 +1832,10 @@ CREATE TABLE IF NOT EXISTS combatants (
   conditions TEXT NOT NULL DEFAULT '[]',
   rule_entry_id INTEGER REFERENCES rule_entries(id) ON DELETE SET NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
+  -- Issue #1923 review finding 1: DM manual-reorder override, consulted by sortCombatants
+  -- ahead of the adapter's initiative tiebreak when both compared rows have a non-null
+  -- value. NULL until the first manual reorder on a running encounter.
+  manual_order INTEGER,
   token_x REAL,
   token_y REAL,
   token_size TEXT NOT NULL DEFAULT 'medium',
@@ -1794,7 +1848,12 @@ CREATE TABLE IF NOT EXISTS combatants (
   active_effects TEXT,
   condition_instances TEXT,
   -- Issue #425: inline homebrew statblock JSON for manual monsters.
-  statblock_json TEXT
+  statblock_json TEXT,
+  -- Issue #1926: DM-controlled reveal of this combatant's statblock to non-DM viewers.
+  statblock_revealed INTEGER NOT NULL DEFAULT 0,
+  -- Issue #1921: limited-use/recharge action spend, JSON map keyed by fingerprint+source to
+  -- { spent }. Null = nothing spent yet.
+  action_uses TEXT
 );
 
 CREATE TABLE IF NOT EXISTS combatant_removal_undos (
@@ -2258,6 +2317,9 @@ CREATE TABLE IF NOT EXISTS action_apply_chains (
   cost_slot TEXT NOT NULL DEFAULT '', cost_count INTEGER NOT NULL DEFAULT 0, spell_level_spent INTEGER NOT NULL DEFAULT 0,
   concentration_before TEXT, pending_concentration_checks_before_json TEXT NOT NULL DEFAULT '[]',
   started_concentration INTEGER NOT NULL DEFAULT 0, targets_json TEXT NOT NULL DEFAULT '[]',
+  -- Issue #1921: the limited-use/recharge spend key + amount this apply wrote, so undo()
+  -- can refund the exact spend rather than re-deriving it from the current action spec.
+  uses_key TEXT, uses_spent INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, undone_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_chains(encounter_id);

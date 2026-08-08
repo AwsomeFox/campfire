@@ -13,14 +13,20 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiConsumes, ApiResponse } from '@nestjs/swagger';
+import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from './campaigns.service';
+import { CampaignGovernanceService } from './campaign-governance.service';
 import {
   CampaignCloneDto,
   CampaignCreateDto,
+  CampaignCreationRequestCreateDto,
+  CampaignCreationRequestDecisionDto,
   CampaignImportDto,
   CampaignPurgeDto,
   CampaignUpdateDto,
@@ -38,12 +44,27 @@ function truthyQuery(value: string | undefined): boolean {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
+/**
+ * Issue #851 review — the same strict bucket the forgot-password flow uses, for the same
+ * reason: a self-service request that lands in an admin's queue and writes an audit row.
+ *
+ * The single-pending guard in CampaignGovernanceService is not a rate limit. It clears the
+ * moment an admin decides the request, so a denied user can re-file immediately, and again
+ * after the next denial — each round costing the admin a queue item and the audit log a row.
+ * CastController does the same thing for an authenticated route, so reusing THROTTLE_AUTH
+ * here follows the established pattern rather than introducing a new bucket.
+ */
+const CREATION_REQUEST_THROTTLE = Throttle({
+  [THROTTLE_AUTH]: { limit: AUTH_THROTTLE_LIMIT, ttl: AUTH_THROTTLE_TTL_MS },
+});
+
 @ApiTags('campaigns')
 @Controller('campaigns')
 export class CampaignsController {
   constructor(
     private readonly campaigns: CampaignsService,
     private readonly access: CampaignAccessService,
+    private readonly governance: CampaignGovernanceService,
   ) {}
 
   @Get()
@@ -121,6 +142,73 @@ export class CampaignsController {
     return this.campaigns.listTrashedForUser(user);
   }
 
+  @Get('allowance')
+  @ApiOperation({
+    summary: "The caller's effective campaign-creation allowance (issue #851)",
+    description:
+      'Any authenticated user. Reports the server-wide creation policy, active/total per-user and ' +
+      'server-wide campaign counts against their configured limits, the operator default storage quota ' +
+      'new campaigns inherit, and whether the caller already has a pending creation request. A display aid ' +
+      'ONLY — POST /campaigns, /campaigns/import, /campaigns/import/archive, and /campaigns/:id/clone re-check ' +
+      'every one of these server-side regardless of what this reports.',
+  })
+  @ApiResponse({ status: 200, description: 'Effective allowance for the caller.' })
+  allowance(@CurrentUser() user: RequestUser) {
+    return this.governance.getAllowance(user);
+  }
+
+  @Post('creation-requests')
+  @CREATION_REQUEST_THROTTLE
+  @ApiOperation({
+    summary: 'Request campaign-creation access (issue #851)',
+    description:
+      "Any authenticated user. Files a 'pending' request an admin can approve or deny — the safe request/approval " +
+      "flow for when settings.campaignCreationPolicy is 'admins_only' or 'approved_organizers'. 409 if the caller " +
+      'already has an undecided request.',
+  })
+  @ApiResponse({ status: 201, description: 'The filed request.' })
+  @ApiResponse({ status: 409, description: 'Caller already has a pending request.' })
+  createCreationRequest(@Body() body: CampaignCreationRequestCreateDto, @CurrentUser() user: RequestUser) {
+    return this.governance.createRequest(user, body.note);
+  }
+
+  @Get('creation-requests')
+  @ServerRoles('admin')
+  @ApiOperation({ summary: 'List pending campaign-creation requests', description: 'Server-admin only.' })
+  @ApiResponse({ status: 200, description: 'Pending requests, newest first.' })
+  listCreationRequests() {
+    return this.governance.listPendingRequests();
+  }
+
+  @Post('creation-requests/:id/approve')
+  @ServerRoles('admin')
+  @ApiOperation({
+    summary: 'Approve a campaign-creation request',
+    description: "Server-admin only. Flips the requester's canCreateCampaigns to true atomically with the decision.",
+  })
+  @ApiResponse({ status: 201, description: 'The decided request.' })
+  @ApiResponse({ status: 409, description: 'Request was already decided.' })
+  async approveCreationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: CampaignCreationRequestDecisionDto,
+    @CurrentUser() actor: RequestUser,
+  ) {
+    return this.governance.decide(id, 'approved', actor, body.note);
+  }
+
+  @Post('creation-requests/:id/deny')
+  @ServerRoles('admin')
+  @ApiOperation({ summary: 'Deny a campaign-creation request', description: 'Server-admin only.' })
+  @ApiResponse({ status: 201, description: 'The decided request.' })
+  @ApiResponse({ status: 409, description: 'Request was already decided.' })
+  async denyCreationRequest(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: CampaignCreationRequestDecisionDto,
+    @CurrentUser() actor: RequestUser,
+  ) {
+    return this.governance.decide(id, 'denied', actor, body.note);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a campaign', description: 'Requires campaign membership.' })
   @ApiResponse({ status: 200, description: 'Campaign.' })
@@ -128,6 +216,25 @@ export class CampaignsController {
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireMember(user, id);
     return this.campaigns.getOrThrow(id);
+  }
+
+  @Get(':id/status-transitions')
+  @ApiOperation({
+    summary: 'List lifecycle-status transitions (issue #846)',
+    description:
+      "Requires campaign membership. Returns the campaign's status-change provenance (actor, time, from→to, optional reason), newest first. " +
+      "The `reason` is DM operational text and is redacted (empty) for non-DM callers — players see only who changed the status, when, and the from→to pair.",
+  })
+  @ApiResponse({ status: 200, description: 'Status transitions, newest first.' })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  async listStatusTransitions(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, id);
+    const transitions = await this.campaigns.listStatusTransitions(id);
+    // Issue #846: the reason is DM-only. Players see actor + status + time only.
+    if (role !== 'dm') {
+      return transitions.map(({ reason: _reason, ...rest }) => ({ ...rest, reason: '' }));
+    }
+    return transitions;
   }
 
   @Patch(':id')

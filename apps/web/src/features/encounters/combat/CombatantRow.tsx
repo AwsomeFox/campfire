@@ -1,20 +1,33 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { ActionSpec, Character, Combatant, TokenSize } from '@campfire/schema';
-import { hasDeathSavesForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
+import type { ActionSpec, Character, Combatant, TokenSize, CustomMechanicsProfile, UsableAction } from '@campfire/schema';
+import { defaultCombatantStatblock, hasDeathSavesForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
 import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
 import { CharacterStatCard } from '../../../components/CharacterStatCard';
 import { Btn, HpBar, TextInput } from '../../../components/ui';
+import { GatedControl } from '../../../components/GatedControl';
+import { useAnnounce } from '../../../components/Announcer';
+import { api, API, translateApiError } from '../../../lib/api';
 import { isImeComposing } from '../../../lib/compositionSafeSubmit';
-import { UI_ICON_SIZE } from '../../../lib/uiIcons';
+import { NOTE_VISIBILITY_ICON, UI_ICON_SIZE } from '../../../lib/uiIcons';
 import { CombatantActionsList } from '../CombatantActionsList';
+import { EncounterWhisperComposer } from '../EncounterWhisperComposer';
 import { CombatantStatblockEditor } from '../CombatantStatblockEditor';
 import { isDown } from '../encounterEndedSummary';
 import { canStabilizeCombatant } from '../combatantLifecycle';
 import { TOKEN_SIZE_OPTIONS } from '../map/BattleMap';
+import { FloatingNumbers } from '../FloatingNumbers';
+import type { HpFeedbackEvent } from '../hpFeedback';
 import { DEATH_STATE_LABEL, DeathSaveTracker } from './DeathSaves';
+import type { DeathSaveOutcome } from './deathSaveOutcome';
 import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, conditionDraftFromInstance, conditionSourceLabel, emptyConditionDraft, type ConditionDraft, type ConditionSourceOption, type ConditionTiming } from './conditionDraft';
+import { initialStatblockDraftState, statblockDraftReducer, statblockPatchForCommit } from './combatantStatblockDraft';
+import { RulesHintPopover } from '../../../components/RulesHintPopover';
+import { conditionHintKey, rulesHintCompendiumHref } from '../../../lib/rulesHints';
+import { canAdjustSpecialResource, findSpecialResource, specialResourceAdjustBody } from '../../characters/specialCharacterResource';
+import { adapterResourceLabel } from '../../../lib/adapterVocabularyLabel';
+import { ReorderMenu } from './ReorderMenu';
 
 const HP_BAND_LABEL: Record<string, string> = { healthy: 'Healthy', bloodied: 'Bloodied', critical: 'Critical', down: 'Down' };
 const HP_BAND_PCT: Record<string, number> = { healthy: 100, bloodied: 50, critical: 20, down: 0 };
@@ -31,10 +44,13 @@ export function hpDisplay(combatant: Pick<Combatant, 'hpCurrent' | 'hpMax' | 'hp
   return combatant.hpBand ? (HP_BAND_LABEL[combatant.hpBand] ?? '—') : '—';
 }
 
+type StatblockPatch = Record<string, unknown>;
+
 export type CombatantRowProps = {
   rowRef?: (el: HTMLDivElement | null) => void;
   encounterId: number;
   combatant: Combatant;
+  hpFeedbackEvents: readonly (HpFeedbackEvent & { id: number })[];
   isCurrentTurn: boolean;
   /**
    * Permission to edit this combatant right now — PERMISSION ONLY (issue #1746 —
@@ -54,8 +70,20 @@ export type CombatantRowProps = {
    * disabled — never `canEditPermission` alone.
    */
   syncBlocked: boolean;
+  /** Issue #1914: turn-topology writes stay gated by riskyBlocked, not own-combatant syncBlocked. */
+  turnTopologyBlocked?: boolean;
   canEditIdentity: boolean;
   canRemove: boolean;
+  /**
+   * Issue #1944 — DM-only mount gate for the adapter-declared special resource's
+   * "Award" control (5e inspiration / PF2e hero points). Mirrors `canRemove`'s
+   * shape: the caller passes `canDmWrite` directly. The control additionally
+   * requires a linked `character` and an adapter that actually declares one of
+   * `SPECIAL_RESOURCE_KEYS` (`findSpecialResource`) before it renders at all — a
+   * campaign whose adapter declares neither (OSR, Open Legend, Starforged, …)
+   * shows no affordance regardless of this flag.
+   */
+  canAwardSpecialResource?: boolean;
   canSetInitiative: boolean;
   /** Encounter is running — clearing initiative re-sorts the live turn order (issue #715). */
   running: boolean;
@@ -70,6 +98,8 @@ export type CombatantRowProps = {
    * Undefined while SSE is offline/reconnecting so obsolete modifiers cannot be rolled (#421).
    */
   campaignId: number | undefined;
+  /** Route campaign id — stable ID for operations like whisper notes not tied to sheet staleness. */
+  routeCampaignId?: number;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string, diceTotal?: number) => void;
@@ -80,6 +110,9 @@ export type CombatantRowProps = {
    */
   onUseAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
+  /** Issue #1922: open the group action runner for a monster/NPC action row — same DM-only
+   *  gating as `onUseMonsterAction`, plus the fetched `UsableAction` row itself. */
+  onUseGroupAction?: (actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
@@ -89,11 +122,14 @@ export type CombatantRowProps = {
   defaultConditionSourceCombatantId: number | null;
   /** Active campaign's rule system — selects the statblock adapter (issue #234). */
   ruleSystem: string | null;
+  customMechanicsProfile?: CustomMechanicsProfile | null;
   onHpDelta: (delta: number) => void;
   onSetTempHp: (value: number) => void;
   onSetDeathSaves: (patch: { deathSaveSuccesses?: number; deathSaveFailures?: number }) => void;
   /** Roll a death save through the server-authoritative d20 + shared dice-log action. */
   onRollDeathSave: () => void;
+  /** Issue #1919: this combatant's just-settled death-save outcome, or null once faded. */
+  deathSaveOutcome?: DeathSaveOutcome | null;
   /**
    * Roll this combatant's own initiative through the server-authoritative die + shared
    * dice-log action (issue #1904). Rendered only for a null-initiative combatant the
@@ -109,45 +145,128 @@ export type CombatantRowProps = {
   onRename: (name: string) => void;
   onSetHpMax: (value: number) => void;
   onSetTokenSize: (size: TokenSize) => void;
-  onPatchCombatant?: (patch: Record<string, unknown>) => void;
+  /**
+   * Returns whether the write actually landed (issue #1992 review) — never rejects, both
+   * outcomes RESOLVE `{ ok }` — so the statblock editor's save-on-blur can await it and keep
+   * its draft on a rejected write instead of discarding it. Every other call site here still
+   * ignores the return value, unaffected.
+   *
+   * `encounterId` (issue #1992 round 7, Devin): every call site passes THIS row's own
+   * `encounterId` prop explicitly, rather than letting the parent resolve it implicitly at
+   * send time. This matters specifically for the statblock save-on-blur's unmount-triggered
+   * flush (`commitStatblock`): a route change to a DIFFERENT encounter does not remount
+   * `RunSessionPage` (only its children, this row included, unmount while it renders `null`
+   * for the new encounter's loading state) — and because `useMutation`'s returned
+   * `mutate`/`mutateAsync` all delegate to ONE observer instance that persists across the
+   * page's own renders, a call made from this row's STALE unmount-cleanup closure would
+   * otherwise resolve the PARENT's now-changed `eid`, not the encounter this combatant
+   * actually belongs to — PATCHing the new encounter with an id it never had (404), and
+   * silently losing the draft (a rejected write leaves `dirty` alone by design, but the
+   * component is mid-unmount and never gets to retry). Passing this row's OWN prop, read
+   * normally rather than resolved through that shared, mutable-in-place observer, closes it.
+   */
+  onPatchCombatant?: (
+    patch: StatblockPatch,
+    encounterId: number,
+  ) =>
+    Promise<{ ok: boolean }> | void;
   onPatchSourceTurnState?: (combatantId: number, patch: Record<string, unknown>) => void;
   legendaryActions?: Combatant['legendaryActions'];
   onUseLegendary?: () => void;
   onReleaseLegendary?: () => void;
+  onDuplicate?: () => void;
   onRemove: () => void;
   /** Existing Stage 3 statblock loader rendered by the parent without moving it early. */
   statblock?: ReactNode;
+  targeting?: { legal: boolean; selected: boolean; declared: boolean; atCapacity: boolean; onToggle: () => void } | null;
+  /**
+   * Color-vision-assist mode (issue #1942): adds a current-turn chevron beside the
+   * accent border/tint, and an HP danger glyph beside the color-only bar tone.
+   */
+  colorVisionAssist?: boolean;
+  /**
+   * Issue #1926: a monster/npc just dropped to 0 HP with its statblock still hidden — show
+   * the one-tap "reveal to players?" prompt on this (DM) row. Never shown for a non-DM;
+   * the parent derives this from `shouldShowKillPrompt` + its own per-session dismissed set.
+   */
+  showKillPrompt?: boolean;
+  /** Dismiss the kill prompt for this combatant for the rest of the session (client-local only). */
+  onDismissKillPrompt?: () => void;
+  isDm?: boolean;
+  myUserId?: string | number;
+  /**
+  /**
+   * Issue #1939: campaign id for condition-tag rules-hint popovers' "Full rule" link.
+   * Deliberately separate from `campaignId` above, which goes `undefined` whenever the
+   * viewer lacks edit permission or sheets are stale — the rules-hint popover is public
+   * rules text identical for DM and players (criterion 4) and must not depend on that.
+   */
+  rulesHintCampaignId?: number;
+  /** Issue #1939: whether the campaign's resolved rule pack has searchable compendium
+   *  entries — gates the "Full rule" link on condition-tag rules-hint popovers. */
+  rulesHintCompendiumAvailable?: boolean;
+  /**
+   * Manual initiative reorder controls (issue #1923) — a drag handle plus the accessible
+   * "Move up / Move down / Move after…" fallback menu. `null` when the caller (DM only,
+   * encounter preparing/running) is not permitted to reorder right now — the whole
+   * control does not mount, matching every other DM-only affordance on this row so a
+   * player/viewer never sees a handle or menu at all.
+   */
+  reorder?: {
+    canMoveUp: boolean;
+    canMoveDown: boolean;
+    onMoveUp: () => void;
+    onMoveDown: () => void;
+    menuTargets: readonly { id: number; name: string }[];
+    onMoveAfter: (afterCombatantId: number | 'top') => void;
+    dragHandleProps: {
+      onPointerDown: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerMove: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerUp: (e: ReactPointerEvent<HTMLElement>) => void;
+      onPointerCancel: (e: ReactPointerEvent<HTMLElement>) => void;
+    };
+    isDragging: boolean;
+    isDropTarget: boolean;
+    busy: boolean;
+  } | null;
 };
 
-export function CombatantRow({
+export const CombatantRow = memo(function CombatantRow({
   rowRef,
   encounterId,
   combatant,
+  hpFeedbackEvents,
   isCurrentTurn,
   canEditPermission,
   syncBlocked,
+  turnTopologyBlocked,
   canEditIdentity,
   statblock,
   canRemove,
+  canAwardSpecialResource = false,
   canSetInitiative,
   running,
   character,
   openCardByDefault,
   openCardOnActiveTurn,
   campaignId,
+  routeCampaignId,
   onRollError,
   onApplyDamage,
   onUseAction,
   onUseMonsterAction,
+  onUseGroupAction,
   busy,
   conditionSuggestions,
   conditionSourceOptions,
   defaultConditionSourceCombatantId,
   ruleSystem,
+  customMechanicsProfile,
   onHpDelta,
   onSetTempHp,
   onSetDeathSaves,
   onRollDeathSave,
+  deathSaveOutcome,
   onRollInitiative,
   onSetInitiative,
   onClearInitiative,
@@ -161,15 +280,27 @@ export function CombatantRow({
   legendaryActions,
   onUseLegendary,
   onReleaseLegendary,
+  onDuplicate,
   onRemove,
+  targeting = null,
+  colorVisionAssist = false,
+  showKillPrompt = false,
+  onDismissKillPrompt,
+  isDm = false,
+  myUserId,
+  rulesHintCampaignId,
+  rulesHintCompendiumAvailable = false,
+  reorder = null,
 }: CombatantRowProps) {
   const { t } = useTranslation();
+  const [showWhisper, setShowWhisper] = useState(false);
   // Issue #1746: one shared reason string for every write control this row disables while
   // the sync gate blocks — kept as a single computed value so every site stays in agreement
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
   // tech via `aria-describedby` (below) rather than `title` alone, which screen readers
   // announce inconsistently and keyboard-only users cannot reach at all.
-  const syncBlockedReason = syncBlocked ? t('encounters.sync.controlsPaused') : undefined;
+  const effectiveTurnTopologyBlocked = turnTopologyBlocked ?? syncBlocked;
+  const syncBlockedReason = syncBlocked ? t('run.gate.syncBlocked') : undefined;
   const syncBlockedReasonId = `combatant-${combatant.id}-sync-blocked-reason`;
   const syncBlockedDescribedBy = syncBlocked ? syncBlockedReasonId : undefined;
   const [addingCondition, setAddingCondition] = useState(false);
@@ -193,9 +324,59 @@ export function CombatantRow({
     );
   }, [defaultConditionSourceCombatantId]);
 
-  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const adapter = useMemo(
+    () => ruleSystemAdapter(ruleSystem, customMechanicsProfile),
+    [ruleSystem, customMechanicsProfile],
+  );
   const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
   const hasSfPools = isStarfinder || (combatant.spMax != null && combatant.spMax > 0) || (combatant.rpMax != null && combatant.rpMax > 0);
+
+  // Issue #1944: whichever of SPECIAL_RESOURCE_KEYS (inspiration/heroPoints) THIS campaign's
+  // adapter declares, or undefined for the majority of adapters that declare neither — the
+  // Award control below renders nothing at all in that case (never a hardcoded 5e-shaped
+  // widget). Same `findSpecialResource`/`canAdjustSpecialResource`/`specialResourceAdjustBody`
+  // trio CharacterPage's AdapterResourceCard uses, so the sheet and this row cannot fork on
+  // what "award" means.
+  const specialResourceDef = useMemo(() => findSpecialResource(adapter), [adapter]);
+  const [specialResourceBusy, setSpecialResourceBusy] = useState(false);
+  const announce = useAnnounce();
+
+  async function awardSpecialResource() {
+    if (!character || !specialResourceDef || specialResourceBusy) return;
+    // Issue #1944 review: consult the sync gate here too, matching `commitStatblock`
+    // above and every other write in this row — the button's `disabled` alone is not
+    // sufficient defense (see `syncBlocked`'s prop doc: "EVERY control that performs a
+    // write must consult both").
+    if (syncBlocked) return;
+    if (!canAdjustSpecialResource(specialResourceDef, character, 'award')) return;
+    setSpecialResourceBusy(true);
+    onRollError(null);
+    try {
+      await api.post(
+        `${API}/characters/${character.id}/resources`,
+        specialResourceAdjustBody(specialResourceDef, character, 'award'),
+      );
+      // The DM's own confirmation; the RECIPIENT's flourish + announcement fires
+      // separately in PlayerVitalsHeader once their client's `character.updated`
+      // refetch shows the increment (issue #1944 acceptance criterion 3).
+      const specialResourceLabel = adapterResourceLabel(t, specialResourceDef);
+      announce(
+        t('encounters.specialResource.awardedAnnounce', {
+          name: specialResourceLabel,
+          combatantName: combatant.name,
+          defaultValue: `${specialResourceLabel} awarded to ${combatant.name}`,
+        }),
+      );
+    } catch (err) {
+      // Same translated-error convention every other encounter-screen write uses
+      // (ResourceTrackerPanel's resourceMutation, etc.) rather than a raw `err.message` —
+      // this surfaces a genuine server 400 (e.g. an award racing past the adapter cap)
+      // as the visible error banner, never a silent no-op.
+      onRollError(translateApiError(err, t, { fallbackKey: 'encounters.resourceTracker.updateResourceError' }));
+    } finally {
+      setSpecialResourceBusy(false);
+    }
+  }
 
   function commitIdentity() {
     const trimmedName = nameDraft.trim();
@@ -219,7 +400,7 @@ export function CombatantRow({
     const instance = buildConditionInstance(conditionDraft, conditionSuggestions, combatant.conditionInstances ?? [], editingConditionId ?? undefined);
     if (!instance) return;
     if (onPatchCombatant) {
-      onPatchCombatant(editingConditionId ? { updateConditionInstance: instance } : { addConditionInstance: instance });
+      onPatchCombatant(editingConditionId ? { updateConditionInstance: instance } : { addConditionInstance: instance }, encounterId);
       if (instance.isConcentration && instance.sourceCombatantId != null && conditionDraft.syncConcentration && onPatchSourceTurnState) {
         onPatchSourceTurnState(instance.sourceCombatantId, { concentration: instance.name });
       }
@@ -252,6 +433,157 @@ export function CombatantRow({
     onSetInitiative(value);
   }
 
+  // Issue #1992 — whole-statblock combatant PATCH concurrency guard. Same "local draft,
+  // committed on blur" shape as initDraft/nameDraft above, but the draft is a whole
+  // CombatantStatblock object and the commit carries `expectedStatblock` (paired with the
+  // draft's base, never refreshed at send time — see combatantStatblockDraft.ts for why).
+  // Guards against the statblock's OWN prior CONTENT, not a row/encounter revision proxy —
+  // an earlier round tried a per-combatant revision token and found it still too coarse
+  // (an hp/condition/position write to this same combatant advanced it without touching
+  // the statblock, making an edit session un-savable from unrelated activity); see the
+  // module doc for the full story.
+  const [statblockDraftState, dispatchStatblockDraft] = useReducer(
+    statblockDraftReducer,
+    undefined,
+    () => initialStatblockDraftState(combatant.statblock ?? defaultCombatantStatblock()),
+  );
+  useEffect(() => {
+    if (combatant.statblock) {
+      dispatchStatblockDraft({ type: 'external', statblock: combatant.statblock });
+    }
+  }, [combatant.statblock]);
+
+  // Issue #1992 review (Devin, round 9): a commit can be triggered by a genuine user
+  // action (the blur handler below) or by one of TWO fully automatic paths (the unmount
+  // flush, the sync-gate-lift flush) — every caller states which, explicitly, so
+  // `commitStatblock` itself is the ONE place that enforces "an automatic flush must not
+  // resend a draft that is only pending because of a round-8 rebase" (see
+  // `awaitingReedit`'s doc in combatantStatblockDraft.ts). Enforcing this here, once,
+  // rather than duplicating the check at each of the three call sites, is the fix: the
+  // round-9 bug was exactly that the rule lived only in a comment plus one guard.
+  function commitStatblock(trigger: 'explicit' | 'automatic') {
+    const patch = statblockPatchForCommit(statblockDraftState);
+    if (!patch) return;
+    // Issue #1992 review (Copilot): gate this write by the sync gate too, matching every
+    // OTHER write control in this file (see the `syncBlocked` prop doc above). Skip rather
+    // than drop the draft — same choice this round's other findings converge on. Once the
+    // gate lifts, the effect below flushes it automatically.
+    if (syncBlocked) return;
+    // Issue #1992 review (Devin, round 8): at most ONE statblock write in flight per row —
+    // not merely a dedupe of the SAME revision (the round-2 shape this replaces). A blur
+    // immediately followed by an unmount, OR a blur followed by refocus-edit-blur inside
+    // one round-trip, both land here; the prior "skip only if THIS exact revision is
+    // in-flight" rule let a genuinely NEWER edit send immediately, carrying the SAME stale
+    // `expectedStatblock` as the write still outstanding — the server's content-compare
+    // then rejected the user's OWN second save as a conflict with their first. Deferring
+    // instead of dropping: the draft stays `dirty`, and the accepted-triggered effect below
+    // resends it the moment the outstanding write is CONFIRMED ACCEPTED, rebased on the
+    // base that acceptance just confirmed — never on the stale one this call started from.
+    if (inFlightRef.current) return;
+    // Issue #1992 review (Devin, round 9): after a rejected write's base is re-seeded by
+    // `external` (`awaitingReedit`), only an EXPLICIT trigger (the user actually blurring
+    // the field) may send — an AUTOMATIC one (unmount, sync-gate-lift) must not, because
+    // the draft is still the user's untouched, already-rejected content and the base now
+    // matches a genuine OTHER writer's change: sending it would silently overwrite that
+    // writer, exactly the bug this whole guard exists to prevent. A further `edit` clears
+    // `awaitingReedit` itself (see the reducer), so this only ever blocks the two
+    // automatic paths, never a real subsequent edit-then-blur.
+    if (statblockDraftState.awaitingReedit && trigger !== 'explicit') return;
+    // Issue #1992: expectedStatblock is a CONTENT compare against the row's own stored
+    // statblock — separate from expectedUpdatedAt (the encounter-wide token). An earlier
+    // round tried a per-combatant REVISION token instead and found it still too coarse: it
+    // advanced on an hp/condition/position write to this same combatant, none of which
+    // touch the statblock, so it falsely invalidated an in-progress edit.
+    const result = onPatchCombatant?.({ statblock: patch.statblock, expectedStatblock: patch.expectedStatblock }, encounterId);
+    // Issue #1992 review (Devin, round 9, finding 2): only claim the in-flight slot when
+    // there is actually a promise that will release it. `onPatchCombatant`'s type permits
+    // an absent callback or a `void` return; claiming the slot unconditionally (as before)
+    // left `inFlightRef.current` stuck `true` for the row's remaining lifetime in that
+    // case, since an optional-chained `then` call is then a no-op and nothing ever clears it — every
+    // later commit attempt would silently no-op via the in-flight guard above. Latent
+    // today (`RunSessionPage` always returns a promise), fixed anyway since it's cheap and
+    // this exact shape (a flag set unconditionally, cleared only inside a callback that
+    // might never run) is the recurring failure pattern across every round of this issue.
+    if (!result) return;
+    inFlightRef.current = true;
+    // Issue #1992 review (coordinator): only mark this REVISION accepted once the write is
+    // CONFIRMED to have landed. `onPatchCombatant` never rejects (it resolves { ok: false }
+    // on a failed write, e.g. STALE_WRITE), so this never throws.
+    result.then((outcome) => {
+      inFlightRef.current = false;
+      // Issue #1992 review (Devin + Kilo, generalized in round 5): the reducer itself
+      // decides whether `dirty` clears (only if `patch.revision` still matches — a newer
+      // edit made WHILE this write was in flight must not be marked done by it) and always
+      // adopts `patch.statblock` (what THIS write actually sent, now confirmed stored) as
+      // the fresh base, regardless of whether a newer edit is now pending. See the
+      // reducer's `accepted` case and combatantStatblockDraft.ts's module doc for the full
+      // reasoning.
+      if (outcome.ok) dispatchStatblockDraft({ type: 'accepted', revision: patch.revision, statblock: patch.statblock });
+      // Issue #1992 review (Devin, round 8): dispatch `rejected` rather than nothing —
+      // `dirty` stays true (whatever the CURRENT revision is) so the draft survives the
+      // settle-triggered refetch exactly as before, but this also flags the base as stale
+      // so the settle-triggered `external` (see combatantPatch.onSettled, which invalidates
+      // unconditionally on both outcomes) is allowed to refresh `baseStatblock` — the
+      // recovery path that keeps a genuine conflict from becoming unsavable without a
+      // reload. The generic error toast (`combatantPatch.onError`) already tells the user
+      // their save was rejected; this just makes it possible to save again afterward.
+      else dispatchStatblockDraft({ type: 'rejected', revision: patch.revision });
+    });
+  }
+  // True while a statblock write for this row is awaiting its server response (issue #1992
+  // review, Devin's double-send finding; round 8 widened this from a per-revision token to
+  // a plain in-flight flag — see commitStatblock's doc for why).
+  const inFlightRef = useRef(false);
+  // Always-latest ref so the unmount effect below calls the CURRENT commitStatblock (current
+  // draft/base-token/callback), not the one closed over when the component first mounted.
+  const commitStatblockRef = useRef(commitStatblock);
+  commitStatblockRef.current = commitStatblock;
+  // Issue #1992 review (Devin, round 8): once an outstanding write is CONFIRMED ACCEPTED —
+  // `baseRevision` only ever advances via `accepted`, never via `rejected` or a routine
+  // `external` — flush a newer edit that was queued behind it while it was in flight,
+  // rebased on the base that acceptance just confirmed. Deliberately NOT triggered by a
+  // rejection: auto-resending the SAME (now stale) draft the instant the base is re-seeded
+  // would silently overwrite a genuine concurrent writer's change with no new decision from
+  // the user — exactly the bug this whole guard exists to prevent. A rejected save instead
+  // waits for an explicit new user action (another edit, or simply blurring the field again).
+  useEffect(() => {
+    if (statblockDraftState.dirty && !inFlightRef.current) {
+      // Issue #1992 review (Devin, round 9): this is an AUTOMATIC flush — see
+      // commitStatblock's `awaitingReedit` gate for why that distinction matters here.
+      commitStatblockRef.current('automatic');
+    }
+    // Dependency array is deliberately just `baseRevision`, not `dirty` — this must fire
+    // only on a write's OWN acceptance, never on every draft change; see the comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statblockDraftState.baseRevision]);
+  // Issue #1992 review: flush one last save attempt on unmount. `RunSessionPage` is reused
+  // across an `eid` change (no remount of the page itself), but every CombatantRow for the
+  // OLD encounter's combatants DOES unmount then (their `key`s vanish from the new roster) —
+  // this is the scenario the issue's third acceptance criterion (an edit queued just before
+  // switching away must not be silently lost) actually exercises, since save-on-blur has no
+  // timer/queue to leak across that switch in the first place (see module doc). Not a
+  // guarantee against a hard tab close/crash — no client-side mechanism can promise that;
+  // this matches the same, already-accepted exposure of the sibling nameDraft/initDraft
+  // blur-commit fields in this file. Round 9: this is an AUTOMATIC flush — see
+  // commitStatblock's `awaitingReedit` gate.
+  useEffect(() => {
+    return () => {
+      commitStatblockRef.current('automatic');
+    };
+  }, []);
+  // Issue #1992 review (Copilot): once the sync gate LIFTS, flush a draft that arrived while
+  // it was up, rather than leaving it stranded until the user happens to touch the field
+  // again. Only fires on the true -> false transition (not on mount, and not while it stays
+  // blocked or stays clear). Round 9: this is an AUTOMATIC flush — see commitStatblock's
+  // `awaitingReedit` gate.
+  const wasSyncBlockedRef = useRef(syncBlocked);
+  useEffect(() => {
+    if (wasSyncBlockedRef.current && !syncBlocked) {
+      commitStatblockRef.current('automatic');
+    }
+    wasSyncBlockedRef.current = syncBlocked;
+  }, [syncBlocked]);
+
   // Clear initiative back to null (issue #715). While combat is running this re-sorts
   // the order — the cleared combatant sinks below every rolled actor — so the title
   // warns the DM. The current-turn pointer is identity-based and stays stable; the
@@ -269,12 +601,23 @@ export function CombatantRow({
   // the whole row and skull/strike-through the name. `isDown` works off the HP band
   // too, so a redacted monster (exact HP hidden, band 'down') gets the same treatment.
   const down = isDown(combatant);
+  const feedbackClass = hpFeedbackEvents.some((event) => event.kind === 'down')
+    ? ' cf-hp-feedback-anchor--down'
+    : hpFeedbackEvents.some((event) => event.kind === 'revive')
+      ? ' cf-hp-feedback-anchor--revive'
+      : hpFeedbackEvents.some((event) => event.crit)
+        ? ' cf-hp-feedback-anchor--crit'
+        : '';
+  const targetSelectionUnavailable = targeting?.legal && targeting.atCapacity && !targeting.selected;
 
   return (
     <div
       ref={rowRef}
       data-testid={`combatant-row-${combatant.id}`}
       data-current-turn={isCurrentTurn ? 'true' : undefined}
+      data-target-legal={targeting?.legal ? 'true' : undefined}
+      data-target-selected={targeting?.selected ? 'true' : undefined}
+      className={`cf-hp-feedback-anchor${feedbackClass}`}
       style={{
         display: 'flex',
         flexWrap: 'wrap',
@@ -283,11 +626,33 @@ export function CombatantRow({
         padding: '9px 14px',
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
-        boxShadow: isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
-        opacity: down ? 0.55 : 1,
+        boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal && !targeting?.declared && !targetSelectionUnavailable ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
+        opacity: down ? 0.55 : targetSelectionUnavailable ? 0.65 : 1,
         filter: down ? 'grayscale(0.75)' : 'none',
       }}
+      onClick={(event) => {
+        if (!targeting?.legal || targeting.declared || targetSelectionUnavailable) return;
+        const interactive = (event.target as HTMLElement).closest('button, input, select, textarea, a, label, summary, [role="button"], [data-combatant-statblock], [data-combatant-detail]');
+        if (interactive && interactive !== event.currentTarget) return;
+        targeting.onToggle();
+      }}
     >
+      <FloatingNumbers events={hpFeedbackEvents} />
+      {targeting?.legal && (
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-44"
+          data-testid={`combatant-target-toggle-${combatant.id}`}
+          aria-label={targetSelectionUnavailable ? `Target limit reached; ${combatant.name} cannot be selected` : `${targeting.selected ? 'Remove' : 'Select'} ${combatant.name} as an action target`}
+          aria-pressed={targeting.selected}
+          disabled={targeting.declared || targetSelectionUnavailable}
+          title={targetSelectionUnavailable ? 'Target limit reached' : undefined}
+          onClick={targeting.onToggle}
+          style={{ flex: 'none', padding: '0 8px', fontSize: 12 }}
+        >
+          {targeting.selected ? 'Targeted' : 'Target'}
+        </button>
+      )}
       {/* Issue #1746: single accessible reason shared by every write control this row
           disables while the sync gate blocks, referenced via aria-describedby below. */}
       {syncBlocked && (
@@ -354,10 +719,10 @@ export function CombatantRow({
             <select
               className="input cf-target-44"
               aria-label={`Initiative group for ${combatant.name}`}
-              aria-describedby={syncBlocked ? syncBlockedReasonId : undefined}
+              aria-describedby={effectiveTurnTopologyBlocked ? syncBlockedReasonId : undefined}
               value={combatant.initiativeGroup ?? (combatant.kind === 'character' ? 'party' : 'monsters')}
-              onChange={(e) => onPatchCombatant?.({ initiativeGroup: e.target.value })}
-              disabled={busy || syncBlocked || !canSetInitiative}
+              onChange={(e) => onPatchCombatant?.({ initiativeGroup: e.target.value }, encounterId)}
+              disabled={busy || effectiveTurnTopologyBlocked || !canSetInitiative}
               title="Initiative group"
               style={{ width: 'auto', marginLeft: 4 }}
             >
@@ -381,7 +746,7 @@ export function CombatantRow({
               aria-label={`Roll initiative for ${combatant.name}`}
               aria-describedby={syncBlocked ? syncBlockedReasonId : undefined}
               style={{ padding: '0 8px', height: 30, fontSize: 12, flex: 'none' }}
-              disabled={busy || syncBlocked}
+              disabled={busy || effectiveTurnTopologyBlocked}
               title="Roll initiative"
               onClick={onRollInitiative}
             >
@@ -410,7 +775,7 @@ export function CombatantRow({
             <select
               className="input cf-target-44"
               value={combatant.initiativeGroup ?? (combatant.kind === 'character' ? 'party' : 'monsters')}
-              onChange={(e) => onPatchCombatant?.({ initiativeGroup: e.target.value })}
+              onChange={(e) => onPatchCombatant?.({ initiativeGroup: e.target.value }, encounterId)}
               disabled={busy || syncBlocked}
               title="Initiative group"
               style={{ width: 'auto', marginLeft: 4 }}
@@ -472,6 +837,15 @@ export function CombatantRow({
           </div>
         ) : (
           <div style={{ fontSize: 14, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+            {colorVisionAssist && isCurrentTurn && (
+              <span
+                data-testid={`combatant-row-turn-chevron-${combatant.id}`}
+                aria-hidden="true"
+                style={{ color: 'var(--color-accent)', fontSize: 12 }}
+              >
+                ▸
+              </span>
+            )}
             <span style={down ? { textDecoration: 'line-through' } : undefined}>
               {down && <GameIcon slug="death-skull" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1.5" />}
               {combatant.name}
@@ -586,6 +960,92 @@ export function CombatantRow({
                 ✎
               </button>
             )}
+            {reorder && (
+              <span className="inline-flex items-center gap-1">
+                {/* Pointer-only drag handle (issue #1923) — mirrors the token-drag pointer
+                    conventions (setPointerCapture, a distance slop before committing).
+                    aria-hidden: a screen-reader / keyboard user reorders via the menu
+                    button beside it, which is the actual accessible entry point. */}
+                <span
+                  aria-hidden="true"
+                  data-testid={`reorder-drag-handle-${combatant.id}`}
+                  className="cf-target-44"
+                  style={{
+                    cursor: reorder.busy ? 'default' : 'grab',
+                    touchAction: 'none',
+                    padding: '2px 6px',
+                    opacity: reorder.busy ? 0.5 : 1,
+                    outline: reorder.isDropTarget ? '2px solid var(--color-accent)' : undefined,
+                  }}
+                  // Issue #2074 review finding 4: while a reorder write is in flight
+                  // (`reorder.busy`), the handle must not start a NEW pointer gesture — the
+                  // shared drag hook keeps a single in-flight gesture ref across every row,
+                  // and starting a second drag on top of a first that hasn't been
+                  // acknowledged by the server yet raced two writes against each other.
+                  // Withhold the pointer handlers entirely rather than merely disabling the
+                  // visual affordance above.
+                  {...(reorder.busy ? {} : reorder.dragHandleProps)}
+                >
+                  ⠿
+                </span>
+                <ReorderMenu
+                  combatantName={combatant.name}
+                  canMoveUp={reorder.canMoveUp}
+                  canMoveDown={reorder.canMoveDown}
+                  onMoveUp={reorder.onMoveUp}
+                  onMoveDown={reorder.onMoveDown}
+                  menuTargets={reorder.menuTargets}
+                  onMoveAfter={reorder.onMoveAfter}
+                  disabled={reorder.busy}
+                />
+              </span>
+            )}
+          </div>
+        )}
+        {/* Issue #1926: one-tap kill prompt — a monster/npc just dropped to 0 HP with its
+            statblock still hidden. Never automatic: the DM must tap Reveal or Dismiss.
+            Dismissing sticks for this combatant for the rest of the session (see
+            `shouldShowKillPrompt`/`dismissKillPrompt`) and leaves the manual toggle below
+            available regardless. */}
+        {showKillPrompt && (
+          <div
+            role="status"
+            data-testid={`kill-prompt-${combatant.id}`}
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              marginTop: 4,
+              marginBottom: 4,
+              padding: '6px 8px',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--color-divider)',
+              fontSize: 12,
+            }}
+          >
+            <span>{t('encounters.statblock.killPrompt', { name: combatant.name })}</span>
+            <button
+              type="button"
+              className="btn btn-ghost !min-h-8 text-xs"
+              disabled={busy || syncBlocked}
+              aria-describedby={syncBlockedDescribedBy}
+              title={syncBlockedReason}
+              onClick={() => {
+                onPatchCombatant?.({ statblockRevealed: true }, encounterId);
+                onDismissKillPrompt?.();
+              }}
+            >
+              {t('encounters.statblock.reveal')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost !min-h-8 text-xs"
+              aria-label={t('encounters.statblock.dismissKillPrompt')}
+              onClick={onDismissKillPrompt}
+            >
+              {t('encounters.statblock.dismiss')}
+            </button>
           </div>
         )}
         {/* Death-save tracker (issue #57): shown for a character that is dying/stable/dead,
@@ -604,9 +1064,9 @@ export function CombatantRow({
               busy={busy}
               syncBlocked={syncBlocked}
               syncBlockedReason={syncBlockedReason}
-              syncBlockedDescribedBy={syncBlockedDescribedBy}
               onSet={onSetDeathSaves}
               onRoll={onRollDeathSave}
+              outcome={deathSaveOutcome}
             />
           )}
         {(combatant.conditionInstances?.length ?? 0) > 0 ? (
@@ -651,6 +1111,24 @@ export function CombatantRow({
                       </span>
                     )}
                   </span>
+                  {(() => {
+                    // Issue #1939: undefined on any adapter without an authored hint
+                    // (every non-5e system today) — no affordance renders.
+                    const hintKey = conditionHintKey(adapter.id, inst.name);
+                    if (!hintKey) return null;
+                    return (
+                      <RulesHintPopover
+                        termId={inst.id || inst.name}
+                        termLabel={inst.name}
+                        hintKey={hintKey}
+                        compendiumHref={
+                          rulesHintCompendiumAvailable && rulesHintCampaignId != null
+                            ? rulesHintCompendiumHref(rulesHintCampaignId, inst.name)
+                            : undefined
+                        }
+                      />
+                    );
+                  })()}
                   {canEditPermission && (
                     <>
                       <button
@@ -686,7 +1164,7 @@ export function CombatantRow({
                         className="cf-target-44"
                         aria-label={`Remove ${inst.name}`}
                         aria-describedby={syncBlockedDescribedBy}
-                        onClick={() => onPatchCombatant ? onPatchCombatant({ removeConditionInstanceId: inst.id }) : onRemoveCondition(inst.name)}
+                        onClick={() => onPatchCombatant ? onPatchCombatant({ removeConditionInstanceId: inst.id }, encounterId) : onRemoveCondition(inst.name)}
                         disabled={busy || syncBlocked}
                         title={syncBlockedReason}
                         style={{
@@ -712,9 +1190,25 @@ export function CombatantRow({
           </div>
         ) : combatant.conditions.length > 0 ? (
           <div id={`combatant-${combatant.id}-conditions`} tabIndex={-1} style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
-            {combatant.conditions.map((cond) => (
+            {combatant.conditions.map((cond) => {
+              // Issue #1939: undefined on any adapter without an authored hint (every
+              // non-5e system today) — no affordance renders.
+              const hintKey = conditionHintKey(adapter.id, cond);
+              return (
               <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
                 {cond}
+                {hintKey && (
+                  <RulesHintPopover
+                    termId={cond}
+                    termLabel={cond}
+                    hintKey={hintKey}
+                    compendiumHref={
+                      rulesHintCompendiumAvailable && rulesHintCampaignId != null
+                        ? rulesHintCompendiumHref(rulesHintCampaignId, cond)
+                        : undefined
+                    }
+                  />
+                )}
                 {canEditPermission && (
                   <button
                     type="button"
@@ -741,7 +1235,8 @@ export function CombatantRow({
                   </button>
                 )}
               </span>
-            ))}
+              );
+            })}
           </div>
         ) : null}
 
@@ -774,7 +1269,7 @@ export function CombatantRow({
                         const instance = buildConditionInstance({ ...emptyConditionDraft(defaultConditionSourceCombatantId), name: s }, conditionSuggestions, combatant.conditionInstances ?? [], undefined);
                         if (!instance) return;
                         if (onPatchCombatant) {
-                          onPatchCombatant({ addConditionInstance: instance });
+                          onPatchCombatant({ addConditionInstance: instance }, encounterId);
                         } else {
                           onAddCondition(instance.name);
                         }
@@ -1021,22 +1516,22 @@ export function CombatantRow({
               </form>
               )
             ) : (
-              <button
-                type="button"
-                className="btn btn-ghost"
-                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
-                disabled={syncBlocked}
-                title={syncBlockedReason}
-                aria-describedby={syncBlockedDescribedBy}
-                data-testid={`add-condition-toggle-${combatant.id}`}
-                onClick={() => {
-                  setEditingConditionId(null);
-                  setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
-                  setAddingCondition(true);
-                }}
-              >
-                + condition
-              </button>
+              <GatedControl reason={syncBlockedReason}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+                  disabled={syncBlocked}
+                  data-testid={`add-condition-toggle-${combatant.id}`}
+                  onClick={() => {
+                    setEditingConditionId(null);
+                    setConditionDraft(emptyConditionDraft(defaultConditionSourceCombatantId));
+                    setAddingCondition(true);
+                  }}
+                >
+                  + condition
+                </button>
+              </GatedControl>
             )}
 
             {/* Starfinder Stamina Rest Button */}
@@ -1047,7 +1542,7 @@ export function CombatantRow({
                 disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) < 1 || (combatant.spCurrent ?? 0) >= combatant.spMax}
                 title={syncBlockedReason ?? ((combatant.rpCurrent ?? 0) < 1 ? 'Requires at least 1 Resolve Point' : '10-minute Stamina Rest: spends 1 RP to restore full SP')}
                 aria-describedby={syncBlockedDescribedBy}
-                onClick={() => onPatchCombatant({ spSet: combatant.spMax, rpDelta: -1 })}
+                onClick={() => onPatchCombatant({ spSet: combatant.spMax, rpDelta: -1 }, encounterId)}
                 style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                 data-testid="stamina-rest-btn"
               >
@@ -1064,7 +1559,7 @@ export function CombatantRow({
                   disabled={busy || syncBlocked}
                   title={syncBlockedReason ?? 'Stabilize combatant at 0 HP'}
                   aria-describedby={syncBlockedDescribedBy}
-                  onClick={() => onPatchCombatant({ deathState: 'stable' })}
+                  onClick={() => onPatchCombatant({ deathState: 'stable' }, encounterId)}
                   style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                 >
                   Stabilize
@@ -1077,7 +1572,7 @@ export function CombatantRow({
                       disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) < 1}
                       title={syncBlockedReason ?? 'Spend 1 RP to stabilize'}
                       aria-describedby={syncBlockedDescribedBy}
-                      onClick={() => onPatchCombatant({ deathState: 'stable', rpDelta: -1 })}
+                      onClick={() => onPatchCombatant({ deathState: 'stable', rpDelta: -1 }, encounterId)}
                       style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                     >
                       Stabilize (1 RP)
@@ -1088,7 +1583,7 @@ export function CombatantRow({
                       disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) < 1}
                       title={syncBlockedReason ?? 'Spend 1 RP to revive at 1 HP'}
                       aria-describedby={syncBlockedDescribedBy}
-                      onClick={() => onPatchCombatant({ hpSet: 1, deathState: 'none', rpDelta: -1 })}
+                      onClick={() => onPatchCombatant({ hpSet: 1, deathState: 'none', rpDelta: -1 }, encounterId)}
                       style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
                     >
                       Revive 1 HP (1 RP)
@@ -1103,47 +1598,110 @@ export function CombatantRow({
             surface the linked entry's AC / attacks / ability scores inline so the DM can
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
-        {statblock}
+        {statblock && <div data-combatant-statblock>{statblock}</div>}
         {onUseMonsterAction && (
-          <CombatantActionsList
-            encounterId={encounterId}
-            combatantId={combatant.id}
-            combatantName={combatant.name}
-            campaignId={campaignId}
-            enabled
-            disabledReason={syncBlockedReason}
-            onUseAction={onUseMonsterAction}
-          />
+          <div data-combatant-detail>
+            <CombatantActionsList
+              encounterId={encounterId}
+              combatantId={combatant.id}
+              combatantName={combatant.name}
+              campaignId={campaignId}
+              enabled
+              disabledReason={syncBlockedReason}
+              onUseAction={onUseMonsterAction}
+              onUseGroupAction={onUseGroupAction}
+            />
+          </div>
         )}
         {canEditIdentity && combatant.statblock && combatant.kind === 'monster' && (
-          <details className="mt-2">
+          <details
+            className="mt-2"
+            data-combatant-detail
+            // Issue #1992: commit only when focus actually LEAVES this editor (not on every
+            // inner blur/re-focus between its own fields) — matching how nameDraft/initDraft
+            // commit on their own field's blur, generalized to a whole subtree of fields.
+            // Round 9: this IS the genuine user action commitStatblock's `awaitingReedit`
+            // gate carves out — passed as `'explicit'`, distinct from the automatic flushes.
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) commitStatblock('explicit');
+            }}
+          >
             <summary className="text-xs text-muted cursor-pointer">Edit statblock</summary>
             <CombatantStatblockEditor
-              value={combatant.statblock}
-              onChange={(next) => onPatchCombatant?.({ statblock: next })}
+              value={statblockDraftState.draft}
+              onChange={(next) => dispatchStatblockDraft({ type: 'edit', statblock: next })}
+              showTemplateHp={false}
               ruleSystem={ruleSystem}
+              customMechanicsProfile={customMechanicsProfile}
             />
           </details>
         )}
+        {/* Issue #1926: a revealed inline statblock, read-only, for a viewer without edit
+            rights (a player, or the DM once the encounter has ended and identity edits are
+            gone). Mutually exclusive with the editable form above (that one requires
+            canEditIdentity); the compendium (ruleEntryId) case is handled by the parent's
+            `statblock` prop instead — see RunSessionPage's reveal-aware condition. */}
+        {!canEditIdentity &&
+          combatant.statblockRevealed &&
+          combatant.statblock &&
+          (combatant.kind === 'monster' || combatant.kind === 'npc') && (
+            <details className="mt-2" data-combatant-detail data-testid={`combatant-statblock-revealed-${combatant.id}`}>
+              <summary className="text-xs text-muted cursor-pointer">{t('encounters.statblock.revealedSummary')}</summary>
+              <CombatantStatblockEditor
+                value={combatant.statblock}
+                onChange={() => {}}
+                disabled
+                showTemplateHp={false}
+                ruleSystem={ruleSystem}
+                customMechanicsProfile={customMechanicsProfile}
+              />
+            </details>
+          )}
         {/* Character card (in-encounter sheet): a player sees only their own combat stats,
             while the DM sees the whole party. */}
         {combatant.kind === 'character' && character && (
-          <CharacterStatCard
-            character={character}
-            ruleSystem={ruleSystem}
-            defaultOpen={openCardByDefault}
-            openOnActiveTurn={openCardOnActiveTurn}
-            /* Click-to-roll only from an active owned card, or any card for the DM. */
-            campaignId={campaignId}
-            /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
-               actions) — mounting this card already implies DM-or-owner (see the `character`
-               prop gate above), matching listUsableActions' own authorization. */
-            encounterId={encounterId}
-            combatantId={combatant.id}
-            onError={onRollError}
-            onApplyDamage={onApplyDamage}
-            onUseAction={onUseAction}
-          />
+          <div data-combatant-detail>
+            <CharacterStatCard
+              character={character}
+              ruleSystem={ruleSystem}
+              customMechanicsProfile={customMechanicsProfile}
+              defaultOpen={openCardByDefault}
+              openOnActiveTurn={openCardOnActiveTurn}
+              /* Click-to-roll only from an active owned card, or any card for the DM. */
+              campaignId={campaignId}
+              /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
+                 actions) — mounting this card already implies DM-or-owner (see the `character`
+                 prop gate above), matching listUsableActions' own authorization. */
+              encounterId={encounterId}
+              combatantId={combatant.id}
+              onError={onRollError}
+              onApplyDamage={onApplyDamage}
+              onUseAction={onUseAction}
+            />
+          </div>
+        )}
+        {/* Issue #1944: DM one-tap Award for the adapter-declared special resource (5e
+            inspiration / PF2e hero points). Renders only for a PC row (kind === 'character'
+            with a resolvable character), a DM viewer, and an adapter that actually declares
+            one of SPECIAL_RESOURCE_KEYS — an OSR/Open Legend/Starforged table sees nothing
+            here. Disabled at the adapter cap (canAdjustSpecialResource), matching the sheet's
+            own Restore button. */}
+        {combatant.kind === 'character' && character && canAwardSpecialResource && specialResourceDef && (
+          <div className="mt-2" data-combatant-detail data-testid={`award-special-resource-${combatant.id}`}>
+            <button
+              type="button"
+              className="btn btn-secondary cf-target-44 text-xs"
+              disabled={specialResourceBusy || syncBlocked || !canAdjustSpecialResource(specialResourceDef, character, 'award')}
+              title={syncBlockedReason}
+              aria-describedby={syncBlockedDescribedBy}
+              onClick={() => void awardSpecialResource()}
+            >
+              {t('encounters.specialResource.award', {
+                name: adapterResourceLabel(t, specialResourceDef),
+                defaultValue: `Award ${specialResourceDef.name}`,
+              })}
+            </button>
+          </div>
         )}
       </div>
       <div style={{ minWidth: 140, flex: 'none' }}>
@@ -1186,7 +1744,7 @@ export function CombatantRow({
                   {hpDisplay(combatant)}
                 </span>
               </div>
-              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
+              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} colorVisionAssist={colorVisionAssist} />
             </div>
             {/* RP (Resolve Points) indicator for Starfinder */}
             {combatant.rpMax != null && combatant.rpMax > 0 && (
@@ -1201,7 +1759,7 @@ export function CombatantRow({
                       disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) <= 0}
                       title={syncBlockedReason ?? 'Decrease Resolve Points'}
                       aria-describedby={syncBlockedDescribedBy}
-                      onClick={() => onPatchCombatant({ rpDelta: -1 })}
+                      onClick={() => onPatchCombatant({ rpDelta: -1 }, encounterId)}
                     >
                       −
                     </button>
@@ -1211,7 +1769,7 @@ export function CombatantRow({
                       disabled={busy || syncBlocked || (combatant.rpCurrent ?? 0) >= combatant.rpMax}
                       title={syncBlockedReason ?? 'Increase Resolve Points'}
                       aria-describedby={syncBlockedDescribedBy}
-                      onClick={() => onPatchCombatant({ rpDelta: 1 })}
+                      onClick={() => onPatchCombatant({ rpDelta: 1 }, encounterId)}
                     >
                       +
                     </button>
@@ -1268,22 +1826,21 @@ export function CombatantRow({
       {canEditPermission && combatant.hpCurrent != null && (
         <div style={{ display: 'flex', gap: 8, flex: 'none', flexWrap: 'wrap', alignItems: 'center', maxWidth: '100%' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
-            <button
-              key={step}
-              className="btn btn-icon btn-secondary cf-target-44"
-              style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
-              /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
-                 lands instantly via setQueryData, so there's no round-trip to wait on.
-                 `busy` intentionally does NOT disable this button; only the sync gate
-                 (issue #1746) does, since a blocked write really cannot be trusted. */
-              disabled={syncBlocked}
-              title={syncBlockedReason}
-              aria-describedby={syncBlockedDescribedBy}
-              aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
-              onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
-            >
-              {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
-            </button>
+            <GatedControl key={step} reason={syncBlockedReason}>
+              <button
+                className="btn btn-icon btn-secondary cf-target-44"
+                style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
+                /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
+                   lands instantly via setQueryData, so there's no round-trip to wait on.
+                   `busy` intentionally does NOT disable this button; only the sync gate
+                   (issue #1746) does, since a blocked write really cannot be trusted. */
+                disabled={syncBlocked}
+                aria-label={`${step < 0 ? 'Reduce' : 'Increase'} ${combatant.name}'s HP by ${Math.abs(step)} (hold Shift for ${Math.abs(step) * 5}; currently ${combatant.hpCurrent} of ${combatant.hpMax})`}
+                onClick={(e) => onHpDelta(e.shiftKey ? step * 5 : step)}
+              >
+                {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
+              </button>
+            </GatedControl>
           ))}
           <div style={{ display: 'flex', gap: 4, marginLeft: 4, alignItems: 'center', flexWrap: 'wrap' }}>
             <input
@@ -1332,6 +1889,46 @@ export function CombatantRow({
           </div>
         </div>
       )}
+      {canEditIdentity && (combatant.kind === 'monster' || combatant.kind === 'npc') && onPatchCombatant && (
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-44 text-xs"
+          style={{ minWidth: 44, height: 44, flex: 'none' }}
+          disabled={busy || syncBlocked}
+          aria-pressed={combatant.statblockRevealed}
+          aria-describedby={syncBlockedDescribedBy}
+          data-testid={`statblock-reveal-toggle-${combatant.id}`}
+          // The visible label is just "Reveal"/"Revealed" to fit the row, which on its own
+          // says nothing about WHAT is revealed — and the battle map already has a fog
+          // "Reveal" tool, so a bare accessible name of "Reveal" is ambiguous both to a
+          // screen-reader user and to any role+name query.
+          aria-label={
+            combatant.statblockRevealed
+              ? t('encounters.statblock.hideFromPlayers')
+              : t('encounters.statblock.revealToPlayers')
+          }
+          title={
+            syncBlockedReason ??
+            (combatant.statblockRevealed ? t('encounters.statblock.hideFromPlayers') : t('encounters.statblock.revealToPlayers'))
+          }
+          onClick={() => onPatchCombatant({ statblockRevealed: !combatant.statblockRevealed }, encounterId)}
+        >
+          {combatant.statblockRevealed ? t('encounters.statblock.revealed') : t('encounters.statblock.reveal')}
+        </button>
+      )}
+      {onDuplicate && (
+        <button
+          className="btn btn-icon btn-ghost cf-target-44"
+          style={{ width: 44, height: 44, flex: 'none' }}
+          disabled={busy || syncBlocked}
+          onClick={onDuplicate}
+          aria-label={t('encounters.duplicateCombatant', { name: combatant.name })}
+          aria-describedby={syncBlockedDescribedBy}
+          title={syncBlockedReason ?? t('encounters.duplicate')}
+        >
+          <UIIcon name="add" size="xs" />
+        </button>
+      )}
       {canRemove && (
         <button
           className="btn btn-icon btn-ghost cf-target-44"
@@ -1343,6 +1940,38 @@ export function CombatantRow({
           <UIIcon name="close" size="xs" />
         </button>
       )}
+      {(() => {
+        const whisperCid = routeCampaignId ?? campaignId;
+        if (!whisperCid || !character?.ownerUserId || String(character.ownerUserId) === String(myUserId)) return null;
+        return (
+          <>
+            {isDm && (
+              <button
+                type="button"
+                className="btn btn-icon btn-ghost cf-target-44"
+                style={{ width: 44, height: 44, flex: 'none' }}
+                disabled={busy}
+                onClick={() => setShowWhisper((w) => !w)}
+                aria-label={t('encounters.whisper.buttonLabel', { name: combatant.name })}
+                title={t('encounters.whisper.buttonLabel', { name: combatant.name })}
+                data-testid={`whisper-button-${combatant.id}`}
+              >
+                <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={UI_ICON_SIZE.xs} />
+              </button>
+            )}
+            {showWhisper && (
+              <div style={{ flexBasis: '100%', width: '100%' }}>
+                <EncounterWhisperComposer
+                  campaignId={whisperCid}
+                  recipientUserId={String(character.ownerUserId)}
+                  recipientName={combatant.name}
+                  onClose={() => setShowWhisper(false)}
+                />
+              </div>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
-}
+});

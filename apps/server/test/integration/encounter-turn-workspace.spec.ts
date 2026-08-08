@@ -1,8 +1,8 @@
 import fs from 'node:fs';
-import { eq } from 'drizzle-orm';
-import { ActionSpec, ConditionInstance } from '@campfire/schema';
+import { desc, eq } from 'drizzle-orm';
+import { ActionResolveRequest, ActionSpec, ConditionInstance } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks } from '../../src/db/schema';
+import { auditLog, campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
@@ -17,6 +17,7 @@ import { EncountersService } from '../../src/modules/encounters/encounters.servi
 import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
+import * as dice from '../../src/common/dice';
 
 /**
  * Issue #413 — current-turn workspace + player End-turn, at the service layer against a real
@@ -1107,6 +1108,147 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(other.actionEconomy).toHaveLength(0);
   });
 
+  describe('movement speed resolution (issue #1910)', () => {
+    /** Resolves the movement slot's reported max from a fetched turn workspace. */
+    function movementMax(workspace: { actionEconomy: Array<{ kind: string; max: number }> }): number | undefined {
+      return workspace.actionEconomy.find((s) => s.kind === 'movement')?.max;
+    }
+
+    it('a null-speed character (nothing set anywhere) shows the adapter default (30 for 5e)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId } = seed(orm);
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(movementMax(workspace)).toBe(30);
+      expect(workspace.movement?.maxFt).toBe(30);
+    });
+
+    it('a combatant add-time speed snapshot resolves the movement max (a dwarf at 25)', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      orm.update(combatants).set({ speed: 25 }).where(eq(combatants.id, c1)).run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(movementMax(workspace)).toBe(25);
+      expect(workspace.movement?.maxFt).toBe(25);
+    });
+
+    // Issue #1910 review (Devin, PR #1980, round 4): a combatant with `speed: null`
+    // does NOT fall through to the linked character's live speed — that would be
+    // ambiguous between "this row predates the speed column" and "the character
+    // genuinely had null speed at add time" (Character.speed defaults to null, so
+    // the second case is every character until someone sets a value), and a live
+    // fallback resolves both identically, reintroducing the retroactive-change bug
+    // the snapshot exists to prevent. The adapter default is the only safe
+    // resolution for a null snapshot, matching pre-#1910 behavior (every combatant
+    // reported the hardcoded adapter constant) — see the sibling test below that
+    // proves this for the realistic "genuinely null at add time" case specifically.
+    it('a combatant with a null snapshot (whether legacy or genuinely unset) resolves to the adapter default, never the character live speed', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      orm.update(characters).set({ speed: 35 }).where(eq(characters.id, c1row.characterId!)).run();
+      // combatant.speed stays null — indistinguishable from a genuinely-unset add.
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(movementMax(workspace)).toBe(30);
+    });
+
+    it('a mid-fight sheet edit does not retroactively change a running encounter movement budget', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const { encounterId, c1 } = seed(orm);
+      const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+      orm.update(combatants).set({ speed: 25 }).where(eq(combatants.id, c1)).run();
+
+      // The DM edits the sheet mid-encounter to 40 (e.g. a Haste spell on the sheet, not
+      // through the combat tracker) — the combatant's frozen snapshot must still win.
+      orm.update(characters).set({ speed: 40 }).where(eq(characters.id, c1row.characterId!)).run();
+
+      const workspace = await service.getTurnWorkspace(encounterId, player1, 'player');
+      expect(movementMax(workspace)).toBe(25);
+    });
+
+    // Devin review on PR #1980: the two BULK party auto-add paths (create()'s party
+    // INSERT and the generator's) build their combatant rows explicitly and must also
+    // stamp `speed`, not just the single-combatant addCombatant() path exercised above —
+    // otherwise every real, auto-added PC (the common case; addCombatant is only for a
+    // mid-fight late join) would resolve through the character's LIVE speed on every
+    // read, silently breaking the frozen-snapshot invariant for essentially all fights.
+    it('an auto-added party member (via the real create() path, not a hand-stamped combatant) keeps a frozen movement max across a mid-fight sheet edit', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const ts = new Date().toISOString();
+      const [campaign] = orm.insert(campaigns).values({ name: 'Auto Add Campaign', createdAt: ts, updatedAt: ts }).returning().all();
+      const [character] = orm
+        .insert(characters)
+        .values({ campaignId: campaign.id, ownerUserId: player1.id, name: 'Auto PC', speed: 25, createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+
+      // The real party auto-add path — no manual combatant INSERT, no hand-stamped speed.
+      // hidden:false — encounters are private-by-default (#754), and player1 needs to
+      // read the turn workspace below.
+      const created = await service.create(campaign.id, { name: 'Ambush', hidden: false }, dmUser, 'dm');
+      expect(created.combatants).toHaveLength(1);
+      const combatantId = created.combatants[0].id;
+      orm.update(encounters).set({ status: 'running', currentCombatantId: combatantId }).where(eq(encounters.id, created.id)).run();
+
+      const before = await service.getTurnWorkspace(created.id, player1, 'player');
+      expect(movementMax(before)).toBe(25);
+
+      // The DM edits the sheet mid-encounter (e.g. a Haste spell) — the auto-added
+      // combatant's frozen snapshot must still win, exactly like the manually-added case.
+      orm.update(characters).set({ speed: 40 }).where(eq(characters.id, character.id)).run();
+
+      const after = await service.getTurnWorkspace(created.id, player1, 'player');
+      expect(movementMax(after)).toBe(25);
+    });
+
+    // Devin review on PR #1980 (round 4): the sibling test above proves the
+    // invariant for a character that ALREADY had a real speed at add time (25).
+    // The overwhelmingly common case is the opposite — Character.speed defaults
+    // to null, so most PCs are added with NO speed set at all. That combatant's
+    // snapshot is also null, indistinguishable at the DB level from a legacy
+    // pre-#1910 row, and — before this fix — getTurnWorkspace's fallback-to-live-
+    // character-speed treated both cases the same way, so filling in the sheet
+    // mid-fight (the realistic sequence: a DM realizes they forgot to set speed
+    // and adds it once combat has already started) silently changed the running
+    // encounter's movement budget, reproducing the exact bug the snapshot exists
+    // to prevent. This is the sequence that must stay frozen.
+    it('a character with NO speed set at add time (the common case) does not retroactively pick up a mid-fight sheet edit', async () => {
+      dataDir = makeTempDataDir();
+      const { orm, service } = build();
+      const ts = new Date().toISOString();
+      const [campaign] = orm.insert(campaigns).values({ name: 'Null Speed Campaign', createdAt: ts, updatedAt: ts }).returning().all();
+      const [character] = orm
+        .insert(characters)
+        // speed omitted entirely -> the schema default, null. This is the ordinary
+        // shape of a freshly-created character, not a contrived edge case.
+        .values({ campaignId: campaign.id, ownerUserId: player1.id, name: 'Blank Slate PC', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+
+      const created = await service.create(campaign.id, { name: 'Ambush', hidden: false }, dmUser, 'dm');
+      expect(created.combatants).toHaveLength(1);
+      const combatantId = created.combatants[0].id;
+      orm.update(encounters).set({ status: 'running', currentCombatantId: combatantId }).where(eq(encounters.id, created.id)).run();
+
+      const before = await service.getTurnWorkspace(created.id, player1, 'player');
+      expect(movementMax(before)).toBe(30); // adapter default — speed was never set
+
+      // The DM fills in the sheet mid-encounter — the frozen (null) snapshot must
+      // NOT pick this up.
+      orm.update(characters).set({ speed: 40 }).where(eq(characters.id, character.id)).run();
+
+      const after = await service.getTurnWorkspace(created.id, player1, 'player');
+      expect(movementMax(after)).toBe(30); // still the adapter default, NOT 40
+    });
+  });
+
   describe('spellbook data — spells/spellSlots on the turn workspace (issue #1900)', () => {
     /** Gives c1's linked character a cantrip, a leveled spell, a non-spell action, and slots. */
     function seedSpellbookCharacter(orm: ReturnType<typeof build>['orm'], c1: number): void {
@@ -2188,5 +2330,404 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
 
       expect((await service.getTurnWorkspace(encounterId, player1, 'player')).suggestedActions).toHaveLength(0);
     });
+  });
+});
+
+/**
+ * Issue #1921 — limited-use/recharge monster abilities: the turn-tick recharge roll (both
+ * outcomes), undo-turn restoring pre-tick recharge state, X/day pools never auto-clearing
+ * mid-encounter, and the DM force-toggle override (+ player 403 / audit row).
+ */
+describe('recharge action turn tick (real SQLite, service layer, issue #1921)', () => {
+  let dataDir: string;
+
+  afterEach(() => {
+    if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+    jest.restoreAllMocks();
+  });
+
+  function build() {
+    const { orm } = openDatabase(dataDir);
+    const audit = new AuditService(orm);
+    const events = new CampaignEventsService();
+    const rolls = new RollsService(orm);
+    const revisions = new RevisionsService(orm, new ModerationService(orm, audit));
+    const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
+    const campaignLibrary = new CampaignLibraryService(orm, audit, events);
+    const actions = new ActionResolverService(orm, events, audit);
+    const service = new EncountersService(
+      orm,
+      audit,
+      events,
+      rolls,
+      revisions,
+      attachments,
+      campaignLibrary,
+      { notifyCampaign: jest.fn().mockResolvedValue(undefined), notifyUser: jest.fn().mockResolvedValue(undefined) } as any,
+      undefined, // safety
+      undefined, // charactersService
+      undefined, // inventoryService
+      undefined, // questsService
+      undefined, // storylinesService
+      undefined, // timelineService
+      undefined, // campaignsService
+      actions,
+    );
+    return { orm, service, actions };
+  }
+
+  const dmUser: RequestUser = { id: 'dev:dm', name: 'DM', serverRole: 'admin', devRole: 'dm' };
+  const player1: RequestUser = { id: 'user-1', name: 'Alice', serverRole: 'user', devRole: 'player' };
+
+  const breathWeaponStatblock = {
+    ac: 18,
+    abilityScores: { STR: 22, DEX: 10, CON: 18, INT: 10, WIS: 12, CHA: 14 },
+    actions: [
+      {
+        name: 'Breath Weapon',
+        kind: 'action',
+        spec: {
+          mode: 'attack',
+          attack: { bonus: '+9' },
+          cost: { slot: '', count: 0 },
+          uses: { recharge: 'recharge-5-6' },
+          targets: { count: 0, allow: 'enemy' },
+          outcomes: {},
+        },
+      },
+    ],
+  };
+
+  /** Alice (top of initiative, current turn) → Drake (monster, recharge action) → nobody else. */
+  function seedAliceThenDrake(orm: ReturnType<typeof build>['orm']) {
+    const ts = new Date().toISOString();
+    const [campaign] = orm.insert(campaigns).values({ name: 'Recharge Test', createdAt: ts, updatedAt: ts }).returning().all();
+    const [char1] = orm
+      .insert(characters)
+      .values({ campaignId: campaign.id, ownerUserId: player1.id, name: 'Alice PC', createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [encounter] = orm
+      .insert(encounters)
+      .values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts })
+      .returning()
+      .all();
+    const [c1] = orm
+      .insert(combatants)
+      .values({ encounterId: encounter.id, kind: 'character', characterId: char1.id, name: 'Alice PC', initiative: 20, hpCurrent: 20, hpMax: 20, sortOrder: 0 })
+      .returning()
+      .all();
+    const [drake] = orm
+      .insert(combatants)
+      .values({
+        encounterId: encounter.id,
+        kind: 'monster',
+        name: 'Recharge Drake',
+        initiative: 10,
+        hpCurrent: 80,
+        hpMax: 80,
+        sortOrder: 1,
+        statblockJson: JSON.stringify(breathWeaponStatblock),
+      })
+      .returning()
+      .all();
+    orm.update(encounters).set({ currentCombatantId: c1.id }).where(eq(encounters.id, encounter.id)).run();
+    return { campaignId: campaign.id, encounterId: encounter.id, c1: c1.id, drake: drake.id };
+  }
+
+  function latestEvent(orm: ReturnType<typeof build>['orm'], encounterId: number) {
+    return orm
+      .select()
+      .from(encounterEvents)
+      .where(eq(encounterEvents.encounterId, encounterId))
+      .orderBy(desc(encounterEvents.id))
+      .limit(1)
+      .all()[0];
+  }
+
+  function spendBreathWeapon(actions: ActionResolverService, encounterId: number, drake: number) {
+    const applied = actions.resolve(
+      encounterId,
+      ActionResolveRequest.parse({ actorCombatantId: drake, actionIndex: 0, targetIds: [], commit: true }),
+      dmUser,
+      'dm',
+    );
+    expect(applied.applied).toBe(true);
+    return applied;
+  }
+
+  it('rolls exactly one d6 for a spent recharge action at turn start, recharging on a hit and logging the outcome', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, actions } = build();
+    const { encounterId, drake } = seedAliceThenDrake(orm);
+
+    // Alice's turn → the drake's turn: nothing spent yet, no roll should happen.
+    const rollSpy = jest.spyOn(dice, 'rollDice');
+    await service.nextTurn(encounterId, {}, dmUser, 'dm');
+    expect(rollSpy).not.toHaveBeenCalledWith('1d6');
+    rollSpy.mockClear();
+
+    spendBreathWeapon(actions, encounterId, drake);
+    const spentRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    const usesKey = Object.keys(JSON.parse(spentRow.actionUses ?? '{}'))[0];
+    expect(JSON.parse(spentRow.actionUses ?? '{}')[usesKey].spent).toBe(1);
+
+    // Drake's turn → Alice's turn (round 2) → the drake's turn again: THIS is where recharge rolls.
+    await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Alice, round 2
+    rollSpy.mockReturnValue({ total: 6, rolls: [6] } as ReturnType<typeof dice.rollDice>);
+    await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Drake, round 2: recharge roll fires
+
+    expect(rollSpy).toHaveBeenCalledWith('1d6');
+    const rechargedRow = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    expect(JSON.parse(rechargedRow.actionUses ?? '{}')[usesKey].spent).toBe(0);
+
+    const event = latestEvent(orm, encounterId);
+    expect(event.type).toBe('resource_changed');
+    expect(event.actorId).toBe(drake);
+    expect(event.detail).toContain('recharges');
+    // Neither the ability's NAME nor its recharge CONDITION may reach this player-visible log
+    // line — both are statblock content for a monster the DM may not have revealed (#1926),
+    // and the die result plus the outcome bounds the condition on its own. See the secrecy
+    // note on the rechargeRolls append in encounters.service.ts.
+    expect(event.detail).not.toContain('Breath Weapon');
+    expect(event.detail).not.toMatch(/\d/);
+
+    // Usable again.
+    spendBreathWeapon(actions, encounterId, drake);
+  });
+
+  it('leaves a spent recharge action spent on a miss, and logs the miss', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, actions } = build();
+    const { encounterId, drake } = seedAliceThenDrake(orm);
+
+    await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Drake, round 1
+    spendBreathWeapon(actions, encounterId, drake);
+    const usesKey = Object.keys(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}'))[0];
+
+    const rollSpy = jest.spyOn(dice, 'rollDice').mockReturnValue({ total: 2, rolls: [2] } as ReturnType<typeof dice.rollDice>);
+    await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Alice, round 2
+    await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Drake, round 2: recharge roll fires, misses
+
+    expect(rollSpy).toHaveBeenCalledWith('1d6');
+    const row = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    expect(JSON.parse(row.actionUses ?? '{}')[usesKey].spent).toBe(1);
+
+    const event = latestEvent(orm, encounterId);
+    expect(event.type).toBe('resource_changed');
+    expect(event.detail).toContain('stays spent');
+    expect(event.detail).not.toContain('Breath Weapon');
+    expect(event.detail).not.toMatch(/\d/);
+
+    // Still exhausted — a second apply attempt is refused.
+    expect(() =>
+      actions.resolve(
+        encounterId,
+        ActionResolveRequest.parse({ actorCombatantId: drake, actionIndex: 0, targetIds: [], commit: true }),
+        dmUser,
+        'dm',
+      ),
+    ).toThrow(/uses remaining/i);
+  });
+
+  it('undoTurn restores the pre-tick spent state after a recharge roll cleared it', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, actions } = build();
+    const { encounterId, drake } = seedAliceThenDrake(orm);
+
+    await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Drake, round 1
+    spendBreathWeapon(actions, encounterId, drake);
+    const usesKey = Object.keys(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}'))[0];
+
+    const rollSpy = jest.spyOn(dice, 'rollDice').mockReturnValue({ total: 6, rolls: [6] } as ReturnType<typeof dice.rollDice>);
+    await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Alice, round 2
+    await service.nextTurn(encounterId, {}, dmUser, 'dm'); // -> Drake, round 2: recharges
+    rollSpy.mockRestore();
+
+    expect(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}')[usesKey].spent).toBe(0);
+
+    await service.undoTurn(encounterId, dmUser, 'dm');
+
+    const row = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    expect(JSON.parse(row.actionUses ?? '{}')[usesKey].spent).toBe(1);
+    const event = latestEvent(orm, encounterId);
+    expect(event.detail).toContain('recharge undone');
+    expect(event.detail).not.toContain('Breath Weapon');
+  });
+
+  it('an X/day pool never auto-recharges mid-encounter, even across several turn advances', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, actions } = build();
+    const ts = new Date().toISOString();
+    const [campaign] = orm.insert(campaigns).values({ name: 'Per-day Test', createdAt: ts, updatedAt: ts }).returning().all();
+    const [char1] = orm.insert(characters).values({ campaignId: campaign.id, ownerUserId: player1.id, name: 'Alice PC', createdAt: ts, updatedAt: ts }).returning().all();
+    const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+    const [c1] = orm.insert(combatants).values({ encounterId: encounter.id, kind: 'character', characterId: char1.id, name: 'Alice PC', initiative: 20, hpCurrent: 20, hpMax: 20, sortOrder: 0 }).returning().all();
+    const [mage] = orm
+      .insert(combatants)
+      .values({
+        encounterId: encounter.id,
+        kind: 'monster',
+        name: 'Once-a-day Mage',
+        initiative: 10,
+        hpCurrent: 40,
+        hpMax: 40,
+        sortOrder: 1,
+        statblockJson: JSON.stringify({
+          ac: 14,
+          abilityScores: { STR: 10, DEX: 12, CON: 12, INT: 18, WIS: 12, CHA: 14 },
+          actions: [
+            {
+              name: 'Fireball',
+              kind: 'action',
+              spec: {
+                mode: 'attack',
+                attack: { bonus: '+6' },
+                cost: { slot: '', count: 0 },
+                uses: { max: 1 },
+                targets: { count: 0, allow: 'enemy' },
+                outcomes: {},
+              },
+            },
+          ],
+        }),
+      })
+      .returning()
+      .all();
+    orm.update(encounters).set({ currentCombatantId: c1.id }).where(eq(encounters.id, encounter.id)).run();
+
+    const applied = actions.resolve(
+      encounter.id,
+      ActionResolveRequest.parse({ actorCombatantId: mage.id, actionIndex: 0, targetIds: [], commit: true }),
+      dmUser,
+      'dm',
+    );
+    expect(applied.applied).toBe(true);
+    const usesKey = Object.keys(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, mage.id)).get()!.actionUses ?? '{}'))[0];
+
+    const rollSpy = jest.spyOn(dice, 'rollDice');
+    // Cycle several full rounds — an X/day pool must stay spent no matter how many turn
+    // starts the mage sees (it is encounter-scoped, not per-turn or per-round).
+    for (let i = 0; i < 6; i++) {
+      await service.nextTurn(encounter.id, {}, dmUser, 'dm');
+    }
+    expect(rollSpy).not.toHaveBeenCalledWith('1d6');
+
+    const row = orm.select().from(combatants).where(eq(combatants.id, mage.id)).get()!;
+    expect(JSON.parse(row.actionUses ?? '{}')[usesKey].spent).toBe(1);
+  });
+
+  // Regression (Devin review on PR #2062): `action_uses` is ONE JSON blob holding every
+  // tracked action's spend. The DM override used to build the merged map from the row read
+  // BEFORE the write transaction opened, then write it wholesale — so any other action's
+  // spend that landed in between was reverted, letting an already-used ability fire again.
+  // The merge now rebases against the fresh transaction-local row, the same way condition
+  // mutations do (issue #747).
+  //
+  // The concurrent write is injected through `adapterForCampaign`, which `updateCombatant`
+  // awaits at a point strictly AFTER it reads the combatant row and strictly BEFORE it opens
+  // the write transaction. That is the exact window the bug lived in, and hooking the awaited
+  // call hits it deterministically — simply not awaiting the call and writing straight after
+  // does NOT: the function yields at an earlier await, so the write lands before the row is
+  // even read and the test passes against the bug.
+  it('a DM uses-override merges against the fresh row, so a concurrent spend of another action is not reverted', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, actions } = build();
+    const { encounterId, drake } = seedAliceThenDrake(orm);
+    spendBreathWeapon(actions, encounterId, drake);
+    const usesKey = Object.keys(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}'))[0];
+
+    const svc = service as unknown as { adapterForCampaign: (campaignId: number) => Promise<unknown> };
+    const originalAdapterFor = svc.adapterForCampaign.bind(service);
+    let injected = false;
+    svc.adapterForCampaign = async (campaignId: number) => {
+      const adapter = await originalAdapterFor(campaignId);
+      if (!injected) {
+        injected = true;
+        const mid = JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}');
+        orm
+          .update(combatants)
+          .set({ actionUses: JSON.stringify({ ...mid, 'other-action': { spent: 1 } }) })
+          .where(eq(combatants.id, drake))
+          .run();
+      }
+      return adapter;
+    };
+
+    try {
+      await service.updateCombatant(
+        encounterId,
+        drake,
+        { actionUses: { actionIndex: 0, spent: 0 }, idempotencyKey: 'concurrent-merge-1' } as any,
+        dmUser,
+        'dm',
+      );
+    } finally {
+      svc.adapterForCampaign = originalAdapterFor;
+    }
+    expect(injected).toBe(true);
+
+    const row = JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}');
+    // The DM's own override applied...
+    expect(row[usesKey].spent).toBe(0);
+    // ...without clobbering the concurrent spend of the other action.
+    expect(row['other-action']).toEqual({ spent: 1 });
+  });
+
+  it('DM force-toggle sets an action’s spend state directly, clamped to [0, max], and is audit-logged', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service, actions } = build();
+    const { campaignId, encounterId, drake } = seedAliceThenDrake(orm);
+    spendBreathWeapon(actions, encounterId, drake);
+    const usesKey = Object.keys(JSON.parse(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.actionUses ?? '{}'))[0];
+
+    const updated = await service.updateCombatant(
+      encounterId,
+      drake,
+      { actionUses: { actionIndex: 0, spent: 0 }, idempotencyKey: 'force-recharge-1' } as any,
+      dmUser,
+      'dm',
+    );
+    expect(updated).toBeDefined();
+    const row = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!;
+    expect(JSON.parse(row.actionUses ?? '{}')[usesKey].spent).toBe(0);
+
+    const auditRows = orm
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.campaignId, campaignId))
+      .all();
+    expect(auditRows.some((r) => r.action === 'encounter.combatant.update' && r.entityId === drake)).toBe(true);
+
+    const event = latestEvent(orm, encounterId);
+    expect(event.type).toBe('resource_changed');
+    expect(event.detail).toContain('uses set by DM');
+    expect(event.detail).not.toContain('Breath Weapon');
+  });
+
+  it('a player may not force-toggle an action’s spend state, even on their OWN character combatant (403)', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    // c1 is player1's OWN character combatant — ownership alone would otherwise let player1
+    // edit it (e.g. hpDelta/conditions), so this specifically exercises the actionUses
+    // absolute-rule gate, not just the "not my combatant" fallback a monster target would
+    // also trip.
+    const { encounterId, c1 } = seedAliceThenDrake(orm);
+
+    let threw: unknown;
+    try {
+      await service.updateCombatant(
+        encounterId,
+        c1,
+        { actionUses: { actionIndex: 0, spent: 0 }, idempotencyKey: 'player-force-1' } as any,
+        player1,
+        'player',
+      );
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeDefined();
+    const body = (threw as { getResponse?: () => unknown }).getResponse?.();
+    expect(body).toMatchObject({ code: 'COMBATANT_FIELD_DM_ONLY' });
   });
 });

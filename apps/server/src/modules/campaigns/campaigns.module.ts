@@ -14,7 +14,9 @@ import { AttachmentsModule } from '../attachments/attachments.module';
 import { EventsModule } from '../events/events.module';
 import { AiDmModule } from '../ai-dm/ai-dm.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { SettingsModule } from '../settings/settings.module';
 import { CampaignsService } from './campaigns.service';
+import { CampaignGovernanceService } from './campaign-governance.service';
 import { CampaignsController } from './campaigns.controller';
 
 @Module({
@@ -39,9 +41,13 @@ import { CampaignsController } from './campaigns.controller';
     // same backstop channel #1653/#1640 built for membership revocation), mirroring
     // MembersService.remove() — a leaf module, safe to import directly (no cycle).
     NotificationsModule,
+    // Issue #851: shared-instance governance (policy/limits/default quota) reads
+    // server settings. SettingsModule is a leaf module (only DbModule), so this
+    // creates no cycle.
+    SettingsModule,
   ],
   controllers: [CampaignsController],
-  providers: [CampaignsService],
-  exports: [CampaignsService],
+  providers: [CampaignsService, CampaignGovernanceService],
+  exports: [CampaignsService, CampaignGovernanceService],
 })
 export class CampaignsModule {}

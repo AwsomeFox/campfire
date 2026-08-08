@@ -1,18 +1,26 @@
 {
   "characters": {
+    "actions": {
+      "oneTapReady": "One-tap ready",
+      "textOnly": "Text only"
+    },
     "conditionLevel": {
       "raise": "Raise",
       "lower": "Lower",
       "level": "{{level}} of {{max}} — {{name}} level",
       "count": "{{level}}/{{max}}",
-      "updateError": "Couldn't update {{name}}."
+      "updateError": "Couldn't update {{name}}.",
+      "announceRaised": "{{name}} raised to level {{level}}",
+      "announceLowered": "{{name}} lowered to level {{level}}"
     },
     "resources": {
       "spend": "Spend",
       "restore": "Restore",
       "available": "{{available}} of {{max}} — {{name}} available",
       "count": "{{available}}/{{max}}",
-      "updateError": "Couldn't update {{name}}."
+      "updateError": "Couldn't update {{name}}.",
+      "announceSpent": "{{name}} spent",
+      "announceRestored": "{{name}} restored"
     },
     "ddbImport": {
       "summaryTitle": "Imported from D&D Beyond",

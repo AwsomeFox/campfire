@@ -1,9 +1,15 @@
 import {
+  ActionResolveResult,
   ActionSpec,
+  Archmage13aAdapter,
   CharacterAction,
   Dnd5eAdapter,
+  OsrAdapter,
+  Pathfinder1eAdapter,
   Pf2eAdapter,
+  RESOLVER_MATH_D20_5E,
   Sf2eAdapter,
+  StarfinderAdapter,
   BasicFantasyAdapter,
   OldSchoolEssentialsAdapter,
   OpenLegendAdapter,
@@ -18,7 +24,9 @@ import {
   dnd5eProficiencyBonus,
   pf2eProficiencyBonus,
   resolveAttackForAdapter,
+  resolverImplementsSystemMath,
   halveDamage,
+  inferActionSpecFromText,
   isResolvableSpec,
   parseSignedBonus,
   pickOutcomeBranch,
@@ -274,6 +282,91 @@ describe('checkProficiencyBonusForAdapter — issue #1599', () => {
   });
 });
 
+describe('resolverImplementsSystemMath — issue #1928 (systemMathSupported honesty)', () => {
+  it('5e is the only adapter that declares the resolver math profile', () => {
+    expect(Dnd5eAdapter.resolverMath).toBe(RESOLVER_MATH_D20_5E);
+    expect(resolverImplementsSystemMath(Dnd5eAdapter)).toBe(true);
+  });
+
+  // Table-driven across every registered adapter family (mirrors the same set
+  // encounter-difficulty-adapters.spec.ts uses for #429): none of them has audited the
+  // resolver's own d20/AC/proficiency maths, so every one must withhold — the resolver still
+  // executes (label, don't block), it just may not claim the numbers are this system's own.
+  describe.each([
+    ['Pathfinder 2e', Pf2eAdapter],
+    ['Starfinder 2e', Sf2eAdapter],
+    ['Pathfinder 1e', Pathfinder1eAdapter],
+    ['Starfinder 1e', StarfinderAdapter],
+    ['Open Legend', OpenLegendAdapter],
+    ['13th Age', Archmage13aAdapter],
+    ['OSR (Basic Fantasy)', BasicFantasyAdapter],
+    ['OSR (Old-School Essentials)', OldSchoolEssentialsAdapter],
+    ['OSR (default)', OsrAdapter],
+  ] as const)('%s (unaudited)', (_name, adapter) => {
+    it('does not declare resolverMath and resolverImplementsSystemMath returns false', () => {
+      expect(adapter.resolverMath).toBeUndefined();
+      expect(resolverImplementsSystemMath(adapter)).toBe(false);
+    });
+  });
+
+  it('an adapter with no resolverMath field at all (Pick-typed caller) is treated as unsupported', () => {
+    expect(resolverImplementsSystemMath({})).toBe(false);
+  });
+});
+
+describe('ActionResolveResult — systemMathSupported/mathProfile schema defaults (issue #1928)', () => {
+  const minimalResolution = {
+    actorCombatantId: 1,
+    actorName: 'Test Actor',
+    actionName: 'Test Action',
+    mode: 'attack' as const,
+  };
+
+  it('defaults systemMathSupported:true and mathProfile:null — a pre-#1928 payload keeps parsing', () => {
+    // No systemMathSupported/mathProfile at all, matching every resolve response that ever
+    // existed before this issue — every one of them WAS run through the 5e-shaped maths this
+    // flag now names, so defaulting to true/(implicit 5e) rather than false/null is the
+    // honest default for an omitted field, not merely a permissive one.
+    const parsed = ActionResolveResult.parse({
+      resolution: minimalResolution,
+      applied: false,
+      canApply: true,
+      policy: 'automatic',
+      chainId: 'chain-1',
+    });
+    expect(parsed.systemMathSupported).toBe(true);
+    expect(parsed.mathProfile).toBeNull();
+  });
+
+  it('accepts an explicit false/null pair (the unaudited-system shape)', () => {
+    const parsed = ActionResolveResult.parse({
+      resolution: minimalResolution,
+      applied: false,
+      canApply: true,
+      policy: 'automatic',
+      chainId: 'chain-2',
+      systemMathSupported: false,
+      mathProfile: null,
+    });
+    expect(parsed.systemMathSupported).toBe(false);
+    expect(parsed.mathProfile).toBeNull();
+  });
+
+  it('accepts an explicit true/profile pair (the audited-5e shape)', () => {
+    const parsed = ActionResolveResult.parse({
+      resolution: minimalResolution,
+      applied: false,
+      canApply: true,
+      policy: 'automatic',
+      chainId: 'chain-3',
+      systemMathSupported: true,
+      mathProfile: RESOLVER_MATH_D20_5E,
+    });
+    expect(parsed.systemMathSupported).toBe(true);
+    expect(parsed.mathProfile).toBe('d20-ascending-ac-5e-proficiency');
+  });
+});
+
 describe('pickOutcomeBranch — fallbacks', () => {
   const spec = ActionSpec.parse({
     mode: 'attack',
@@ -349,3 +442,49 @@ describe('isResolvableSpec — fallback gate (no silent math)', () => {
     expect(isResolvableSpec(undefined)).toBe(false);
   });
 });
+
+describe('inferActionSpecFromText — sheet action spec inference (issue #1930)', () => {
+  it('infers an attack spec from "+5" and "1d8+3 slashing"', () => {
+    const spec = inferActionSpecFromText('+5', '1d8+3 slashing', '');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('attack');
+    expect(spec?.attack.bonus).toBe('+5');
+    expect(spec?.outcomes.hit?.damage).toEqual([{ formula: '1d8', flat: 3, type: 'slashing' }]);
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
+  });
+
+  it('infers an attack spec from bare bonus with no damage', () => {
+    const spec = inferActionSpecFromText('+5', '', '');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('attack');
+    expect(spec?.attack.bonus).toBe('+5');
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
+  });
+
+  it('infers a save spec from "DC 15" and "3d6 fire"', () => {
+    const spec = inferActionSpecFromText('DC 15', '3d6 fire', 'spell');
+    expect(spec).toBeDefined();
+    expect(spec?.mode).toBe('save');
+    expect(spec?.save.dc.dc).toBe(15);
+    expect(spec?.outcomes.failure?.damage).toEqual([{ formula: '3d6', flat: 0, type: 'fire' }]);
+    expect(spec?.outcomes.success?.halfDamage).toBe(true);
+    expect(spec?.provenance.source).toBe('sheet-inferred');
+    expect(isResolvableSpec(spec)).toBe(true);
+  });
+
+  it('preserves negative flat damage modifiers ("1d4-1 poison")', () => {
+    const spec = inferActionSpecFromText('+5', '1d4-1 poison', '');
+    expect(spec).toBeDefined();
+    expect(spec?.outcomes.hit?.damage).toEqual([{ formula: '1d4', flat: -1, type: 'poison' }]);
+  });
+
+  it('returns undefined for non-resolvable text or empty input', () => {
+    expect(inferActionSpecFromText('', '', '')).toBeUndefined();
+    expect(inferActionSpecFromText('versatile', '', '')).toBeUndefined();
+    expect(inferActionSpecFromText('', '3d6 fire', 'save')).toBeUndefined();
+  });
+});
+
+

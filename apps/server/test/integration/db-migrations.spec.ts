@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
+import type { Combatant } from '@campfire/schema';
+import { Dnd5eAdapter } from '@campfire/schema';
 import {
   dbFilePath,
   openDatabase,
@@ -9,6 +11,7 @@ import {
 } from '../../src/db/db.module';
 import { makeTempDataDir, writeOldSchemaDb, columnNames, countRows } from './fixtures';
 import { legacyIcsUid } from '../../src/modules/sessions/ics.util';
+import { sortCombatants } from '../../src/modules/encounters/encounters.logic';
 
 /**
  * Integration coverage for the hand-rolled ADD-COLUMN / table-rebuild migrations
@@ -29,6 +32,14 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
+  it('boots a fresh database before the combatants table exists (#1924)', () => {
+    dataDir = makeTempDataDir();
+    const fresh = openDatabase(dataDir);
+    try {
+      expect(columnNames(fresh.sqlite, 'combatants')).toContain('npc_identity_source_id');
+    } finally { fresh.sqlite.close(); }
+  });
+
   it('adds every migrated column when upgrading an old-shaped DB', () => {
     dataDir = makeTempDataDir();
     writeOldSchemaDb(dataDir);
@@ -37,7 +48,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     try {
       // users — the 12-step rebuild path (password_hash NOT NULL -> nullable) plus later ADDs.
       const userCols = columnNames(sqlite, 'users');
-      expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
+      expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size', 'can_create_campaigns']));
 
       expect(columnNames(sqlite, 'campaigns')).toEqual(
         expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at', 'public_recap_sharing_enabled']),
@@ -56,6 +67,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           'death_state',
           'death_save_successes',
           'death_save_failures',
+          'speed', // 0161 (#1910): movement speed, additive nullable column.
         ]),
       );
       expect(columnNames(sqlite, 'quests')).toContain('hidden');
@@ -76,7 +88,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['current_combatant_id', 'location_id', 'quest_id', 'session_id', 'hidden']),
       );
       expect(columnNames(sqlite, 'combatants')).toEqual(
-        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id', 'npc_disposition_snapshot']),
+        expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id', 'npc_disposition_snapshot', 'speed']),
       );
       expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
@@ -166,6 +178,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['series_id', 'occurrence_id', 'recurrence_local_date', 'kind', 'from_scheduled_at', 'to_scheduled_at']),
       );
       expect(columnNames(sqlite, 'schedule_templates')).toEqual(expect.arrayContaining(['name', 'timezone', 'slots_json']));
+      expect(MIGRATION_NAMES).toContain('0161_character_combatant_speed_1910');
     } finally {
       sqlite.close();
     }
@@ -240,12 +253,34 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(character.death_state).toBe('none');
       expect(character.death_save_successes).toBe(0);
       expect(character.death_save_failures).toBe(0);
+      // 0161 (#1910): speed ADD COLUMN — a pre-existing character row reads null
+      // (unset), not a fabricated 30, so the turn workspace supplies the adapter
+      // default at read time instead of the migration guessing a value.
+      expect(character.speed).toBeNull();
 
       expect((sqlite.prepare('SELECT hidden FROM quests WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
       expect((sqlite.prepare('SELECT hidden FROM npcs WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
       // 0039 (issue #307): icon_slug ADD COLUMN backfills the pre-existing item with ''.
       expect((sqlite.prepare('SELECT icon_slug FROM inventory_items WHERE id = 1').get() as { icon_slug: string }).icon_slug).toBe('');
       expect((sqlite.prepare('SELECT admin_enabled FROM api_tokens WHERE id = 1').get() as { admin_enabled: number }).admin_enabled).toBe(0);
+      // 0164 (#851): can_create_campaigns ADD COLUMN backfills the pre-existing legacy
+      // user to 1 (true) — an upgrade must never silently revoke someone's pre-existing
+      // ability to create/import a campaign once an operator turns on the
+      // 'approved_organizers' policy.
+      expect(
+        (sqlite.prepare('SELECT can_create_campaigns FROM users WHERE id = 1').get() as { can_create_campaigns: number })
+          .can_create_campaigns,
+      ).toBe(1);
+      // ...and the COLUMN DEFAULT is 0, so a NEW account on this upgraded database fails
+      // CLOSED (review). Backfilling with `ADD COLUMN ... DEFAULT 1` would have done the
+      // grant above in one statement, but SQLite cannot later change a column default, so
+      // the permissive value would be baked in forever and every future insert that forgot
+      // the field would silently grant organizer eligibility. Asserting the default here is
+      // what keeps the two-statement form from being "simplified" back into one.
+      const canCreateCol = (
+        sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string; dflt_value: string | null }>
+      ).find((c) => c.name === 'can_create_campaigns');
+      expect(canCreateCol?.dflt_value).toBe('0');
       expect(
         sqlite
           .prepare('SELECT family_id, refresh_consumed_at, revoked_at, family_revoked_at FROM oauth_access_tokens WHERE id = 1')
@@ -263,6 +298,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(combatant.death_save_successes).toBe(0);
       expect(combatant.death_save_failures).toBe(0);
       expect(combatant.npc_id).toBeNull(); // 0044: npc_id ADD COLUMN — null for the pre-existing row
+      expect(combatant.speed).toBeNull(); // 0161 (#1910): pre-existing combatant row reads null too.
 
 
 
@@ -494,6 +530,19 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_purge_tombstones'").get(),
       ).toBeTruthy();
+      // 0164/0165 (#851): shared-instance governance — organizer flag + the
+      // campaign-creation request/approval flow's table, created new on an old-shaped DB.
+      expect(MIGRATION_NAMES).toContain('0164_users_can_create_campaigns_851');
+      expect(MIGRATION_NAMES).toContain('0165_campaign_creation_requests_851');
+      expect(
+        sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_creation_requests'").get(),
+      ).toBeTruthy();
+      expect(columnNames(sqlite, 'campaign_creation_requests')).toEqual(
+        expect.arrayContaining(['user_id', 'status', 'note', 'requested_at', 'decided_at', 'decided_by']),
+      );
+      expect(
+        (sqlite.pragma('index_list(campaign_creation_requests)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_campaign_creation_requests_user');
       expect(columnNames(sqlite, 'entity_revisions')).toEqual(
         expect.arrayContaining([
           'author_source',
@@ -2402,6 +2451,27 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       upgraded.sqlite.close();
     }
   });
+  it('adds and backfills NPC identity sources without blocking fresh bootstrap (#1924)', () => {
+    expect(MIGRATION_NAMES).toContain('0145b_combatants_npc_identity_source_1924');
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE combatants DROP COLUMN npc_identity_source_id');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0145b_combatants_npc_identity_source_1924');
+      const now = '2026-08-05T00:00:00.000Z';
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Legacy identity source campaign', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO encounters (id, campaign_id, name, created_at, updated_at) VALUES (1, 1, 'Legacy identity source encounter', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO npcs (id, campaign_id, name, created_at, updated_at) VALUES (42, 1, 'Legacy NPC identity', ?, ?)").run(now, now);
+      legacy.prepare("INSERT INTO combatants (encounter_id, kind, npc_id, name, hp_current, hp_max) VALUES (1, 'npc', 42, 'Legacy NPC', 1, 1)").run();
+    } finally { legacy.close(); }
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'combatants')).toContain('npc_identity_source_id');
+      expect(upgraded.sqlite.prepare('SELECT npc_identity_source_id FROM combatants WHERE name = ?').get('Legacy NPC')).toEqual({ npc_identity_source_id: 42 });
+    } finally { upgraded.sqlite.close(); }
+  });
   it('adds the rule_packs manifest_hash column when upgrading a pre-#1518 DB (#1518)', () => {
     expect(MIGRATION_NAMES).toContain('0148_rule_packs_manifest_hash_1518');
 
@@ -2634,4 +2704,198 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
        upgraded.sqlite.close();
      }
    });
+
+  it('0166 adds users.color_vision_assist and defaults existing rows to off (#1942)', () => {
+    expect(MIGRATION_NAMES).toContain('0166_users_color_vision_assist_1942');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'users')).toContain('color_vision_assist');
+      const user = sqlite.prepare('SELECT color_vision_assist FROM users WHERE id = 1').get() as {
+        color_vision_assist: number;
+      };
+      // NOT NULL DEFAULT 0 backfills the pre-existing legacy row — assist stays
+      // off for everyone until they opt in via PATCH /me/preferences.
+      expect(user.color_vision_assist).toBe(0);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('0169 adds check_requests.group_id on upgrade; a pre-existing (pre-#1943) row reads back null (#1943)', () => {
+    expect(MIGRATION_NAMES).toContain('0169_check_requests_group_id_1943');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'check_requests')).toContain('group_id');
+
+      // Simulate a row a pre-#1943 server would have written — no group_id column existed
+      // yet, so this INSERT (campaign 1 / character 1 are seeded by writeOldSchemaDb) omits it.
+      sqlite.exec(`
+        INSERT INTO check_requests
+          (campaign_id, character_id, check_id, check_label, mode, status, requested_by_user_id, created_at)
+        VALUES (1, 1, 'save:DEX', 'DEX save', 'flat', 'pending', 'dev:dm-1', '2020-01-01T00:00:00.000Z')
+      `);
+      const row = sqlite.prepare('SELECT group_id FROM check_requests ORDER BY id DESC LIMIT 1').get() as {
+        group_id: string | null;
+      };
+      expect(row.group_id).toBeNull();
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('0174 adds combatants.manual_order on upgrade; a pre-existing (pre-#1923) row reads back null (#1923)', () => {
+    expect(MIGRATION_NAMES).toContain('0174_combatants_manual_order_1923');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'combatants')).toContain('manual_order');
+
+      // writeOldSchemaDb already seeds a pre-existing combatant row (Legacy Goblin) written
+      // before this column existed — it must read back null, not silently gain a manual
+      // reorder position it never had.
+      const row = sqlite.prepare("SELECT manual_order FROM combatants WHERE name = 'Legacy Goblin'").get() as {
+        manual_order: number | null;
+      };
+      expect(row.manual_order).toBeNull();
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("0172 adds users.table_audio and defaults existing rows to 'off' (#1920)", () => {
+    expect(MIGRATION_NAMES).toContain('0172_users_table_audio_1920');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'users')).toContain('table_audio');
+      const user = sqlite.prepare('SELECT table_audio FROM users WHERE id = 1').get() as {
+        table_audio: string;
+      };
+      // NOT NULL DEFAULT 'off' backfills the pre-existing legacy row — table audio
+      // and haptics stay silent for everyone until they opt in via PATCH /me/preferences.
+      expect(user.table_audio).toBe('off');
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('re-running openDatabase on an already-migrated DB is idempotent for users.table_audio (#1920)', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const first = openDatabase(dataDir);
+    first.sqlite.close();
+
+    // Boot is not once-only (DbHolder re-runs it on every restore) — a second
+    // openDatabase call against the now-migrated file must not throw a
+    // "duplicate column" error from re-running the ADD COLUMN.
+    const second = openDatabase(dataDir);
+    try {
+      expect(columnNames(second.sqlite, 'users')).toContain('table_audio');
+    } finally {
+      second.sqlite.close();
+    }
+  });
+
+  /**
+   * Issue #2095 review: upgrade compatibility for #2074's whole-roster manual_order
+   * stamping. #2074 (merged before #2084's narrower fix) stamped EVERY combatant's
+   * `manual_order` on every drag, so any encounter a DM had already reordered under
+   * that code has every row non-null in the database. #2084's narrower stamping never
+   * retroactively cleans that up — this migration is the actual fix for those
+   * already-affected users.
+   *
+   * Simulates that exact legacy state directly against a real, fully-migrated
+   * combatants table (not the old-shaped fixture — `manual_order` already existed by
+   * #1923, this is a DATA cleanup, not a schema change), then proves the two things
+   * that matter: the column is cleared, and — the behavioral consequence the
+   * migration exists for — an untouched tie group actually resolves through the
+   * adapter's own tiebreak (DEX/initMod) afterwards, not the frozen legacy order.
+   */
+  it('0176 clears every legacy manual_order stamp, and an untouched tie group resolves via the adapter afterwards (#2095)', () => {
+    expect(MIGRATION_NAMES).toContain('0176_combatants_clear_legacy_manual_order_2095');
+
+    dataDir = makeTempDataDir();
+    // A fresh DB already runs every migration (including 0176) with nothing to do —
+    // open once to get a fully-migrated, empty schema to seed the legacy data into.
+    const seeding = openDatabase(dataDir);
+    const now = '2026-01-01T00:00:00.000Z';
+    seeding.sqlite.exec(`
+      INSERT INTO campaigns (name, created_at, updated_at) VALUES ('Legacy Reorder Campaign', '${now}', '${now}');
+      INSERT INTO encounters (campaign_id, name, status, created_at, updated_at)
+        VALUES (1, 'Legacy Fight', 'running', '${now}', '${now}');
+    `);
+    // A(20) is unique — not part of any tie. W/X/Y are all tied at 14 with DIFFERENT
+    // initMod, so the adapter's own rule (higher initMod first) would order them
+    // X(3), W(1), Y(0) — but the legacy whole-roster stamp (from some OTHER, unrelated
+    // drag under #2074's code) instead recorded plain add order (W=1, X=2, Y=3),
+    // exactly the "worse while preparing... encodes add order" shape #2084 fixed for
+    // FUTURE writes. The DM never touched this tie group directly.
+    const insertCombatant = seeding.sqlite.prepare(
+      'INSERT INTO combatants (encounter_id, kind, name, initiative, init_mod, sort_order, manual_order) VALUES (1, ?, ?, ?, ?, ?, ?)',
+    );
+    insertCombatant.run('monster', 'A', 20, 0, 0, 0);
+    insertCombatant.run('monster', 'W', 14, 1, 1, 1);
+    insertCombatant.run('monster', 'X', 14, 3, 2, 2);
+    insertCombatant.run('monster', 'Y', 14, 0, 3, 3);
+    // Pretend 0176 has not yet reached this data — it already ran once (harmlessly,
+    // no rows existed yet) when `seeding` first opened this fresh DB.
+    seeding.sqlite.prepare("DELETE FROM __migrations WHERE name = '0176_combatants_clear_legacy_manual_order_2095'").run();
+    seeding.sqlite.close();
+
+    // Re-open: 0176 is no longer recorded as applied, so it runs again — now against
+    // the legacy-shaped data.
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const rows = sqlite
+        .prepare('SELECT id, name, initiative, init_mod, sort_order, manual_order FROM combatants ORDER BY id')
+        .all() as Array<{ id: number; name: string; initiative: number; init_mod: number; sort_order: number; manual_order: number | null }>;
+      expect(rows).toHaveLength(4);
+      expect(rows.every((r) => r.manual_order === null)).toBe(true);
+
+      // The behavioral consequence: feed the post-migration rows through the REAL
+      // sortCombatants + 5e adapter tiebreak. With manual_order cleared, the tie group
+      // must now sort by initMod (adapter), not the legacy add-order stamp.
+      const combatants: Combatant[] = rows.map(
+        (r) =>
+          ({
+            id: r.id,
+            encounterId: 1,
+            kind: 'monster',
+            characterId: null,
+            name: r.name,
+            initiative: r.initiative,
+            initMod: r.init_mod,
+            hpCurrent: null,
+            hpMax: null,
+            hpBand: null,
+            conditions: [],
+            ruleEntryId: null,
+            sortOrder: r.sort_order,
+            manualOrder: r.manual_order,
+          }) as unknown as Combatant,
+      );
+      const sorted = sortCombatants(combatants, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b));
+      // A(20) first, then the tie group ordered by initMod desc: X(3), W(1), Y(0) — the
+      // adapter's answer, NOT the legacy stamp's add order (W, X, Y).
+      expect(sorted.map((c) => c.name)).toEqual(['A', 'X', 'W', 'Y']);
+    } finally {
+      sqlite.close();
+    }
+  });
 });
+

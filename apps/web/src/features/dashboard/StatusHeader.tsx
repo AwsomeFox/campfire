@@ -173,9 +173,14 @@ export function StatusHeader({
         <span className="tag tag-neutral" style={{ whiteSpace: 'nowrap' }}>
           {formatCampaignSessionPosition(campaign)}
         </span>
+        {/* Issue #871: "Campaign danger · X" (not bare "X danger") names the scope so this
+            reads distinctly from the adjacent live "Round N" state, and the TermHelp trigger
+            distinguishes it from encounter difficulty, HP danger, and Session Zero safety.
+            Shown to every role — not DM-gated — since the chip itself is visible to all. */}
         <span className="tag tag-accent" style={{ whiteSpace: 'nowrap' }}>
-          {DANGER_LABEL[campaign.dangerLevel]} danger
+          Campaign danger · {DANGER_LABEL[campaign.dangerLevel]}
         </span>
+        <TermHelp termId="dangerLevel" />
         {/* Mode-aware chrome (#343): tells everyone an AI participates before it speaks. */}
         <AiModeBadge campaignId={campaignId} />
         <span className="tag tag-outline" style={{ whiteSpace: 'nowrap' }}>

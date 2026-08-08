@@ -5,10 +5,15 @@
  * Passive poll/SSE refetch must leave an still-actionable error visible.
  */
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   clearsActionErrorOn,
   makeActionError,
 } from '../../src/features/encounters/encounterActionError';
+
+const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const ERROR_NOTE = resolve(__dirname, '../../src/components/ui.tsx');
 
 test.describe('encounter action-error clearing (issue #430)', () => {
   test('clears on refresh, navigate, dismiss, retry, mutation-start, and successful action', () => {
@@ -34,9 +39,23 @@ test.describe('encounter action-error clearing (issue #430)', () => {
     expect(err.at).toBe(1_700_000_000_000);
   });
 
-  test('clears action error on user actions via clearsActionErrorOn helper', () => {
-    expect(clearsActionErrorOn('refresh')).toBe(true);
-    expect(clearsActionErrorOn('dismiss')).toBe(true);
-    expect(clearsActionErrorOn('retry')).toBe(true);
+  // `clearsActionErrorOn` documents the intended per-event policy above, but it has no
+  // production caller — RunSessionPage.tsx calls `setActionError(null)` directly in each
+  // handler rather than gating through this helper. A regression that unhooks Refresh or
+  // Dismiss from `setActionError` (or lets `ErrorNote` drop its dismiss control) would
+  // still pass every assertion above; only reading the actual wiring catches that.
+  test('RunSessionPage Refresh and Dismiss clear actionError; ErrorNote supports dismiss', () => {
+    const page = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const ui = readFileSync(ERROR_NOTE, 'utf8');
+
+    expect(page).toMatch(/refreshEncounter/);
+    expect(page).toMatch(/setActionError\(null\)/);
+    expect(page).toMatch(/onDismiss=\{actionError \? \(\) => setActionError\(null\) : undefined\}/);
+    expect(page).toMatch(/onClick=\{refreshEncounter\}/);
+    // Passive invalidate path stays separate from the Refresh clear.
+    expect(page).toMatch(/const refetchEncounter = useCallback\(\(\) => invalidateEncounter/);
+
+    expect(ui).toMatch(/onDismiss\?:/);
+    expect(ui).toMatch(/\bDismiss\b/);
   });
 });

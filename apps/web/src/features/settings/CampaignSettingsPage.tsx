@@ -20,6 +20,7 @@ import type {
   CampaignExportRequest,
   CampaignExportRequestPage,
   CampaignInvite,
+  CampaignStatusTransition,
   CastSession,
   CastSessionCreated,
   DangerLevel,
@@ -1350,7 +1351,30 @@ function StatusCard({
   const [error, setError] = useState<string | null>(null);
   const [liveInviteCount, setLiveInviteCount] = useState(0);
   const [revokeInvitesOnArchive, setRevokeInvitesOnArchive] = useState(false);
+  // Issue #846: optional DM-only reason captured at archive time and PATCHed as
+  // statusChangeReason; shown back in the transition history below. Reset on
+  // cancel/apply so it never leaks into the next change.
+  const [reason, setReason] = useState('');
+  const [transitions, setTransitions] = useState<CampaignStatusTransition[] | null>(null);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Issue #846: load the status-transition history (DM sees the reason; the
+  // server redacts it for non-DMs). Re-fetch whenever the persisted status
+  // changes so a fresh transition appears without a manual reload.
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .get<CampaignStatusTransition[]>(`${API}/campaigns/${campaignId}/status-transitions`)
+      .then((list) => {
+        if (!cancelled) setTransitions(list);
+      })
+      .catch(() => {
+        if (!cancelled) setTransitions(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, campaign.status]);
 
   // If the persisted status changes out from under us (reload or an external
   // edit), drop every pending transient so the select reflects the real server
@@ -1424,10 +1448,12 @@ function StatusCard({
 
   function cancelConfirm() {
     setRevokeInvitesOnArchive(false);
+    setReason('');
     setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'cancelConfirm' }));
   }
 
   function cancelPreview() {
+    setReason('');
     setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'cancel' }));
   }
 
@@ -1443,7 +1469,10 @@ function StatusCard({
         isArchivingTransition(from, value) && revokeInvitesOnArchive ? '?revokeInvites=true' : '';
       const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}${revokeQs}`, {
         status: value,
+        // Issue #846: DM-only reason recorded with the transition (server-side provenance).
+        ...(reason.trim() ? { statusChangeReason: reason.trim() } : {}),
       });
+      setReason('');
       onSaved(updated);
       // Announce via the app-root live region (survives the card re-rendering
       // into the archived state) so a screen reader hears the lock land.
@@ -1636,6 +1665,21 @@ function StatusCard({
                   </label>
                 </div>
               )}
+              {/* Issue #846: optional DM-only reason recorded with the transition. */}
+              <label className="flex flex-col gap-1" style={{ margin: 0 }}>
+                <span className="text-muted" style={{ fontSize: 11.5 }}>
+                  Reason (optional, DM-only — not shown to players)
+                </span>
+                <textarea
+                  className="input"
+                  rows={2}
+                  maxLength={500}
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder="e.g. Pausing for the holidays; resuming in January."
+                  data-testid="archive-reason"
+                />
+              </label>
               <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
                 You can undo this for a few seconds, or set the status back to Active at any time.
               </p>
@@ -1688,6 +1732,27 @@ function StatusCard({
           >
             Dismiss
           </button>
+        </div>
+      )}
+
+      {/* Issue #846: status-transition history (newest first). DMs see the reason;
+          the server redacts it for non-DMs. Append-only, so reactivation keeps
+          the full archive→reactivate trail. */}
+      {transitions && transitions.length > 0 && (
+        <div
+          data-testid="status-transition-history"
+          className="flex flex-col gap-1.5"
+          style={{ fontSize: 11.5 }}
+        >
+          <p className="card-kicker" style={{ margin: 0 }}>Status history</p>
+          {transitions.slice(0, 6).map((t) => (
+            <div key={t.id} className="text-muted" style={{ margin: 0 }}>
+              <strong style={{ color: 'var(--color-text)' }}>{t.actorName || 'Someone'}</strong>{' '}
+              changed {STATUS_LABEL[t.fromStatus] ?? t.fromStatus} →{' '}
+              {STATUS_LABEL[t.toStatus] ?? t.toStatus} on {formatDateTime(t.createdAt)}
+              {t.reason ? <> — <span style={{ color: 'var(--color-text)' }}>{t.reason}</span></> : null}
+            </div>
+          ))}
         </div>
       )}
 
@@ -1758,7 +1823,7 @@ function RuleSystemCard({
   const targetProfile = packs ? rulesetCapabilitiesForSelection(selected, packs) : null;
   const targetMechanics = targetProfile?.mechanicsSummary ??
     (selected
-      ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected)} combat math.`
+      ? mechanicsForPackSlug(selected) ?? `Falls back to ${ruleSystemAdapterLabel(selected, selected === currentSlug ? campaign.customMechanicsProfile : null)} combat math.`
       : 'No installed rules text. Combat math falls back to D&D 5e defaults; this does not select a 5e rules pack.');
 
   return (

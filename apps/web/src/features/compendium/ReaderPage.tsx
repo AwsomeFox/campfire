@@ -15,7 +15,8 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import type { Character, RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton, Btn } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
-import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
+import { StatBlock, entryRendersMonsterStatblock } from '../../components/StatBlock';
+import { EntryFacts, hasEntryFacts } from '../../components/EntryFacts';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
 import { useDialog } from '../../components/useDialog';
@@ -38,7 +39,9 @@ export default function ReaderPage() {
   const navigate = useNavigate();
   // Resolve the statblock adapter from the active campaign's rule system (issue #234),
   // not the 5e default baked in at the call site.
-  const ruleSystem = useCampaign(Number.isFinite(id) ? id : undefined)?.ruleSystem ?? null;
+  const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
+  const ruleSystem = campaign?.ruleSystem ?? null;
+  const customMechanicsProfile = campaign?.customMechanicsProfile ?? null;
   // Only the DM (of this campaign) may set an entry's icon override (issue #305) — the
   // PATCH is server-side gated to admin/DM too; this just hides the control for players.
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
@@ -174,6 +177,10 @@ export default function ReaderPage() {
     );
   }
 
+  // Both predicates parse `dataJson`; resolve each once rather than per JSX branch.
+  const showsStatblock = entryRendersMonsterStatblock(entry?.type, entry?.dataJson, ruleSystem, customMechanicsProfile);
+  const showsFacts = !showsStatblock && hasEntryFacts(entry?.dataJson);
+
   return (
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 900 }}>
       <div className="flex items-center gap-2.5 flex-wrap">
@@ -240,12 +247,21 @@ export default function ReaderPage() {
               and the JSON has renderable fields; otherwise fall back to the markdown
               body. Older imports stored literal escape sequences (backslash-n) that
               break markdown tables/paragraphs; normalise defensively so
-              already-installed packs render correctly without a reinstall. */}
+              already-installed packs render correctly without a reinstall.
+
+              Non-creature entries carry their mechanics in `dataJson` too — an item's
+              price and damage, a spell's range and duration. Those used to be
+              unreachable on this page: the structured branch is creature-only, so an
+              item with a prose body showed the prose alone and an item without one
+              showed "No details available" while its stats sat in the JSON. Facts now
+              render ABOVE the prose (statblock first, prose after — the printed
+              convention) for every non-creature entry that has any. */}
+          {showsFacts && <EntryFacts data={entry.dataJson} />}
           {entry.body.trim() ? (
             <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
-          ) : hasMonsterStatblock(entry.dataJson, ruleSystem) ? (
-            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} headingLevel={2} />
-          ) : (
+          ) : showsStatblock ? (
+            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} customMechanicsProfile={customMechanicsProfile} headingLevel={2} />
+          ) : showsFacts ? null : (
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}
           <div

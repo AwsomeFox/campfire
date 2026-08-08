@@ -606,6 +606,78 @@ body {
   padding: 0;
 }
 
+/* Inline rules hints on standard actions and conditions (issue #1939) — same fixed-panel
+   disclosure pattern as .cf-term-help above (a narrow/overflow-hidden host like the
+   combatant list or the standard-actions bar's own horizontal scroller would otherwise
+   clip an absolutely-positioned panel), sized smaller since these mount once per chip/tag
+   rather than once per glossary term. */
+.cf-rules-hint {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.cf-rules-hint__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--color-divider);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent-200);
+  font-size: 11px;
+  font-weight: 800;
+  font-style: italic;
+  line-height: 1;
+}
+
+.cf-rules-hint__trigger:hover,
+.cf-rules-hint__trigger:focus-visible {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 55%, var(--color-divider));
+}
+
+.cf-rules-hint__panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: min(260px, calc(100vw - 24px));
+  max-height: calc(100dvh - 96px);
+  overflow: auto;
+  z-index: var(--cf-layer-dialog);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  text-align: start;
+  white-space: normal;
+}
+
+.cf-rules-hint__title {
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.cf-rules-hint__body {
+  color: var(--color-neutral-300);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cf-rules-hint__link {
+  align-self: flex-start;
+  color: var(--color-accent-200);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 
 /* Login information architecture (#862): one source order at every size —
    compact value statement, applicable authentication, then the full pitch. */
@@ -1245,6 +1317,11 @@ h1, h2, h3, h4, h5, h6 {
 .cf-token-state-pulse {
   animation: cf-token-state-pulse 1.5s ease-in-out infinite;
 }
+@keyframes cf-target-impact-ring {
+  from { opacity: .9; transform: scale(.65); }
+  to { opacity: 0; transform: scale(1.55); }
+}
+.cf-target-impact-ring { position: absolute; inset: -8px; border: 2px solid var(--color-accent); border-radius: 50%; pointer-events: none; animation: cf-target-impact-ring 250ms ease-out both; }
 .cf-death-save-pip {
   box-sizing: border-box;
   position: relative;
@@ -1272,6 +1349,86 @@ h1, h2, h3, h4, h5, h6 {
 .cf-death-save-pip:disabled {
   cursor: default;
 }
+/* Death-save outcome presentation (issue #1919): a table-holds-breath moment, not a
+   silent mutation. A brief flash on the pip group a just-settled roll changed, a
+   distinct outcome banner (revive / dead / stabilized / plain success-failure), a
+   highlighted combat-log row, and a transient spectator toast for other viewers. The
+   global reduced-motion policy below (issue #594) strips every animation here; the text
+   itself carries the same information either way. */
+@keyframes cf-death-save-pip-flash {
+  0%, 100% { filter: brightness(1); }
+  40% { filter: brightness(1.7); }
+}
+.cf-death-save-pips-flash {
+  animation: cf-death-save-pip-flash 0.9s ease-out both;
+}
+@keyframes cf-death-save-outcome-enter {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.cf-death-save-outcome {
+  display: inline-block;
+  width: fit-content;
+  font-weight: 600;
+  font-size: var(--type-label);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm, 4px);
+  border: 1px solid transparent;
+  animation: cf-death-save-outcome-enter 0.4s ease-out both;
+}
+.cf-death-save-outcome--revive {
+  color: #4ade80;
+  border-color: color-mix(in srgb, #4ade80 45%, transparent);
+  background: color-mix(in srgb, #4ade80 12%, transparent);
+}
+.cf-death-save-outcome--dead {
+  color: #f87171;
+  border-color: color-mix(in srgb, #f87171 45%, transparent);
+  background: color-mix(in srgb, #f87171 12%, transparent);
+}
+.cf-death-save-outcome--stabilized {
+  color: #38bdf8;
+  border-color: color-mix(in srgb, #38bdf8 45%, transparent);
+  background: color-mix(in srgb, #38bdf8 12%, transparent);
+}
+.cf-death-save-outcome--success {
+  color: var(--color-accent);
+}
+.cf-death-save-outcome--failure {
+  color: #e5484d;
+}
+/* Combat-log row highlight for a death-save roll (issue #1919). */
+.cf-combat-log-death-save {
+  border-left: 2px solid #e5484d;
+  padding-left: 6px;
+  margin-left: -8px;
+  background: color-mix(in srgb, #e5484d 8%, transparent);
+  border-radius: 3px;
+}
+/* Spectator toast (issue #1919) — "table side": a compact transient banner for a
+   viewer other than the roller. Visible-only (see the render site's comment). */
+@keyframes cf-death-save-spectator-toast-enter {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.cf-death-save-spectator-toast {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  max-width: min(90vw, 420px);
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  background: var(--color-neutral-900, #18181b);
+  color: #fff;
+  border: 1px solid color-mix(in srgb, #e5484d 55%, transparent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font-size: var(--type-label);
+  font-weight: 600;
+  text-align: center;
+  animation: cf-death-save-spectator-toast-enter 0.3s ease-out both;
+}
 .cf-roll-control {
   box-sizing: border-box;
   display: inline-flex;
@@ -1294,6 +1451,38 @@ h1, h2, h3, h4, h5, h6 {
 .cf-roll-control:disabled {
   cursor: default;
   opacity: 0.6;
+}
+
+/*
+ * GatedControl (issue #1933) — the wrapper is always present (see the component doc
+ * comment for why) so it must never affect layout when nothing is gated: `inline-flex`
+ * shrinks to the child's own size, and `position: relative` only matters once the hint
+ * bubble below is actually rendered.
+ */
+.cf-gated-control {
+  display: inline-flex;
+  position: relative;
+  vertical-align: middle;
+}
+.cf-gated-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.cf-gated-hint {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 30;
+  margin-bottom: 6px;
+  max-width: 220px;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-neutral-900);
+  color: var(--color-neutral-100);
+  font-size: var(--type-label);
+  line-height: 1.3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  pointer-events: none;
 }
 .cf-dismiss-target {
   box-sizing: border-box;
@@ -2334,6 +2523,17 @@ a:hover .cf-name-reveal {
 }
 .cf-hp-flash-heal { animation: cf-hp-flash-heal 0.5s ease-out both; }
 
+/* --- Special resource award flourish (PlayerVitalsHeader, issue #1944) --- */
+/* A DM award (5e inspiration / PF2e hero points) landing on the recipient's own pip via
+   the character.updated refetch — a brief accent glow, same fill-mode/shape as the HP
+   flash pair above so it reverts cleanly to the pip's normal look. */
+@keyframes cf-special-resource-award-flash {
+  0%   { box-shadow: 0 0 12px 3px var(--color-accent-300); filter: brightness(1.6); }
+  60%  { box-shadow: 0 0 6px 1px var(--color-accent-300); filter: brightness(1.2); }
+  100% { box-shadow: 0 0 0 0 transparent; filter: brightness(1); }
+}
+.cf-special-resource-award-flash { animation: cf-special-resource-award-flash 0.6s ease-out both; }
+
 /* --- Level up (CharacterPage XpCard) --- */
 /* "Ready to level up" tag gently breathes to draw the eye. */
 @keyframes cf-ready-pulse {
@@ -2368,6 +2568,56 @@ a:hover .cf-name-reveal {
 }
 .cf-turn-beat-motion { animation: cf-turn-beat-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .cf-turn-beat-pulse { animation: cf-turn-beat-pulse 0.7s ease-out both; }
+/* Transient encounter HP feedback (issue #1907). Kept presentation-only: the
+   canonical combatant query remains the single source for its values. */
+.cf-hp-feedback-anchor { position: relative; }
+.cf-hp-feedback {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 20;
+  overflow: visible;
+}
+.cf-hp-feedback__item {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .9);
+  animation: cf-hp-feedback-rise .9s ease-out both;
+}
+.cf-hp-feedback__item--damage { color: #f87171; }
+.cf-hp-feedback__item--heal { color: #4ade80; }
+.cf-hp-feedback__item--tempHp { color: #38bdf8; }
+.cf-hp-feedback__item--down { color: #f8fafc; }
+.cf-hp-feedback__item--revive { color: #86efac; }
+.cf-hp-feedback__item--bandTick { color: #fbbf24; }
+.cf-hp-feedback__item--crit { font-size: 21px; color: #fff; text-shadow: 0 0 8px #fff, 0 1px 3px rgba(0, 0, 0, .9); }
+.cf-hp-feedback-anchor--down { animation: cf-hp-feedback-down .3s ease-out both; }
+.cf-hp-feedback-anchor--revive { animation: cf-hp-feedback-revive .3s ease-out both; }
+.cf-hp-feedback-anchor--crit { animation: cf-hp-feedback-crit .18s steps(1, end) both; }
+@keyframes cf-hp-feedback-rise {
+  0% { opacity: 0; transform: translate(-50%, -35%) scale(.8); }
+  18% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, calc(-50% - 24px)) scale(1); }
+}
+@keyframes cf-hp-feedback-down {
+  0% { filter: grayscale(0); transform: scale(1); }
+  100% { filter: grayscale(.75); transform: scale(.96); }
+}
+@keyframes cf-hp-feedback-revive {
+  0% { filter: grayscale(.75); transform: scale(.96); }
+  100% { filter: grayscale(0); transform: scale(1); }
+}
+@keyframes cf-hp-feedback-crit {
+  0%, 45% { filter: brightness(2.5); }
+  100% { filter: brightness(1); }
+} 
 
 /* Accessibility: honour a reduced-motion preference globally (issue #594).
    Named cf-anim-* classes are not enough — Tailwind animate-* utilities,
@@ -2401,6 +2651,7 @@ a:hover .cf-name-reveal {
   .cf-anim-hp-damage,
   .cf-hp-flash-damage,
   .cf-hp-flash-heal,
+  .cf-special-resource-award-flash,
   .cf-anim-ready,
   .cf-anim-levelup,
   .cf-sparkle,
@@ -2409,8 +2660,18 @@ a:hover .cf-name-reveal {
   .cf-dice-roll-overlay__die--crit,
   .cf-dice-roll-overlay__die--fumble,
   .cf-dice-roll-overlay__crit-ring,
-  .cf-dice-roll-overlay__fumble-void {
+  .cf-dice-roll-overlay__fumble-void,
+  .cf-hp-feedback-anchor--down,
+  .cf-hp-feedback-anchor--revive,
+  .cf-hp-feedback-anchor--crit,
+  .cf-hp-feedback__item {
     animation: none !important;
+  }
+
+  .cf-hp-feedback__item {
+    opacity: 1;
+    top: calc(50% - var(--cf-hp-feedback-offset, 0px));
+    transform: translate(-50%, -50%);
   }
 }
 
@@ -2728,6 +2989,21 @@ a:hover .cf-name-reveal {
   background: radial-gradient(circle, rgba(239, 68, 68, 0.35) 0%, transparent 70%);
   animation: cf-fumble-implode 0.6s cubic-bezier(0.22, 1, 0.36, 1) forwards;
   pointer-events: none;
+}
+/* Color-vision-assist crit/fumble badge (issue #1942): a static glyph, not an
+   animation, so the distinction survives prefers-reduced-motion (which disables
+   the ring/void flourishes above) and hue alike. */
+.cf-dice-roll-overlay__assist-glyph {
+  position: absolute;
+  bottom: 2px;
+  right: 4px;
+  font-size: 16px;
+  line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+  pointer-events: none;
+}
+.cf-dice-roll-overlay__die--d20 .cf-dice-roll-overlay__assist-glyph {
+  transform: rotate(-45deg);
 }
 
 @keyframes cf-die-crit-pulse {

@@ -25,6 +25,7 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type {
   CampaignSummary,
   CastSafetyState,
@@ -48,6 +49,7 @@ import { useDialog } from '../../components/useDialog';
 import { SafetyHoldDisplayOverlay, SafetyHoldOverlayView } from '../../components/SafetyHoldBar';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { BattleMap } from '../encounters/RunSessionPage';
+import { TurnElapsedChip } from '../encounters/TurnElapsedChip';
 import { useAuth } from '../../app/auth';
 import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
@@ -220,6 +222,7 @@ async function castRequest<T>(token: string, path: string, init?: RequestInit & 
 }
 
 export default function PlayerDisplayPage() {
+  const { t } = useTranslation();
   const { campaignId, token: castToken } = useParams<{ campaignId: string; token?: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
@@ -268,7 +271,7 @@ export default function PlayerDisplayPage() {
    * paging deterministically. */
   const [sceneTick, setSceneTick] = useState(0);
   /** Transient battle-map pings mirrored from the live encounter (issue #484). */
-  const [mapPings, setMapPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null }>>([]);
+  const [mapPings, setMapPings] = useState<Array<{ key: number; x: number; y: number; senderName: string | null; color: string | null; label: string | null }>>([]);
   const mapPingSeq = useRef(0);
   const fullscreenActiveRef = useRef(isFullscreen);
   /** A popup gets one best-effort fullscreen request. Browser activation rules
@@ -491,21 +494,27 @@ export default function PlayerDisplayPage() {
 
   usePollWhileVisible(() => void loadCastSafety(), POLL_MS, isCastMode);
 
-  const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null }) => {
+  const addMapPing = useCallback((ping: { x: number; y: number; senderName?: string | null; color?: string | null; label?: string | null }) => {
     const key = ++mapPingSeq.current;
-    if (ping.senderName) {
-      announce(`${ping.senderName} pinged the map`);
-    } else {
-      announce('A map ping arrived');
-    }
+    // Issue #1937: mirrors RunSessionPage's announcement — a labeled (intent) ping
+    // includes the intent, a plain tap keeps the original wording. Issue #2048: this
+    // composes exactly as BattleMap's visible ping log does — same two keys, same
+    // `unknownSender` fallback — so the announcement a screen-reader user hears is the
+    // sentence that is on screen, in one language.
+    const senderName = ping.senderName || t('encounters.map.ping.log.unknownSender');
+    announce(
+      ping.label
+        ? t('encounters.map.ping.log.labeled', { name: senderName, label: ping.label })
+        : t('encounters.map.ping.log.plain', { name: senderName }),
+    );
     setMapPings((prev) => {
-      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null }];
+      const next = [...prev, { key, x: ping.x, y: ping.y, senderName: ping.senderName || null, color: ping.color || null, label: ping.label || null }];
       return next.slice(-10);
     });
     window.setTimeout(() => {
       setMapPings((prev) => prev.filter((p) => p.key !== key));
     }, 10000);
-  }, [announce]);
+  }, [announce, t]);
 
   const dismissMapPing = useCallback((key: number) => {
     setMapPings((prev) => prev.filter((p) => p.key !== key));
@@ -596,7 +605,7 @@ export default function PlayerDisplayPage() {
     const party = safeParty(summary.party, { includeAlumni, participatingCharacterIds });
     const quests = safeQuests(summary.quests);
     const npcs = safeNpcs(summary.npcs);
-    const combatants = encounter ? safeCombatants(encounter.combatants) : [];
+    const combatants = encounter ? safeCombatants(encounter.combatants, encounter.monsterHpDisplay) : [];
     const currentId =
       encounter && encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
     const currentIndex = currentId != null ? combatants.findIndex((c) => c.id === currentId) : -1;
@@ -644,7 +653,7 @@ export default function PlayerDisplayPage() {
       prevAnnounceRef.current = null;
       return;
     }
-    const safe = safeCombatants(encounter.combatants);
+    const safe = safeCombatants(encounter.combatants, encounter.monsterHpDisplay);
     const currentId = encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
     const turnKey =
       encounter.status === 'running' ? `${encounter.round}:${currentId}` : encounter.status;
@@ -674,10 +683,12 @@ export default function PlayerDisplayPage() {
         const now = hp.get(c.id);
         if (before == null || now == null || now === '' || before === now) continue;
         if (c.hpBand != null) {
-          // Monster — band label only, never the exact numbers.
+          // Monster/NPC in 'band' or 'hidden'-and-down mode — band label only, never the
+          // exact numbers (issue #1925: the mode already decided this server-side).
           combatantUpdates.push(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
         } else if (c.hpCurrent != null && c.hpMax != null) {
-          // Character — exact HP is shared table info.
+          // Character (always), or a monster/NPC in 'exact' mode — exact HP is safe to
+          // announce because the server already decided to ship the real numbers.
           combatantUpdates.push(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
         }
       }
@@ -1223,6 +1234,14 @@ export default function PlayerDisplayPage() {
             <span className="cf-status-round" data-testid="cf-status-round">
               Round {encounter.round}
             </span>
+            {/* Turn timer (issue #1935): same "players only see it with a limit set" rule as
+                PlayerVitalsHeader — turnStartedAt/turnTimerSeconds are not secrets, so no
+                playerSafe re-shaping is needed here. */}
+            <TurnElapsedChip
+              turnStartedAt={encounter.turnStartedAt}
+              turnTimerSeconds={encounter.turnTimerSeconds}
+              audience="player"
+            />
             <span className="cf-status-turn" data-testid="cf-status-current">
               <span className="cf-status-turn-label">Now</span>
               <span className="cf-status-turn-name cf-clamp-1">{currentActor?.name ?? '—'}</span>
@@ -1745,14 +1764,18 @@ function InitiativeRow({
   isCurrent: boolean;
   tick: number;
 }) {
-  // Non-character combatants (monsters AND DM-controlled NPCs) show a coarse HP band,
-  // not exact numbers — safeCombatant redacts both, so treat both the same here.
+  // Kind badge only — unrelated to which HP form is shown below.
   const isMonster = combatant.kind !== 'character';
+  // Which HP form to show follows the encounter's monsterHpDisplay dial (issue #1925),
+  // already applied server-side and carried through by safeCombatant: exact numbers when
+  // present (characters always, monsters/NPCs in 'exact' mode), a coarse band otherwise
+  // ('band' mode, or a downed combatant in 'hidden' mode), or neither ('hidden').
+  const hasExactHp = combatant.hpCurrent != null && combatant.hpMax != null;
   const bandPct = combatant.hpBand ? HP_BAND_PCT[combatant.hpBand] : 0;
   const bandTone = combatant.hpBand ? HP_BAND_TONE[combatant.hpBand] : '';
   const charPct =
-    combatant.hpCurrent != null && combatant.hpMax != null && combatant.hpMax > 0
-      ? Math.max(0, Math.min(100, (combatant.hpCurrent / combatant.hpMax) * 100))
+    hasExactHp && combatant.hpMax! > 0
+      ? Math.max(0, Math.min(100, (combatant.hpCurrent! / combatant.hpMax!) * 100))
       : 0;
   const charTone = charPct <= 25 ? 'crit' : charPct <= 50 ? 'low' : '';
 
@@ -1782,20 +1805,20 @@ function InitiativeRow({
         <ConditionChips conditions={combatant.conditions} tick={tick} />
       </div>
       <div className="cf-init-hp">
-        {isMonster ? (
-          <>
-            <span className="cf-hp-num">{combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}</span>
-            <div className={`cf-screen-hp ${bandTone}`}>
-              <div style={{ width: `${bandPct}%` }} />
-            </div>
-          </>
-        ) : (
+        {hasExactHp ? (
           <>
             <span className="cf-hp-num">
               {combatant.hpCurrent}/{combatant.hpMax}
             </span>
             <div className={`cf-screen-hp ${charTone}`}>
               <div style={{ width: `${charPct}%` }} />
+            </div>
+          </>
+        ) : (
+          <>
+            <span className="cf-hp-num">{combatant.hpBand ? HP_BAND_LABEL[combatant.hpBand] : '—'}</span>
+            <div className={`cf-screen-hp ${bandTone}`}>
+              <div style={{ width: `${bandPct}%` }} />
             </div>
           </>
         )}
@@ -2129,6 +2152,9 @@ const SCREEN_CSS = `
 }
 .cf-screen .cf-status-enc { font-weight: 700; color: var(--color-accent-2); max-width: 30cqw; }
 .cf-screen .cf-status-round { font-weight: 600; }
+/* Turn timer chip (issue #1935) — scaled up to the same across-the-room legibility
+   as the rest of the status band, same reasoning as .cf-screen-chip above. */
+.cf-screen .cf-turn-timer-chip { font-size: max(15px, 2cqh); padding: 0.4cqh 1.2cqw; }
 .cf-screen .cf-status-turn { display: inline-flex; align-items: baseline; gap: 0.8cqw; min-width: 0; }
 .cf-screen .cf-status-turn-label {
   font-size: max(15px, 1.9cqh);

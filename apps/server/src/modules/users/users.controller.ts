@@ -146,6 +146,7 @@ export class UsersController {
     if (body.serverRole !== undefined) changes.push(`role=${updated.serverRole}`);
     if (body.disabled !== undefined) changes.push(updated.disabled ? 'disabled' : 'enabled');
     if (body.displayName !== undefined) changes.push('displayName');
+    if (body.canCreateCampaigns !== undefined) changes.push(`canCreateCampaigns=${updated.canCreateCampaigns}`);
     await this.audit.log({
       actor: auditActor(actor),
       actorRole: auditActorRole(actor),

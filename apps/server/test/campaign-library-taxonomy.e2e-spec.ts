@@ -2,7 +2,7 @@ import request from 'supertest';
 import { and, eq } from 'drizzle-orm';
 import { closeTestApp, createTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { auditLog, campaignLibraryBulkOperations, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaigns, characters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
+import { auditLog, campaignLibraryBulkOperations, campaignLibraryEntityTaxonomy, campaignLibraryMonsters, campaigns, characters, combatants, encounters, inventoryItems, locations, npcs, quests } from '../src/db/schema';
 
 describe('campaign library taxonomy (issue #742)', () => {
   let ctx: TestAppContext;
@@ -548,6 +548,19 @@ describe('campaign library taxonomy (issue #742)', () => {
     const monsterCopy = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${monsterTemplate.body.id}/instantiate`).set(dm).send({ name: 'Monster copy' });
     expect(monsterCopy.status).toBe(201);
     expect((await db.select().from(campaignLibraryMonsters).where(eq(campaignLibraryMonsters.id, monsterCopy.body.entityId))).at(0)?.name).toBe('Monster copy');
+    const [encSource] = await db.insert(encounters).values({ campaignId, name: 'REST Encounter', createdAt: ts, updatedAt: ts }).returning();
+    await db.insert(combatants).values({ encounterId: encSource.id, kind: 'monster', name: 'Goblin 1', hpMax: 12, hpCurrent: 5, initMod: 1, sortOrder: 0 });
+    await db.insert(combatants).values({ encounterId: encSource.id, kind: 'monster', name: 'Goblin 2', hpMax: 12, hpCurrent: 5, initMod: 1, sortOrder: 1 });
+    const encTemplate = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm).send({ entityType: 'encounter', entityId: encSource.id, name: 'Encounter Template' });
+    expect(encTemplate.status).toBe(201);
+    expect(encTemplate.body.snapshot.roster).toHaveLength(1);
+    expect(encTemplate.body.snapshot.roster[0]).toMatchObject({ kind: 'monster', name: 'Goblin', count: 2, hpMax: 12 });
+    const instantiatedEnc = await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${encTemplate.body.id}/instantiate`).set(dm).send({ name: 'Instantiated Fight' });
+    expect(instantiatedEnc.status).toBe(201);
+    const encRows = await db.select().from(combatants).where(eq(combatants.encounterId, instantiatedEnc.body.entityId));
+    expect(encRows).toHaveLength(2);
+    expect(encRows.map((c) => c.name)).toEqual(['Goblin 1', 'Goblin 2']);
+    expect(encRows.every((c) => c.hpCurrent === 12 && c.initiative === null)).toBe(true);
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${saved.body.id}/archive`).set(dm)).status).toBe(201);
     expect((await request(server).get(`/api/v1/campaigns/${campaignId}/library/templates`).set(dm)).body.map((template: { id: number }) => template.id)).not.toContain(saved.body.id);
     expect((await request(server).post(`/api/v1/campaigns/${campaignId}/library/templates/${saved.body.id}/instantiate`).set(dm).send({})).status).toBe(404);

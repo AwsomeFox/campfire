@@ -12,6 +12,7 @@ import {
   restRequestBody,
   resourcePatchBody,
   spellSlotPatchBody,
+  combatantResourceAdjustBody,
   canEditCharacterResource,
   hasTrackedResources,
   pendingTargetKey,
@@ -19,6 +20,7 @@ import {
   removePendingKey,
   type PipOwnerScope,
 } from './resourceTrackerLogic';
+import { adapterResourceLabel } from '../../lib/adapterVocabularyLabel';
 
 function Pips({
   max,
@@ -62,7 +64,6 @@ export function ResourceTrackerPanel({
   canPlayerWrite,
   ownedCharacterIds,
   encounterWritable,
-  encounterUpdatedAt,
 }: {
   campaignId?: number;
   encounterId: number;
@@ -74,13 +75,6 @@ export function ResourceTrackerPanel({
   /** `encounter.status !== 'ended'` (issue #1902 rework, round 2) — see the doc comment on
    *  {@link canEditCharacterResource} for why this only affects statblock-only combatants. */
   encounterWritable: boolean;
-  /** The encounter's own `updatedAt` (issue #1902 rework, round 12, devin) — echoed back as
-   *  `expectedUpdatedAt` on a statblock pip write. `updateCombatant` validates this CAS token
-   *  against the ENCOUNTER row, not a per-combatant one (there is no per-combatant revision
-   *  field), so this is the same guard every other `expectedUpdatedAt`-bearing combatant PATCH
-   *  in the app already relies on. Without it, a whole-statblock PATCH built from a stale
-   *  cached combatant could silently overwrite another client's concurrent statblock edit. */
-  encounterUpdatedAt: string | undefined;
 }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -110,7 +104,7 @@ export function ResourceTrackerPanel({
   // stamina/night cadence instead of a generic short/long rest that restores no SP and
   // spends no RP.
   const campaign = useCampaign(campaignId);
-  const adapter = ruleSystemAdapter(campaign?.ruleSystem);
+  const adapter = ruleSystemAdapter(campaign?.ruleSystem, campaign?.customMechanicsProfile);
   const restOptions = restOptionsForAdapter(adapter);
   // Issue #1902 rework: `CampaignProvider`'s campaign list loads asynchronously, so on
   // first paint `useCampaign(campaignId)` can still be `undefined` for a moment even
@@ -152,11 +146,11 @@ export function ResourceTrackerPanel({
   // `endPendingAfterReconciling`'s own direct (non-stuck) reconciliation path.
   // Issue #1902 rework (round 23, codex P2): `needsCharacters` is whether THIS target's own
   // CAS token/rendered state actually depends on the `campaignCharacters` query — true for
-  // the three character-scoped mutations, false for `statblockMutation` (a monster/NPC
-  // combatant's token is the ENCOUNTER's own `updatedAt`; see `endPendingAfterReconciling`'s
-  // own doc comment). Without this, a monster pip that succeeded outright could still get
-  // stuck-then-never-released whenever an unrelated `campaignCharacters` fetch was failing,
-  // even though that query has nothing to do with the monster's own state.
+  // the three character-scoped mutations, false for `combatantResourceMutation` (a
+  // monster/NPC combatant's rendered state depends only on the `encounter` query). Without
+  // this, a monster pip that succeeded outright could still get stuck-then-never-released
+  // whenever an unrelated `campaignCharacters` fetch was failing, even though that query has
+  // nothing to do with the monster's own state.
   const stuckKeysRef = useRef<Map<string, { wasAmbiguous: boolean; needsCharacters: boolean }>>(new Map());
   const [, setStuckKeysVersion] = useState(0);
   useEffect(() => {
@@ -220,21 +214,21 @@ export function ResourceTrackerPanel({
   // the identical way. Both cases therefore wait for a fresh read of BOTH caches this panel
   // renders from before releasing the pending key, so the control's next render reflects
   // server-truth rather than the pre-request snapshot.
-  // `forceReconcile` (issue #1902 rework, round 14, codex P2): `statblockMutation`'s CAS
-  // token is the ENCOUNTER's `updatedAt`, not something its own `Combatant` response can
-  // refresh (see the `encounterUpdatedAt` prop's doc comment) — so unlike the other three
-  // mutations (whose token IS in their own response, synchronously reconciled by
-  // `reconcileCharacter`), a statblock write must wait for the encounter to actually
-  // refetch on SUCCESS too, not only on an ambiguous/stale-write error, or an immediate
-  // second click resends the now-provably-stale encounter revision and 409s against its
-  // own prior write.
+  // `forceReconcile` (issue #1902 rework, round 14, codex P2): historically needed because
+  // the old whole-statblock PATCH's CAS token was the ENCOUNTER's `updatedAt`, which its own
+  // `Combatant` response could not refresh — a statblock write had to wait for the encounter
+  // to actually refetch on SUCCESS too, or an immediate second click resent the now-stale
+  // encounter revision and 409d against its own prior write. Issue #1909's delta-based
+  // `POST .../combatants/:cid/resources` sends no CAS token at all (it reads the row fresh
+  // inside its own transaction), so `combatantResourceMutation` below no longer needs
+  // `forceReconcile: true` — the parameter still exists for whichever future mutation
+  // reintroduces a response-external CAS token.
   // Issue #1902 rework (round 23, codex P2): `needsCharacters` (default true) says whether
   // the CALLER's target actually depends on the `campaignCharacters` query at all. The three
   // character-scoped mutations do (their CAS token and rendered resource values live on the
-  // character row), but `statblockMutation` — a monster/NPC combatant, no linked sheet —
-  // depends only on the `encounter` query (see the `forceReconcile` doc comment just above:
-  // its CAS token IS the encounter's own `updatedAt`). Demanding `charactersOk` regardless
-  // meant a successful monster pip could still get stuck (and keep retrying every 5s) purely
+  // character row), but `combatantResourceMutation` — a monster/NPC combatant, no linked
+  // sheet — depends only on the `encounter` query. Demanding `charactersOk` regardless meant
+  // a successful monster pip could still get stuck (and keep retrying every 5s) purely
   // because an UNRELATED `campaignCharacters` fetch was failing — a failure that target's own
   // state never depended on.
   const endPendingAfterReconciling = async (key: string, error: unknown, forceReconcile = false, needsCharacters = true) => {
@@ -275,10 +269,10 @@ export function ResourceTrackerPanel({
   // Every write reconciles the ROW it touched into the relevant cache from its OWN
   // response, before `invalidate()`'s async refetch (issue #1902 rework): round 1 did
   // this for slotMutation, round 2 for restMutation, round 5 for resourceMutation.
-  // `reconcileCombatant` (round 6) is the statblock-side equivalent — `statblockMutation`
-  // was the one write path still relying on `invalidate()` alone, so the SAME defect
-  // class (self-inflicted revert from a stale local snapshot) applied to a monster's
-  // combatant row that applied to a character's sheet before round 5.
+  // `reconcileCombatant` (round 6) is the statblock-side equivalent, now backing
+  // `combatantResourceMutation` (issue #1909) — the same defect class (self-inflicted
+  // revert from a stale local snapshot) applied to a monster's combatant row that applied
+  // to a character's sheet before round 5.
   const reconcileCharacter = (updated: Character) => {
     if (campaignId != null) {
       queryClient.setQueryData<Character[]>(queryKeys.campaignCharacters(campaignId), (old) =>
@@ -379,29 +373,41 @@ export function ResourceTrackerPanel({
     },
   });
 
-  const statblockMutation = useMutation({
+  // Issue #1909: a statblock (monster/NPC) combatant's pip click now spends/restores ONE
+  // resource or spell-slot level via the delta-based, transactional
+  // POST .../combatants/:cid/resources — replacing the whole-statblock PATCH that used to
+  // rebuild and resend the ENTIRE statblock object from whatever this client last cached,
+  // racing last-writer-wins with a second writer (another tab, an MCP-driven AI DM) and
+  // silently reverting their unrelated edits. No CAS token is needed here: the server reads
+  // the combatant row fresh inside the same transaction that decides the new `used` value.
+  const combatantResourceMutation = useMutation({
     mutationFn: async ({
       combatantId,
-      statblock,
-      expectedUpdatedAt,
+      target,
+      currentUsed,
+      nextUsed,
     }: {
       combatantId: number;
-      statblock: Record<string, unknown>;
-      // Issue #1902 rework: this one mutation backs both statblock resource pips and
-      // statblock spell-slot pips. `kind` lets `onError` pick the fallback message that
-      // matches which control actually failed, instead of always reporting "resource".
+      target: { key: string } | { spellLevel: number };
+      currentUsed: number;
+      nextUsed: number;
+      // This one mutation backs both statblock resource pips and statblock spell-slot
+      // pips. `kind` lets `onError` pick the fallback message that matches which control
+      // actually failed, instead of always reporting "resource".
       kind: 'resource' | 'slot';
-      // Issue #1902 rework (round 12, devin): the encounter's `updatedAt` as last read —
-      // see the doc comment on the `encounterUpdatedAt` prop. A whole-statblock PATCH built
-      // from a stale cached combatant must not silently clobber a concurrent statblock edit.
-      expectedUpdatedAt: string | undefined;
-    }) => api.patch<Combatant>(`${API}/encounters/${encounterId}/combatants/${combatantId}`, { statblock, expectedUpdatedAt }),
+    }) =>
+      api.post<Combatant>(
+        `${API}/encounters/${encounterId}/combatants/${combatantId}/resources`,
+        combatantResourceAdjustBody(target, currentUsed, nextUsed),
+      ),
     onMutate: (vars) => beginPending(pendingTargetKey({ combatantId: vars.combatantId })),
-    // Issue #1902 rework (round 23, codex P2): a monster/NPC statblock combatant's CAS
-    // token and rendered state depend only on the `encounter` query, never `campaignCharacters`
-    // — pass `needsCharacters: false` so reconciliation (and the stuck-key auto-release) never
-    // gates this target's release on an unrelated character-list failure.
-    onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ combatantId: vars.combatantId }), error, true, false),
+    // Issue #1909: unlike the whole-statblock PATCH this replaces, there is no
+    // response-external CAS token to catch up on, so `forceReconcile` stays false — the
+    // default (reconcile-before-release only on an ambiguous/stale-write outcome) is
+    // exactly right, matching the three character-scoped mutations. `needsCharacters:
+    // false` (round 23 convention) — a monster/NPC statblock combatant's rendered state
+    // depends only on the `encounter` query, never `campaignCharacters`.
+    onSettled: (_data, error, vars) => endPendingAfterReconciling(pendingTargetKey({ combatantId: vars.combatantId }), error, false, false),
     onSuccess: (updated, vars) => {
       clearErrorFor(pendingTargetKey({ combatantId: vars.combatantId }));
       reconcileCombatant(updated);
@@ -539,7 +545,11 @@ export function ResourceTrackerPanel({
                   return (
                     <div key={key} className="flex items-center justify-between gap-4 flex-wrap">
                       <div className="text-sm min-w-0 break-words">
-                        {res.name || key}
+                        {/* Issue #2053 / #2068 — `res.name` may be an explicit custom name, the raw
+                            `key` (when defaulted at creation), or undefined. `adapterResourceLabel`
+                            translates known keys when `res.name` is absent or matches the key or the
+                            catalog's English value, while preserving customized or differing names. */}
+                        {adapterResourceLabel(t, { key, name: res.name })}
                         {res.recharge && <span className="ml-2 text-xs opacity-70">({res.recharge})</span>}
                         {sourceText && <span className="ml-2 text-xs opacity-70">[{sourceText}]</span>}
                       </div>
@@ -556,13 +566,10 @@ export function ResourceTrackerPanel({
                             // `used` needs this guard even more than a relative delta does.
                             resourceMutation.mutate({ characterId: c.characterId, key, used: val, expectedUpdatedAt: updatedAt });
                           } else if (c.statblock) {
-                            const sb = c.statblock as unknown as Record<string, unknown>;
-                            statblockMutation.mutate({
-                              combatantId: c.id,
-                              statblock: { ...c.statblock, resources: { ...(sb.resources as Record<string, unknown>), [key]: { ...res, used: val } } },
-                              kind: 'resource',
-                              expectedUpdatedAt: encounterUpdatedAt,
-                            });
+                            // Issue #1909: delta = clicked − current used, spent/restored
+                            // via the combatant-scoped endpoint — no more rebuilding and
+                            // resending the whole statblock object.
+                            combatantResourceMutation.mutate({ combatantId: c.id, target: { key }, currentUsed: res.used, nextUsed: val, kind: 'resource' });
                           }
                         }}
                       />
@@ -602,13 +609,10 @@ export function ResourceTrackerPanel({
                             expectedUpdatedAt: updatedAt,
                           });
                         } else if (c.statblock) {
-                          const sb = c.statblock as unknown as Record<string, unknown>;
-                          statblockMutation.mutate({
-                            combatantId: c.id,
-                            statblock: { ...c.statblock, spellSlots: { ...(sb.spellSlots as Record<string, unknown>), [level]: { ...slot, used: val } } },
-                            kind: 'slot',
-                            expectedUpdatedAt: encounterUpdatedAt,
-                          });
+                          // Issue #1909: delta = clicked − current used, spent/restored via
+                          // the combatant-scoped endpoint — no more rebuilding and resending
+                          // the whole statblock object.
+                          combatantResourceMutation.mutate({ combatantId: c.id, target: { spellLevel: Number(level) }, currentUsed: slot.used, nextUsed: val, kind: 'slot' });
                         }
                       }}
                     />

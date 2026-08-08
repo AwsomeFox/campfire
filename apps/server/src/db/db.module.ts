@@ -267,7 +267,118 @@ function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
   const hasDiceTheme = columns.some((c) => c.name === 'dice_theme');
   if (hasDiceTheme) return;
 
-  sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+}
+
+/**
+ * Migration for DBs created before spectator roll animation toggle (issue #1899):
+ * `users.animate_others_rolls` didn't exist. Plain NOT NULL DEFAULT 1 ADD COLUMN.
+ */
+function migrateUsersTableForAnimateOthersRolls(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasAnimate = columns.some((c) => c.name === 'animate_others_rolls');
+  if (hasAnimate) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN animate_others_rolls INTEGER NOT NULL DEFAULT 1');
+}
+
+/**
+ * Migration for DBs created before shared-instance governance (issue #851):
+ * `users.can_create_campaigns` didn't exist. Plain NOT NULL DEFAULT 1 ADD COLUMN —
+ * defaulting every EXISTING user to true is deliberate: switching
+ * settings.campaignCreationPolicy to 'approved_organizers' must never silently
+ * revoke a user's pre-existing ability to create/import a campaign; an admin who
+ * wants to narrow it does so per-user afterwards.
+ */
+function migrateUsersTableForCanCreateCampaigns851(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasCanCreateCampaigns = columns.some((c) => c.name === 'can_create_campaigns');
+  if (hasCanCreateCampaigns) return;
+
+  // Two statements, deliberately (review). The COLUMN default is 0 so that any insert which
+  // forgets the field fails CLOSED, and the UPDATE then grants every PRE-EXISTING account the
+  // flag — an upgrade must never silently revoke someone's ability to create campaigns.
+  //
+  // Adding it with `DEFAULT 1` would do the backfill in one statement, but SQLite has no
+  // `ALTER COLUMN SET DEFAULT`, so the permissive default would be baked into every upgraded
+  // database forever, leaving the safe value dependent on every current and future
+  // account-insert path remembering to override it.
+  sqlite.exec('ALTER TABLE users ADD COLUMN can_create_campaigns INTEGER NOT NULL DEFAULT 0');
+  sqlite.exec('UPDATE users SET can_create_campaigns = 1');
+}
+
+/**
+ * Issue #851 — the campaign-creation request/approval flow's table. A single new
+ * CREATE TABLE / CREATE INDEX, so this is a recorded no-op on fresh DBs
+ * (BOOTSTRAP_SQL already declares it) and a one-time create on upgraded DBs.
+ * Mirrors bootstrap.sql.ts exactly.
+ */
+function migrateCampaignCreationRequestsTable851(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_creation_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT NOT NULL DEFAULT '',
+      requested_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_creation_requests_user
+      ON campaign_creation_requests(user_id, status);
+  `);
+}
+
+/**
+ * Migration for DBs created before color-vision-assist mode (issue #1942):
+ * `users.color_vision_assist` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN.
+ */
+function migrateUsersTableForColorVisionAssist1942(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasColorVisionAssist = columns.some((c) => c.name === 'color_vision_assist');
+  if (hasColorVisionAssist) return;
+
+  sqlite.exec('ALTER TABLE users ADD COLUMN color_vision_assist INTEGER NOT NULL DEFAULT 0');
+}
+
+/**
+ * Migration for DBs created before table audio & haptics (issue #1920):
+ * `users.table_audio` didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN,
+ * modeled on migrateUsersTableForColorVisionAssist1942 above.
+ */
+function migrateUsersTableForTableAudio1920(sqlite: Database.Database): void {
+  // `sqlite.pragma(...)` rather than `prepare('PRAGMA table_info(users)').all()`, and
+  // `.exec` for the existence probe rather than `prepare(...).get()`: both avoid leaving
+  // a better-sqlite3 `Statement` alive for the process to destruct at teardown. That was
+  // a guess at the Node 24 `Statement::~Statement()` abort seen on #2050, and it never
+  // moved the failure rate. The current explanation is the dependency, not statement
+  // lifetime: better-sqlite3 11.10.0 predates Node 24 and declares no support for it,
+  // and it embedded raw V8 (`node::ObjectWrap`) rather than Node-API, so its `Statement`
+  // finalizers ran as V8 weak callbacks with no entered context and it carried no
+  // cross-major ABI guarantee. The 13.x line moved those objects to
+  // `Napi::ObjectWrap`, which the Node-API runtime finalizes with a valid `env`. The
+  // pragma form is kept here only because it is the narrower call. Most migrations in
+  // this file still use the `prepare` form.
+  const columns = sqlite.pragma('table_info(users)') as Array<{ name: string }>;
+  if (columns.length === 0) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+  if (columns.some((c) => c.name === 'table_audio')) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN table_audio TEXT NOT NULL DEFAULT 'off'");
 }
 
 /**
@@ -944,6 +1055,55 @@ function migrateDiceRollsTableForEncounterNpcRefs1904(sqlite: Database.Database)
 }
 
 /**
+ * Issue #1910: additive nullable `speed` column on `characters` and `combatants` —
+ * movement speed in the rule system adapter's movement unit, replacing the hardcoded
+ * 30 ft every PC previously got in the turn workspace. NULL on both tables preserves
+ * upgrade compatibility: an existing character/combatant row keeps reading as "no
+ * speed on file", and getTurnWorkspace's resolution chain (combatant snapshot ->
+ * character -> adapter movement-slot max) supplies the same adapter default those
+ * rows already displayed before this column existed. Same guarded per-table ADD
+ * COLUMN idiom as migrateStarfinderCombatState above. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares both columns.
+ */
+function migrateCharacterCombatantSpeed1910(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (hasCharactersTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'speed')) sqlite.exec('ALTER TABLE characters ADD COLUMN speed INTEGER');
+  }
+
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'speed')) sqlite.exec('ALTER TABLE combatants ADD COLUMN speed INTEGER');
+  }
+}
+
+/**
+ * Migration for DBs created before homebrew mechanics profiles (issue #1502):
+ * `campaigns.custom_mechanics_profile` didn't exist. Plain nullable ADD COLUMN — no
+ * table rebuild needed, same idiom as migrateCampaignsTableForActiveEncounter (0057).
+ * Existing campaigns get NULL (no homebrew profile), so `ruleSystemAdapter()` resolves
+ * exactly as it did before this column existed. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForCustomMechanicsProfile1502(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'custom_mechanics_profile')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN custom_mechanics_profile TEXT');
+}
+
+/**
  * Migration for DBs created before trash consistency (issue #701): factions,
  * story_arcs, story_beats, and encounters gained the same nullable `deleted_at`
  * timestamp the other trashable entities carry. Idempotent per-table ADD COLUMNs.
@@ -1155,6 +1315,16 @@ function migrateCombatantsTableForNpcId(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_id INTEGER');
 }
 
+function migrateCombatantsTableForNpcIdentitySource(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL creates the column.
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'npc_identity_source_id')) sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_identity_source_id INTEGER');
+  sqlite.exec('UPDATE combatants SET npc_identity_source_id = npc_id WHERE npc_identity_source_id IS NULL AND npc_id IS NOT NULL');
+}
+
 /**
  * Migration for DBs created before hex grids + shared AoE templates (issue #238):
  * `encounters` gained `grid_type` (NOT NULL DEFAULT 'square' — existing encounters backfill to
@@ -1211,6 +1381,27 @@ function migrateEncountersTableForHexOrientation(sqlite: Database.Database): voi
   if (!has('hex_orientation')) {
     sqlite.exec("ALTER TABLE encounters ADD COLUMN hex_orientation TEXT NOT NULL DEFAULT 'pointy'");
   }
+}
+
+/**
+ * Migration for DBs created before the turn timer (issue #1935): `encounters` gained
+ * `turn_started_at` (nullable — the server-stamped instant the CURRENT turn began; null
+ * when not actively mid-turn) and `turn_timer_seconds` (NOT NULL, DM-set pacing limit;
+ * 0 = off). Plain ADD COLUMNs — same shape as the grid-calibration migration above.
+ * Existing (already-running) encounters backfill `turn_started_at` to NULL, which is
+ * indistinguishable from "not running" until the next turn transition stamps a real
+ * value — acceptable because the elapsed chip only ever renders once a stamp exists.
+ */
+function migrateEncountersTableForTurnTimer(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('turn_started_at')) sqlite.exec('ALTER TABLE encounters ADD COLUMN turn_started_at TEXT');
+  if (!has('turn_timer_seconds')) sqlite.exec('ALTER TABLE encounters ADD COLUMN turn_timer_seconds INTEGER NOT NULL DEFAULT 0');
 }
 
 /**
@@ -1274,6 +1465,44 @@ function migrateEncountersTableForAftermathMutations1448(sqlite: Database.Databa
   const has = (name: string) => columns.some((c) => c.name === name);
   if (!has('aftermath_xp_awarded_at')) sqlite.exec('ALTER TABLE encounters ADD COLUMN aftermath_xp_awarded_at TEXT');
   if (!has('aftermath_loot')) sqlite.exec('ALTER TABLE encounters ADD COLUMN aftermath_loot TEXT');
+}
+
+/** Per-encounter monster-HP display dial for non-DM viewers (issue #1925). */
+function migrateEncountersTableForMonsterHpDisplay1925(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'monster_hp_display')) return;
+
+  sqlite.exec("ALTER TABLE encounters ADD COLUMN monster_hp_display TEXT NOT NULL DEFAULT 'band'");
+}
+
+/**
+ * Issue #846: create the append-only `campaign_status_transitions` provenance table.
+ * CREATE TABLE / INDEX IF NOT EXISTS, so it is a no-op on a fresh DB (BOOTSTRAP_SQL
+ * already declares it) and idempotent on upgraded DBs. Column/index names mirror the
+ * drizzle schema and BOOTSTRAP_SQL exactly so the fresh-DB and upgraded-DB shapes
+ * cannot drift.
+ */
+function migrateCampaignStatusTransitions846(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_status_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      actor_user_id TEXT NOT NULL,
+      actor_name TEXT NOT NULL,
+      from_status TEXT NOT NULL,
+      to_status TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec(
+    'CREATE INDEX IF NOT EXISTS idx_campaign_status_transitions_campaign ON campaign_status_transitions(campaign_id, created_at)',
+  );
 }
 
 /** Boss-fight turn scheduling — lair slot at initiative 20 (issue #618). */
@@ -1672,6 +1901,26 @@ function migrateAiDmSeatsTableForStylePresets1049(sqlite: Database.Database): vo
   sqlite.exec("ALTER TABLE ai_dm_seats ADD COLUMN style_presets TEXT DEFAULT '{}'");
 }
 
+/**
+ * Issue #874: comprehension profile (reading complexity / paragraph length / sensory intensity /
+ * choice count) on the AI-DM seat. Same one-JSON-column shape as #1049's `style_presets` above,
+ * for the same reason: the whole block is read and written as one value. Defaults to '{}', which
+ * zod fills with the all-`default` profile, meaning an upgraded seat renders the same fixed
+ * baseline `## Comprehension` section (see driver-comprehension.ts) it would render anyway — no
+ * per-axis lines until a DM chooses one.
+ */
+function migrateAiDmSeatsTableForComprehensionProfile874(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_seats)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'comprehension_profile')) return;
+
+  sqlite.exec("ALTER TABLE ai_dm_seats ADD COLUMN comprehension_profile TEXT DEFAULT '{}'");
+}
+
 function migrateAiDmSeatsTableForProactiveSettings(sqlite: Database.Database): void {
   const hasTable = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
@@ -1966,6 +2215,25 @@ function migrateCheckRequestsTable(sqlite: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
     CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);
   `);
+}
+
+/**
+ * Migration for DBs created before group checks (issue #1943): `check_requests.group_id`
+ * didn't exist. Plain nullable ADD COLUMN — no backfill: pre-existing rows have no recorded
+ * group (there is no way to know which historical single-target sends belonged together), and
+ * `groupId: null` is a valid, back-compat CheckRequest shape. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCheckRequestsTableForGroupId1943(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='check_requests'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(check_requests)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'group_id')) return;
+
+  sqlite.exec('ALTER TABLE check_requests ADD COLUMN group_id TEXT');
 }
 
 /**
@@ -2689,11 +2957,118 @@ function migrateCombatantsTableForStatblockJson(sqlite: Database.Database): void
   }
 }
 
+/**
+ * Issue #1926 — DM-controlled reveal of a monster/npc's statblock to non-DM viewers.
+ * Single ADD COLUMN (no follow-up UPDATE): DEFAULT 0 (not revealed) is already the
+ * correct/safe backfill for every pre-existing combatant, not merely a permissive
+ * placeholder — an upgrade must never retroactively reveal a monster's statblock
+ * that was withheld before this column existed.
+ */
+function migrateCombatantsTableForStatblockRevealed1926(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'statblock_revealed')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN statblock_revealed INTEGER NOT NULL DEFAULT 0');
+  }
+}
+
+/**
+ * Issue #1921 — persist limited-use/recharge action spends. Two plain ADD COLUMNs, no
+ * table rebuild: `combatants.action_uses` (the live spend map, see
+ * ActionResolverService.applyInternal/undo) and `action_apply_chains.uses_key` /
+ * `.uses_spent` (the exact spend an apply wrote, so undo() can refund it without
+ * re-deriving from a possibly-since-edited action spec). Both default to "nothing spent"
+ * for every pre-existing row, which is the correct backfill — an upgrade must never
+ * retroactively mark an action as exhausted that was never tracked before this column
+ * existed.
+ */
+function migrateActionUsesTracking1921(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === 'action_uses')) {
+      sqlite.exec('ALTER TABLE combatants ADD COLUMN action_uses TEXT');
+    }
+  }
+  const hasChainsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='action_apply_chains'")
+    .get();
+  if (hasChainsTable) {
+    const chainColumns = sqlite.prepare('PRAGMA table_info(action_apply_chains)').all() as Array<{ name: string }>;
+    if (!chainColumns.some((c) => c.name === 'uses_key')) {
+      sqlite.exec('ALTER TABLE action_apply_chains ADD COLUMN uses_key TEXT');
+    }
+    if (!chainColumns.some((c) => c.name === 'uses_spent')) {
+      sqlite.exec('ALTER TABLE action_apply_chains ADD COLUMN uses_spent INTEGER NOT NULL DEFAULT 0');
+    }
+  }
+}
+
 function migrateCombatantsTableForNpcDispositionSnapshot(sqlite: Database.Database): void {
   const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
   if (!hasTable) return;
   const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
   if (!columns.some((c) => c.name === 'npc_disposition_snapshot')) sqlite.exec('ALTER TABLE combatants ADD COLUMN npc_disposition_snapshot TEXT');
+}
+
+/**
+ * Issue #1923 review finding 1 — DM manual-reorder override. A running encounter's
+ * `sortCombatants` orders by initiative and breaks ties via the campaign's adapter
+ * (`initiativeTiebreak`); 5e and Open Legend compare `initMod` BEFORE `sortOrder`
+ * (`initModDescThenSortOrderAsc` in packages/schema/src/initiative-tiebreak.ts), so a
+ * pure `sortOrder` rewrite from a manual drag was silently discarded whenever the tied
+ * combatants had different `initMod` (different DEX) — the DM's reorder had no effect.
+ * Plain nullable ADD COLUMN, same per-table idiom as migrateCharacterCombatantSpeed1910
+ * above: NULL preserves upgrade compatibility (an existing row keeps reading as "never
+ * manually reordered", which is exactly the pre-migration behaviour — `sortCombatants`
+ * only consults this column when BOTH compared rows are non-null). New DBs never hit
+ * this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCombatantsTableForManualOrder1923(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'manual_order')) sqlite.exec('ALTER TABLE combatants ADD COLUMN manual_order INTEGER');
+}
+
+/**
+ * Issue #2095 review — upgrade compatibility for #2074/#2084's manual_order history.
+ * #2074 (merged before #2084's narrower-stamping fix) stamped `manual_order` on EVERY
+ * combatant in a roster on every drag. Any encounter a DM had already reordered under
+ * that code has EVERY row's `manual_order` non-null in the database right now — not
+ * because the DM placed each one, but as an incidental side effect of the old
+ * whole-roster write. #2084's narrower stamping only ever touches rows in a moved
+ * combatant's landing tie group on a FUTURE reorder; it never retroactively cleans up
+ * rows a PAST whole-roster stamp already wrote. `sortCombatants` still prioritizes any
+ * stamped row over any unstamped one within a tie (issue #2088/#2095's total-order
+ * rule), so those legacy stamps keep freezing untouched tie groups at their old
+ * whole-roster order and keep `adapter.initiativeTiebreak` from ever running again for
+ * them — the exact defect #2084 exists to fix, still live for every user who already
+ * hit it before upgrading. AGENTS.md requires preserving upgrade compatibility, so this
+ * is part of the fix, not a follow-up.
+ *
+ * Clears EVERY existing `manual_order` value rather than trying to recompute a narrower
+ * one in place. There is no way to distinguish, from the stored data alone, which row
+ * (if any) in a stamped roster reflects a genuine DM decision versus incidental
+ * whole-roster copying — the old code wrote every row identically regardless of
+ * whether the DM ever looked at it, so a from-scratch reconstruction has no real intent
+ * signal to recover. Clearing is simple, self-healing (the next drag on that encounter
+ * re-stamps correctly under the fixed narrower rule — see reorderCombatant), and,
+ * unlike any in-place narrowing heuristic, guaranteed not to preserve incidental noise
+ * as if it were intent. The cost — discarding some genuinely DM-set orders alongside
+ * the noise — is unavoidable given the old code could not distinguish them either.
+ */
+function migrateCombatantsTableClearLegacyManualOrder2095(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'manual_order')) return; // pre-#1923 DB — nothing to clear.
+  sqlite.exec('UPDATE combatants SET manual_order = NULL WHERE manual_order IS NOT NULL');
 }
 
 /** Issue #425: campaign-scoped homebrew monster library for clone/edit/reuse. */
@@ -4995,6 +5370,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // name. `runMigrations` dedupes by name, so an already-recorded original migration cannot
   // safely acquire this later ALTER in place.
   { name: '0145_action_pending_fingerprint_1451', run: migrateActionPendingFingerprint1451 },
+  { name: '0145b_combatants_npc_identity_source_1924', run: migrateCombatantsTableForNpcIdentitySource },
   { name: '0146_action_pending_turn_version_1316', run: migrateActionPendingTurnVersion1316 },
   // 0146 is now owned by #1316; this never-shipped combatant snapshot follows it.
   { name: '0147_combatants_npc_disposition_snapshot_1454', run: migrateCombatantsTableForNpcDispositionSnapshot },
@@ -5019,6 +5395,39 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0158_encounters_aftermath_mutations_1448', run: migrateEncountersTableForAftermathMutations1448 },
   { name: '0159_scheduled_sessions_prep_notes_883', run: migrateScheduledSessionsForPrepNotes883 },
   { name: '0160_dice_rolls_encounter_npc_refs_1904', run: migrateDiceRollsTableForEncounterNpcRefs1904 },
+  { name: '0161_character_combatant_speed_1910', run: migrateCharacterCombatantSpeed1910 },
+  { name: '0162_ai_dm_seats_comprehension_profile_874', run: migrateAiDmSeatsTableForComprehensionProfile874 },
+  { name: '0163_campaigns_custom_mechanics_profile_1502', run: migrateCampaignsTableForCustomMechanicsProfile1502 },
+  // #851 shared-instance governance: organizer eligibility flag + the creation
+  // request/approval table. Originally declared 0162/0163; #874 claimed 0162 on main
+  // (eca15e17) and #1502 claimed 0163 (002174ac), so both take the next free ordinals as a
+  // deliberate pre-merge step. Neither has run against a real database under its earlier
+  // name, so no installation can have recorded the old numbers.
+  { name: '0164_users_can_create_campaigns_851', run: migrateUsersTableForCanCreateCampaigns851 },
+  { name: '0165_campaign_creation_requests_851', run: migrateCampaignCreationRequestsTable851 },
+  // #1942 originally claimed 0164; #851 landed first (5981ba5a) and owns 0164/0165.
+  // Renumbered to the next free ordinal — this migration has never run against a
+  // real database under 0164, so no installation can have recorded it, and upgrade
+  // compatibility is unaffected.
+  { name: '0166_users_color_vision_assist_1942', run: migrateUsersTableForColorVisionAssist1942 },
+  { name: '0167_users_animate_others_rolls_1899', run: migrateUsersTableForAnimateOthersRolls },
+  { name: '0168_combatants_statblock_revealed_1926', run: migrateCombatantsTableForStatblockRevealed1926 },
+  { name: '0169_check_requests_group_id_1943', run: migrateCheckRequestsTableForGroupId1943 },
+  { name: '0170_encounters_turn_timer_1935', run: migrateEncountersTableForTurnTimer },
+  { name: '0171_encounters_monster_hp_display_1925', run: migrateEncountersTableForMonsterHpDisplay1925 },
+  // #1925 landed on main taking 0171; this branch takes 0172 as the centrally claimed ordinal.
+  { name: '0172_users_table_audio_1920', run: migrateUsersTableForTableAudio1920 },
+  { name: '0173_action_uses_tracking_1921', run: migrateActionUsesTracking1921 },
+  // 0172/0173 are CENTRALLY CLAIMED by other in-flight branches (#2050 table audio/haptics
+  // holds 0172; #1921 monster recharge abilities holds 0173 — see that branch's "chore(db):
+  // renumber the action-uses migration to 0173" commit). Confirmed free across every
+  // claude/codex/work/port/feat/fix remote branch at the time this was taken.
+  { name: '0174_combatants_manual_order_1923', run: migrateCombatantsTableForManualOrder1923 },
+  // #846 campaign status provenance — renumbered to 0175 (0172-0174 taken on main by #2050/#1921/#1923).
+  { name: '0175_campaign_status_transitions_846', run: migrateCampaignStatusTransitions846 },
+  // 0176 confirmed free on main and every claude/codex/work/port/feat/fix remote branch
+  // at the time this was taken (see the same caveat on 0174 above).
+  { name: '0176_combatants_clear_legacy_manual_order_2095', run: migrateCombatantsTableClearLegacyManualOrder2095 },
 ];
 
 /**

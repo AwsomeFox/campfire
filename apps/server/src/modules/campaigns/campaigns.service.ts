@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, count, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
@@ -21,8 +21,12 @@ import {
   CompendiumSnapshot,
   normalizeOffsetIsoDateTime,
   CharacterAction,
+  isRegisteredRuleSystemSlug,
+  HomebrewMechanicsProfile,
+  MonsterHpDisplay,
 } from '@campfire/schema';
-import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
+import type { Campaign, CampaignClonePreview, CampaignStatus, CampaignStatusTransition, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
+import { fromJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
@@ -74,6 +78,7 @@ import {
   auditLog,
   participantSupportPreferences,
   campaignPurgeTombstones,
+  campaignStatusTransitions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
@@ -94,7 +99,7 @@ import { MembersService } from '../membership/members.service';
 import { InvitesService } from '../membership/invites.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { auditActor } from '../../common/user.types';
+import { auditActor, auditActorRole } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
 import { copyAttachmentBytes, remapAttachmentFileUrl, attachmentUploadPath } from '../attachments/attachment-copy';
@@ -114,6 +119,8 @@ import {
   preflightCompendiumImport,
   resolveImportedCombatantRuleEntryId,
 } from './compendium-import';
+import { auditBestEffort } from '../audit/audit-best-effort';
+import { CampaignGovernanceDeniedError, CampaignGovernanceService } from './campaign-governance.service';
 
 function safeImportedCompendiumSnapshot(value: unknown): string | null {
   const parsed = CompendiumSnapshot.safeParse(value);
@@ -190,6 +197,105 @@ function assertUploadsWritable(): void {
       `Upload directory is not writable (cannot stage the import): ${
         err instanceof Error ? err.message : String(err)
       }`,
+    );
+  }
+}
+
+/**
+ * Issue #851: cap on the TOTAL bytes an archive is allowed to expand to once every
+ * referenced entry (campaign.json + each manifest attachment) is decompressed. This
+ * is deliberately measured from what the importer actually reads — only
+ * manifest-referenced entries are ever decompressed or persisted (see
+ * importArchive's attachment loop), so an attacker cannot inflate this figure with
+ * unreferenced padding entries packed into the zip; those are never touched.
+ * Larger than MAX_IMPORT_ARCHIVE_BYTES (the COMPRESSED cap) since a legitimate
+ * export of several full-size uncompressed PNG/JPEG maps expands very little
+ * (images are already compressed), but a pathological archive could still expand
+ * disproportionately — this is the independent backstop for that.
+ */
+export const MAX_IMPORT_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Issue #851: minimum free space uploadsRoot()'s filesystem must retain AFTER
+ * writing this import's attachment bytes, mirroring the same reserve-margin
+ * pattern the scheduled-backup disk guard uses (BACKUP_MIN_FREE_BYTES, 512 MiB
+ * default) — never fully drain the volume the DB itself lives on for one import.
+ */
+export const IMPORT_DISK_RESERVE_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Issue #851 — running-total accounting for an archive's uncompressed size, checked
+ * BEFORE persistence starts (importArchive calls this as each entry is decompressed,
+ * ahead of any staging/DB write). Exported with an overridable `capBytes` so a test
+ * can pin an exact boundary without allocating a real multi-hundred-MB buffer.
+ */
+/**
+ * The uncompressed length a ZIP entry DECLARES in its own header, or null when the archive
+ * does not carry one (issue #851 review).
+ *
+ * Checking this before calling `.async('nodebuffer')` is what makes the cap a real zip-bomb
+ * defence rather than an accounting exercise. Accumulating only after decompression bounds
+ * the SUM across entries but not the PEAK of any single one, and the compressed upload cap is
+ * 128 MiB while one deflate entry can expand by orders of magnitude — so a small crafted
+ * archive could force a multi-gigabyte allocation (RangeError, or the process OOM) before the
+ * running total ever crossed its ceiling.
+ *
+ * A declared size is attacker-supplied and may understate the truth, which is exactly why the
+ * post-decompression accumulate stays: this rejects the cheap, honest-header bomb before the
+ * allocation, and the existing check still catches a lying header afterwards.
+ */
+function declaredUncompressedBytes(entry: unknown): number | null {
+  const data = (entry as { _data?: { uncompressedSize?: unknown } })?._data;
+  const size = data?.uncompressedSize;
+  return typeof size === 'number' && Number.isFinite(size) && size >= 0 ? size : null;
+}
+
+export function accumulateImportUncompressedBytes(
+  runningTotal: number,
+  addedBytes: number,
+  capBytes: number = MAX_IMPORT_UNCOMPRESSED_BYTES,
+): number {
+  const next = runningTotal + addedBytes;
+  if (next > capBytes) {
+    throw new BadRequestException('Import archive exceeds the maximum uncompressed size once expanded.');
+  }
+  return next;
+}
+
+/**
+ * Issue #851 — preflight the uploads volume's free space BEFORE any byte is staged
+ * to disk (persistence starts right after this call, in importCampaign's staging
+ * step). `requiredBytes` is the sum of every attachment's decompressed length this
+ * import will actually write. `statfs`/`reserveBytes`/`root` are overridable so a
+ * test can pin an exact free-space boundary without touching the real filesystem.
+ */
+export function assertImportDiskReserve(
+  requiredBytes: number,
+  opts: {
+    statfs?: (path: string) => { bavail: number; bsize: number };
+    root?: string;
+    reserveBytes?: number;
+  } = {},
+): void {
+  if (requiredBytes <= 0) return;
+  const root = opts.root ?? uploadsRoot();
+  const reserveBytes = opts.reserveBytes ?? IMPORT_DISK_RESERVE_BYTES;
+  const statfs = opts.statfs ?? fs.statfsSync;
+  let stat: { bavail: number; bsize: number };
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    stat = statfs(root);
+  } catch {
+    // Cannot statfs (e.g. platform without it, or a filesystem quirk) — do not block
+    // the import on a diagnostic we cannot perform; assertUploadsWritable() already
+    // proves the volume is writable, which is the load-bearing guarantee.
+    return;
+  }
+  const freeBytes = stat.bavail * stat.bsize;
+  if (freeBytes - requiredBytes < reserveBytes) {
+    throw new BadRequestException(
+      `Not enough free disk space to import this archive: needs ~${requiredBytes} bytes and a ` +
+        `${reserveBytes} byte reserve, but only ${freeBytes} bytes are free.`,
     );
   }
 }
@@ -278,6 +384,21 @@ const asArr = (v: unknown): Rec[] => (Array.isArray(v) ? v.map(asRec) : []);
 const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
 const intOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null);
 const intOr = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : fallback);
+// Issue #1910 review (Devin, PR #1980, on c3ea4545): `speed` (unlike `ac`) has a
+// schema-level `min(0)`, so a malformed/negative import value would otherwise write
+// past the domain contract and fail zod validation on the next read (bricking the
+// imported sheet) — that part of the original fix was right. But the original
+// version of this helper CLAMPED a negative value to 0 via Math.max(0, n), which
+// collided with this PR's own stated design: 0 is a REAL value (a homebrew
+// immobilized PC), and null means "unset" so the turn workspace falls through to
+// the adapter default. Clamping a corrupted/hand-edited negative import to 0 would
+// silently paralyze that PC instead of landing it on the adapter default. Returns
+// null for anything out of range so it's always schema-valid AND preserves the
+// null/0 distinction the rest of the PR depends on.
+const nonNegativeIntOrNull = (v: unknown): number | null => {
+  const n = intOrNull(v);
+  return n == null || n < 0 ? null : n;
+};
 const realOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const boolOf = (v: unknown): boolean => v === true;
 /**
@@ -287,6 +408,17 @@ const boolOf = (v: unknown): boolean => v === true;
  * never accidentally reveal a private prep entity to players.
  */
 const hiddenOf = (v: unknown): boolean => v !== false;
+/**
+ * Monster-HP display dial (issue #1925) coercion for import — an import document is
+ * untrusted input, so the raw value goes through the shared enum's own validation
+ * rather than being trusted as-is. Missing or invalid falls back to 'band': the safe
+ * direction, since it reveals LESS than a possibly-forged 'exact'/'hidden' value would,
+ * and never writes a mode a later read wouldn't recognize.
+ */
+const monsterHpDisplayOf = (v: unknown): 'band' | 'exact' | 'hidden' => {
+  const parsed = MonsterHpDisplay.safeParse(v);
+  return parsed.success ? parsed.data : 'band';
+};
 /** Serialize a JSON-ish export field (object/array) back to the TEXT the column stores. */
 const jsonCol = (v: unknown, fallback: string): string => {
   if (v === undefined || v === null) return fallback;
@@ -323,6 +455,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     sessionCount: row.sessionCount,
     latestSessionNumber: row.latestSessionNumber,
     ruleSystem: row.ruleSystem,
+    customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row.customMechanicsProfile, null),
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
     deletedAt: row.deletedAt ?? null,
@@ -360,6 +493,10 @@ export class CampaignsService {
     // Issue #1707: trash() sends the account-wide `campaign_trashed` signal. NotificationsModule
     // is a leaf module (only DbModule), so importing it here creates no cycle.
     private readonly notifications: NotificationsService,
+    // Issue #851: shared-instance governance (creation policy, per-user/server-wide
+    // limits, default storage quota) — enforced atomically inside create/importCampaign/clone's
+    // own transaction. See CampaignGovernanceService.enforceTx for why.
+    private readonly governance: CampaignGovernanceService,
   ) {}
 
   /**
@@ -509,12 +646,49 @@ export class CampaignsService {
    * downstream (Compendium lookups scoped by pack slug) that assumes it resolves.
    * Empty string ('' — "no rule system picked") is always allowed, both on create and
    * when clearing it back via PATCH.
+   *
+   * Issue #1502: a homebrew campaign that carries its OWN validated customMechanicsProfile
+   * (checked separately by validateCustomMechanicsProfile, always in the same write) is the
+   * one exception — its slug need not match an installed rule pack, since the profile IS
+   * the rule system rather than imported content.
    */
-  private async validateRuleSystem(ruleSystem: string | undefined): Promise<void> {
+  private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
     if (!ruleSystem) return;
+    if (hasCustomMechanicsProfile) return;
     const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
     if (!pack) {
-      throw new BadRequestException(`ruleSystem "${ruleSystem}" does not match any installed rule pack`);
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" does not match any installed rule pack (or provide a matching customMechanicsProfile)`,
+      );
+    }
+  }
+
+  /**
+   * Validate a homebrew mechanics profile against the ruleSystem slug it is being stored
+   * against (issue #1502). `HomebrewMechanicsProfile` itself already rejects out-of-enum
+   * strategy values at the zod boundary (CampaignCreate/CampaignUpdate parsing, both REST
+   * and MCP); this covers the cross-field business rules zod alone can't express:
+   *  - a profile requires a non-empty ruleSystem slug to attach to;
+   *  - that slug must NOT be a built-in registered adapter (5e/PF2e/OSR/…) — a homebrew
+   *    profile can never override a known system's mechanics through this side door;
+   *  - profile.slug must equal ruleSystem, so `ruleSystemAdapter(ruleSystem, profile)` can
+   *    trust the pairing without a second lookup at every resolve call site.
+   */
+  private validateCustomMechanicsProfile(
+    ruleSystem: string | null | undefined,
+    profile: HomebrewMechanicsProfile | null | undefined,
+  ): void {
+    if (profile == null) return;
+    if (!ruleSystem) {
+      throw new BadRequestException('customMechanicsProfile requires a non-empty ruleSystem slug');
+    }
+    if (isRegisteredRuleSystemSlug(ruleSystem)) {
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" is a built-in rule system and cannot carry a customMechanicsProfile`,
+      );
+    }
+    if (profile.slug !== ruleSystem) {
+      throw new BadRequestException(`customMechanicsProfile.slug ("${profile.slug}") must match ruleSystem ("${ruleSystem}")`);
     }
   }
 
@@ -553,9 +727,18 @@ export class CampaignsService {
     if (!row) throw new BadRequestException(`mapAttachmentId ${attachmentId} does not exist in this campaign`);
   }
 
-  /** Any authenticated user may create a campaign; creator is auto-inserted as 'dm' (skipped for dev:* users). */
+  /**
+   * Creates a campaign, subject to the shared-instance governance policy (issue #851):
+   * an operator can restrict WHO may create/import (admins only / approved organizers /
+   * everyone — the pre-#851 default), cap active/total campaigns per-user and server-wide,
+   * and set a default storage quota every new campaign inherits. The policy/limit check and
+   * the insert happen in ONE synchronous transaction so a denial rolls back cleanly and two
+   * concurrent creates cannot both slip past a limit — see CampaignGovernanceService.enforceTx.
+   * Creator is auto-inserted as 'dm' (skipped for dev:* users).
+   */
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
-    await this.validateRuleSystem(input.ruleSystem);
+    this.validateCustomMechanicsProfile(input.ruleSystem ?? '', input.customMechanicsProfile ?? null);
+    await this.validateRuleSystem(input.ruleSystem, input.customMechanicsProfile != null);
     // A brand-new campaign has no locations/attachments of its own yet, so any
     // non-null currentLocationId/mapAttachmentId on create can never be valid.
     if (input.currentLocationId != null) {
@@ -564,38 +747,79 @@ export class CampaignsService {
     if (input.mapAttachmentId != null) {
       throw new BadRequestException('mapAttachmentId cannot be set on campaign create (no attachments exist yet)');
     }
+    const govCtx = await this.governance.resolveContext(user);
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(campaigns)
-      .values({
-        name: input.name,
-        description: input.description ?? '',
-        status: input.status ?? 'active',
-        currentLocationId: input.currentLocationId ?? null,
-        dangerLevel: input.dangerLevel ?? 'low',
-        dmControlsProgression: input.dmControlsProgression ?? false,
-        dmControlsTurns: input.dmControlsTurns ?? false,
-        requireDmTurnConfirmation: input.requireDmTurnConfirmation ?? false,
-        publicRecapSharingEnabled: true,
-        // Brand-new campaigns that start archived cannot accept joins until the
-        // DM both unarchives and deliberately re-enables invites (#857).
-        publicInvitesEnabled: (input.status ?? 'active') === 'active',
-        narrationLanguage: input.narrationLanguage ?? 'en',
-        aiExternalContentPolicy: input.aiExternalContentPolicy ?? 'member_consent',
-        sessionCount: 0,
-        latestSessionNumber: 0,
-        ruleSystem: input.ruleSystem ?? '',
-        mapAttachmentId: input.mapAttachmentId ?? null,
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
+    let row: typeof campaigns.$inferSelect;
+    try {
+      row = this.db.transaction((tx) => {
+        this.governance.enforceTx(tx, govCtx);
+        const [inserted] = tx
+          .insert(campaigns)
+          .values({
+            name: input.name,
+            description: input.description ?? '',
+            status: input.status ?? 'active',
+            currentLocationId: input.currentLocationId ?? null,
+            dangerLevel: input.dangerLevel ?? 'low',
+            dmControlsProgression: input.dmControlsProgression ?? false,
+            dmControlsTurns: input.dmControlsTurns ?? false,
+            requireDmTurnConfirmation: input.requireDmTurnConfirmation ?? false,
+            publicRecapSharingEnabled: true,
+            // Brand-new campaigns that start archived cannot accept joins until the
+            // DM both unarchives and deliberately re-enables invites (#857).
+            publicInvitesEnabled: (input.status ?? 'active') === 'active',
+            narrationLanguage: input.narrationLanguage ?? 'en',
+            aiExternalContentPolicy: input.aiExternalContentPolicy ?? 'member_consent',
+            sessionCount: 0,
+            latestSessionNumber: 0,
+            ruleSystem: input.ruleSystem ?? '',
+            customMechanicsProfile: input.customMechanicsProfile ? JSON.stringify(input.customMechanicsProfile) : null,
+            mapAttachmentId: input.mapAttachmentId ?? null,
+            // Issue #851: the operator's default quota, inherited atomically with the row
+            // itself. null (unlimited) unless an admin has configured one — never touches
+            // any EXISTING campaign's own storageQuotaBytes.
+            storageQuotaBytes: govCtx.defaultStorageQuotaBytes,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
 
-    if (!user.devRole) {
-      const numericId = Number(user.id);
-      if (Number.isInteger(numericId)) {
-        await this.members.addCreatorAsDm(row.id, numericId);
+        if (!user.devRole) {
+          const numericId = Number(user.id);
+          if (Number.isInteger(numericId)) {
+            this.members.addCreatorAsDmTx(tx, inserted.id, numericId, ts);
+          }
+        }
+        return inserted;
+      }, { behavior: 'immediate' });
+    } catch (err) {
+      if (err instanceof CampaignGovernanceDeniedError) {
+        // Best-effort, outside the rolled-back transaction (see AuditService.log's doc).
+        // Best-effort in the real sense (review): a bare `await this.audit.log(...)`
+        // would let an audit-write failure THROW past the denial, turning an expected
+        // 403-with-a-reason into a 500 with none. The denial is the caller's answer; a
+        // missing audit row is an operator problem, logged rather than substituted.
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            // The caller's REAL role, not 'dm' (review). Every other audit in this file
+            // stamps 'dm' because the actor is acting as, or becoming, the campaign's DM.
+            // A DENIED create is the opposite: nobody became anything. Limits are
+            // deliberately not admin-exempt (see enforceTx's doc), so a server admin
+            // refused by a ceiling is a reachable case — and logging it as 'dm' erases
+            // exactly the distinction an incident reviewer needs.
+            actor: auditActor(user),
+            actorRole: auditActorRole(user),
+            action: 'campaign.create.denied',
+            entityType: 'campaign',
+            detail: `reason=${err.code}`,
+          },
+          (e) => `audit campaign.create.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
+      throw err;
     }
 
     await this.audit.log({
@@ -605,8 +829,75 @@ export class CampaignsService {
       entityType: 'campaign',
       entityId: row.id,
       campaignId: row.id,
+      detail: govCtx.defaultStorageQuotaBytes != null ? `storageQuotaBytes=${govCtx.defaultStorageQuotaBytes}` : undefined,
     });
     return toDomain(row);
+  }
+
+  /**
+   * Issue #846: list this campaign's lifecycle-status transitions, newest first. The
+   * newest row is the current provenance surfaced in the archived banner/settings;
+   * older rows are the history that survives reactivation. Member-readable (actor +
+   * status + time are shown to players; `reason` is DM-only and the caller redacts it
+   * for non-DM viewers — see the controller).
+   */
+  async listStatusTransitions(id: number): Promise<CampaignStatusTransition[]> {
+    const rows = await this.db
+      .select()
+      .from(campaignStatusTransitions)
+      .where(eq(campaignStatusTransitions.campaignId, id))
+      .orderBy(desc(campaignStatusTransitions.createdAt), desc(campaignStatusTransitions.id));
+    return rows.map((r) => ({
+      id: r.id,
+      campaignId: r.campaignId,
+      actorUserId: r.actorUserId,
+      actorName: r.actorName,
+      fromStatus: r.fromStatus as CampaignStatus,
+      toStatus: r.toStatus as CampaignStatus,
+      reason: r.reason,
+      createdAt: r.createdAt,
+    }));
+  }
+
+  /**
+   * Issue #846: append a durable status-transition provenance row + an audit entry.
+   * Append-only by design — reactivation and re-archiving accumulate history rather
+   * than overwrite it, so the newest row is always the current provenance. `reason`
+   * is DM operational text and never reaches players; the audit `detail` carries it
+   * for incident reviewers. Best-effort on the audit side (a failed audit write must
+   * not unwind a successful status change), mirroring the auditBestEffort pattern.
+   */
+  private async recordStatusTransition(
+    id: number,
+    fromStatus: string,
+    toStatus: string,
+    reason: string,
+    user: RequestUser,
+  ): Promise<void> {
+    const cleanReason = (reason ?? '').trim().slice(0, 500);
+    await this.db.insert(campaignStatusTransitions).values({
+      campaignId: id,
+      actorUserId: auditActor(user).slice(0, 120),
+      actorName: (user.name ?? '').slice(0, 200),
+      fromStatus,
+      toStatus,
+      reason: cleanReason,
+      createdAt: nowIso(),
+    });
+    await auditBestEffort(
+      this.audit,
+      this.logger,
+      {
+        actor: auditActor(user),
+        actorRole: auditActorRole(user),
+        action: 'campaign.status_change',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: JSON.stringify({ from: fromStatus, to: toStatus, ...(cleanReason ? { reason: cleanReason } : {}) }),
+      },
+      (e) => `audit campaign.status_change failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 
   async update(
@@ -617,21 +908,77 @@ export class CampaignsService {
   ): Promise<Campaign> {
     const existing = await this.getOrThrow(id);
     // mapAlignment is a request-time directive (issue #870), not a stored column.
-    const { mapAlignment, ...campaignInput } = input;
+    // customMechanicsProfile is pulled out too (issue #1502) — it needs cross-field validation
+    // against the EFFECTIVE ruleSystem and JSON serialization before it can join campaignInput,
+    // which is spread directly into `.set()` below.
+    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, statusChangeReason, ...campaignInput } = input;
     const shouldResetPins =
       mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
     // or paused <-> completed) — any other field requires un-archiving first.
     if (existing.status !== 'active') {
-      const extraKeys = Object.keys(input).filter((k) => k !== 'status' && input[k as keyof CampaignUpdateInput] !== undefined);
+      const extraKeys = Object.keys(input).filter(
+        (k) => k !== 'status' && k !== 'statusChangeReason' && input[k as keyof CampaignUpdateInput] !== undefined,
+      );
       if (extraKeys.length > 0) {
         throw new ForbiddenException(
           `Campaign is ${existing.status} (read-only) — only 'status' can be changed; set it back to 'active' first (rejected: ${extraKeys.join(', ')})`,
         );
       }
     }
-    await this.validateRuleSystem(input.ruleSystem);
+    // Issue #846: a genuine status change (active<->paused<->completed) records durable
+    // provenance via recordStatusTransition in each status-flipping return path below.
+    const statusChanging = input.status !== undefined && existing.status !== input.status;
+    // Issue #1502: resolve the EFFECTIVE ruleSystem this write applies against — the incoming
+    // value, or the campaign's existing one when this request doesn't touch ruleSystem — so a
+    // customMechanicsProfile write is validated against the slug it will actually pair with.
+    const effectiveRuleSystem = input.ruleSystem !== undefined ? input.ruleSystem : existing.ruleSystem;
+    // #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule pack, so
+    // the rule-pack requirement has to be satisfied by the profile the campaign will actually
+    // have after this write — not only by one re-sent in the same request. Without the second
+    // clause a homebrew campaign becomes un-PATCHable the moment any request echoes its own
+    // `ruleSystem` (a full-object PUT-style update from the settings form does exactly that):
+    // no rule pack carries that slug, so it 400s on a value it already holds.
+    // An explicit `customMechanicsProfile: null` deliberately does NOT satisfy it — that
+    // request is removing the profile, and leaving the slug unbacked is the error this check
+    // exists to catch.
+    const profileBacksEffectiveRuleSystem =
+      customMechanicsProfileInput != null ||
+      (customMechanicsProfileInput === undefined &&
+        existing.customMechanicsProfile != null &&
+        existing.customMechanicsProfile.slug === effectiveRuleSystem);
+    await this.validateRuleSystem(input.ruleSystem, profileBacksEffectiveRuleSystem);
+    // ...and the same check against the EFFECTIVE slug on the one path where the call above
+    // cannot run (review). `validateRuleSystem` short-circuits on a falsy first argument, so a
+    // PATCH of just `{ customMechanicsProfile: null }` never reached it: the profile column was
+    // cleared while `ruleSystem` kept the homebrew slug, and every read site then resolved 5e —
+    // exactly the unbacked-slug state the comment above says this check exists to catch, reached
+    // by omitting the field rather than echoing it.
+    //
+    // Deliberately narrowed to that path instead of always validating `effectiveRuleSystem`:
+    // doing the latter would start rejecting every unrelated PATCH on a campaign whose rule
+    // pack has since been uninstalled, which is a behaviour change this fix has no business
+    // making.
+    if (customMechanicsProfileInput === null && input.ruleSystem === undefined) {
+      await this.validateRuleSystem(effectiveRuleSystem, false);
+    }
+    let nextCustomMechanicsProfile: string | null | undefined;
+    if (customMechanicsProfileInput !== undefined) {
+      // Explicitly set (or cleared with null) in this request.
+      this.validateCustomMechanicsProfile(effectiveRuleSystem, customMechanicsProfileInput);
+      nextCustomMechanicsProfile = customMechanicsProfileInput ? JSON.stringify(customMechanicsProfileInput) : null;
+    } else if (existing.customMechanicsProfile && existing.customMechanicsProfile.slug !== effectiveRuleSystem) {
+      // ruleSystem changed away from the slug the stored profile belongs to, in this SAME
+      // request, without this request also touching customMechanicsProfile. The stale profile
+      // can never resolve again (ruleSystemAdapter only honors an exact slug match against the
+      // CURRENT ruleSystem), so clear it rather than leave silently-orphaned data behind.
+      nextCustomMechanicsProfile = null;
+    } else {
+      nextCustomMechanicsProfile = undefined; // leave the column untouched
+    }
+    const customMechanicsProfilePatch =
+      nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of
@@ -651,6 +998,78 @@ export class CampaignsService {
           'This attachment is protecting a fogged encounter map — use a separate image for the campaign region map, or disable fog first',
         );
       }
+    }
+
+    const reactivating = existing.status !== 'active' && input.status === 'active';
+
+    // Issue #2016 (split from the #851 review): un-pausing an existing campaign back to
+    // 'active' raises the counted ACTIVE total exactly like a fresh create does, but it never
+    // passed through any governance check — only create/importCampaign/clone did. This has to
+    // run BEFORE the metadata-write logic below rather than fold into it: the archived-campaign
+    // read-only rule above already guarantees `input` carries nothing but `status` whenever
+    // `existing.status !== 'active'` (extraKeys was rejected otherwise), so a reactivation
+    // payload never touches ruleSystem/mapAttachmentId/pins/invites, and this can be a
+    // self-contained atomic status flip.
+    if (reactivating) {
+      const govCtx = await this.governance.resolveContext(user);
+      const ts = nowIso();
+      let updatedRow: typeof campaigns.$inferSelect | undefined;
+      try {
+        updatedRow = this.db.transaction((tx) => {
+          // Re-read status inside the transaction rather than trusting `existing` (fetched
+          // outside it, before this transaction reserved the writer slot): under
+          // `{ behavior: 'immediate' }` a concurrent reactivation of the SAME campaign may
+          // already have committed by the time this callback runs. If so, the row is already
+          // active and this request changes nothing — skip the ceiling check rather than
+          // falsely deny a no-op racing against its own prior success.
+          const current = tx.select({ status: campaigns.status }).from(campaigns).where(eq(campaigns.id, id)).limit(1).get();
+          if (!current) throw new NotFoundException(`Campaign ${id} not found`);
+          if (current.status !== 'active') {
+            // Issue #2016: the authoritative, race-free ACTIVE-only ceiling check — first
+            // statement that can deny, atomic with the status write below. Keyed to the
+            // CAMPAIGN's own owner, not the acting DM (see enforceActiveLimitTx's doc) — a
+            // co-DM may un-pause a campaign owned by someone else.
+            const ownerUserId = this.governance.getOwnerUserId(tx, id);
+            this.governance.enforceActiveLimitTx(tx, govCtx, ownerUserId);
+          }
+          const row = tx.update(campaigns).set({ status: 'active', updatedAt: ts }).where(eq(campaigns.id, id)).returning().get();
+          if (!row) throw new NotFoundException(`Campaign ${id} not found`);
+          return row;
+        }, { behavior: 'immediate' });
+      } catch (err) {
+        if (err instanceof CampaignGovernanceDeniedError) {
+          // Best-effort, outside the rolled-back transaction — see create()'s identical catch
+          // for why a bare `await this.audit.log(...)` here would risk turning an expected
+          // 403-with-a-reason into a 500 with none.
+          await auditBestEffort(
+            this.audit,
+            this.logger,
+            {
+              actor: auditActor(user),
+              actorRole: auditActorRole(user),
+              action: 'campaign.update.denied',
+              entityType: 'campaign',
+              entityId: id,
+              campaignId: id,
+              detail: `reason=${err.code}`,
+            },
+            (e) => `audit campaign.update.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+        throw err;
+      }
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.update',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+      });
+      if (statusChanging) {
+        await this.recordStatusTransition(id, existing.status, 'active', statusChangeReason ?? '', user);
+      }
+      return toDomain(updatedRow);
     }
 
     const archiving =
@@ -682,7 +1101,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -742,6 +1161,9 @@ export class CampaignsService {
         campaignId: id,
         detail: JSON.stringify({ revoked }),
       });
+      if (statusChanging) {
+        await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
+      }
       return toDomain(row);
     }
 
@@ -767,7 +1189,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, updatedAt: ts })
+          .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -808,7 +1230,7 @@ export class CampaignsService {
 
       [updatedRow] = await this.db
         .update(campaigns)
-        .set({ ...campaignInput, updatedAt: ts })
+        .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
         .where(eq(campaigns.id, id))
         .returning();
     }
@@ -822,6 +1244,12 @@ export class CampaignsService {
       campaignId: id,
       detail: shouldResetPins ? JSON.stringify({ mapAlignment: 'reset', pinsCleared }) : undefined,
     });
+    // Issue #846: record durable status-transition provenance for any genuine change
+    // reaching this path (paused<->completed, and the plain archive path without
+    // ?revokeInvites). Reactivating and archive+revoke recorded theirs above.
+    if (statusChanging) {
+      await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
+    }
     // Archive (active → paused/completed) suspends public invites. Restore/
     // unarchive never flips the flag back — deliberate reactivation required (#857).
     if (archiving) {
@@ -1116,6 +1544,10 @@ export class CampaignsService {
     const source = await this.getOrThrow(id);
     const template = input.mode === 'template';
     const name = (input.name ?? `${source.name} (copy)`).slice(0, 120);
+    // Issue #851: a clone creates a brand-new campaign row too, so it is governed
+    // exactly like create/import — same policy, same per-user/server-wide limits,
+    // same operator default quota (NOT the source campaign's own quota).
+    const govCtx = await this.governance.resolveContext(user);
 
     // Read everything up front — only the writes need the transaction. Trashed
     // (soft-deleted, #116) entities are excluded so a clone never resurrects them.
@@ -1241,7 +1673,12 @@ export class CampaignsService {
       dstAttachmentId: number;
       mime: string;
     }[] = [];
-    const newId = this.db.transaction((tx) => {
+    let newId: number;
+    try {
+    newId = this.db.transaction((tx) => {
+      // Issue #851: the authoritative, race-free governance check — first statement
+      // inside the transaction, atomic with the insert below.
+      this.governance.enforceTx(tx, govCtx);
       const [campaignRow] = tx
         .insert(campaigns)
         .values({
@@ -1260,13 +1697,33 @@ export class CampaignsService {
           sessionCount: template ? 0 : source.sessionCount,
           latestSessionNumber: template ? 0 : source.latestSessionNumber,
           ruleSystem: source.ruleSystem,
+          // Issue #1502: carry the paired homebrew mechanics profile with its ruleSystem slug —
+          // otherwise a clone of a homebrew campaign would silently resolve to the 5e adapter
+          // fallback (no ADAPTERS entry for the slug, no profile to pair it with).
+          customMechanicsProfile: source.customMechanicsProfile ? JSON.stringify(source.customMechanicsProfile) : null,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
+          // Issue #851: the operator's default quota, inherited atomically with the
+          // row — deliberately NOT the source campaign's own storageQuotaBytes.
+          storageQuotaBytes: govCtx.defaultStorageQuotaBytes,
           createdAt: ts,
           updatedAt: ts,
         })
         .returning()
         .all();
       const cloneId = campaignRow.id;
+
+      // Issue #851 review: the owner row is written INSIDE this transaction, exactly as
+      // create() and importCampaign() do. `enforceTx` counts a user's campaigns by joining
+      // `campaignMembers.primaryOwner`, so writing it after the commit (and after an awaited
+      // attachment-copy loop) left a window in which the clone existed but was owned by
+      // nobody — a concurrent clone counted past it and both slipped the limit. The atomicity
+      // this PR claims for create/import has to hold for clone too, or the limit is advisory.
+      if (!user.devRole) {
+        const numericOwnerId = Number(user.id);
+        if (Number.isInteger(numericOwnerId)) {
+          this.members.addCreatorAsDmTx(tx, cloneId, numericOwnerId, ts);
+        }
+      }
 
       // Locations first — npcs, quests-via-npcs and currentLocationId all point at them.
       // Two passes like quests below: insert all (parentId deferred), then remap the
@@ -1593,6 +2050,10 @@ export class CampaignsService {
               gridOpacity: e.gridOpacity,
               fog: e.fog,
               hidden: e.hidden,
+              // Monster-HP display dial (issue #1925) — a table-secrecy config choice, the
+              // same class as `hidden` just above; a duplicate must preserve it rather than
+              // silently resetting every fight to the coarse-band default.
+              monsterHpDisplay: e.monsterHpDisplay,
               endedAt: null,
               createdAt: ts,
               updatedAt: ts,
@@ -1609,6 +2070,7 @@ export class CampaignsService {
                 kind: c.kind,
                 characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
+                npcIdentitySourceId: c.npcIdentitySourceId != null ? (npcMap.get(c.npcIdentitySourceId) ?? null) : null,
                 // Clones reset encounters to fresh prep, so they must derive NPC
                 // allegiance from the cloned NPC rather than retain played history.
                 npcDispositionSnapshot: null,
@@ -1621,6 +2083,11 @@ export class CampaignsService {
                 ruleEntryId: c.ruleEntryId,
                 sortOrder: c.sortOrder,
                 sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
+                // Issue #1910 review (Codex, round 5): a baseline stat snapshot like
+                // initMod above, not combat state — carry it forward the same way,
+                // rather than silently resetting it like the play-progress fields
+                // (hp/initiative/conditions) this insert deliberately does reset.
+                speed: c.speed,
               })
               .run();
           }
@@ -1937,7 +2404,31 @@ export class CampaignsService {
       this.sessions.recomputeSessionStatsInTx(tx, cloneId);
 
       return cloneId;
-    });
+    }, { behavior: 'immediate' });
+    } catch (err) {
+      // Issue #851: a governance denial rolled back the transaction (no row committed) —
+      // best-effort audit it outside that rolled-back tx, then rethrow unchanged.
+      if (err instanceof CampaignGovernanceDeniedError) {
+        // Best-effort in the real sense (review): a bare `await this.audit.log(...)`
+        // would let an audit-write failure THROW past the denial, turning an expected
+        // 403-with-a-reason into a 500 with none. The denial is the caller's answer; a
+        // missing audit row is an operator problem, logged rather than substituted.
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            // The caller's real role — see the note on the create() denial audit.
+            actor: auditActor(user),
+            actorRole: auditActorRole(user),
+            action: 'campaign.create.denied',
+            entityType: 'campaign',
+            detail: `reason=${err.code}, path=clone, sourceCampaignId=${id}`,
+          },
+          (e) => `audit campaign.create.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      throw err;
+    }
 
     // Issue #524/#435: publish attachment bytes after the entity rows committed.
     for (const p of pendingAttachmentCopies) {
@@ -1952,14 +2443,6 @@ export class CampaignsService {
       }
     }
 
-    // Same membership rule as create(): the caller becomes the clone's dm.
-    if (!user.devRole) {
-      const numericId = Number(user.id);
-      if (Number.isInteger(numericId)) {
-        await this.members.addCreatorAsDm(newId, numericId);
-      }
-    }
-
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
@@ -1967,7 +2450,9 @@ export class CampaignsService {
       entityType: 'campaign',
       entityId: newId,
       campaignId: newId,
-      detail: `cloned from campaign ${id} (${template ? 'template' : 'full'})`,
+      detail:
+        `cloned from campaign ${id} (${template ? 'template' : 'full'})` +
+        (govCtx.defaultStorageQuotaBytes != null ? `, storageQuotaBytes=${govCtx.defaultStorageQuotaBytes}` : ''),
     });
 
     // #1049 review: carrying `proactiveSettings` is not the same as HONOURING them. The watcher
@@ -2003,8 +2488,10 @@ export class CampaignsService {
    *    row is recreated under the new campaign with a fresh id + its file written to
    *    disk, and every reference to it — campaign.mapAttachmentId, character.portraitUrl,
    *    encounter.mapAttachmentId — is remapped to that new id instead of being reset.
-   *  - ruleSystem: kept only if that rule pack is installed on THIS server; otherwise
-   *    cleared to '' so a dangling slug can't break compendium lookups.
+   *  - ruleSystem: kept only if that rule pack is installed on THIS server, OR if the
+   *    document carries a valid customMechanicsProfile that names the same slug (issue
+   *    #1502 — a homebrew system is defined by its profile, not by an installed pack);
+   *    otherwise cleared to '' so a dangling slug can't break compendium lookups.
    *  - status: forced to 'active' so a freshly imported campaign is editable even if
    *    the source was archived (paused/completed, read-only).
    *  - members / audit / proposals: not imported — install-specific; only the caller
@@ -2051,11 +2538,37 @@ export class CampaignsService {
     const campaignSrc = asRec(doc.campaign);
     const name = (str(input.name) || str(campaignSrc.name) || 'Imported Campaign').slice(0, 120);
 
+    // Issue #851: resolve the shared-instance governance context (settings + this
+    // caller's organizer flag) up front — it needs async DB reads, and the actual
+    // gate (CampaignGovernanceService.enforceTx) must run SYNCHRONOUSLY inside the
+    // transaction below, atomically with the insert, so a denial rolls back cleanly
+    // and two concurrent imports cannot both slip past a limit.
+    const govCtx = await this.governance.resolveContext(user);
+
     // Keep the source rule system only if that pack is installed here — otherwise a
     // dangling slug would silently break Compendium lookups scoped by pack.
     const ruleSystemSrc = str(campaignSrc.ruleSystem);
     let ruleSystem = '';
-    if (ruleSystemSrc) {
+    // Issue #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule
+    // pack, so the pack lookup alone dropped it — an exported homebrew campaign came back on
+    // the 5e fallback with its entire rule system silently gone. The clone path already
+    // carries the pair for exactly this reason.
+    //
+    // An export document is untrusted input, so the profile goes through the SAME rules a
+    // create/update write does — full schema validation, non-empty slug, never a built-in
+    // registered slug, and profile.slug === ruleSystem — and anything that fails is dropped
+    // rather than persisted, leaving the campaign on the ordinary cleared-slug path.
+    let customMechanicsProfile: string | null = null;
+    const profileParsed = HomebrewMechanicsProfile.safeParse(campaignSrc.customMechanicsProfile);
+    if (
+      ruleSystemSrc &&
+      profileParsed.success &&
+      profileParsed.data.slug === ruleSystemSrc &&
+      !isRegisteredRuleSystemSlug(ruleSystemSrc)
+    ) {
+      ruleSystem = ruleSystemSrc;
+      customMechanicsProfile = JSON.stringify(profileParsed.data);
+    } else if (ruleSystemSrc) {
       const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystemSrc)).limit(1);
       if (pack) ruleSystem = ruleSystemSrc;
     }
@@ -2242,6 +2755,9 @@ export class CampaignsService {
     }
 
     const newId = this.db.transaction((tx) => {
+      // Issue #851: the authoritative, race-free governance check — first statement
+      // inside the transaction, atomic with the insert below.
+      this.governance.enforceTx(tx, govCtx);
       const [campaignRow] = tx
         .insert(campaigns)
         .values({
@@ -2262,7 +2778,11 @@ export class CampaignsService {
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           latestSessionNumber: Math.max(0, intOr(campaignSrc.latestSessionNumber, 0)),
           ruleSystem,
+          customMechanicsProfile,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
+          // Issue #851: the operator's default quota, inherited atomically with the
+          // row — never touches an existing campaign's own storageQuotaBytes.
+          storageQuotaBytes: govCtx.defaultStorageQuotaBytes,
           createdAt: ts,
           updatedAt: ts,
         })
@@ -2525,6 +3045,7 @@ export class CampaignsService {
             background: str(c.background),
             stats: jsonCol(c.stats, '{}'),
             ac: intOrNull(c.ac),
+            speed: nonNegativeIntOrNull(c.speed),
             hpCurrent: intOr(c.hpCurrent, 10),
             hpMax: intOr(c.hpMax, 10),
             // #1667 half B: write the paired condition columns through the sheet helper.
@@ -2714,6 +3235,12 @@ export class CampaignsService {
             fog: e.fog == null ? null : jsonCol(e.fog, ''),
             // #754: missing hidden on import → DM-only (same as create default).
             hidden: hiddenOf(e.hidden),
+            // Monster-HP display dial (issue #1925) — an import document is untrusted input,
+            // so validate against the enum rather than trusting the raw string; missing or
+            // invalid falls back to 'band' (the safe direction: it reveals LESS than a
+            // possibly-forged 'exact'/'hidden' value would, and never writes a mode a later
+            // read wouldn't recognize).
+            monsterHpDisplay: monsterHpDisplayOf(e.monsterHpDisplay),
             endedAt: typeof e.endedAt === 'string' ? e.endedAt : null,
             createdAt: ts,
             updatedAt: ts,
@@ -2728,7 +3255,9 @@ export class CampaignsService {
           const cSrcId = intOrNull(c.id);
           const charSrc = intOrNull(c.characterId);
           const npcSrc = intOrNull(c.npcId);
+          const npcIdentitySourceSrc = intOrNull(c.npcIdentitySourceId);
           const mappedNpcId = npcSrc != null ? (npcMap.get(npcSrc) ?? null) : null;
+          const mappedNpcIdentitySourceId = npcIdentitySourceSrc != null ? (npcMap.get(npcIdentitySourceSrc) ?? null) : null;
           const compendiumResolved = resolveImportedCombatantRuleEntryId(c, compendiumResolution);
           if (compendiumResolved.detached) compendiumDetachedCount += 1;
           const [cRow] = tx
@@ -2738,11 +3267,15 @@ export class CampaignsService {
               kind: str(c.kind, 'monster'),
               characterId: charSrc != null ? (charMap.get(charSrc) ?? null) : null,
               npcId: mappedNpcId,
+              npcIdentitySourceId: mappedNpcIdentitySourceId,
               // A fresh encounter cannot retain allegiance for an NPC that import
               // could not restore: preparation ignores that snapshot, and /start
               // cannot refresh an unlinked combatant.
               npcDispositionSnapshot:
-                encounterStatus === 'preparing' && npcSrc != null && mappedNpcId === null
+                encounterStatus === 'preparing' &&
+                (npcSrc != null || npcIdentitySourceSrc != null) &&
+                mappedNpcId === null &&
+                mappedNpcIdentitySourceId === null
                   ? null
                   : typeof c.npcDispositionSnapshot === 'string'
                     ? c.npcDispositionSnapshot
@@ -2752,6 +3285,10 @@ export class CampaignsService {
               initMod: intOr(c.initMod, 0),
               hpCurrent: intOr(c.hpCurrent, 10),
               hpMax: intOr(c.hpMax, 10),
+              // Issue #1910: carry the add-time speed snapshot through import so a
+              // re-imported encounter's movement budget matches what was exported,
+              // rather than silently falling back to the adapter default.
+              speed: nonNegativeIntOrNull(c.speed),
               conditions: jsonCol(c.conditions, '[]'),
               ruleEntryId: compendiumResolved.ruleEntryId,
               sortOrder: intOr(c.sortOrder, 0),
@@ -3162,7 +3699,9 @@ export class CampaignsService {
             // can see why an item they expected to be equipped is not.
             (equipIssuesResolved > 0
               ? ` (auto-unequipped ${equipIssuesResolved} inventory item${equipIssuesResolved === 1 ? '' : 's'} with an invalid or conflicting equip slot)`
-              : ''),
+              : '') +
+            // Issue #851: record the effective default quota this import inherited.
+            (govCtx.defaultStorageQuotaBytes != null ? `, storageQuotaBytes=${govCtx.defaultStorageQuotaBytes}` : ''),
           createdAt: ts,
         })
         .run();
@@ -3184,7 +3723,7 @@ export class CampaignsService {
       }
 
       return cid;
-    });
+    }, { behavior: 'immediate' });
 
     // COMMITTED — every entity row + the dm membership + the audit row are
     // durable together. Now PUBLISH the staged attachment bytes by renaming each
@@ -3248,6 +3787,39 @@ export class CampaignsService {
     // carrying `proactiveSettings.enabled: true` would otherwise import as ON-but-inert.
     await this.aiDm.syncProactiveWatcher(newId);
 
+    // Issue #846: re-insert lifecycle-status provenance. Best-effort and per-row defensive
+    // (provenance is non-critical): a malformed entry is skipped, never failing the import.
+    // Imported campaigns start 'active', but their transition HISTORY is preserved so the
+    // archived banner/settings can still show who paused/completed it and when.
+    const importedTransitions = Array.isArray(input.statusTransitions) ? input.statusTransitions : [];
+    for (const entry of importedTransitions) {
+      const t = (entry ?? {}) as Record<string, unknown>;
+      const fromStatus = str(t.fromStatus);
+      const toStatus = str(t.toStatus);
+      // Defensive (#846 review): an export is a loose document — only accept rows whose
+      // from/to are real campaign statuses and whose timestamp parses as ISO, so a malformed
+      // or hand-edited export can't plant invalid statuses/non-ISO times that break ordering
+      // and UI formatting. Skipped rows carry no provenance and never fail the import.
+      const VALID_STATUSES = new Set(['active', 'paused', 'completed']);
+      if (!VALID_STATUSES.has(fromStatus) || !VALID_STATUSES.has(toStatus)) continue;
+      const rawCreated = str(t.createdAt);
+      const parsedCreatedAt = rawCreated ? Date.parse(rawCreated) : NaN;
+      if (Number.isNaN(parsedCreatedAt)) continue;
+      try {
+        await this.db.insert(campaignStatusTransitions).values({
+          campaignId: newId,
+          actorUserId: str(t.actorUserId).slice(0, 120) || auditActor(user),
+          actorName: str(t.actorName).slice(0, 200) || (user.name ?? ''),
+          fromStatus,
+          toStatus,
+          reason: str(t.reason).slice(0, 500),
+          createdAt: new Date(parsedCreatedAt).toISOString(),
+        });
+      } catch {
+        // skip a single bad provenance row; never fail the import over it
+      }
+    }
+
     const campaign = await this.getOrThrow(newId);
     return {
       campaign,
@@ -3258,6 +3830,29 @@ export class CampaignsService {
       compendiumPreflight,
       compendiumDetachedCount,
     };
+    } catch (err) {
+      // Issue #851: a governance denial rolled back the transaction (no row committed) —
+      // best-effort audit it outside that rolled-back tx, then rethrow unchanged.
+      if (err instanceof CampaignGovernanceDeniedError) {
+        // Best-effort in the real sense (review): a bare `await this.audit.log(...)`
+        // would let an audit-write failure THROW past the denial, turning an expected
+        // 403-with-a-reason into a 500 with none. The denial is the caller's answer; a
+        // missing audit row is an operator problem, logged rather than substituted.
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            // The caller's real role — see the note on the create() denial audit.
+            actor: auditActor(user),
+            actorRole: auditActorRole(user),
+            action: 'campaign.create.denied',
+            entityType: 'campaign',
+            detail: `reason=${err.code}, path=import`,
+          },
+          (e) => `audit campaign.create.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      throw err;
     } finally {
       // Always sweep the staging dir, success OR failure. On success the staged
       // files were renamed away (consumed); on failure the tx rolled back and
@@ -3288,6 +3883,34 @@ export class CampaignsService {
       throw new BadRequestException('Import archive is too large.');
     }
 
+    // Refuse a policy-forbidden caller BEFORE a single byte is expanded (review). The
+    // authoritative gate is enforceTx inside importCampaign's insert transaction, but that
+    // runs after the archive has been fully decompressed and every attachment staged to
+    // disk — so a user who may not import at all could still force hundreds of megabytes of
+    // expansion and disk writes on every attempt, just to be handed the 403 afterwards.
+    // Only the POLICY tiers can be decided this early; the count-based limits stay in the
+    // transaction, where they are race-free.
+    const earlyCtx = await this.governance.resolveContext(user);
+    try {
+      this.governance.assertPolicyAllowed(earlyCtx);
+    } catch (err) {
+      if (err instanceof CampaignGovernanceDeniedError) {
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            actor: auditActor(user),
+            actorRole: auditActorRole(user),
+            action: 'campaign.create.denied',
+            entityType: 'campaign',
+            detail: `reason=${err.code}, path=import-archive-preflight`,
+          },
+          (e) => `audit campaign.create.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      throw err;
+    }
+
     let zip: JSZip;
     try {
       zip = await JSZip.loadAsync(zipBuffer);
@@ -3302,9 +3925,28 @@ export class CampaignsService {
       );
     }
 
+    // The SAME pre-check the attachment loop below applies (review). Without it the manifest
+    // was the one entry that got only post-decompression accounting: an archive whose sole
+    // content is a highly compressible campaign.json forces its full expansion into memory —
+    // multi-gigabyte, from a <=128 MiB upload — before the cap is ever consulted. That is the
+    // exact zip-bomb shape the attachment pre-check exists to close, left open on the entry
+    // that is read first, and campaign-import-preflight.spec.ts already asserts the intent.
+    const declaredManifestBytes = declaredUncompressedBytes(manifestFile);
+    if (declaredManifestBytes !== null) accumulateImportUncompressedBytes(0, declaredManifestBytes);
+
+    let manifestText: string;
+    try {
+      manifestText = await manifestFile.async('string');
+    } catch {
+      throw new BadRequestException('campaign.json in the archive could not be read.');
+    }
+    // Issue #851: start the archive's uncompressed-size accounting from the manifest
+    // text itself — every byte this import will actually decompress counts, not just
+    // the attachment payloads below.
+    let unpackedBytes = accumulateImportUncompressedBytes(0, Buffer.byteLength(manifestText, 'utf8'));
     let doc: unknown;
     try {
-      doc = JSON.parse(await manifestFile.async('string'));
+      doc = JSON.parse(manifestText);
     } catch {
       throw new BadRequestException('campaign.json in the archive is not valid JSON.');
     }
@@ -3335,7 +3977,17 @@ export class CampaignsService {
         attachmentsSkipped += 1; // present=false / dangling — no bytes were shipped
         continue;
       }
+      // Check the DECLARED size before expanding anything (review) — see
+      // `declaredUncompressedBytes`. This runs the same accumulator, so a header that would
+      // blow the cap rejects the archive without the allocation ever happening.
+      const declared = declaredUncompressedBytes(entry);
+      if (declared !== null) accumulateImportUncompressedBytes(unpackedBytes, declared);
       const bytes = await entry.async('nodebuffer');
+      // Issue #851: preflight the running uncompressed total BEFORE this entry's bytes
+      // are staged/persisted anywhere — reject the whole archive once expansion crosses
+      // the cap, rather than silently truncating what gets imported. Still required after
+      // the declared-size check above, which trusts a number the archive author chose.
+      unpackedBytes = accumulateImportUncompressedBytes(unpackedBytes, bytes.length);
       if (bytes.length === 0 || bytes.length > MAX_UPLOAD_BYTES) {
         attachmentsSkipped += 1;
         continue;
@@ -3374,6 +4026,11 @@ export class CampaignsService {
         ...metadata.data,
       });
     }
+
+    // Issue #851: preflight the uploads volume's free space against the bytes this
+    // import will actually stage, BEFORE importCampaign starts writing anything.
+    const totalAttachmentBytes = attachmentFiles.reduce((sum, a) => sum + a.bytes.length, 0);
+    assertImportDiskReserve(totalAttachmentBytes);
 
     const result = await this.importCampaign(input, user, attachmentFiles);
     // Fold the preflight skip count into the result (importCampaign only sees the
@@ -3515,14 +4172,66 @@ export class CampaignsService {
    *
    * Issue #867: the UPDATE is predicated on `deleted_at IS NOT NULL` so a concurrent
    * purge that commits first leaves restore as 404 (never resurrects a wiped row).
+   *
+   * Issue #2016 (split from the #851 review): a trashed row is excluded from BOTH the
+   * active and total counts (see CampaignGovernanceService's doc), so restoring one that
+   * was ACTIVE when it was trashed raises the active total exactly like un-pausing does,
+   * with no check at all. A trashed row that was paused/completed does not re-enter the
+   * active count on restore, so it needs no check here — only ACTIVE-at-trash-time matters.
    */
   async restore(id: number, user: RequestUser): Promise<Campaign> {
-    const [row] = await this.db
-      .update(campaigns)
-      .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(and(eq(campaigns.id, id), isNotNull(campaigns.deletedAt)))
-      .returning();
-    if (!row) throw new NotFoundException(`Campaign ${id} is not in the trash`);
+    const govCtx = await this.governance.resolveContext(user);
+    let row: typeof campaigns.$inferSelect | undefined;
+    try {
+      row = this.db.transaction((tx) => {
+        const existing = tx
+          .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1)
+          .get();
+        if (!existing || existing.deletedAt == null) {
+          throw new NotFoundException(`Campaign ${id} is not in the trash`);
+        }
+        if (existing.status === 'active') {
+          // Issue #2016: the authoritative, race-free ACTIVE-only ceiling check — first
+          // statement that can deny, atomic with clearing deletedAt below. Keyed to the
+          // CAMPAIGN's own owner, not the acting DM (a co-DM may restore a campaign owned
+          // by someone else) — see enforceActiveLimitTx's doc.
+          const ownerUserId = this.governance.getOwnerUserId(tx, id);
+          this.governance.enforceActiveLimitTx(tx, govCtx, ownerUserId);
+        }
+        const updated = tx
+          .update(campaigns)
+          .set({ deletedAt: null, updatedAt: nowIso() })
+          .where(and(eq(campaigns.id, id), isNotNull(campaigns.deletedAt)))
+          .returning()
+          .get();
+        if (!updated) throw new NotFoundException(`Campaign ${id} is not in the trash`);
+        return updated;
+      }, { behavior: 'immediate' });
+    } catch (err) {
+      if (err instanceof CampaignGovernanceDeniedError) {
+        // Best-effort, outside the rolled-back transaction — see create()'s identical catch
+        // for why a bare `await this.audit.log(...)` here would risk turning an expected
+        // 403-with-a-reason into a 500 with none.
+        await auditBestEffort(
+          this.audit,
+          this.logger,
+          {
+            actor: auditActor(user),
+            actorRole: auditActorRole(user),
+            action: 'campaign.restore.denied',
+            entityType: 'campaign',
+            entityId: id,
+            campaignId: id,
+            detail: `reason=${err.code}`,
+          },
+          (e) => `audit campaign.restore.denied failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      throw err;
+    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',

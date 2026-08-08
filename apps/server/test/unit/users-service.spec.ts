@@ -100,11 +100,54 @@ describe('UsersService unit tests', () => {
         textSize: 'large',
         diceTheme: 'cyberpunk_neon',
         timeFormat: '24h',
+        colorVisionAssist: true,
       },
       adminActor,
     );
     expect(prefUpdated.accentColor).toBe('#123456');
     expect(prefUpdated.textSize).toBe('large');
+    expect(prefUpdated.colorVisionAssist).toBe(true);
+  });
+
+  it('defaults colorVisionAssist to false and round-trips it independently of other preferences (#1942)', async () => {
+    const created = await usersService.create({
+      username: 'ely',
+      displayName: 'Ely',
+      password: 'password123',
+    });
+    expect(created.colorVisionAssist).toBe(false);
+
+    const enabled = await usersService.updatePreferences(created.id, { colorVisionAssist: true }, adminActor);
+    expect(enabled.colorVisionAssist).toBe(true);
+    // Untouched preferences are not disturbed by a partial update.
+    expect(enabled.textSize).toBe('default');
+
+    const fetched = await usersService.getOrThrow(created.id);
+    expect(fetched.colorVisionAssist).toBe(true);
+
+    const disabled = await usersService.updatePreferences(created.id, { colorVisionAssist: false }, adminActor);
+    expect(disabled.colorVisionAssist).toBe(false);
+  });
+
+  it('defaults tableAudio to off and round-trips every level independently of other preferences (#1920)', async () => {
+    const created = await usersService.create({
+      username: 'finn',
+      displayName: 'Finn',
+      password: 'password123',
+    });
+    expect(created.tableAudio).toBe('off');
+
+    const enabled = await usersService.updatePreferences(created.id, { tableAudio: 'medium' }, adminActor);
+    expect(enabled.tableAudio).toBe('medium');
+    // Untouched preferences are not disturbed by a partial update.
+    expect(enabled.textSize).toBe('default');
+    expect(enabled.colorVisionAssist).toBe(false);
+
+    const fetched = await usersService.getOrThrow(created.id);
+    expect(fetched.tableAudio).toBe('medium');
+
+    const disabled = await usersService.updatePreferences(created.id, { tableAudio: 'off' }, adminActor);
+    expect(disabled.tableAudio).toBe('off');
   });
 
   it('creates SSO user and syncs OIDC role', async () => {

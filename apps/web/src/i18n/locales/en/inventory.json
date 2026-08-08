@@ -113,6 +113,10 @@
         "ring2": "Ring 2",
         "wondrous": "Wondrous item"
       }
+    },
+    "compendium": {
+      "statsLabel": "Statistics",
+      "sourceDetails": "Source details"
     }
   }
 }

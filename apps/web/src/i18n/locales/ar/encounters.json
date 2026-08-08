@@ -1,6 +1,61 @@
 {
   "encounters": {
     "title": "المواجهات",
+    "combatLogHeading": "سجل القتال",
+    "actions": {
+      "title": "الإجراءات",
+      "use": "استخدام",
+      "useGroup": "تنفيذ للمجموعة",
+      "uses": {
+        "rechargeSingle": "إعادة الشحن {{min}}",
+        "recharge": "إعادة الشحن {{min}}–{{max}}",
+        "spent": "مُستهلَك",
+        "perDay": "{{max}}/يوم",
+        "left": "بقي {{count}}",
+        "left_other": "بقي {{count}}",
+        "disabledReason": "لا توجد استخدامات متبقية ({{label}})"
+      }
+    },
+    "vitals": {
+      "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
+      "maxHp": "الحد الأقصى لنقاط الحياة",
+      "setMax": "تعيين الحد الأقصى",
+      "deathSaves": "رميات الموت",
+      "dyingStrip": "أنت تحتضر — {{successes}} نجاحات / {{failures}} إخفاقات",
+      "rollDeathSave": "ارمِ نرد الموت"
+    },
+    "deathSave": {
+      "outcome": {
+        "revive": "٢٠ طبيعي — عدت إلى قدميك!",
+        "dead": "توفي.",
+        "stabilized": "استقرت حالته.",
+        "success": "نجاح (بنتيجة {{natural}}).",
+        "failure": "إخفاق (بنتيجة {{natural}})."
+      },
+      "spectatorToast": "{{name}} - رمية موت: {{outcome}} (بنتيجة {{natural}})",
+      "spectatorOutcomeSuccess": "نجاح",
+      "spectatorOutcomeFailure": "إخفاق"
+    },
+    "turnTimer": {
+      "elapsed": "الوقت المنقضي للدور {{elapsed}}",
+      "elapsedOfLimit": "الوقت المنقضي للدور {{elapsed}} من {{limit}}",
+      "settingsLabel": "إعدادات مؤقت الدور",
+      "settingsTitle": "مؤقت الدور",
+      "settingsHint": "مجرد تذكير اجتماعي بالوتيرة — لا يقدّم الدور تلقائيًا أبدًا ولا يمنع أحدًا.",
+      "off": "إيقاف",
+      "presetSeconds": "{{seconds}} ثانية"
+    },
+    "initiativeChipLabel": "المبادرة: {{value}}",
+    "reorder": {
+      "menuLabel": "إعادة ترتيب {{name}} في المبادرة",
+      "moveUp": "نقل للأعلى",
+      "moveDown": "نقل للأسفل",
+      "moveAfterLabel": "نقل بعد…",
+      "top": "المقدمة",
+      "go": "نقل",
+      "delayingBadge": "مؤجَّل",
+      "announcement": "تم نقل {{name}} في ترتيب المبادرة."
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
@@ -27,6 +82,8 @@
       "title": "لا توجد مواجهات بعد",
       "hintDm": "Start one when combat kicks off.",
       "hintPlayer": "The DM hasn't started one yet.",
+      "sampleFight": "Try a sample fight",
+      "sampleFightLoading": "Seeding…",
       "noCombatants": "No combatants yet",
       "noCombatantsHintDmActive": "Add the party from the Party tab, then enemies.",
       "noCombatantsHintDmNoParty": "Add combatants below — this campaign has no active party to auto-add.",
@@ -36,6 +93,15 @@
       "checking": "جارٍ التحقق من الحالة المحفوظة — نتأكد ممّا إذا كان التغيير قد حُفظ قبل أن تتصرّف مجددًا.",
       "done": "تم التحقق. الحالة المعروضة تطابق الخادم الآن."
     },
+    "monsterHpDisplay": {
+      "label": "نقاط صحة الوحش المعروضة للاعبين",
+      "band": "نطاق",
+      "exact": "دقيق",
+      "hidden": "مخفي",
+      "bandDescription": "حالة تقريبية فقط (سليم/جريح/حرج/ساقط) — بدون أرقام دقيقة.",
+      "exactDescription": "إرسال أرقام نقاط الصحة الفعلية إلى اللاعبين.",
+      "hiddenDescription": "لا أرقام ولا حالة — الوحش الساقط يظل يظهر كـ«ساقط»."
+    },
     "sync": {
       "overridePrompt": "قد تعمل من حالة قديمة.",
       "overrideConfirm": "المتابعة على أي حال",
@@ -43,11 +109,24 @@
       "bannerOverrideOffline": "غير متصل — يُعرض آخر حالة معروفة للمواجهة. يجري العمل على بيانات قد تكون قديمة إلى أن تتم إعادة المزامنة.",
       "bannerOverrideReconnecting": "جارٍ إعادة الاتصال — يجري العمل على بيانات قد تكون قديمة إلى أن يعود الاتصال المباشر.",
       "bannerOverrideStale": "انقطعت التحديثات المباشرة — يجري العمل على بيانات قد تكون قديمة إلى أن تتم إعادة المزامنة.",
-      "controlsPaused": "Paused — reconnecting to live updates."
+      "controlsPaused": "متوقف مؤقتًا — جارٍ إعادة الاتصال بالتحديثات المباشرة.",
+      "ownOverridePrompt": "المزامنة المباشرة معطلة. لا يزال بإمكانك تحديث شخصيتك الخاصة فقط — سيرفض الخادم التحديث إذا غيّره شخص آخر أولاً.",
+      "ownOverrideConfirm": "المتابعة على أي حال",
+      "ownOverrideActive": "شخصيتك فقط — يجري العمل على بيانات قد تكون قديمة إلى أن تتم إعادة المزامنة. باقي الإجراءات تبقى متوقفة.",
+      "bannerOverrideOwnOffline": "غير متصل — يُعرض آخر حالة معروفة للمواجهة. لا يزال بإمكانك تحديث شخصيتك الخاصة إلى أن تتم إعادة المزامنة.",
+      "bannerOverrideOwnReconnecting": "جارٍ إعادة الاتصال — لا يزال بإمكانك تحديث شخصيتك الخاصة إلى أن يعود الاتصال المباشر.",
+      "bannerOverrideOwnStale": "انقطعت التحديثات المباشرة — لا يزال بإمكانك تحديث شخصيتك الخاصة إلى أن تتم إعادة المزامنة."
+    },
+    "feedback": {
+      "down": "سقط",
+      "revive": "نهض",
+      "hurt": "تأذى",
+      "recover": "تعافى"
     },
     "errors": {
       "load": "تعذّر تحميل encounters.",
       "create": "تعذّر الإنشاء the encounter.",
+      "sampleFight": "Couldn't seed the sample fight.",
       "preview": "Couldn't build a preview.",
       "commit": "Couldn't commit the encounter.",
       "loadEncounter": "تعذّر تحميل this encounter.",
@@ -57,6 +136,7 @@
       "actionFailed": "فشل هذا الإجراء.",
       "sendCheck": "Couldn't send the check request.",
       "rollCheck": "Couldn't roll the check.",
+      "loadChecks": "تعذّر تحميل قائمة الفحوصات لكل شخصية محددة.",
       "resolveAction": "Couldn't resolve that action.",
       "applyAction": "Couldn't apply that action.",
       "loadAftermath": "Couldn't load the aftermath workflow.",
@@ -138,6 +218,37 @@
         "failed": "Couldn't prepare optimised sizes for this map — it is still shown at full size.",
         "retry": "Refresh sizes",
         "retrying": "Refreshing…"
+      },
+      "aoe": {
+        "label": "منطقة التأثير",
+        "addCircle": "أضف دائرة تأثير",
+        "addCone": "أضف مخروط تأثير",
+        "addLine": "أضف خط تأثير",
+        "clearPlayers": "امسح قوالب اللاعبين",
+        "clearPlayersHint": "أزل كل قوالب التأثير التي أعلنها اللاعبون",
+        "declaredBy": "أعلنه {{name}}"
+      },
+      "ping": {
+        "menuLabel": "نية الإشارة",
+        "keyboardHint": "يفتح Shift+Enter قائمة انظر أو خطر أو تحرك هنا.",
+        "intents": {
+          "look": "انظر",
+          "danger": "خطر",
+          "move": "تحرك هنا"
+        },
+        "surfaceAriaLabel": "أشر إلى مركز الخريطة للجميع. {{hint}} العرض: +/− للتكبير، 0 لإعادة التعيين، مفاتيح الأسهم للتحريك عند التكبير.",
+        "toolHelp": "انقر على مكان في الخريطة أو اضغط Enter/Space عندما تكون الخريطة مركزة للإشارة إليه للجميع. {{hint}}",
+"log": {
+          "unknownSender": "شخص ما",
+          "labeled": "أشار {{name}} إلى: {{label}}",
+          "plain": "أشار {{name}} إلى الخريطة"
+        }
+      },
+      "dragDistance": {
+        "budget": "استُخدم {{used}} من {{max}} {{unit}}",
+        "overSpeed": "تجاوز السرعة",
+        "movedMessage": "تحرك {{feet}} {{unit}}.",
+        "undoneMessage": "تم التراجع عن الحركة."
       }
     },
     "workspace": {
@@ -187,22 +298,76 @@
         "pending": "Reopening encounter…"
       },
       "addCombatant": "Add combatant",
-      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
+      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here.",
+      "library": {
+        "hpNotSet": "لم يتم تحديد نقاط الحياة",
+        "hpValue": "{{hp}} نقطة حياة",
+        "hpOverrideLabel": "تحديد نقاط الحياة قبل الإضافة",
+        "hpOverridePlaceholder": "نقاط الحياة",
+        "addWithHp": "إضافة"
+      }
     },
     "checks": {
       "requestCheck": "Request a check",
-      "character": "Character",
-      "chooseCharacter": "Choose a character…",
+      "targets": "الأهداف",
+      "wholeParty": "الفريق بأكمله ({{count}})",
+      "wholePartyTooLarge": "عدد كبير جدًا من الشخصيات النشطة لتحديدها بلمسة واحدة ({{count}}/{{max}}) — اختر الأهداف يدويًا.",
+      "manualSelectionTooLarge": "تم تحديد أهداف كثيرة جدًا ({{count}}/{{max}}) — ألغِ تحديد البعض لإرسال هذا الطلب.",
+      "noCharacters": "لا توجد شخصيات لاستهدافها.",
       "check": "Check",
       "chooseCheck": "Choose a check…",
-      "pickCharacterFirst": "Pick a character first",
+      "noCommonCheck": "لا يوجد فحص مشترك بين كل الأهداف المحددة",
+      "noCommonCheckHint": "لا يوجد فحص مشترك بين الأهداف المحددة — اختر أهدافًا أقل، أو أرسل طلبات منفصلة.",
+      "retryLoadChecks": "إعادة المحاولة",
+      "pickCharacterFirst": "اختر هدفًا أولاً",
       "dc": "DC",
       "consequenceOptional": "Consequence (optional)",
       "rolled": "Rolled ",
-      "consequence": "Consequence: "
+      "consequence": "Consequence: ",
+      "board": {
+        "title": "الفحوصات الجماعية",
+        "tallyPassed": "{{pass}} من {{total}} نجحوا",
+        "tallyResolved": "{{resolved}} من {{total}} تم حسمها",
+        "pending": "قيد الانتظار",
+        "passed": "نجاح",
+        "failed": "فشل",
+        "resolved": "محسوم",
+        "majoritySucceeds": "تنجح المجموعة (نصفها أو أكثر)",
+        "possiblyIncomplete": "قد لا يظهر بعض الأعضاء (الطلب قديم جدًا ليُحمَّل بالكامل)"
+      }
     },
     "actionFlow": {
-      "noTargets": "No legal targets."
+      "noTargets": "No legal targets.",
+      "systemMathNotice": "تمت التسوية بحسابات لم تُدقَّق لنظام قواعدك — تحقّق من النتيجة."
+    },
+    "groupAction": {
+      "heading": "{{actorName}} · {{actionName}} · المجموعة",
+      "regionLabel": "تنفيذ {{actionName}} للمجموعة",
+      "dismissLabel": "إلغاء الإجراء الجماعي",
+      "cancel": "إلغاء",
+      "loadingCandidates": "جارٍ التحقق من القائمة بحثًا عن مقاتلين مطابقين…",
+      "noCandidates": "لا يوجد مقاتلون أحياء آخرون يطابقون هذا الإجراء.",
+      "runForAllCount": "تنفيذ لـ {{count}} مقاتلين",
+      "targetShared": "هدف مشترك",
+      "targetPerActor": "استهداف فردي",
+      "pickTargets": "اختر الهدف/الأهداف ({{selected}}/{{max}})",
+      "roll": "الرمي للمجموعة",
+      "rolling": "جارٍ الرمي…",
+      "announceComplete": "تم تطبيق {{applied}} من أصل {{total}}.",
+      "stoppedEarly": "توقف بعد فشل — تم تطبيق {{applied}}، ولم يُنفَّذ {{notRun}}.",
+      "status": {
+        "applied": "تم التنفيذ",
+        "skipped": "تم التخطي — لا يوجد إجراء متبقٍ",
+        "failed": "فشل",
+        "notRun": "لم يُنفَّذ",
+        "skippedNoUses": "تم التخطي — لا توجد استخدامات متبقية"
+      },
+      "undo": "تراجع",
+      "undone": "تم التراجع",
+      "undoAll": "تراجع عن الكل",
+      "undoingAll": "جارٍ التراجع…",
+      "undoAllFailed": "فشل بعض التراجعات — أعد التحميل للتحقق من حالة المواجهة.",
+      "close": "إغلاق"
     },
     "wizard": {
       "step1": "1. Parameters",
@@ -210,8 +375,13 @@
       "step3": "3. Save encounter",
       "noCreatures": "No creatures — adjust the filters and regenerate, or add one.",
       "none": "— none —",
-      "noStatblock": "No statblock detail — HP/CR may be incomplete."
+      "noStatblock": "No statblock detail — HP/CR may be incomplete.",
+      "heuristicDifficultyBadge": "الفئة المستهدفة: تقديرية",
+      "heuristicDifficultyHint": "تم تحديد حجم الفئة المستهدفة وفق ميزانية نقاط الخبرة الخاصة بـ D&D 5e — لا يمتلك نظام القواعد هذا حسابات صعوبة خاصة به.",
+      "homebrewBadge": "محتوى منزلي"
     },
+    "duplicate": "تكرار",
+    "duplicateCombatant": "تكرار {{name}}",
     "resourceTracker": {
       "title": "متتبع الموارد",
       "features": "القدرات",
@@ -224,6 +394,119 @@
       "updateSlotError": "تعذر تحديث خانة التعويذة.",
       "ambiguousResolved": "لم نتمكن من تأكيد اكتمال هذا الإجراء في حينه، لكن القيم المعروضة محدثة الآن — تحقق منها قبل إعادة المحاولة.",
       "setUsedTitle": "تعيين المستخدم إلى {{val}}"
+    },
+    "adapterResource": {
+      "hitDice": "مكعبات الحياة",
+      "rage": "الغضب",
+      "actionSurge": "اندفاع الأفعال",
+      "kiPoints": "نقاط التركيز/الكي",
+      "recharge": "سمة إعادة الشحن",
+      "inspiration": "الإلهام",
+      "focusPoints": "نقاط التركيز",
+      "heroPoints": "نقاط البطولة"
+    },
+    "adapterCondition": {
+      "Blinded": "أعمى",
+      "Charmed": "مسحور",
+      "Deafened": "أصم",
+      "Exhaustion": "الإرهاق",
+      "Frightened": "خائف",
+      "Grappled": "ممسوك",
+      "Incapacitated": "عاجز",
+      "Invisible": "غير مرئي",
+      "Paralyzed": "مشلول",
+      "Petrified": "متحجر",
+      "Poisoned": "مسموم",
+      "Prone": "ملقى أرضًا",
+      "Restrained": "مقيد",
+      "Stunned": "مذهول",
+      "Unconscious": "فاقد الوعي"
+    },
+    "rulesLookup": {
+      "heading": "البحث السريع في القواعد",
+      "placeholder": "ابحث في القواعد والابتكارات…",
+      "searchLabel": "البحث في القواعد والابتكارات المنزلية",
+      "noResults": "لم يتم العثور على قواعد مطابقة.",
+      "noDetails": "لا تتوفر تفاصيل لهذه القائمة.",
+      "recentLookups": "عمليات البحث الأخيرة",
+      "homebrewBadge": "محتوى منزلي",
+      "toggleExpand": "توسيع البحث السريع في القواعد",
+      "toggleCollapse": "طوي البحث السريع في القواعد",
+      "show": "عرض",
+      "hide": "إخفاء",
+      "loading": "جارٍ البحث…",
+      "typeToSearch": "ابدأ الكتابة للبحث في القواعد والابتكارات…",
+      "searchError": "تعذر البحث في القواعد."
+    },
+    "statblock": {
+      "reveal": "كشف",
+      "revealed": "مكشوف",
+      "revealToPlayers": "كشف بطاقة الإحصائيات للاعبين",
+      "hideFromPlayers": "إخفاء بطاقة الإحصائيات عن اللاعبين",
+      "revealedSummary": "بطاقة الإحصائيات (مكشوفة للاعبين)",
+      "killPrompt": "وصل {{name}} إلى 0 نقطة حياة — هل تريد كشف بطاقة إحصائياته للاعبين؟",
+      "dismiss": "تجاهل",
+      "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات",
+      "maxHp": "الحد الأقصى لنقاط الحياة",
+      "hpUnknown": "غير معروف"
+    },
+    "whisper": {
+      "button": "همس",
+      "buttonLabel": "همس إلى {{name}}",
+      "panelTitle": "همسة سريعة للاعب",
+      "recipientLabel": "المستلم",
+      "selectRecipient": "اختر لاعباً…",
+      "messageLabel": "رسالة الهمسة",
+      "title": "همس إلى {{name}}",
+      "placeholder": "اكتب همسة خاصة…",
+      "send": "إرسال الهمسة",
+      "cancel": "إلغاء",
+      "sent": "تم إرسال الهمسة إلى {{name}}",
+      "error": "تعذر إرسال الهمسة."
+    },
+    "rulesHints": {
+      "triggerAria": "تلميح القواعد لـ {{term}}",
+      "regionLabel": "تلميح القواعد: {{term}}",
+      "fullRule": "القاعدة الكاملة",
+      "dnd5e": {
+        "actions": {
+          "attack": "نفّذ ضربة سلاح واحدة أو ضربة بالأيدي العارية على هدف ضمن المدى. بعض ميزات الفئة مثل \"هجوم إضافي\" قد تمنحك أكثر من ضربة.",
+          "dash": "احصل على حركة إضافية تساوي سرعتك لهذا الدور.",
+          "dodge": "حتى دورك التالي، تُصبح أي رمية هجوم ضدك بعيب إذا كنت ترى المهاجم، ولديك ميزة في رميات نجاة الرشاقة.",
+          "disengage": "لا تستفزّ حركتك هجمات الفرصة لبقية هذا الدور.",
+          "help": "امنح حليفًا ميزة في فحص القدرة التالي لإنجاز مهمة، أو مهّد لهجومه القريب التالي على مخلوق يقف على بعد 5 أقدام منك.",
+          "hide": "نفّذ فحص رشاقة (تخفٍّ) لمحاولة الاختباء، فتصبح غير مرئي للمخلوقات التي تفشل في اكتشافك.",
+          "ready": "اختر مُحفِّزًا وفعلًا أو حركة تنفذهما استجابةً له، مستخدمًا رد فعلك عند وقوع المُحفِّز.",
+          "search": "كرّس انتباهك لإيجاد شيء ما، عادةً عبر فحص حكمة (إدراك) أو ذكاء (تحرٍّ).",
+          "use": "تفاعل مع غرض أو عنصر بيئي إضافي غير التفاعل المجاني الذي تحصل عليه أصلًا في دورك."
+        },
+        "conditions": {
+          "blinded": "لا يمكنه الرؤية ويفشل تلقائيًا في أي فحص يتطلب البصر. رميات الهجوم ضده تحظى بميزة، بينما رميات هجومه هو تُصاب بعيب.",
+          "charmed": "لا يمكنه مهاجمة الساحر أو استهدافه بقدرات أو سحر ضار، ويملك الساحر ميزة في الفحوصات الاجتماعية ضده.",
+          "deafened": "لا يمكنه السمع ويفشل تلقائيًا في أي فحص يتطلب السمع.",
+          "exhaustion": "مسار عقوبات تراكمي من المستوى 1 إلى 6 — كل مستوى يزيد سوءًا في فحوصات القدرة والسرعة وغيرها، ويكون المستوى 6 قاتلًا.",
+          "frightened": "يملك عيبًا في فحوصات القدرة ورميات الهجوم طالما مصدر خوفه ضمن خط الرؤية، ولا يمكنه التحرك بإرادته نحوه.",
+          "grappled": "تصبح سرعته صفرًا ولا يستفيد من أي زيادة في السرعة؛ تنتهي الحالة إذا أُصيب الماسك بالعجز أو أُبعد المخلوق عن متناوله.",
+          "incapacitated": "لا يمكنه اتخاذ أفعال أو ردود أفعال.",
+          "invisible": "يستحيل رؤيته بدون حاسة خاصة، ويُعدّ محجوبًا بشدة لأغراض الاختباء. رميات الهجوم ضده تُصاب بعيب، بينما رميات هجومه تحظى بميزة.",
+          "paralyzed": "عاجز ولا يمكنه الحركة أو الكلام، ويفشل تلقائيًا في رميات نجاة القوة والرشاقة. الهجمات ضده تحظى بميزة، وأي إصابة من مسافة 5 أقدام تُعدّ ضربة حاسمة.",
+          "petrified": "يتحول هو وأي أغراض غير سحرية يحملها إلى مادة صلبة؛ يصبح عاجزًا، ومقاومًا لكل أنواع الضرر، ومحصنًا ضد السم والمرض.",
+          "poisoned": "يملك عيبًا في رميات الهجوم وفحوصات القدرة.",
+          "prone": "لا يمكنه سوى الزحف ما لم ينهض. يملك عيبًا في رميات الهجوم؛ الهجمات القريبة ضده تحظى بميزة، بينما الهجمات عن بُعد تُصاب بعيب.",
+          "restrained": "تصبح سرعته صفرًا. رميات الهجوم ضده تحظى بميزة، ورميات هجومه تُصاب بعيب، ويملك عيبًا في رميات نجاة الرشاقة.",
+          "stunned": "عاجز، ولا يمكنه الحركة، ويتكلم بتعثر فقط؛ يفشل تلقائيًا في رميات نجاة القوة والرشاقة، والهجمات ضده تحظى بميزة.",
+          "unconscious": "عاجز، ولا يمكنه الحركة أو الكلام، وغير مدرك لمحيطه. يُسقط ما يحمله ويسقط أرضًا؛ الهجمات ضده تحظى بميزة، وأي إصابة من مسافة 5 أقدام تُعدّ ضربة حاسمة."
+        }
+      }
+    },
+    "specialResource": {
+      "award": "منح {{name}}",
+      "awardedAnnounce": "تم منح {{name}} إلى {{combatantName}}",
+      "spend": "استخدام {{name}}",
+      "spendConfirm": "استخدام {{name}}؟",
+      "spentToast": "تم استخدام {{name}}",
+      "available": "{{available}} من {{max}} من {{name}} متاح",
+      "receivedAnnounce": "لقد حصلت على {{name}}!"
     }
   }
 }

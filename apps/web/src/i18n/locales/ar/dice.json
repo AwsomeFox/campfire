@@ -50,6 +50,7 @@
     "announceRoll": "Rolled {{label}}{{expr}}: {{total}} ({{rolls}}{{kept}}){{check}}{{flourish}}",
     "announceRemoteRoll": "{{roller}} {{body}}",
     "announceRemoteRollBatch": "{{count}} new dice rolls. {{messages}}",
+    "spectatorAttribution": "{{roller}} يرمي {{expr}}",
     "diceLogFeedLabel": "Shared dice roll feed",
     "rollError": "Couldn't roll.",
     "saveRollTitle": "حفظ roll",

@@ -1,6 +1,12 @@
 import { expect, test } from '@playwright/test';
 import { Dnd5eAdapter, OpenLegendAdapter, Pf2eAdapter } from '@campfire/schema';
-import { findSpecialResource, resourceAvailability, SPECIAL_RESOURCE_KEYS } from '../../src/features/characters/specialCharacterResource';
+import {
+  canAdjustSpecialResource,
+  findSpecialResource,
+  resourceAvailability,
+  specialResourceAdjustBody,
+  SPECIAL_RESOURCE_KEYS,
+} from '../../src/features/characters/specialCharacterResource';
 
 /**
  * Issue #1642 — the character sheet surfaces inspiration (5e) / hero points (PF2e) as a
@@ -65,5 +71,96 @@ test.describe('resourceAvailability — pip math, DM-awarded economy (#1642)', (
     expect(
       resourceAvailability(inspirationDef, { resources: { inspiration: { max: 1, used: 3 } } }),
     ).toEqual({ max: 1, used: 3, available: 0 });
+  });
+});
+
+/**
+ * Issue #1944 — the encounter screen's DM-award (`CombatantRow`) and player-spend
+ * (`PlayerVitalsHeader`) controls call these two helpers instead of re-deriving the
+ * `AdapterResourceCard.adjust` semantics a second time. Same fixtures as the
+ * `resourceAvailability` suite above so the two suites stay easy to cross-reference.
+ */
+test.describe('specialResourceAdjustBody — exact POST /characters/:id/resources body (#1944)', () => {
+  const inspirationDef = { key: 'inspiration', defaultMax: 1, name: 'Inspiration', recharge: 'special' as const };
+  const heroPointsDef = { key: 'heroPoints', defaultMax: 3, name: 'Hero Points', recharge: 'special' as const };
+  const AT = '2026-01-01T00:00:00.000Z';
+
+  test('award on a never-touched pool is the first-touch creation payload, not a delta', () => {
+    expect(specialResourceAdjustBody(inspirationDef, { resources: {}, updatedAt: AT }, 'award')).toEqual({
+      key: 'inspiration',
+      max: 1,
+      used: 0,
+      name: 'Inspiration',
+      recharge: 'special',
+      expectedUpdatedAt: AT,
+    });
+    expect(specialResourceAdjustBody(heroPointsDef, { resources: {}, updatedAt: AT }, 'award')).toEqual({
+      key: 'heroPoints',
+      max: 3,
+      used: 2,
+      name: 'Hero Points',
+      recharge: 'special',
+      expectedUpdatedAt: AT,
+    });
+  });
+
+  // Devin review on PR #2052: the creation arm is the only ABSOLUTE `used` write here, and the
+  // absence of a stored record is what selects it — so a stale copy is self-perpetuating. A
+  // second Award pressed before the first round-trips still sees no record, posts the same body,
+  // and the server rewrites the same value while the caller reports success. The CAS token makes
+  // that a 409 rather than a silent no-op. Asserted separately from the shape above so a refactor
+  // that drops the field fails HERE, on a case whose name says why.
+  test('only the absolute creation arm carries the concurrency token — a relative delta neither needs nor sends one', () => {
+    const created = specialResourceAdjustBody(heroPointsDef, { resources: {}, updatedAt: AT }, 'award');
+    expect(created).toHaveProperty('expectedUpdatedAt', AT);
+    for (const body of [
+      specialResourceAdjustBody(heroPointsDef, { resources: { heroPoints: { max: 5, used: 2 } }, updatedAt: AT }, 'award'),
+      specialResourceAdjustBody(inspirationDef, { resources: { inspiration: { max: 1, used: 0 } }, updatedAt: AT }, 'spend'),
+    ]) {
+      expect(body).not.toHaveProperty('expectedUpdatedAt');
+    }
+  });
+
+  test('award on an already-touched pool is a plain delta: -1 — never re-sends max/name/recharge (would clobber a DM override)', () => {
+    expect(
+      specialResourceAdjustBody(heroPointsDef, { resources: { heroPoints: { max: 5, used: 2 } }, updatedAt: AT }, 'award'),
+    ).toEqual({ key: 'heroPoints', delta: -1 });
+  });
+
+  test('spend is always a plain delta: +1 — a spend is only ever legal once the pool has been touched', () => {
+    expect(
+      specialResourceAdjustBody(inspirationDef, { resources: { inspiration: { max: 1, used: 0 } }, updatedAt: AT }, 'spend'),
+    ).toEqual({ key: 'inspiration', delta: 1 });
+  });
+});
+
+test.describe('canAdjustSpecialResource — award-cap and spend-zero gating (#1944)', () => {
+  const inspirationDef = { key: 'inspiration', defaultMax: 1 };
+  const heroPointsDef = { key: 'heroPoints', defaultMax: 3 };
+
+  test('spend is gated off at zero available (a never-touched pool cannot be spent)', () => {
+    expect(canAdjustSpecialResource(inspirationDef, { resources: {} }, 'spend')).toBe(false);
+    expect(
+      canAdjustSpecialResource(inspirationDef, { resources: { inspiration: { max: 1, used: 1 } } }, 'spend'),
+    ).toBe(false);
+  });
+
+  test('spend is allowed once available > 0', () => {
+    expect(
+      canAdjustSpecialResource(heroPointsDef, { resources: { heroPoints: { max: 3, used: 2 } } }, 'spend'),
+    ).toBe(true);
+  });
+
+  test('award is gated off at the adapter cap (used === 0 — nothing left to top up)', () => {
+    expect(
+      canAdjustSpecialResource(heroPointsDef, { resources: { heroPoints: { max: 3, used: 0 } } }, 'award'),
+    ).toBe(false);
+  });
+
+  test('award is allowed on a never-touched pool (used === max per resourceAvailability) and on a partially-used one', () => {
+    expect(canAdjustSpecialResource(inspirationDef, { resources: {} }, 'award')).toBe(true);
+    expect(
+      canAdjustSpecialResource(heroPointsDef, { resources: { heroPoints: { max: 3, used: 1 } } }, 'award'),
+    ).toBe(true);
   });
 });

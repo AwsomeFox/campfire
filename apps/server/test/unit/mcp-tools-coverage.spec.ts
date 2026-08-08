@@ -1,5 +1,7 @@
 import { McpToolsService } from '../../src/modules/mcp/mcp-tools';
 import type { RequestUser } from '../../src/common/user.types';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 describe('McpToolsService coverage unit tests', () => {
   const user: RequestUser = {
@@ -63,6 +65,7 @@ describe('McpToolsService coverage unit tests', () => {
     const inboxSweep = overrides.inboxSweep ?? {};
     const throttlerStorage = overrides.throttlerStorage ?? {};
     const safetyCharterValidator = overrides.safetyCharterValidator ?? {};
+    const sampleEncounter = overrides.sampleEncounter ?? {};
 
     return new McpToolsService(
       access as any,
@@ -108,6 +111,7 @@ describe('McpToolsService coverage unit tests', () => {
       inboxSweep as any,
       throttlerStorage as any,
       safetyCharterValidator as any,
+      sampleEncounter as any,
     );
   }
 
@@ -133,5 +137,149 @@ describe('McpToolsService coverage unit tests', () => {
       // Call every registered tool — even if validation fails or mock throws, it executes the handler body seam
       await toolset.call(tool.name, { campaignId: 1, id: 1, query: 'test' });
     }
+  });
+
+  /**
+   * Issue #1928 review (Codex, three separate rounds on this one sentence). An AI caller reads
+   * `resolve_action`'s description to decide how much to trust a result. `systemMathSupported:
+   * false` marks the system UNAUDITED end-to-end — it does not say which maths ran. OSR and Open
+   * Legend supply their own `resolveAttack` (descending-AC comparison, exploding dice pools) and
+   * are still reported unsupported because the combined attack/save profile is unaudited, so a
+   * blanket "the numbers are 5e-shaped" claim is false for exactly the systems the flag is meant
+   * to protect — and would push an agent to discount a result that was right for the table.
+   *
+   * This pins the correction rather than banning the phrase: the description legitimately says
+   * "5e-shaped" in a clause conditioned on `mathProfile` naming the 5e profile.
+   */
+  it('resolve_action does not tell callers the unsupported flag means 5e math ran', () => {
+    const service = createMcpToolsService();
+    const toolset = service.buildToolset(user);
+    const resolveAction = toolset.tools.find((t) => t.name === 'resolve_action');
+    expect(resolveAction).toBeDefined();
+    const description = resolveAction!.description ?? '';
+
+    // The corrective statement must be present...
+    expect(description).toMatch(/does NOT mean 5e math was necessarily used/);
+    expect(description).toMatch(/OSR, Open Legend/);
+    // ...and the flag must never be described as meaning the numbers ARE 5e-shaped.
+    expect(description).not.toMatch(/only flags that the numbers are 5e-shaped/);
+  });
+
+  /**
+   * Issue #1928 review (Codex, fourth round). The mirror-image error on the generator side:
+   * `difficultySupport: 'heuristic'` does NOT mean the reported difficulty is a 5e-shaped
+   * RATING — for a registered non-5e system the reported difficulty is `unsupported` with a
+   * null band, i.e. the absence of a rating. Only the roster-SIZING pass is 5e-shaped. A
+   * description that attaches "5e-shaped" to the reported difficulty invites an AI caller to
+   * report a band the payload does not contain. `generate_encounter` already got this right;
+   * `preview_encounter` did not, so both are pinned here rather than only the one that broke.
+   */
+  /**
+   * Issue #1928, fifth round on this one claim. The first four corrections each fixed the
+   * copy that was quoted and left another surface behind: the web catalog, the component's
+   * inline fallback, `resolve_action`'s description, `preview_encounter`'s. The fifth was
+   * the SCHEMA JSDoc — the thing a downstream TypeScript consumer actually reads on hover,
+   * and the one surface no test looked at. Pin it here alongside the tool descriptions so
+   * "the docs and the registered descriptions agree" is one assertion, not a habit.
+   */
+  it('the ActionResolveResult schema docs do not claim the unsupported flag means 5e math ran', () => {
+    const source = readFileSync(
+      resolve(__dirname, '../../../../packages/schema/src/action-resolver.ts'),
+      'utf8',
+    );
+    const block = source.slice(
+      source.indexOf('Issue #1928: whether the resolver'),
+      source.indexOf('systemMathSupported: z.boolean()'),
+    );
+    expect(block.length).toBeGreaterThan(200);
+    // Whitespace-tolerant: this is a JSDoc block, so any phrase can be split across a line
+    // wrap by ` * `. A literal-space regex here would fail on formatting rather than meaning.
+    expect(block).toMatch(/UNAUDITED[\s*]+end-to-end/);
+    expect(block).toMatch(/OSR|Open Legend/);
+    expect(block).not.toMatch(/it only tells a caller the numbers it\s*\n?\s*\*?\s*just got are 5e-shaped/);
+  });
+
+  it.each(['generate_encounter', 'preview_encounter'])(
+    '%s does not describe the reported difficulty itself as 5e-shaped',
+    (toolName) => {
+      const service = createMcpToolsService();
+      const toolset = service.buildToolset(user);
+      const tool = toolset.tools.find((t) => t.name === toolName);
+      expect(tool).toBeDefined();
+      const description = tool!.description ?? '';
+
+      // "5e-shaped" is legal, but only ever attached to the sizing/heuristic pass.
+      for (const match of description.match(/[^.;]*5e-shaped[^.;]*/g) ?? []) {
+        expect(match).toMatch(/siz(e|ed|ing)|heuristic/i);
+      }
+      // ...and the unsupported difficulty must be described as absent, not as a 5e rating.
+      expect(description).toMatch(/unsupported/);
+      expect(description).not.toMatch(/reported difficulty is 5e-shaped/);
+    },
+  );
+
+  /**
+   * Issue #2058. `LimitArg(max, fallback)` renders its arg description from `fallback`,
+   * which is supposed to name the endpoint's REAL service default page size. Two shapes
+   * must both render honestly:
+   *
+   * - a genuine service default (get_notifications-style: the service applies `?? 50`
+   *   when `limit` is omitted) — the description must claim that real number as the
+   *   default, not the unrelated max.
+   * - no service default at all (list_check_requests / get_session_recaps / list_comments:
+   *   `applyPage` is a literal no-op when `limit`/`offset` are both omitted, so every
+   *   visible row comes back) — the description must say so, and must NOT claim the max
+   *   as a fake "default", which would tell a caller that omitting `limit` is safely
+   *   capped when it is actually unbounded.
+   */
+  it('list_check_requests limit description matches applyPage\'s unbounded-when-omitted behaviour', () => {
+    const service = createMcpToolsService();
+    const toolset = service.buildToolset(user);
+    const tool = toolset.tools.find((t) => t.name === 'list_check_requests');
+    expect(tool).toBeDefined();
+    const limitDescription = (
+      (tool!.inputSchema as { properties?: Record<string, { description?: string }> }).properties?.limit
+        ?.description ?? ''
+    );
+
+    // Must not claim a default page size — omitting `limit` returns every row.
+    expect(limitDescription).not.toMatch(/default\s+\d+/);
+    // Must say what actually happens when `limit` is omitted.
+    expect(limitDescription).toMatch(/omitted returns every row|no default page size/i);
+  });
+
+  it.each([
+    ['get_session_recaps', 'limit'],
+    ['list_comments', 'limit'],
+  ])('%s %s description matches applyPage\'s unbounded-when-omitted behaviour', (toolName, argName) => {
+    const service = createMcpToolsService();
+    const toolset = service.buildToolset(user);
+    const tool = toolset.tools.find((t) => t.name === toolName);
+    expect(tool).toBeDefined();
+    const description = (
+      (tool!.inputSchema as { properties?: Record<string, { description?: string }> }).properties?.[argName]
+        ?.description ?? ''
+    );
+    expect(description).not.toMatch(/default\s+\d+/);
+    expect(description).toMatch(/omitted returns every row|no default page size/i);
+  });
+
+  /**
+   * The mirror-image check: an endpoint that DOES have a real service default (here,
+   * list_notifications defaults to 50 server-side — notifications.service.ts's
+   * `Math.min(Math.max(opts.limit ?? 50, 1), 200)`) must keep advertising that default,
+   * not regress to the unbounded phrasing.
+   */
+  it('list_notifications limit description still advertises its real service default', () => {
+    const service = createMcpToolsService();
+    const toolset = service.buildToolset(user);
+    const tool = toolset.tools.find((t) => t.name === 'list_notifications');
+    expect(tool).toBeDefined();
+    const description = (
+      (tool!.inputSchema as { properties?: Record<string, { description?: string }> }).properties?.limit
+        ?.description ?? ''
+    );
+    expect(description).toMatch(/default 50/);
+    expect(description).not.toMatch(/omitted returns every row/i);
   });
 });

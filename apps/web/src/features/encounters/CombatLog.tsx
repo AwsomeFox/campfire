@@ -9,7 +9,8 @@ import {
   formatCombatLogChainDetails,
   formatCombatLogChainSummary,
   formatCombatLogEventSummary,
-} from './combatLogAccessibility'; 
+} from './combatLogAccessibility';
+import { isDeathSaveRollEvent } from './combat/deathSaveOutcome';
 
 const EVENT_ICON: Record<string, string> = {
   damage: 'crossed-swords',
@@ -24,7 +25,7 @@ const EVENT_ICON: Record<string, string> = {
 };
 
 export const CombatLog = React.memo(function CombatLog({ events }: { events: EncounterEvent[] }) {
-  const { t } = useTranslation('encounters');
+  const { t } = useTranslation();
   const headingId = 'combat-log-heading';
   const logRef = useRef<HTMLDivElement>(null);
   const preservedScrollTopRef = useRef(0);
@@ -51,7 +52,7 @@ export const CombatLog = React.memo(function CombatLog({ events }: { events: Enc
 
   return (
     <Card className="space-y-2 min-w-0" id="combat-log">
-      <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>{t('combatLogHeading', 'Combat log')}</h2>
+      <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>{t('encounters.combatLogHeading', 'Combat log')}</h2>
       <div
         ref={logRef}
         role="log"
@@ -75,8 +76,15 @@ export const CombatLog = React.memo(function CombatLog({ events }: { events: Enc
               const details = expandable ? formatCombatLogChainDetails(chain) : [];
               const summary = chain.chainId ? formatCombatLogChainSummary(chain) : formatCombatLogEventSummary(head);
               const iconType = head.type;
+              // Issue #1919 — a death-save roll is the tensest line in the log; give it a
+              // distinct highlighted style rather than reading identically to any other roll.
+              const isDeathSaveRoll = !chain.chainId && isDeathSaveRollEvent(head);
               return (
-                <li key={chainKey} style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 12.5, lineHeight: 1.4 }}>
+                <li
+                  key={chainKey}
+                  className={isDeathSaveRoll ? 'cf-combat-log-death-save' : undefined}
+                  style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 12.5, lineHeight: 1.4 }}
+                >
                   <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
                     <span aria-hidden="true" style={{ flex: 'none' }}>
                       {EVENT_ICON[iconType] ? <GameIcon slug={EVENT_ICON[iconType]} size={UI_ICON_SIZE.xs} /> : '•'}
