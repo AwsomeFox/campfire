@@ -83,22 +83,58 @@ test.describe('actionSpecFacts — states only what the spec carries', () => {
   });
 });
 
-test.describe('actionSpecEffects — player-safe branch prose, deduplicated', () => {
-  test('an effect shared by the hit and crit branches is listed once', () => {
+test.describe('actionSpecEffects — player-safe branch prose, kept under its own outcome', () => {
+  /**
+   * The invariant this suite exists for: a save's branches are MUTUALLY EXCLUSIVE, so
+   * merging them into one list tells the reader that both a success effect and a failure
+   * condition apply. Each branch keeps its own name.
+   */
+  test('a save keeps success and failure apart, each under its own label', () => {
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      outcomes: {
+        failure: { effects: [{ condition: 'Restrained' }] },
+        success: { text: 'The target is unaffected.' },
+      },
+    });
+    expect(actionSpecEffects(spec)).toEqual([
+      { outcome: 'success', label: 'On a success', lines: ['The target is unaffected.'] },
+      { outcome: 'failure', label: 'On a failure', lines: ['Restrained'] },
+    ]);
+  });
+
+  test('the same effect on hit and on crit is two statements about two outcomes, not one', () => {
     const spec = ActionSpec.parse({
       outcomes: {
         hit: { effects: [{ condition: 'Prone' }] },
         crit: { effects: [{ condition: 'Prone' }] },
       },
     });
-    expect(actionSpecEffects(spec)).toEqual(['Prone']);
+    expect(actionSpecEffects(spec)).toEqual([
+      { outcome: 'crit', label: 'On a critical hit', lines: ['Prone'] },
+      { outcome: 'hit', label: 'On a hit', lines: ['Prone'] },
+    ]);
+  });
+
+  test('a line repeated WITHIN one branch is still shown once', () => {
+    const spec = ActionSpec.parse({
+      outcomes: { hit: { text: 'Prone', effects: [{ condition: 'Prone' }] } },
+    });
+    expect(actionSpecEffects(spec)).toEqual([{ outcome: 'hit', label: 'On a hit', lines: ['Prone'] }]);
   });
 
   test('duration and save-ends are spelled out beside the condition', () => {
     const spec = ActionSpec.parse({
       outcomes: { failure: { text: 'The target is scorched.', effects: [{ condition: 'Frightened', rounds: 1, saveEnds: true }] } },
     });
-    expect(actionSpecEffects(spec)).toEqual(['The target is scorched.', 'Frightened (1 round), save ends']);
+    expect(actionSpecEffects(spec)).toEqual([
+      { outcome: 'failure', label: 'On a failure', lines: ['The target is scorched.', 'Frightened (1 round), save ends'] },
+    ]);
+  });
+
+  test('a branch that carries no player-safe prose contributes no group', () => {
+    const spec = ActionSpec.parse({ outcomes: { hit: { damage: [{ formula: '1d8', flat: 3, type: 'slashing' }] } } });
+    expect(actionSpecEffects(spec)).toEqual([]);
   });
 
   test('a spec with no outcome branches yields nothing', () => {

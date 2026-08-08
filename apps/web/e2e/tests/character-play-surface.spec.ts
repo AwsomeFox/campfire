@@ -154,6 +154,51 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): navigating character-to-character without a full
+   * reload must never leave the previous character's gear on the new sheet — a player
+   * could otherwise see, and roll, an item they do not carry.
+   */
+  test('navigating to another character does not carry the first one\'s gear over', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+
+    const armed = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Carries A Blade', className: 'Fighter', level: 2 },
+    })).json()).id as number;
+    const empty = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Carries Nothing', className: 'Monk', level: 2 },
+    })).json()).id as number;
+
+    try {
+      const itemId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+        data: { name: 'Borrowed Glaive', qty: 1, ownerType: 'character', characterId: armed },
+      })).json()).id as number;
+      await ctx.patch(`/api/v1/inventory/${itemId}`, {
+        data: {
+          equipped: true,
+          equipSlot: 'main hand',
+          equippedAction: { name: 'Glaive Sweep', kind: 'melee', toHit: '+5', damage: '1d10+3', notes: '', targetAc: '' },
+        },
+      });
+
+      await page.goto(`/c/${campaignId}/characters/${armed}?tab=play`);
+      await expect(page.getByTestId('character-granted-actions').getByText('Glaive Sweep')).toBeVisible();
+
+      // In-app navigation, no reload: the roster link, then the other sheet.
+      await page.getByRole('link', { name: /Back to party/ }).click();
+      await page.getByRole('link', { name: 'Carries Nothing' }).first().click();
+      await expect(page.getByRole('heading', { level: 1, name: 'Carries Nothing' })).toBeVisible();
+      await expect(page.getByText('Glaive Sweep')).toHaveCount(0);
+      await expect(page.getByTestId('character-granted-actions')).toHaveCount(0);
+    } finally {
+      await ctx.delete(`/api/v1/characters/${armed}`);
+      await ctx.delete(`/api/v1/characters/${empty}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Codex review on #2115): the sheet read the pack separately from the
    * embedded inventory section, so unequipping in Build left the granted action still
    * rollable in Play until a full page reload. The two views must move together.

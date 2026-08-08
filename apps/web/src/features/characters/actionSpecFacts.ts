@@ -95,25 +95,54 @@ export function actionSpecFacts(spec: ActionSpec | undefined | null): ActionFact
   return candidates.filter((f) => f.value !== '');
 }
 
+/** One outcome branch's player-safe consequences, under the branch's own name. */
+export type ActionEffectGroup = { readonly outcome: string; readonly label: string; readonly lines: readonly string[] };
+
+/**
+ * Display order and naming for the outcome branches. Attack branches first, then save /
+ * check degrees best-to-worst, so a reader meets consequences in the order the table
+ * resolves them.
+ */
+const OUTCOME_LABELS: ReadonlyArray<readonly [string, string]> = [
+  ['crit', 'On a critical hit'],
+  ['hit', 'On a hit'],
+  ['miss', 'On a miss'],
+  ['critMiss', 'On a critical miss'],
+  ['critSuccess', 'On a critical success'],
+  ['success', 'On a success'],
+  ['failure', 'On a failure'],
+  ['critFailure', 'On a critical failure'],
+];
+
 /**
  * Player-safe effect lines from the spec's outcome branches — the template's "Effects"
  * list. Only branch prose and applied-condition phrasing, never hidden monster numbers.
+ *
+ * Grouped BY BRANCH rather than flattened: a save's `success` and `failure` consequences
+ * are mutually exclusive, and one unlabelled list reads as though both apply. Lines are
+ * deduplicated within a branch, never across — "Prone" under both `hit` and `crit` is two
+ * true statements about two different outcomes, and collapsing them would drop the only
+ * thing that says which is which.
  */
-export function actionSpecEffects(spec: ActionSpec | undefined | null): string[] {
+export function actionSpecEffects(spec: ActionSpec | undefined | null): ActionEffectGroup[] {
   if (!spec) return [];
-  const out: string[] = [];
-  for (const branch of Object.values(spec.outcomes ?? {})) {
+  const outcomes = spec.outcomes ?? {};
+  const groups: ActionEffectGroup[] = [];
+  for (const [outcome, label] of OUTCOME_LABELS) {
+    const branch = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
     if (!branch) continue;
-    if (branch.text) out.push(branch.text);
+    const lines: string[] = [];
+    if (branch.text) lines.push(branch.text);
     for (const effect of branch.effects ?? []) {
       const line = effect.text || effect.condition;
       if (!line) continue;
       const rounds = effect.rounds != null ? ` (${effect.rounds} round${effect.rounds === 1 ? '' : 's'})` : '';
-      out.push(`${line}${rounds}${effect.saveEnds ? ', save ends' : ''}`);
+      lines.push(`${line}${rounds}${effect.saveEnds ? ', save ends' : ''}`);
     }
+    const unique = [...new Set(lines)];
+    if (unique.length > 0) groups.push({ outcome, label, lines: unique });
   }
-  // Branches repeat phrasing (hit and crit often share an effect); show each line once.
-  return [...new Set(out)];
+  return groups;
 }
 
 /**

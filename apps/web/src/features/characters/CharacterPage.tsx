@@ -144,7 +144,7 @@ import {
   rollPreview,
 } from '../../lib/characterStats';
 import { RollModeChooser } from './RollModeChooser';
-import { resolveRollMode, toCheckRollMode, rollModeSummary } from './rollMode';
+import { rollModeForClick, toCheckRollMode, rollModeSummary } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -1449,7 +1449,7 @@ function AbilityScoresCard({
                   void roller.rollCheck(
                     character.id,
                     def.id,
-                    toCheckRollMode(resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false })),
+                    toCheckRollMode(m),
                   )
                 }
                 disabled={roller.rolling}
@@ -1676,7 +1676,7 @@ function VitalsBlock({
                 void roller.rollCheck(
                   character.id,
                   initiative.id,
-                  toCheckRollMode(resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false })),
+                  toCheckRollMode(m),
                 )
               }
               disabled={roller.rolling}
@@ -1892,7 +1892,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
             <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
               <RollContextMenu
                 className="w-full h-full block"
-                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false })))}
+                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(rollModeForClick(m, mode)))}
                 disabled={roller.rolling}
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
                 title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}]`}
@@ -2019,7 +2019,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
               )}
               <RollContextMenu
                 className="flex-1 flex items-center gap-1.5 min-w-0"
-                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false })))}
+                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(m))}
                 disabled={roller.rolling}
                 style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
                 title={`Roll ${name} (${signed(mod)}) [${breakdownStr}]`}
@@ -2067,8 +2067,9 @@ function ActionsCard({
   const [targetAc, setTargetAc] = useState('');
   const [notes, setNotes] = useState('');
   // Roll-mode chooser (issue #713): the attack "to hit" roll mode. Applies to
-  // every action's attack roll in this card; a shift/alt-click still overrides
-  // once (resolveRollMode) so the desktop shortcut keeps working.
+  // every action's attack roll in this card — sheet-authored and gear-granted alike;
+  // a shift/alt-click or the long-press menu still overrides once (rollModeForClick),
+  // so the desktop shortcut keeps working and the chooser is untouched by it.
   const [mode, setMode] = useState<RollMode>('normal');
   // In-place edit (issue #718): editingIndex is the position in character.actions
   // being edited, or null when not editing an existing row. The row collapses into
@@ -2280,7 +2281,7 @@ function ActionsCard({
                         title={`Roll ${action.name} attack (${attackExpr}) · ${rollModeSummary(mode)}`}
                         disabled={roller.rolling}
                         onClick={(m) => {
-                          const resolvedMode = resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false });
+                          const resolvedMode = rollModeForClick(m, mode);
                           void roller.roll(toHitExpr(action.toHit, resolvedMode === 'advantage' ? 'adv' : resolvedMode === 'disadvantage' ? 'dis' : 'flat')! , `${character.name} · ${action.name} to hit${resolvedMode !== 'normal' ? ` (${resolvedMode})` : ''}`);
                         }}
                       />
@@ -2410,7 +2411,7 @@ function ActionsCard({
                             title={`Roll ${granted.name} attack (${attackExpr})`}
                             disabled={roller.rolling}
                             onClick={(m) => {
-                              const resolved = resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false });
+                              const resolved = rollModeForClick(m, mode);
                               void roller.roll(
                                 toHitExpr(granted.toHit, resolved === 'advantage' ? 'adv' : resolved === 'disadvantage' ? 'dis' : 'flat')!,
                                 `${character.name} · ${granted.name} to hit${resolved !== 'normal' ? ` (${resolved})` : ''}`,
@@ -2495,13 +2496,19 @@ function ActionDetails({
             </div>
           )}
           {effects.length > 0 && (
-            <div>
-              <p className="text-[length:var(--type-label)] tracking-wide text-secondary">Effects</p>
-              <ul className="text-[11px] space-y-0.5 mt-0.5">
-                {effects.map((line) => (
-                  <li key={line}>· {line}</li>
-                ))}
-              </ul>
+            <div className="space-y-1.5">
+              {/* Named per branch: a save's success and failure consequences are mutually
+                  exclusive, and one merged list would read as though both applied. */}
+              {effects.map((group) => (
+                <div key={group.outcome}>
+                  <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{group.label}</p>
+                  <ul className="text-[11px] space-y-0.5 mt-0.5">
+                    {group.lines.map((line) => (
+                      <li key={line}>· {line}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </div>
           )}
           {source && <p className="text-[10px] text-muted">{source}</p>}

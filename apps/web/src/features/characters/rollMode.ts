@@ -68,6 +68,23 @@ export function resolveRollMode(chosen: RollMode, modifiers: { shiftKey: boolean
   return chosen;
 }
 
+/**
+ * Resolve the mode for ONE click on a `RollContextMenu`-backed control that also has a
+ * visible chooser beside it.
+ *
+ * `RollContextMenu` has already folded shift/alt-click and its long-press menu into the
+ * single `clicked` mode it emits, and emits `'normal'` when the user expressed no
+ * preference for this click — which is exactly when the chooser's standing selection
+ * should apply. Call sites previously passed `clicked` straight into
+ * {@link resolveRollMode} along with modifiers derived from `clicked` itself, which made
+ * that call a no-op and left the chooser purely decorative: a touch user who selected
+ * Advantage and tapped the attack still submitted a flat d20 — the exact gap issue #713
+ * added the chooser to close.
+ */
+export function rollModeForClick(clicked: RollMode, chosen: RollMode): RollMode {
+  return clicked === 'normal' ? chosen : clicked;
+}
+
 export function toCheckRollMode(mode: RollMode): 'normal' | 'advantage' | 'disadvantage' | 'crit' {
   return mode;
 }

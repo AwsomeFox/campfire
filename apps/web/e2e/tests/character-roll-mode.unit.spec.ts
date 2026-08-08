@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { ROLL_MODES, rollModeOptions, rollModeSummary, resolveRollMode, type RollMode } from '../../src/features/characters/rollMode';
+import { ROLL_MODES, rollModeOptions, rollModeSummary, resolveRollMode, rollModeForClick, type RollMode } from '../../src/features/characters/rollMode';
 
 /**
  * Issue #713 — touch + keyboard roll-mode chooser.
@@ -79,5 +79,34 @@ test.describe('modifier-key shortcut coexists with the chooser (issue #713)', ()
     const chosen: RollMode = 'disadvantage';
     resolveRollMode(chosen, { ...noMods, shiftKey: true });
     expect(resolveRollMode(chosen, noMods)).toBe('disadvantage');
+  });
+});
+
+/**
+ * Codex review on #2115 — the chooser was decorative on the Saving throws and Actions
+ * cards. `RollContextMenu` folds shift/alt-click and its long-press menu into ONE mode and
+ * emits 'normal' for a plain click, so call sites that fed that value back in as the
+ * "chosen" default could never see the chooser's selection: a touch user who picked
+ * Advantage and tapped the attack still submitted a flat d20 — precisely the gap this
+ * issue added the chooser to close.
+ */
+test.describe('rollModeForClick — the chooser is the default, one click can override it', () => {
+  test('a plain click rolls whatever the chooser has selected', () => {
+    for (const chosen of ROLL_MODES) {
+      expect(rollModeForClick('normal', chosen)).toBe(chosen);
+    }
+  });
+
+  test('an explicit click mode wins over the chooser for that roll', () => {
+    expect(rollModeForClick('advantage', 'disadvantage')).toBe('advantage');
+    expect(rollModeForClick('disadvantage', 'advantage')).toBe('disadvantage');
+    // The long-press / context menu can also ask for a crit; it is an override like any other.
+    expect(rollModeForClick('crit', 'advantage')).toBe('crit');
+  });
+
+  test('it is pure — overriding once leaves the chooser selection intact', () => {
+    const chosen: RollMode = 'advantage';
+    rollModeForClick('disadvantage', chosen);
+    expect(rollModeForClick('normal', chosen)).toBe('advantage');
   });
 });
