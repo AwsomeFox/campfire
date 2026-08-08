@@ -2415,7 +2415,16 @@ export default function RunSessionPage() {
     }: {
       expectedCurrentCombatantId: number | null;
       idempotencyKey: string;
-    }) => api.post<EncounterWithCombatants>(`${API}/encounters/${eid}/next-turn`, { expectedCurrentCombatantId, idempotencyKey }),
+    }) => {
+      // Block body deliberately: a concise arrow returning api.post with an explicit
+      // generic type argument false-positives the i18n JSX-text-node scanner
+      // (scripts/check-i18n-catalog.mjs's extractJsxTextNodes) — its naive regex treats
+      // the arrow's closing angle bracket and the generic's opening one as a JSX text-node
+      // pair and captures "api.post" in between as if it were hardcoded UI text. See the
+      // filed scanner-defect issue for the reproduction; this shape avoids the false match
+      // without touching the i18n-jsx-baseline.json ratchet.
+      return api.post<EncounterWithCombatants>(`${API}/encounters/${eid}/next-turn`, { expectedCurrentCombatantId, idempotencyKey });
+    },
     onMutate: () => setActionError(null),
     // Issue #2092: `headerBusy` (gating the Next Turn button) tracks only
     // `nextTurnMut.isPending`, which clears the instant this POST resolves — well

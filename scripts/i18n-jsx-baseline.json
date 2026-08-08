@@ -8,7 +8,7 @@
   "apps/web/src/features/encounters/PlayerVitalsHeader.tsx": 6,
   "apps/web/src/features/encounters/ResourceTrackerPanel.tsx": 1,
   "apps/web/src/features/encounters/RulesLookupPanel.tsx": 3,
-  "apps/web/src/features/encounters/RunSessionPage.tsx": 31,
+  "apps/web/src/features/encounters/RunSessionPage.tsx": 30,
   "apps/web/src/features/encounters/SpellbookPanel.tsx": 10,
   "apps/web/src/features/encounters/TurnWorkspace.tsx": 8,
   "apps/web/src/features/encounters/combat/AddCombatantPanel.tsx": 12,
