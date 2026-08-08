@@ -48,6 +48,16 @@ import { isRollableDamageExpression } from './dice-bounds';
 export interface ItemActionAdapter {
   readonly id: string;
   abilityModifier(score: number): number;
+  /**
+   * This system's canonical damage-type vocabulary, when it declares one (the 5e adapter
+   * does). Review (chatgpt-codex-connector P2): damage defenses are matched by EXACT
+   * lowercased type, so a noncanonical-but-short type like `"slashing damage"` produced a
+   * resolvable spec whose damage sailed past a target's slashing immunity untouched — the
+   * same silent-defense-bypass this module already refuses for an EMPTY type, reached by a
+   * different door. An adapter that declares no vocabulary can't be checked against one, so
+   * the length bound remains the only gate there.
+   */
+  readonly damageTypes?: readonly string[];
 }
 
 /** The character fields the attack math reads. */
@@ -192,7 +202,12 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
   if (!profile) return null;
 
   const diceUsable = isRollableDamageExpression(profile.damageDice);
-  const typeUsable = profile.damageType.length > 0 && profile.damageType.length <= MAX_DAMAGE_TYPE_LENGTH;
+  const normalizedType = profile.damageType.toLowerCase();
+  const vocabulary = adapter.damageTypes;
+  const typeUsable =
+    normalizedType.length > 0 &&
+    normalizedType.length <= MAX_DAMAGE_TYPE_LENGTH &&
+    (!vocabulary || vocabulary.some((t) => t.toLowerCase() === normalizedType));
 
   try {
     // Only a 5e-shaped adapter gets attack math. Another system's weapon still becomes an
@@ -311,7 +326,18 @@ export type EquippedActionSource = z.infer<typeof EquippedActionSource>;
  *
  * `name`, `kind`, and `notes` are preserved verbatim: they never feed the roll.
  */
-export function rebuildEditedActionSpec(edited: CharacterAction, ruleSystem = ''): CharacterAction {
+export function rebuildEditedActionSpec(
+  edited: CharacterAction,
+  ruleSystem = '',
+  /**
+   * The system's canonical damage-type vocabulary, when it has one. Same reasoning as the
+   * derivation's own check: defenses match by exact lowercased type, so a hand-typed
+   * "slashing damage" would build a resolvable spec whose damage ignores slashing immunity.
+   * A human typed it, but they typed it into a field labelled "1d8+3 slashing" — the honest
+   * response is a text-only action they can see is unfinished, not silent defense bypass.
+   */
+  damageTypes?: readonly string[],
+): CharacterAction {
   if (edited.spec) return edited;
 
   const bonusMatch = edited.toHit.trim().match(/^([+-]?\d+)$/);
@@ -325,7 +351,8 @@ export function rebuildEditedActionSpec(edited: CharacterAction, ruleSystem = ''
     !damageMatch ||
     !isRollableDamageExpression(damageMatch[1]) ||
     !damageType ||
-    damageType.length > MAX_DAMAGE_TYPE_LENGTH
+    damageType.length > MAX_DAMAGE_TYPE_LENGTH ||
+    (damageTypes && !damageTypes.some((t) => t.toLowerCase() === damageType))
   ) {
     return CharacterAction.parse({ ...edited, spec: undefined });
   }

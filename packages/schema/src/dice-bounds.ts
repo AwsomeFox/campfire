@@ -25,8 +25,16 @@ export const DICE_MAX_COUNT = 20;
 /** Maximum absolute value of a flat modifier. */
 export const DICE_MAX_MODIFIER_ABS = 999;
 
-/** One `NdM` term with an optional `+K`/`-K` modifier — the shape a damage formula takes. */
-const SIMPLE_DAMAGE_EXPRESSION = /^(\d+)d(\d+)(?:\s*([+-])\s*(\d+))?$/i;
+/**
+ * One `NdM` term with an optional `+K`/`-K` modifier — the shape a damage formula takes.
+ *
+ * Digit limits mirror `DiceExprPattern` exactly (index.ts): count 1-2 digits, sides 1-3,
+ * modifier 1-3. Review (chatgpt-codex-connector P2): bounding only the parsed NUMBERS let
+ * `001d6` through — its count is 1, but the roller's own grammar rejects three count digits,
+ * so it produced a resolvable spec that threw at roll time. Checking the grammar AND the
+ * bounds is what makes "rollable" mean rollable.
+ */
+const SIMPLE_DAMAGE_EXPRESSION = /^(\d{1,2})d(\d{1,3})(?:\s*([+-])\s*(\d{1,3}))?$/i;
 
 /**
  * Whether `expr` is a single die term (plus optional flat modifier) the roller will accept.

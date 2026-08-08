@@ -742,16 +742,18 @@ export class InventoryService {
     // that keeps open encounter cards honest, since no equip field actually changed.
     // Resolved up-front for the same reason as the owner ids: the write below is a synchronous
     // better-sqlite3 transaction, and `rebuildEditedActionSpec` needs the campaign's system.
-    const campaignRuleSystem =
-      input.equippedAction
-        ? (
-            await this.db
-              .select({ ruleSystem: campaigns.ruleSystem })
-              .from(campaigns)
-              .where(eq(campaigns.id, existing.campaignId))
-              .get()
-          )?.ruleSystem ?? ''
-        : '';
+    const campaignRuleSystem = input.equippedAction
+      ? (
+          await this.db
+            .select({ ruleSystem: campaigns.ruleSystem })
+            .from(campaigns)
+            .where(eq(campaigns.id, existing.campaignId))
+            .get()
+        )?.ruleSystem ?? ''
+      : '';
+    // The system's canonical damage-type vocabulary, so an edited action is held to the same
+    // standard as a derived one — see `rebuildEditedActionSpec`.
+    const campaignDamageTypes = input.equippedAction ? ruleSystemAdapter(campaignRuleSystem).damageTypes : undefined;
 
     // Review (chatgpt-codex-connector P2): "should we derive?" is tracked separately from
     // "what did it produce?". A regeneration that yields NOTHING — the accepted snapshot no
@@ -904,7 +906,7 @@ export class InventoryService {
           // the web editor's round-trip did — would display the correction and keep rolling
           // the original. Rebuilt here rather than in the web app so the MCP write path gets
           // the same guarantee. A caller supplying its own spec is trusted and untouched.
-          const authored = input.equippedAction ? rebuildEditedActionSpec(input.equippedAction, campaignRuleSystem) : null;
+          const authored = input.equippedAction ? rebuildEditedActionSpec(input.equippedAction, campaignRuleSystem, campaignDamageTypes) : null;
           update.equippedAction = authored ? JSON.stringify(authored) : null;
           // Issue #2097: ANY caller-supplied action is a human's, so the row becomes
           // 'manual' and derivation will never regenerate over it again — that promise is

@@ -1,4 +1,4 @@
-import { CharacterAction, deriveEquippedItemAction, isResolvableSpec, rebuildEditedActionSpec, type ItemActionAdapter } from '@campfire/schema';
+import { CharacterAction, deriveEquippedItemAction, DND5E_DAMAGE_TYPES, isResolvableSpec, rebuildEditedActionSpec, type ItemActionAdapter } from '@campfire/schema';
 
 /**
  * Issue #2097 — deriving an equipped item's attack from its compendium data.
@@ -11,6 +11,7 @@ import { CharacterAction, deriveEquippedItemAction, isResolvableSpec, rebuildEdi
 const dnd5e: ItemActionAdapter = {
   id: 'dnd5e',
   abilityModifier: (score) => Math.floor((score - 10) / 2),
+  damageTypes: DND5E_DAMAGE_TYPES,
 };
 const pf2e: ItemActionAdapter = { id: 'pf2e', abilityModifier: (score) => Math.floor((score - 10) / 2) };
 
@@ -198,6 +199,41 @@ describe('deriveEquippedItemAction (#2097)', () => {
       expect(action!.notes).toContain('check it');
     });
 
+    it('rejects a damage type outside the system vocabulary, not just an empty one', () => {
+      // Review (chatgpt-codex-connector P2): defenses are matched by EXACT lowercased type, so
+      // "slashing damage" is short enough to pass a length check and then sails straight past
+      // a target's slashing immunity — the same silent bypass the empty-type rule below
+      // prevents, reached by a different door.
+      for (const damageType of ['slashing damage', 'sword', 'slash']) {
+        const action = deriveEquippedItemAction({
+          itemName: 'Odd Blade',
+          data: open5eWeapon({ damageType }),
+          character: fighter,
+          adapter: dnd5e,
+        });
+        expect(isResolvableSpec(action!.spec)).toBe(false);
+      }
+      // Canonical types still resolve, case-insensitively.
+      expect(
+        isResolvableSpec(
+          deriveEquippedItemAction({ itemName: 'Blade', data: open5eWeapon({ damageType: 'SLASHING' }), character: fighter, adapter: dnd5e })!.spec,
+        ),
+      ).toBe(true);
+    });
+
+    it('still derives for an adapter that declares no damage vocabulary', () => {
+      // Nothing to check against, so the length bound stays the only gate — a system that has
+      // not declared its vocabulary must not be silently downgraded to text-only.
+      const noVocab: ItemActionAdapter = { id: 'dnd5e', abilityModifier: (s2) => Math.floor((s2 - 10) / 2) };
+      const action = deriveEquippedItemAction({
+        itemName: 'Homebrew Blade',
+        data: open5eWeapon({ damageType: 'ichor' }),
+        character: fighter,
+        adapter: noVocab,
+      });
+      expect(isResolvableSpec(action!.spec)).toBe(true);
+    });
+
     it('produces a text-only action when the damage type is missing', () => {
       // The resolver treats an empty damage type as untyped and applies no resistance or
       // immunity — so a resolvable spec here would let the damage quietly bypass defenses.
@@ -260,14 +296,28 @@ describe('deriveEquippedItemAction (#2097)', () => {
     it('reads a Starfinder-shaped item, which carries flat damage keys', () => {
       const action = deriveEquippedItemAction({
         itemName: 'Pulsecaster Pistol',
-        data: { category: 'weapon', damage: '1d4', damageType: 'electricity', range: 30 },
+        data: { category: 'weapon', damage: '1d4', damageType: 'fire', range: 30 },
         character: fighter,
         adapter: dnd5e,
       });
       expect(action).not.toBeNull();
       // range > 0 with no melee signal → DEX +1, proficiency +3
       expect(action!.toHit).toBe('+4');
-      expect(action!.damage).toContain('electricity');
+      expect(action!.damage).toContain('fire');
+    });
+
+    it("degrades a foreign system's damage type under a vocabulary that lacks it", () => {
+      // Starfinder's `electricity` has no 5e equivalent, and 5e defenses are matched by exact
+      // type — so deriving a resolvable spec here would produce damage no 5e resistance or
+      // immunity can ever apply to. Text-only is the honest answer, not a silent bypass.
+      const action = deriveEquippedItemAction({
+        itemName: 'Pulsecaster Pistol',
+        data: { category: 'weapon', damage: '1d4', damageType: 'electricity', range: 30 },
+        character: fighter,
+        adapter: dnd5e,
+      });
+      expect(isResolvableSpec(action!.spec)).toBe(false);
+      expect(action!.damage).toBe('1d4 electricity');
     });
   });
 });
@@ -302,6 +352,27 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
   it('leaves a caller-supplied spec alone — the MCP path for a richer action', () => {
     const authored = CharacterAction.parse({ ...derived, toHit: '+99', damage: 'nonsense' });
     expect(rebuildEditedActionSpec(authored, 'dnd5e')).toEqual(authored);
+  });
+
+  it('rejects a zero-padded count the roller grammar forbids', () => {
+    // Review (chatgpt-codex-connector P2): `001d6` parses to count 1, but DiceExprPattern
+    // allows at most two count digits — so bounding only the NUMBERS produced a resolvable
+    // spec that threw at roll time, recreating the exact failure this check exists to stop.
+    const out = rebuildEditedActionSpec(
+      CharacterAction.parse({ ...derived, toHit: '+7', damage: '001d6 slashing', spec: undefined }),
+      'dnd5e',
+      DND5E_DAMAGE_TYPES,
+    );
+    expect(out.spec).toBeUndefined();
+  });
+
+  it('rejects an edited damage type outside the system vocabulary', () => {
+    const out = rebuildEditedActionSpec(
+      CharacterAction.parse({ ...derived, toHit: '+7', damage: '1d8+4 slashing damage', spec: undefined }),
+      'dnd5e',
+      DND5E_DAMAGE_TYPES,
+    );
+    expect(out.spec).toBeUndefined();
   });
 
   it('refuses to build a spec from edited dice the roller would reject', () => {
