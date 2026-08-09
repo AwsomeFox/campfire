@@ -18,7 +18,9 @@ const PUSH_WORKER_CAPABILITY_TIMEOUT_MS = 1_500;
 const PUSH_WORKER_CAPABILITY_REQUEST = 'campfire:push-capability';
 const PUSH_WORKER_CAPABILITY_RESPONSE = 'campfire:push-capable:v1';
 const PUSH_ENDPOINT_STORAGE_KEY = 'cf.browserPushEndpoint';
+const PUSH_REBIND_BLOCKED_STORAGE_KEY = 'cf.browserPushRebindBlocked';
 let pendingLocalDetach: Promise<void> = Promise.resolve();
+let pushRebindBlockedInMemory = false;
 
 export function browserPushSupported(): boolean {
   return (
@@ -69,6 +71,32 @@ function forgetEndpoint(): void {
   }
 }
 
+function blockAutomaticRebind(): void {
+  pushRebindBlockedInMemory = true;
+  try {
+    localStorage.setItem(PUSH_REBIND_BLOCKED_STORAGE_KEY, '1');
+  } catch {
+    /* The in-memory guard still protects this page session. */
+  }
+}
+
+function automaticRebindBlocked(): boolean {
+  try {
+    return pushRebindBlockedInMemory || localStorage.getItem(PUSH_REBIND_BLOCKED_STORAGE_KEY) === '1';
+  } catch {
+    return pushRebindBlockedInMemory;
+  }
+}
+
+function allowAutomaticRebind(): void {
+  pushRebindBlockedInMemory = false;
+  try {
+    localStorage.removeItem(PUSH_REBIND_BLOCKED_STORAGE_KEY);
+  } catch {
+    /* best effort */
+  }
+}
+
 function usesApplicationServerKey(subscription: PushSubscription, publicKey: string): boolean {
   const current = subscription.options.applicationServerKey;
   if (!current) return true;
@@ -95,9 +123,20 @@ export function detachBrowserPushLocally(): Promise<void> {
     try {
       const registration = await currentRegistration();
       const subscription = (await registration?.pushManager.getSubscription()) ?? null;
-      await subscription?.unsubscribe();
+      if (!subscription) {
+        allowAutomaticRebind();
+        return;
+      }
+      const unsubscribed = await subscription.unsubscribe();
+      if (!unsubscribed) {
+        blockAutomaticRebind();
+        return;
+      }
+      allowAutomaticRebind();
     } catch {
-      // Auth transitions must complete even if the browser push implementation fails.
+      // Auth transitions must complete even if browser cleanup fails. Persist a
+      // fail-closed marker so another account cannot inherit the subscription.
+      blockAutomaticRebind();
     }
   });
   return pendingLocalDetach;
@@ -191,6 +230,9 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
     subscription = null;
   }
 
+  if (!subscription) allowAutomaticRebind();
+  const rebindBlocked = automaticRebindBlocked();
+
   // Permission can be revoked outside Campfire. The next preferences visit
   // cleans up both sides so the server does not retain a dead capability.
   if (Notification.permission === 'denied') {
@@ -203,7 +245,7 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
     await subscription?.unsubscribe().catch(() => false);
     forgetEndpoint();
     subscription = null;
-  } else if (subscription) {
+  } else if (subscription && !rebindBlocked) {
     // Idempotently re-bind this browser to the current signed-in user. This is
     // essential on shared devices where the PushManager subscription survives
     // an account switch.
@@ -215,7 +257,7 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
     kind: 'ready',
     publicKey: status.publicKey,
     permission: Notification.permission,
-    enabled: subscription !== null,
+    enabled: subscription !== null && !rebindBlocked,
   };
 }
 
@@ -237,6 +279,7 @@ export async function enableBrowserPush(publicKey: string): Promise<void> {
     }));
   try {
     await api.post(`${API}/notifications/push-subscribe`, subscriptionBody(subscription));
+    allowAutomaticRebind();
     rememberEndpoint(subscription.endpoint);
   } catch (error) {
     if (!existing) await subscription.unsubscribe().catch(() => false);

@@ -110,6 +110,27 @@ test.describe('Notification preferences card (#789)', () => {
     expect(AUTH_PROVIDER_SOURCE.match(/detachBrowserPushLocally\(\)/g)?.length).toBeGreaterThanOrEqual(4);
   });
 
+  test('blocks automatic rebinding when auth-transition cleanup leaves a subscription behind', () => {
+    const detachSource = BROWSER_PUSH_SOURCE.slice(
+      BROWSER_PUSH_SOURCE.indexOf('export function detachBrowserPushLocally'),
+      BROWSER_PUSH_SOURCE.indexOf('async function readyRegistration'),
+    );
+    const inspectSource = BROWSER_PUSH_SOURCE.slice(
+      BROWSER_PUSH_SOURCE.indexOf('export async function inspectBrowserPush'),
+      BROWSER_PUSH_SOURCE.indexOf('export async function enableBrowserPush'),
+    );
+    const enableSource = BROWSER_PUSH_SOURCE.slice(
+      BROWSER_PUSH_SOURCE.indexOf('export async function enableBrowserPush'),
+      BROWSER_PUSH_SOURCE.indexOf('export async function disableBrowserPush'),
+    );
+    expect(BROWSER_PUSH_SOURCE).toContain("const PUSH_REBIND_BLOCKED_STORAGE_KEY = 'cf.browserPushRebindBlocked'");
+    expect(detachSource).toContain('if (!unsubscribed)');
+    expect(detachSource.match(/blockAutomaticRebind\(\)/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(inspectSource).toContain('subscription && !rebindBlocked');
+    expect(inspectSource).toContain('enabled: subscription !== null && !rebindBlocked');
+    expect(enableSource.indexOf('api.post')).toBeLessThan(enableSource.indexOf('allowAutomaticRebind()'));
+  });
+
   test('routes status through the shared Announcer, not a new aria-live region', () => {
     expect(CARD_SOURCE).toContain('useAnnounce');
     // No hand-rolled live region — the Announcer owns polite/assertive output.
