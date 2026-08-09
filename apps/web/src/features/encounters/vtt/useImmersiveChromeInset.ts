@@ -23,6 +23,21 @@ import { useLayoutEffect } from 'react';
 import { MAIN_CONTENT_ID } from '../../../app/routeFocus';
 
 const INSET_VAR = '--cf-immersive-chrome-inset';
+/**
+ * How much height the two scrolling chrome regions may share, in px.
+ *
+ * Sized from what is actually left rather than from assumed vh: whatever Layout stacks
+ * ABOVE this chrome (its sticky mobile header is ~51px) eats into the same space, and a
+ * fixed `18vh + 22vh` pair ignored it — at 667x320 landscape those caps plus that header
+ * reach ~179px against a 160px clamp, so the cockpit covered the bottom of the prompt
+ * scroller. Measuring the chrome's own distance from the top of the viewport accounts for
+ * everything above it without this hook having to know what that is.
+ */
+const CAP_VAR = '--cf-immersive-chrome-cap';
+/** The cockpit never cedes more than this share of the viewport. Matches `.cf-vtt`'s clamp. */
+const CHROME_BUDGET_RATIO = 0.5;
+/** Below this the caps stop shrinking — a scroller too short to show one row helps nobody. */
+const MIN_CHROME_CAP_PX = 72;
 
 /**
  * Campaign-wide chrome the cockpit must not cover. Both are optional: the safety bar
@@ -54,6 +69,25 @@ export function measureImmersiveChromeInsetPx(): number {
   return Math.max(0, Math.ceil(bottom));
 }
 
+/**
+ * The height the chrome regions may share, given whatever Layout has already placed above
+ * them. Derived from the topmost chrome element's own offset, so a sticky mobile header —
+ * or anything else added there later — is accounted for without naming it.
+ */
+export function measureImmersiveChromeCapPx(): number {
+  let top = Number.POSITIVE_INFINITY;
+  for (const selector of CHROME_SELECTORS) {
+    const element = document.querySelector(selector);
+    if (!(element instanceof HTMLElement)) continue;
+    const style = getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    top = Math.min(top, element.getBoundingClientRect().top);
+  }
+  const above = Number.isFinite(top) ? Math.max(0, top) : 0;
+  const budget = window.innerHeight * CHROME_BUDGET_RATIO;
+  return Math.max(MIN_CHROME_CAP_PX, Math.floor(budget - above));
+}
+
 export function useImmersiveChromeInset(): void {
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -69,8 +103,14 @@ export function useImmersiveChromeInset(): void {
     let frame = 0;
     let published = -1;
 
+    let publishedCap = -1;
     const publish = () => {
       frame = 0;
+      const cap = measureImmersiveChromeCapPx();
+      if (cap !== publishedCap) {
+        publishedCap = cap;
+        root.style.setProperty(CAP_VAR, `${cap}px`);
+      }
       const inset = measureImmersiveChromeInsetPx();
       if (inset === published) return;
       published = inset;
@@ -117,6 +157,7 @@ export function useImmersiveChromeInset(): void {
       mutations.disconnect();
       window.removeEventListener('resize', schedule);
       root.style.removeProperty(INSET_VAR);
+      root.style.removeProperty(CAP_VAR);
     };
   }, []);
 }

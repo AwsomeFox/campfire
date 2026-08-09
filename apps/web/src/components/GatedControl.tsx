@@ -275,7 +275,11 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
 
   const hintNode = tooltipVisible ? (
     <span
-      className="cf-gated-hint"
+      // The escaped copy needs its own tier: portaled to `<body>` it leaves the trigger's
+      // stacking context, and the base `z-index: 30` sits UNDER an immersive surface like
+      // the encounter cockpit (41) — so escaping the clip would have hidden it completely
+      // instead. Note a visibility assertion cannot see that; only hit-testing can.
+      className={escapeAt ? 'cf-gated-hint cf-gated-hint--escaped' : 'cf-gated-hint'}
       role="presentation"
       aria-hidden="true"
       data-testid="gated-control-hint"

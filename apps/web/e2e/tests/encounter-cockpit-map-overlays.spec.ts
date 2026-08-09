@@ -97,3 +97,78 @@ test.describe('encounter cockpit — setup canvas on a phone', () => {
     }
   });
 });
+
+test.describe('encounter cockpit — gated tool hints', () => {
+  test('a rail gate reason is readable, not clipped and not behind the cockpit', async ({ page }) => {
+    await restoreSeedEncounter(page);
+    const { campaignId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Rail hint drill', hidden: false },
+    });
+    expect(created.ok()).toBe(true);
+    const id = ((await created.json()) as { id: number }).id;
+    const up = await page.request.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+      multipart: { kind: 'map', file: { name: 'hint.png', mimeType: 'image/png', buffer: PNG } },
+    });
+    expect(up.ok()).toBe(true);
+    const mapAttachmentId = ((await up.json()) as { id: number }).id;
+    // A map with NO grid scale: Measure is gated, which is the reason bubble under test.
+    await page.request.patch(`/api/v1/encounters/${id}`, { data: { mapAttachmentId } });
+
+    try {
+      await page.goto(`/c/${campaignId}/encounters/${id}`);
+      const gatedTool = page.getByTestId('map-tool-measure');
+      await expect(gatedTool).toBeVisible();
+      await gatedTool.focus();
+
+      const hint = page.getByTestId('gated-control-hint').first();
+      await expect(hint).toBeVisible();
+
+      // `toBeVisible()` is not enough here, and that is the whole point: it passed while
+      // the bubble was sliced to the 58px rail, and passed again while it was portaled to
+      // <body> UNDERNEATH the opaque cockpit. Hit-testing cannot help either — the bubble
+      // is `pointer-events: none`, so `elementFromPoint` never returns it. So: measure the
+      // geometry, and sample the pixel actually painted at its centre.
+      const box = await hint.boundingBox();
+      expect(box).not.toBeNull();
+      const railWidth = await page.evaluate(
+        () => document.querySelector('.cf-vtt-rail')?.getBoundingClientRect().width ?? 0,
+      );
+      // Wider than the rail it lives in — i.e. it escaped the clip rather than being sliced.
+      expect(Math.round(box!.width)).toBeGreaterThan(Math.round(railWidth));
+
+      const shot = await page.screenshot({
+        clip: { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2, width: 2, height: 2 },
+      });
+      // The bubble's own ground (`--color-neutral-900`, #292b31) must be what is on screen
+      // there. Caveat worth knowing before trusting this line: Measure sits high in the
+      // rail, so its bubble lands ABOVE the cockpit's top edge — this sample therefore
+      // proves the bubble is painted and unclipped, but does NOT exercise the stacking fix
+      // (`.cf-gated-hint--escaped`) that a bubble anchored lower down would need.
+      const pixel = await page.evaluate(
+        (data) =>
+          new Promise<number[]>((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.width;
+              canvas.height = img.height;
+              const ctx = canvas.getContext('2d');
+              if (!ctx) return reject(new Error('no 2d context'));
+              ctx.drawImage(img, 0, 0);
+              const data2 = ctx.getImageData(0, 0, 1, 1).data;
+              resolve([data2[0], data2[1], data2[2]]);
+            };
+            img.onerror = () => reject(new Error('decode failed'));
+            img.src = `data:image/png;base64,${data}`;
+          }),
+        shot.toString('base64'),
+      );
+      const distance = Math.hypot(pixel[0] - 0x29, pixel[1] - 0x2b, pixel[2] - 0x31);
+      expect(distance, `painted ${JSON.stringify(pixel)} where the hint should be`).toBeLessThan(24);
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
+});

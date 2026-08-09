@@ -1488,6 +1488,13 @@ h1, h2, h3, h4, h5, h6 {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   pointer-events: none;
 }
+/* Portaled out of a clipping ancestor (see GatedControl): it has left the trigger's
+   stacking context, so it needs a tier above an immersive surface — but still below
+   dialogs, which legitimately cover the control the hint belongs to. Must come AFTER the
+   base rule: same specificity, so source order is what decides. */
+.cf-gated-hint--escaped {
+  z-index: calc(var(--cf-layer-immersive, 41) + 1);
+}
 .cf-dismiss-target {
   box-sizing: border-box;
   display: inline-flex;
@@ -3092,20 +3099,22 @@ html.cf-vtt-locked body {
    check requests would otherwise have the lower cards, and the cockpit itself, pushed
    somewhere nothing can reach.
    
-   The caps are a shared BUDGET, not two independent limits. Earlier they were 30vh and
-   38vh, which are additive: a tall safety banner plus a deep prompt queue could push the
-   prompts past the cockpit's own 50vh clamp, and the clamp would then start the opaque
-   cockpit above them — unreachable, since nothing scrolls. Sized so the worst case still
-   fits under the clamp: 18vh + 22vh = 40vh, leaving ~10vh for Layout's sticky mobile
-   header above them (~44px, under 8vh even at 568px tall). Each keeps its own scroller,
-   so a queue longer than its share scrolls rather than growing. */
+   The caps are a shared BUDGET, not two independent limits, and the budget is MEASURED
+   rather than assumed. Fixed `vh` pairs failed twice: as independent limits they were
+   additive and could push the prompts past the cockpit's clamp, and even summed they
+   ignored whatever Layout stacks above them — its sticky mobile header is ~51px, so at
+   667x320 landscape an 18vh + 22vh pair plus that header reached ~179px against a 160px
+   clamp and the cockpit covered the bottom of the prompt scroller. `--cf-immersive-chrome-cap`
+   is published by `useImmersiveChromeInset` as "half the viewport, minus everything already
+   above this chrome", so the two shares always land inside the clamp. Each keeps its own
+   scroller, so a queue longer than its share scrolls rather than growing. */
 html.cf-vtt-locked [data-testid='check-request-prompts'] {
-  max-height: 22vh;
+  max-height: calc(var(--cf-immersive-chrome-cap, 22vh) * 0.55);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 html.cf-vtt-locked [data-testid='safety-bar'] {
-  max-height: 18vh;
+  max-height: calc(var(--cf-immersive-chrome-cap, 18vh) * 0.45);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -3667,6 +3676,7 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
   .cf-vtt-banners {
     max-height: 20vh;
   }
+
   .cf-vtt-body { flex-direction: column; }
   /* Nothing overlays the board at phone width: the canvas and the turn bar stack, so a
      drag that starts at the middle of the map reaches the map and not the strip.
