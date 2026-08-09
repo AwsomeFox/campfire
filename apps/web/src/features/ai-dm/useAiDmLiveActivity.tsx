@@ -38,7 +38,7 @@ import {
 import { queryKeys, useAiDmSeat, useAiDmSession, invalidateAiDm, invalidateAiDmToolConfirmations } from '../../lib/query';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
-import { api, API } from '../../lib/api';
+import { api, API, ApiError } from '../../lib/api';
 import { usePendingHydrate } from './usePendingHydrate';
 import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChip, type ToolStreamEvent } from './toolActivity';
 import {
@@ -207,13 +207,31 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           const last = result.items[result.items.length - 1];
           if (watermark === undefined || !result.hasMore || !last) return;
           watermark = last.seq;
-        } catch {
+        } catch (err) {
+          // A 403/404 is not a transient history-read failure: this viewer no longer has
+          // authority to retain the projection (or the campaign is gone). Match the Table
+          // surface by purging both cache scopes and the in-memory activity transcript.
+          // Keep the owner/generation guard so an old request cannot clear a new viewer.
+          if (
+            err instanceof ApiError
+            && (err.status === 403 || err.status === 404)
+            && transcriptOwnerRef.current === ownerKey
+            && transcriptRequestGenerationRef.current === requestGeneration
+          ) {
+            clearTranscript(viewerId, campaignId);
+            clearTranscript(viewerId, campaignId, 'activity');
+            lastSeqRef.current = 0;
+            setPreHydrationLiveEntryIds(new Set());
+            setTranscriptGeneration((generation) => generation + 1);
+            dispatchTranscript({ type: 'reset' });
+            dispatchTranscript({ type: 'authoritative' });
+          }
           // A live stream remains useful when transcript history is temporarily unavailable.
           return;
         }
       }
     },
-    [campaignId],
+    [campaignId, viewerId],
   );
 
   useEffect(() => {
