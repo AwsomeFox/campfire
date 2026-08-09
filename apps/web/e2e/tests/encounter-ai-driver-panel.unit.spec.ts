@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const RUN_SESSION = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const ENCOUNTER_LIST = resolve(__dirname, '../../src/features/encounters/EncounterListPage.tsx');
 const PANEL = resolve(__dirname, '../../src/features/ai-dm/EncounterAiDriverPanel.tsx');
 const LIVE_ACTIVITY = resolve(__dirname, '../../src/features/ai-dm/useAiDmLiveActivity.tsx');
 
@@ -43,6 +44,13 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/ai-dm\/transcript\?limit=/);
     expect(hook).toMatch(/transcriptOwnerRef\.current !== ownerKey/);
     expect(hook).toMatch(/fetchTranscript\(key, lastSeqRef\.current \|\| undefined\)/);
+  });
+
+  test('the empty encounter list retains a Driver session entry', () => {
+    const list = readFileSync(ENCOUNTER_LIST, 'utf8');
+    expect(list).toMatch(/liveActivity\.mode === 'driver'/);
+    expect(list).toMatch(/encounter-list-live-session/);
+    expect(list).toMatch(/navigate\(`\/c\/\$\{id\}\/table`\)/);
   });
 });
 
