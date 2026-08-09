@@ -496,6 +496,28 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
     expect(out.spec?.outcomes?.hit?.damage?.[0]).toMatchObject({ formula: '1d6', flat: 0, type: 'bludgeoning' });
   });
 
+  it("rebuilds when a save-based action's display damage is edited away from its spec", () => {
+    // Review (chatgpt-codex-connector P1, second round): the previous fix scanned every outcome
+    // branch to decide whether the spec rolls damage, but then COMPARED against `outcomes.hit`
+    // alone — so a save action storing its damage under `failure` had its display line edited
+    // to 8d6 while combat kept rolling 2d6. One list of parts, one rule, whatever the branch.
+    const edited = CharacterAction.parse({
+      ...derived,
+      toHit: '',
+      damage: '8d6 fire',
+      spec: {
+        ...derived.spec,
+        attack: { bonus: '', ability: 'DEX', proficient: true, vs: 'ac' },
+        outcomes: { failure: { damage: [{ formula: '2d6', flat: 0, type: 'fire' }] } },
+      },
+    });
+    const out = rebuildEditedActionSpec(edited, 'dnd5e', DND5E_DAMAGE_TYPES);
+    // `toHit` is not a bonus, so there is nothing to rebuild an attack from — text-only is the
+    // honest outcome, rather than displaying 8d6 while rolling 2d6.
+    expect(out.spec).toBeUndefined();
+    expect(out.damage).toBe('8d6 fire');
+  });
+
   it('trusts a save-based spec whose damage lives under `failure`, not `hit`', () => {
     // The reason the check above looks across EVERY outcome branch: `expandRawStatblockAction`
     // puts a save action's damage under `failure`, so demanding a `hit` branch would call a

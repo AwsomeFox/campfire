@@ -435,35 +435,36 @@ function specAgreesWithFields(edited: CharacterAction): boolean {
   // `ability`) is deliberately not a fixed number and stays uncomparable.
   if (specBonus !== null && specBonus !== fieldBonus) return false;
 
-  const specParts = spec.outcomes?.hit?.damage ?? [];
+  // Every damage part the spec rolls, from EVERY outcome branch (chatgpt-codex-connector P1,
+  // twice). An attack puts its damage under `hit` and a save-based action under `failure`, so
+  // a check that reads only `hit` compares nothing at all for half the shapes — the first fix
+  // scanned every branch to decide whether the spec rolls damage, but then compared against
+  // `hit` alone, which let a save action's display line be edited to 8d6 while combat kept
+  // rolling the 2d6 stored under `failure`. One list, one rule.
+  const specParts = Object.values(spec.outcomes ?? {}).flatMap((branch) => branch?.damage ?? []);
   const fieldPart = damageLineToPart(edited.damage);
 
-  // A display line stating rollable typed damage beside a spec that rolls NO damage at all
-  // (chatgpt-codex-connector P1): adding "1d6 bludgeoning" to a previously non-damaging attack
-  // and round-tripping its spec showed the new damage while the apply path rolled none.
-  //
-  // Checked across EVERY outcome branch, not just `hit`: a save-based action puts its damage
-  // under `failure` (see `expandRawStatblockAction`), and demanding a `hit` branch would call
-  // that a contradiction and rebuild away a legitimately authored spec.
-  const specRollsDamageAnywhere = Object.values(spec.outcomes ?? {}).some((branch) => (branch?.damage?.length ?? 0) > 0);
-  if (fieldPart && !specRollsDamageAnywhere) return false;
-  // One part is what a round trip carries and what one display line can describe; more than
-  // that is authored structure the line was never able to express, so there is nothing to
-  // contradict.
-  if (specParts.length === 1) {
+  if (specParts.length === 0) {
+    // The display states rollable typed damage the spec does not roll — adding
+    // "1d6 bludgeoning" to a previously non-damaging attack, say.
+    if (fieldPart) return false;
+  } else if (specParts.length === 1) {
+    // One part is what a round trip carries and what one display line can describe; more than
+    // that is authored structure the line was never able to express, so there is nothing to
+    // contradict.
     const part = specParts[0];
     if (fieldPart) {
       if (part.formula.toLowerCase() !== fieldPart.formula.toLowerCase()) return false;
       if (part.flat !== fieldPart.flat) return false;
       if (part.type.toLowerCase() !== fieldPart.type) return false;
     } else if (edited.damage.trim() === '' || specBonus !== null) {
-      // A spec that rolls damage beside a display line that does not say so is the same lie
-      // as a mismatched bonus, so the action is rebuilt — text-only, honest about being
-      // unfinished, rather than rolling numbers the line disowns.
+      // A spec that rolls damage beside a display line that does not say so is the same lie as
+      // a mismatched bonus, so the action is rebuilt — text-only when the fields cannot be
+      // read, honest about being unfinished rather than rolling numbers the line disowns.
       //
-      // CLEARED is unambiguous whatever the spec's bonus looks like (chatgpt-codex-connector
-      // P1): an empty field asserts there is nothing to show, and no authoring intent is
-      // expressed by leaving the damage line blank on an action that deals damage.
+      // CLEARED is unambiguous whatever the spec looks like: an empty field asserts there is
+      // nothing to show, and no authoring intent is expressed by blanking the damage line on
+      // an action that deals damage.
       //
       // PROSE is only a contradiction for the weapon shape — a spec stating a fixed attack
       // bonus, whose one damage part IS what the line describes. A save-based action
