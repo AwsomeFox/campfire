@@ -4459,6 +4459,49 @@ export class McpToolsService {
       },
     );
 
+    // #1314: creature checks deliberately have distinct tools instead of widening the
+    // character-only list_checks/roll_check contracts. Both routes share the encounter
+    // service with REST, including the DM-only secrecy gate and creature attribution.
+    this.tool(
+      server,
+      'list_creature_checks',
+      'DM only: list adapter-derived rollable ability checks plus explicitly published save/skill modifiers for a monster or NPC combatant. Missing creature mechanics are withheld rather than inferred.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters or get_encounter'),
+        combatantId: Id.describe('Monster or NPC combatant id — from get_encounter'),
+      },
+      async ({ encounterId, combatantId }) => {
+        const encounter = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, encounter.campaignId, 'dm');
+        return this.encounters.listCreatureChecks(encounterId as number, combatantId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'roll_creature_check',
+      'DM only: roll a monster/NPC check from list_creature_checks. The server derives the modifier through the campaign rule adapter, audits it, and records a creature-attributed shared dice-log entry without exposing the private modifier breakdown in the shared label.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters or get_encounter'),
+        combatantId: Id.describe('Monster or NPC combatant id — from get_encounter'),
+        checkId: CheckRollRequest.shape.checkId,
+        mode: CheckRollRequest.shape.mode,
+        dc: CheckRollRequest.shape.dc,
+      },
+      async ({ encounterId, combatantId, checkId, mode, dc }) => {
+        const encounter = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, encounter.campaignId, 'dm');
+        return this.encounters.rollCreatureCheck(
+          encounterId as number,
+          combatantId as number,
+          { checkId: checkId as string, mode: mode as 'normal' | 'advantage' | 'disadvantage' | 'crit', dc: dc as number | undefined },
+          user,
+          role,
+        );
+      },
+    );
+
     // #415: request_check — DM asks selected players to roll a check/save. Creates one pending
     // request per target character; each targeted player's client is nudged (thin real-time
     // signal) to read it back and roll once. The check must exist in each target's catalog.

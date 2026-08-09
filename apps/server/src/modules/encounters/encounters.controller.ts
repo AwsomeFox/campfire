@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantReorderDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, CreatureCheckRollDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantReorderDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -1050,6 +1050,42 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.encounters.reopen(id, user, role, body);
+  }
+
+  // ---------- creature roll catalog (issue #1314) ----------
+
+  @Get(':id/combatants/:cid/checks')
+  @ApiOperation({
+    summary: 'List a monster/NPC combatant’s rollable checks',
+    description:
+      'DM only. Returns ability checks derived through the campaign rule adapter plus only the save/skill modifiers explicitly supplied by the creature statblock. Missing mechanics are withheld rather than inferred.',
+  })
+  @ApiResponse({ status: 200, description: 'Adapter-derived creature check catalog.' })
+  @ApiResponse({ status: 403, description: 'DM role required; creature mechanics are never returned to players/viewers.' })
+  async creatureChecks(@Param('id', ParseIntPipe) id: number, @Param('cid', ParseIntPipe) cid: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.listCreatureChecks(id, cid, user, role);
+  }
+
+  @Post(':id/combatants/:cid/checks/roll')
+  @ApiOperation({
+    summary: 'Roll a monster/NPC combatant check',
+    description:
+      'DM only. The server resolves the requested check from the encounter creature’s adapter-derived catalog, rolls and audits it, and records a creature-attributed entry in the shared dice log without publishing its private modifier breakdown.',
+  })
+  @ApiResponse({ status: 201, description: 'Resolved check plus its persisted dice-log entry.' })
+  @ApiResponse({ status: 403, description: 'DM role required.' })
+  @ApiResponse({ status: 404, description: 'Unknown check or combatant.' })
+  async rollCreatureCheck(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: CreatureCheckRollDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.rollCreatureCheck(id, cid, body, user, role);
   }
 
   // ---------- structured action resolver (issue #414) ----------

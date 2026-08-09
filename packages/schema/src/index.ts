@@ -6023,6 +6023,127 @@ export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: Ch
   return catalog.filter((c) => c.category !== 'initiative');
 }
 
+/**
+ * A creature's check source is intentionally smaller than a character sheet: ability values
+ * come through the adapter's statblock mapping, while saves and skills are emitted only when
+ * the imported/manual statblock explicitly supplies their final modifier. This keeps the
+ * catalog honest for creatures, whose proficiency/rank details are often not available.
+ */
+export interface CreatureCheckCatalogInput {
+  readonly data: Record<string, unknown>;
+}
+
+function creatureCheckModifierMap(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+    if (Number.isFinite(n)) out[key] = Math.trunc(n);
+  }
+  return out;
+}
+
+function creatureAbilityLabel(key: string): string {
+  const normalized = key.trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    strength: 'STR', str: 'STR', dexterity: 'DEX', dex: 'DEX', constitution: 'CON', con: 'CON',
+    intelligence: 'INT', int: 'INT', wisdom: 'WIS', wis: 'WIS', charisma: 'CHA', cha: 'CHA',
+  };
+  return aliases[normalized] ?? key.trim().toUpperCase();
+}
+
+function creatureCheckLabel(key: string): string {
+  return key
+    .trim()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+/**
+ * Build the roll catalog for a creature statblock (issue #1314). Unlike characters, a
+ * creature's saves/skills are already-published final modifiers, so this function NEVER
+ * invents a proficiency value from incomplete source data. Ability checks always flow through
+ * `mapStatblock` plus the adapter's representation-aware modifier seam.
+ */
+export function creatureCheckCatalogForAdapter(
+  adapter: RuleSystemAdapter,
+  creature: CreatureCheckCatalogInput,
+): RollCheckDefinition[] {
+  // A neutral d20 catalog would be a lie for pool/non-d20 systems. An adapter can add a
+  // dedicated creature catalog in a later focused change; until then withholding is honest.
+  if (!hasNeutralD20ChecksForAdapter(adapter)) return [];
+
+  const mapped = adapter.mapStatblock(creature.data);
+  const supportsDegrees = typeof adapter.degreeOfSuccess === 'function';
+  // Advantage is a 5e mechanic; do not present it for PF2e merely because both use a d20.
+  const supportsAdvantage = adapter.id === DND5E_ADAPTER_ID;
+  const out: RollCheckDefinition[] = [];
+  const ids = new Set<string>();
+  const add = (def: RollCheckDefinition) => {
+    if (!ids.has(def.id)) {
+      ids.add(def.id);
+      out.push(def);
+    }
+  };
+
+  for (const [rawKey, rawValue] of Object.entries(mapped.abilityScores ?? {})) {
+    if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) continue;
+    const ability = creatureAbilityLabel(rawKey);
+    const modifier = resolveAbilityModifier(adapter, rawValue, mapped.abilityRepresentation);
+    add({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier,
+      breakdown: [{ label: ability, value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  const saves = creatureCheckModifierMap(creature.data.saves ?? creature.data.savingThrows ?? creature.data.saving_throws);
+  for (const [rawKey, modifier] of Object.entries(saves)) {
+    const label = creatureCheckLabel(rawKey);
+    add({
+      id: `save:${rawKey.trim().toLowerCase()}`,
+      label: `${label} save`,
+      category: 'save',
+      ability: null,
+      proficiency: 'statblock',
+      favorite: true,
+      modifier,
+      breakdown: [{ label: 'statblock', value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  const skills = creatureCheckModifierMap(creature.data.skills ?? creature.data.skillMods ?? creature.data.skill_mod);
+  for (const [rawKey, modifier] of Object.entries(skills)) {
+    const label = creatureCheckLabel(rawKey);
+    add({
+      id: `skill:${rawKey.trim().toLowerCase()}`,
+      label,
+      category: 'skill',
+      ability: null,
+      proficiency: 'statblock',
+      favorite: true,
+      modifier,
+      breakdown: [{ label: 'statblock', value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  return sortCheckCatalog(out);
+}
+
 /** Find a single check by its stable id within a character's catalog, or null. */
 export function findCheckInCatalog(adapter: RuleSystemAdapter, character: CheckCatalogCharacter, checkId: string): RollCheckDefinition | null {
   return checkCatalogForAdapter(adapter, character).find((c) => c.id === checkId) ?? null;

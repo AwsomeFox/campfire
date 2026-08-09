@@ -5,6 +5,7 @@ import { defaultCombatantStatblock, hasDeathSavesForAdapter, hasInitiativeRollFo
 import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
 import { CharacterStatCard } from '../../../components/CharacterStatCard';
+import { CreatureStatCard } from '../../../components/CreatureStatCard';
 import { Btn, HpBar, TextInput } from '../../../components/ui';
 import { GatedControl } from '../../../components/GatedControl';
 import { useAnnounce } from '../../../components/Announcer';
@@ -1647,6 +1648,14 @@ export const CombatantRow = memo(function CombatantRow({
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
         {statblock && <div data-combatant-statblock>{statblock}</div>}
+        {combatant.kind !== 'character' && campaignId != null && (
+          <CreatureStatCard
+            encounterId={encounterId}
+            combatantId={combatant.id}
+            creatureName={combatant.name}
+            onError={onRollError}
+          />
+        )}
         {onUseMonsterAction && (
           <div data-combatant-detail>
             <CombatantActionsList

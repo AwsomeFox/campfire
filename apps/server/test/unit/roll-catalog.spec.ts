@@ -5,6 +5,7 @@ import {
   listRuleSystemAdapters,
   ruleSystemAdapter,
   checkCatalogForAdapter,
+  creatureCheckCatalogForAdapter,
   findCheckInCatalog,
   neutralCheckCatalog,
   dnd5eProficiencyBonus,
@@ -18,6 +19,29 @@ import {
   type CheckCatalogCharacter,
   type RuleSystemAdapter,
 } from '@campfire/schema';
+
+describe('creature roll catalog — adapter-derived statblocks (issue #1314)', () => {
+  it('uses 5e score mapping for abilities but only publishes supplied save/skill modifiers', () => {
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { abilityScores: { strength: 8, dexterity: 14 }, saves: { dex: 4 }, skills: { stealth: 6 } },
+    });
+    expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(-1);
+    expect(catalog.find((check) => check.id === 'ability:DEX')?.modifier).toBe(2);
+    expect(catalog.find((check) => check.id === 'save:dex')?.modifier).toBe(4);
+    expect(catalog.find((check) => check.id === 'skill:stealth')?.modifier).toBe(6);
+    expect(catalog.some((check) => check.id === 'save:str')).toBe(false);
+  });
+
+  it('uses PF2e creature modifiers directly and does not offer advantage', () => {
+    const catalog = creatureCheckCatalogForAdapter(Pf2eAdapter, {
+      data: { abilityMods: { strength: 4, dexterity: 2 }, saves: { fortitude: 11 }, skills: { athletics: 12 } },
+    });
+    expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(4);
+    expect(catalog.find((check) => check.id === 'save:fortitude')?.modifier).toBe(11);
+    expect(catalog.find((check) => check.id === 'skill:athletics')?.supportsDegrees).toBe(true);
+    expect(catalog.every((check) => !check.supportsAdvantage)).toBe(true);
+  });
+});
 
 /**
  * Roll catalog (issue #415). The adapter owns an encounter/sheet ROLL CATALOG so an ordinary

@@ -80,7 +80,7 @@ describe('encounters (e2e)', () => {
         type: 'monster',
         summary: 'CR 0.25',
         body: '',
-        dataJson: JSON.stringify({ hitPoints: 7 }),
+        dataJson: JSON.stringify({ hitPoints: 7, abilityScores: { strength: 8, dexterity: 14 }, saves: { dex: 4 }, skills: { stealth: 6 } }),
         createdAt: ts,
         updatedAt: ts,
       })
@@ -107,6 +107,32 @@ describe('encounters (e2e)', () => {
     expect(aria.hpCurrent).toBe(20);
     expect(aria.hpMax).toBe(20);
     expect(aria.initiative).toBeNull();
+  });
+
+  it('DM-only creature checks use the adapter catalog and persist an attributed, non-leaking shared roll', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Creature checks' });
+    const added = await request(server)
+      .post(`/api/v1/encounters/${created.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId });
+    expect(added.status).toBe(201);
+    const checks = await request(server).get(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks`).set(dm);
+    expect(checks.status).toBe(200);
+    expect(checks.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'ability:DEX', modifier: 2 }),
+      expect.objectContaining({ id: 'save:dex', modifier: 4 }),
+      expect.objectContaining({ id: 'skill:stealth', modifier: 6 }),
+    ]));
+    expect((await request(server).get(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks`).set(player)).status).toBe(403);
+    const rolled = await request(server)
+      .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
+      .set(dm)
+      .send({ checkId: 'skill:stealth' });
+    expect(rolled.status).toBe(201);
+    expect(rolled.body.check.modifier).toBe(6);
+    expect(rolled.body.roll).toMatchObject({ actor: 'Test Goblin', encounterId: created.body.id, label: 'Test Goblin · Stealth' });
+    expect(rolled.body.roll.label).not.toContain('+6');
   });
 
   // Issue #491: PF2e initiative is Perception = WIS mod + trained proficiency (level+2),
