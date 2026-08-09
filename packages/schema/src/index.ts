@@ -62,6 +62,7 @@ import type { RestModel, RestOptionDef } from './rest';
 export { type RestOptionDef, DEFAULT_GENERIC_REST_OPTIONS, DEFAULT_STARFINDER_REST_OPTIONS, restOptionsForAdapter } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
+import { EquippedActionSource } from './equipped-item-action';
 import { NarrationLanguage } from './narration-language';
 import {
   MAX_SERIES_OCCURRENCES,
@@ -78,6 +79,9 @@ export * from './spell-slots';
 export * from './rest';
 export * from './character-action';
 export * from './combatant-statblock';
+export * from './canonical-json';
+export * from './dice-bounds';
+export * from './equipped-item-action';
 export * from './osr-adapter';
 export * from './character-creation';
 export * from './narration-language';
@@ -11866,14 +11870,27 @@ export const InventoryItem = z.object({
    */
   equipSlot: z.string().max(60).nullable().default(null),
   /**
-   * Optional structured action this item grants while equipped (issue #1326) — the same
-   * shape as a hand-authored `Character.actions` row, so the resolver can merge it in
-   * without a second action representation. Authored directly (by a player or DM) or,
-   * in future, hydrated from compendium data; that derivation is out of scope here (the
-   * source item's `dataJson` is too thin to auto-generate an attack — see issue #1326).
-   * Inert while unequipped.
+   * The structured action this item grants while equipped (issue #1326) — the same shape as
+   * a hand-authored `Character.actions` row, so the resolver merges it in without a second
+   * action representation. Either a human's, stored verbatim, or one the server derived from
+   * the item's compendium data for this response (issue #2097); `equippedActionSource` says
+   * which. Inert while unequipped.
    */
   equippedAction: CharacterAction.nullable().default(null),
+  /**
+   * Where `equippedAction` came from (issue #2097). `manual` means a human authored it and
+   * the server stored it verbatim; `derived` means the server COMPUTED it for this response
+   * from the item's accepted compendium snapshot and its wielder, and will compute it again
+   * — under whatever the campaign's rule system, the item's name and the character's numbers
+   * say at that moment — every time the item is read. Null when the item grants no action.
+   *
+   * Computed, not stored: only an authored action reaches the database, which is why a
+   * derived one can never be stale. A caller sets this field indirectly by writing
+   * `equippedAction` (which makes the row `manual`) or by clearing it (which hands the item
+   * back to its derivation); it is never writable directly, so "a human wrote this" cannot
+   * be forged into "the server generated this" or vice versa.
+   */
+  equippedActionSource: EquippedActionSource.nullable().default(null),
   ...timestamps,
   // Soft-delete tombstone (issue #551). NULL on live items; ISO timestamp + actor
   // id when the item is in the campaign trash. Not user-writable via create/update.
@@ -11895,6 +11912,7 @@ export const InventoryItemCreate = InventoryItem.omit({
   equipped: true,
   equipSlot: true,
   equippedAction: true,
+  equippedActionSource: true,
 }).partial().required({ name: true });
 
 /** Acquire a play-safe snapshot of an installed compendium item. */

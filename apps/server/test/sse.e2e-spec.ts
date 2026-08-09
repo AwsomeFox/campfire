@@ -421,6 +421,113 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     conn.close();
   });
 
+  it('issue #2097: deleting an equipped weapon ticks even though its action was never stored', async () => {
+    const server = ctx.app.getHttpServer();
+    const conn = await openStream(campaignId, player);
+
+    const characterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Delete Tick PC', ownerUserId: 'dev:dm-1', level: 5, stats: { STR: 16 } })
+    ).body.id as number;
+    const itemId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Doomed Blade', ownerType: 'character', characterId })
+    ).body.id as number;
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'delete-slot' });
+    // Drain the setup's own ticks (character create, equip) before sampling a baseline —
+    // otherwise an in-flight frame lands after `seenBeforeDelete` and the assertions below
+    // read it as the delete's.
+    await conn.waitFor((e) => e.type === 'character.updated' && e.characterId === characterId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Review (chatgpt-codex-connector P2): this used to be gated on the stored
+    // `equippedAction` being non-null. With derived actions computed on read that column is
+    // null for exactly the compendium weapons whose action IS derived, so the gate excluded
+    // the common case and an open encounter card kept offering a deleted attack.
+    const seenBeforeDelete = conn.events.length;
+    const deleteRes = await request(server).delete(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(deleteRes.status).toBe(200);
+    const deleteTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId && conn.events.indexOf(e) >= seenBeforeDelete,
+    );
+    expect(deleteTick.campaignId).toBe(campaignId);
+
+    conn.close();
+  });
+
+  it("issue #2097: switching the campaign's rule system ticks every character holding a derived action", async () => {
+    const server = ctx.app.getHttpServer();
+    // A campaign of its own: this switches mechanics, which every other spec in this file
+    // would otherwise inherit.
+    const ownCampaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Mechanics Tick' })).body.id as number;
+    const conn = await openStream(ownCampaignId, dm);
+
+    const characterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${ownCampaignId}/characters`)
+        .set(dm)
+        .send({ name: 'System Tick PC', level: 5, stats: { STR: 16 } })
+    ).body.id as number;
+    const itemId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${ownCampaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'System Blade', ownerType: 'character', characterId })
+    ).body.id as number;
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'system-slot' });
+    // Drain the setup's own ticks (character create, equip) before sampling a baseline.
+    await conn.waitFor((e) => e.type === 'character.updated' && e.characterId === characterId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Review (chatgpt-codex-connector P2): read-time derivation removed the invalidation
+    // WORK (there are no stored actions to clear) but not the need to announce — every
+    // derived action changes the instant this commits, and RunSessionPage refreshes its
+    // merged-action cache only on `character.updated`.
+    const profile = {
+      slug: 'sse-tick-hack',
+      label: 'SSE Tick Hack',
+      mechanicsSummary: 'A homebrew system used to switch a campaign mid-test.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const seenBeforeSwitch = conn.events.length;
+    const switched = await request(server)
+      .patch(`/api/v1/campaigns/${ownCampaignId}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(switched.status).toBe(200);
+    const switchTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId && conn.events.indexOf(e) >= seenBeforeSwitch,
+    );
+    expect(switchTick.campaignId).toBe(ownCampaignId);
+
+    // Resending the SAME mechanics is a no-op and must stay silent — a full-object REST or
+    // MCP client resends `customMechanicsProfile` on every PATCH, and treating that as a
+    // change would invalidate every open card on an unrelated edit.
+    const seenBeforeNoop = conn.events.length;
+    const noop = await request(server)
+      .patch(`/api/v1/campaigns/${ownCampaignId}`)
+      .set(dm)
+      .send({ name: 'Mechanics Tick Renamed', ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(noop.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(conn.events.slice(seenBeforeNoop).some((e) => (e as { type?: string }).type === 'character.updated')).toBe(false);
+
+    conn.close();
+  });
+
   it('invalidates the authoritative next-session projection on create, reschedule, RSVP, and cancellation', async () => {
     const server = ctx.app.getHttpServer();
     const conn = await openStream(campaignId, player);

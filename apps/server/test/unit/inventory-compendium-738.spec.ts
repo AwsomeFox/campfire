@@ -49,8 +49,13 @@ describe('compendium inventory acquisition (#738)', () => {
     expect(service).toContain('sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry))');
     expect(service).toContain('withCompendiumStates');
     expect(service).toContain('inArray(ruleEntries.id, linkedIds)');
+    // Issue #2097 review (chatgpt-codex-connector P2): the source entry is read INSIDE the
+    // transaction that writes the snapshot. Reading first and updating afterwards let
+    // `RulesService.updatePack()` supersede the entry in between, so the refresh stored an
+    // already-obsolete revision and marked it `linked` — claiming the item was current.
+    expect(service).toContain('const row = this.db.transaction((tx) => {');
     expect(service).toContain('const refreshed = await this.withCompendiumState(row);');
-    expect(service).toContain('return (await this.redactEquippedActions([refreshed], user, role))[0];');
+    expect(service).toContain('return (await this.resolveEquippedActions([refreshed], user, role))[0];');
     expect(service).toContain("action: 'item.refresh_compendium'");
     expect(service).toContain("action: 'item.compendium_state'");
     // Handoff/publish allowlists must retain portable provenance (ruleEntryId is nulled on import).

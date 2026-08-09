@@ -1,10 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterAction, CompendiumRef, CompendiumSnapshot, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
-import type { Treasury, Role } from '@campfire/schema';
+import { canonicalJson, CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, rebuildEditedActionSpec, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
+import type { HomebrewMechanicsProfile, RuleSystemAdapter, Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
+import { fromJsonText } from '../../common/json';
+import { campaigns, inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
 import { buildCompendiumRef, buildCompendiumSnapshot, compendiumRefKey, computeRuleEntryContentHash } from '../campaigns/compendium-import';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
@@ -148,6 +149,7 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     equipped: row.equipped,
     equipSlot: row.equipSlot ?? null,
     equippedAction: parsedAction?.success ? parsedAction.data : null,
+    equippedActionSource: parsedAction?.success ? EquippedActionSource.enum.manual : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
@@ -184,7 +186,7 @@ export class InventoryService {
       .select()
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
-    return this.redactEquippedActions(await this.withCompendiumStates(rows), user, role);
+    return this.resolveEquippedActions(await this.withCompendiumStates(rows), user, role);
   }
 
   /**
@@ -210,7 +212,7 @@ export class InventoryService {
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), isNotNull(inventoryItems.deletedAt)))
       .orderBy(desc(inventoryItems.deletedAt));
-    return this.redactEquippedActions(rows.map(toDomain), user, role);
+    return this.resolveEquippedActions(rows.map(toDomain), user, role);
   }
 
   async getRowOrThrow(id: number, opts?: { includeDeleted?: boolean }) {
@@ -223,7 +225,7 @@ export class InventoryService {
 
   async getOrThrow(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
     const item = await this.withCompendiumState(await this.getRowOrThrow(id));
-    const [redacted] = await this.redactEquippedActions([item], user, role);
+    const [redacted] = await this.resolveEquippedActions([item], user, role);
     return redacted;
   }
 
@@ -239,6 +241,36 @@ export class InventoryService {
    * that character's owning player. Party-stash items are never redacted — `equipped`
    * can never be true there, and the shared stash has never been private.
    */
+  /**
+   * Build the action an item grants while equipped, from its compendium data (issue #2097).
+   * Returns null whenever nothing can be derived — not a weapon, no compendium provenance,
+   * or a character that has vanished — and never throws: this runs on the equip path, and a
+   * malformed compendium row must not be able to fail the equip itself.
+   *
+   * Reads the LIVE rule entry's data when the item is still linked, falling back to the
+   * snapshot captured at acquire time. Both are the same shape; the snapshot is what a
+   * detached or since-uninstalled item still has, and using it keeps derivation working
+   * for an item whose pack was removed.
+   */
+  /** The campaign's rule adapter, `customMechanicsProfile` included. */
+  private async adapterForCampaign(campaignId: number): Promise<{ adapter: RuleSystemAdapter; mechanics: string }> {
+    const campaign = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .get();
+    return {
+      adapter: ruleSystemAdapter(
+        campaign?.ruleSystem ?? '',
+        fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+      ),
+      // A canonical fingerprint of the mechanics this adapter was built from, so a write can
+      // check they still hold when it commits — see `update()`. Key-sorted, because the stored
+      // profile's key order is whatever serialized it.
+      mechanics: canonicalJson([campaign?.ruleSystem ?? '', safeJson(campaign?.customMechanicsProfile ?? '')]),
+    };
+  }
+
   /** Fail-closed redaction of `equippedAction` for a single, already-resolved owner. */
   private redactEquippedActionForOwner(
     item: InventoryItem,
@@ -248,35 +280,101 @@ export class InventoryService {
   ): InventoryItem {
     if (role === 'dm') return item;
     if (item.equippedAction == null) return item;
-    if (item.ownerType !== 'character' || item.characterId == null) return { ...item, equippedAction: null };
+    // Issue #2097: `equippedActionSource` is nulled alongside the action it describes. A
+    // surviving 'derived'/'manual' on a redacted row would announce that this character HAS
+    // a granted action — the exact fact the redaction exists to withhold — and would do it
+    // for free, without the reader needing to see a single number.
+    if (item.ownerType !== 'character' || item.characterId == null) {
+      return { ...item, equippedAction: null, equippedActionSource: null };
+    }
     if (ownerUserId != null && ownerUserId === user.id) return item;
-    return { ...item, equippedAction: null };
+    return { ...item, equippedAction: null, equippedActionSource: null };
   }
 
-  private async redactEquippedActions(items: InventoryItem[], user: RequestUser, role: Role): Promise<InventoryItem[]> {
-    if (role === 'dm') return items;
+  /**
+   * Fill in each item's equipped action, then redact what this reader may not see.
+   *
+   * Issue #2097: a DERIVED action is computed HERE, at read time, from the item's accepted
+   * snapshot and its wielder — it is never stored. That is the whole shape of this feature:
+   * the value depends on the compendium snapshot, the character's stats and level, the
+   * campaign's rule system and the item's name, all owned by different modules and all free
+   * to change at any moment. Persisting it meant every one of those writers had to invalidate
+   * it, every write had to fence against every input, and every copy in a journal or tombstone
+   * needed the same treatment. Computing it on the way out makes staleness unrepresentable.
+   *
+   * `equippedAction` therefore stores only HUMAN-authored actions, which is the one thing that
+   * genuinely needs saving. `equippedActionSource` stays on the API — `manual` for a stored
+   * action, `derived` for a computed one — so clients keep the distinction without the server
+   * keeping a column.
+   */
+  private async resolveEquippedActions(items: InventoryItem[], user: RequestUser, role: Role): Promise<InventoryItem[]> {
+    // Only an EQUIPPED, character-owned item without an authored action can derive one.
+    const derivable = items.filter(
+      (item) => item.equipped && item.ownerType === 'character' && item.characterId != null && item.equippedAction == null,
+    );
     const characterIds = [
       ...new Set(
         items
-          .filter((item) => item.ownerType === 'character' && item.characterId != null && item.equippedAction != null)
+          .filter((item) => item.ownerType === 'character' && item.characterId != null)
           .map((item) => item.characterId as number),
       ),
     ];
-    const owners =
+    const characterRows =
       characterIds.length > 0
         ? await this.db
-            .select({ id: characters.id, ownerUserId: characters.ownerUserId })
+            .select({ id: characters.id, ownerUserId: characters.ownerUserId, stats: characters.stats, level: characters.level })
             .from(characters)
             .where(inArray(characters.id, characterIds))
         : [];
-    const ownerById = new Map(owners.map((owner) => [owner.id, owner.ownerUserId]));
-    return items.map((item) => {
+    const characterById = new Map(characterRows.map((row) => [row.id, row]));
+
+    // Batched, so a full inventory list costs one query per campaign rather than one per item.
+    const entryIds = [
+      ...new Set(
+        derivable
+          .filter((item) => !item.compendiumSnapshot && item.ruleEntryId != null)
+          .map((item) => item.ruleEntryId as number),
+      ),
+    ];
+    const entryRows =
+      entryIds.length > 0
+        ? await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(inArray(ruleEntries.id, entryIds))
+        : [];
+    const entryById = new Map(entryRows.map((row) => [row.id, row.dataJson]));
+
+    const campaignIds = [...new Set(derivable.map((item) => item.campaignId))];
+    const adapterByCampaign = new Map<number, RuleSystemAdapter>();
+    for (const campaignId of campaignIds) adapterByCampaign.set(campaignId, (await this.adapterForCampaign(campaignId)).adapter);
+
+    const resolved = items.map((item) => {
+      if (item.equippedAction != null || !item.equipped || item.ownerType !== 'character' || item.characterId == null) return item;
+      const character = characterById.get(item.characterId);
+      const adapter = adapterByCampaign.get(item.campaignId);
+      if (!character || !adapter) return item;
+      // The accepted snapshot is authoritative; the live entry is the fallback for an item
+      // that has none. No fence needed either way — this reads and computes in one pass, so
+      // there is no window in which the inputs and the result can disagree.
+      const dataJson = item.compendiumSnapshot?.dataJson ?? (item.ruleEntryId != null ? entryById.get(item.ruleEntryId) ?? null : null);
+      if (!dataJson) return item;
+      const action = deriveEquippedItemAction({
+        itemName: item.name,
+        data: safeJson(dataJson),
+        character: { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level },
+        adapter,
+      });
+      return action ? { ...item, equippedAction: action, equippedActionSource: EquippedActionSource.enum.derived } : item;
+    });
+
+    if (role === 'dm') return resolved;
+    return resolved.map((item) => {
       if (item.equippedAction == null) return item;
       // Party-stash items should never carry an equippedAction, and a character-owned item
       // without a resolvable owner is treated as fail-closed rather than fail-open.
-      if (item.ownerType !== 'character' || item.characterId == null) return { ...item, equippedAction: null };
-      if (ownerById.get(item.characterId) === user.id) return item;
-      return { ...item, equippedAction: null };
+      if (item.ownerType !== 'character' || item.characterId == null) {
+        return { ...item, equippedAction: null, equippedActionSource: null };
+      }
+      if (characterById.get(item.characterId)?.ownerUserId === user.id) return item;
+      return { ...item, equippedAction: null, equippedActionSource: null };
     });
   }
 
@@ -354,6 +452,25 @@ export class InventoryService {
     throw new ForbiddenException('Only dm or the owning player may manage this character\'s items');
   }
 
+  /**
+   * Non-throwing sibling of {@link assertCanWriteOwner}, for re-checking authorization AFTER
+   * an already-authorized write has been applied (issue #2097 review). Same rule, asked as a
+   * question instead of asserted: a DM may write anyone's items, a player only their own
+   * character's.
+   */
+  private async canWriteOwner(
+    ownerType: 'party' | 'character',
+    characterId: number | null,
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<boolean> {
+    if (ownerType === 'party') return characterId == null;
+    if (role === 'dm') return true;
+    const character = await this.validateOwner(ownerType, characterId, campaignId);
+    return !!character && character.ownerUserId === user.id;
+  }
+
   async create(campaignId: number, input: InventoryItemCreateInput, user: RequestUser, role: Role): Promise<InventoryItem> {
     const ownerType = input.ownerType ?? 'party';
     const characterId = input.characterId ?? null;
@@ -386,7 +503,7 @@ export class InventoryService {
       campaignId,
     });
     const created = toDomain(row);
-    return (await this.redactEquippedActions([created], user, role))[0];
+    return (await this.resolveEquippedActions([created], user, role))[0];
   }
 
   async acquireFromCompendium(campaignId: number, input: InventoryFromCompendiumInput, user: RequestUser, role: Role): Promise<InventoryItem> {
@@ -451,22 +568,84 @@ export class InventoryService {
     });
     if (!replayed) await this.audit.log({ actor: auditActor(user), actorRole: role, action: 'item.acquire_compendium', entityType: 'inventory_item', entityId: row.id, campaignId });
     const acquired = await this.withCompendiumState(row);
-    return (await this.redactEquippedActions([acquired], user, role))[0];
+    return (await this.resolveEquippedActions([acquired], user, role))[0];
   }
 
   async refreshCompendium(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
-    const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
+    const existing = await this.getRowOrThrow(id);
+    const authorizedOwner = await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
     if (!existing.ruleEntryId) throw new BadRequestException('This item is detached from the compendium');
-    const [entry] = await this.db
-      .select()
-      .from(ruleEntries)
-      .where(and(eq(ruleEntries.id, existing.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, existing.campaignId))))
-      .limit(1);
-    if (!entry || entry.type !== 'item') throw new NotFoundException('The linked source item is unavailable');
-    const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
-    const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
-    if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
-    const [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    // The wielder's `ownerUserId` as it stood when this request was authorized — but only when
+    // it was what authorized the request (issue #2097 review: chatgpt-codex-connector P1). A DM
+    // may write any item in the campaign, so reassigning the character underneath them changes
+    // nothing about their authority and must not 409 them. For a PLAYER it is the whole basis
+    // of the check: reassign the character and the former owner is no longer allowed to touch
+    // the snapshot that controls the new owner's derived action.
+    const authorizedOwnerUserId = role === 'dm' ? undefined : (authorizedOwner?.ownerUserId ?? null);
+    // Read the source and write the snapshot in ONE synchronous better-sqlite3 transaction
+    // (issue #2097 review: chatgpt-codex-connector P2). Reading the entry first and updating
+    // afterwards leaves a window in which `RulesService.updatePack()` rewrites that entry, so
+    // the refresh stores a revision that was already superseded before it landed — and marks
+    // it `linked`, which claims the item is current. Nothing here needs to await, so the
+    // window can simply be closed rather than fenced against.
+    const row = this.db.transaction((tx) => {
+      const [entry] = tx
+        .select()
+        .from(ruleEntries)
+        .where(and(eq(ruleEntries.id, existing.ruleEntryId!), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, existing.campaignId))))
+        .limit(1)
+        .all();
+      if (!entry || entry.type !== 'item') throw new NotFoundException('The linked source item is unavailable');
+      const [pack] = tx.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1).all();
+      if (!pack) throw new NotFoundException('The linked source pack is unavailable');
+      const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
+      if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
+      // Re-check the WIELDER's owner inside the transaction (chatgpt-codex-connector P1). The
+      // predicate below fences the item's owner fields, but a DM reassigning the CHARACTER to
+      // another player leaves those untouched — `ownerType` and `characterId` are the same row
+      // values — while moving the authority this request was granted under.
+      if (authorizedOwnerUserId !== undefined && existing.characterId != null) {
+        const wielder = tx.select({ ownerUserId: characters.ownerUserId }).from(characters).where(eq(characters.id, existing.characterId)).get();
+        if ((wielder?.ownerUserId ?? null) !== authorizedOwnerUserId) {
+          throw new ForbiddenException('Only dm or the owning player may manage this character\'s items');
+        }
+      }
+      // A derived action is computed from whatever snapshot the row holds at READ time (see
+      // `resolveEquippedActions`), so accepting a revision is now only this snapshot write —
+      // there is nothing cached to regenerate or authorize a second time.
+      // Fence the write on the owner this request was AUTHORIZED against (issue #2097 review:
+      // chatgpt-codex-connector P1). `assertCanWriteOwner` ran before this transaction; if a DM
+      // hands the item to another player's character in between, an update keyed on the id
+      // alone lets the former owner replace the accepted snapshot — which now immediately
+      // changes what the NEW owner's weapon does. The authorization has to hold at the moment
+      // of the write, not merely at the moment it was checked.
+      const [row] = tx
+        .update(inventoryItems)
+        .set({
+          compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)),
+          compendiumSnapshot: JSON.stringify(snapshot),
+          compendiumState: 'linked',
+          updatedAt: nowIso(),
+        })
+        .where(
+          and(
+            eq(inventoryItems.id, id),
+            eq(inventoryItems.ownerType, existing.ownerType),
+            existing.characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, existing.characterId),
+            // ...and on the SOURCE LINK this refresh resolved (chatgpt-codex-connector P2). A
+            // concurrent `setCompendiumState('detached')` nulls `ruleEntryId`; without this the
+            // write would relink the row as `linked` while leaving that id null, so the item
+            // reported a live link whose next refresh fails as detached. Detaching is a
+            // deliberate act — losing the race means refetching, not being silently relinked.
+            eq(inventoryItems.ruleEntryId, existing.ruleEntryId!),
+          ),
+        )
+        .returning()
+        .all();
+      if (!row) throw new ConflictException('This item changed owner or source link while the refresh was in flight; refetch and try again');
+      return row;
+    });
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -475,8 +654,25 @@ export class InventoryService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    // Issue #2097 review (chatgpt-codex-connector P2): accepting a new revision changes what
+    // an equipped weapon derives on the very next read, and `RunSessionPage` refreshes its
+    // merged-action cache only on `character.updated` — without this an open encounter card
+    // keeps offering the previous revision's attack, which resolving then rejects as changed.
+    // Gated on there being no STORED action: a human's action is returned verbatim and a
+    // refresh does not touch it.
+    //
+    // Decided from the COMMITTED row, not the pre-transaction read (chatgpt-codex-connector
+    // P2, second round). A concurrent request can equip this item — emitting its own tick —
+    // between the read above and this transaction; a stale `existing.equipped` of false then
+    // suppressed the refresh's tick, and a client that had already handled the equip would
+    // cache an action derived from the snapshot this write just replaced. The owner fence
+    // covers who may write; it says nothing about what the row now IS.
+    if (row.ownerType === 'character' && row.characterId != null && row.equipped && row.equippedAction == null) {
+      this.events.emit({ type: 'character.updated', campaignId: row.campaignId, characterId: row.characterId, userId: user.id });
+    }
+
     const refreshed = await this.withCompendiumState(row);
-    return (await this.redactEquippedActions([refreshed], user, role))[0];
+    return (await this.resolveEquippedActions([refreshed], user, role))[0];
   }
 
   async setCompendiumState(id: number, state: 'overridden' | 'detached', user: RequestUser, role: Role): Promise<InventoryItem> {
@@ -493,7 +689,7 @@ export class InventoryService {
       detail: state,
     });
     const stateItem = await this.withCompendiumState(row);
-    return (await this.redactEquippedActions([stateItem], user, role))[0];
+    return (await this.resolveEquippedActions([stateItem], user, role))[0];
   }
 
   async update(id: number, input: InventoryItemUpdateInput, user: RequestUser, role: Role): Promise<InventoryItem> {
@@ -608,10 +804,23 @@ export class InventoryService {
           )?.ownerUserId
         : undefined;
 
+    // Issue #2097: an AUTHORED action is validated and spec-rebuilt against the campaign's
+    // own rule system, so the adapter is resolved HERE — the write below is a synchronous
+    // better-sqlite3 transaction that cannot await, exactly like the owner ids above.
+    const editMechanics = input.equippedAction ? await this.adapterForCampaign(existing.campaignId) : null;
+    const campaignRuleSystem = editMechanics?.adapter.id ?? '';
+    const campaignDamageTypes = editMechanics?.adapter.damageTypes;
+
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
     // retries observe a single committed apply (issue #782).
     let committed!: InventoryItem;
+    /**
+     * The item's name as it stood INSIDE the transaction, before this write. The baseline for
+     * "did this PATCH actually rename the item?" — see the invalidation below for why the
+     * pre-transaction read is the wrong one to ask.
+     */
+    let nameBeforeWrite = existing.name;
     let replayed = false;
     let qtyConflict: InventoryItem | null = null;
     // Issue #1901 rework (review: devin-ai-integration + chatgpt-codex-connector P2 on
@@ -737,21 +946,47 @@ export class InventoryService {
           update.ownerType = finalOwnerType;
           update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;
         }
-        if (input.equippedAction !== undefined) {
-          update.equippedAction = input.equippedAction ? JSON.stringify(input.equippedAction) : null;
-        } else if (moved) {
-          // Issue #1326 review (coordinator): THE ownership-change clearing rule —
-          // equipped, equipSlot, and equippedAction reset together, atomically, unless
-          // THIS SAME write explicitly re-establishes a field for the new owner (handled
-          // by the branch above). Left uncleared, a character's private granted action
-          // would silently follow the item to its new owner: another character who never
-          // chose it, or the public party stash, which is never redaction-checked at all
-          // (see `redactEquippedActions`) — turning a previously-private action visible
-          // campaign-wide the moment ownership changes. Uses the same CLEARED_EQUIP_STATE
-          // every other owner-changing path (bulk move_inventory_owner + its undo, clone,
-          // import) treats as the base "off" state for this triple.
+        // Issue #2097: with derived actions computed at READ time, this write only decides
+        // what happens to a HUMAN-authored one — store it, clear it, or leave it. There is
+        // nothing cached to keep current, so none of the fences, revisions, or conflict
+        // paths this block used to carry are needed.
+        nameBeforeWrite = fresh.name;
+        const actionWrite: 'authored' | 'clear' | 'leave' =
+          input.equippedAction !== undefined ? (input.equippedAction ? 'authored' : 'clear') : moved ? 'clear' : 'leave';
+
+        if (actionWrite === 'authored') {
+          // An authored action's structured `spec` is what the resolver ROLLS; `toHit` and
+          // `damage` are only what it shows. A caller that edits the numbers while carrying
+          // the old spec through — which a REST/MCP round-trip does naturally — would display
+          // the correction and keep rolling the original, so a spec that contradicts the
+          // fields it arrived with is rebuilt from them. Decided from the REQUEST alone (see
+          // `rebuildEditedActionSpec`), which is why nothing is read here to compare against:
+          // any such baseline can be overwritten by a concurrent edit between the caller's
+          // read and this write, and then a genuinely stale spec looks deliberate.
+          // Fence on the mechanics the adapter above was built from (issue #2097 review:
+          // chatgpt-codex-connector P2). `adapterForCampaign` awaits, and a campaign PATCH can
+          // switch the rule system during that await — the edit would then be validated
+          // against the old system's damage vocabulary and expanded by its attack math, and
+          // stored as `manual`, which nothing ever regenerates. A derived action would simply
+          // recompute under the new system on the next read; an authored one is permanent, so
+          // this is the one write on this path that a mechanics change can still spoil.
+          const nowMechanics = (() => {
+            const campaign = tx
+              .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+              .from(campaigns)
+              .where(eq(campaigns.id, existing.campaignId))
+              .get();
+            return canonicalJson([campaign?.ruleSystem ?? '', safeJson(campaign?.customMechanicsProfile ?? '')]);
+          })();
+          if (nowMechanics !== editMechanics!.mechanics) {
+            throw new ConflictException("The campaign's rule system changed while this action was being saved; refetch and try again");
+          }
+          const authored = rebuildEditedActionSpec(input.equippedAction!, campaignRuleSystem, campaignDamageTypes);
+          update.equippedAction = JSON.stringify(authored);
+        } else if (actionWrite === 'clear') {
           update.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
         }
+
         if (equipWillChange) {
           if (nextEquipped) {
             // Slot conflict (issue #1326): reject a second equipped item claiming the same
@@ -910,7 +1145,10 @@ export class InventoryService {
           prior.fingerprint === err.fingerprint &&
           prior.userId === err.userId
         ) {
-          return JSON.parse(prior.responseJson) as InventoryItem;
+          // The stored replay body never contains a derived action — only authored ones
+          // reach the row — so re-resolving gives the caller today's derivation rather than
+          // the one that was current when the key was first used.
+          return (await this.resolveEquippedActions([JSON.parse(prior.responseJson) as InventoryItem], user, role))[0];
         }
         throw new ConflictException({
           code: 'IDEMPOTENCY_KEY_REUSE',
@@ -921,7 +1159,7 @@ export class InventoryService {
     }
 
     // Idempotent replay returns the first committed response without re-auditing.
-    if (replayed) return committed;
+    if (replayed) return (await this.resolveEquippedActions([committed], user, role))[0];
 
     // Issue #1326: record the equip transition (if any) alongside the existing qty detail
     // rather than a separate audit action — this is still one `item.update` write.
@@ -935,14 +1173,25 @@ export class InventoryService {
     // (never part of the merge) doesn't trigger a needless invalidation.
     const equippedActionEdited = input.equippedAction !== undefined && committed.equipped;
     // Issue #1901 rework (review: chatgpt-codex-connector P2): a name-only PATCH on an
-    // equipped, action-granting item changes the merged list's DERIVED `source` label
-    // (`equipped: <item name>` — see EncountersService.suggestedActionsForCombatant /
-    // ActionResolverService.equippedItemActionRows) without touching equipped/equipSlot/
-    // equippedAction, so none of the other flags below would catch it. Gated on
-    // `committed.equippedAction != null` — renaming a plain (non-action) piece of
-    // equipped gear doesn't change anything the merge renders.
-    const renamedGrantingItem =
-      input.name !== undefined && input.name !== existing.name && committed.equipped && committed.equippedAction != null;
+    // equipped item changes the merged list — both the `equipped: <item name>` source label
+    // and, for a derived action, its title — without touching equipped/equipSlot/
+    // equippedAction, so no other flag here would catch it.
+    //
+    // Issue #2097: NOT gated on the item actually granting an action. A derived action is
+    // computed at read time and never stored, so `committed.equippedAction` is null for
+    // exactly the items whose action a rename retitles — gating on it would have skipped the
+    // invalidation in the one case it exists for. The cost of an extra invalidation on a
+    // renamed non-action item is a refetch; the cost of a missing one is an encounter card
+    // offering an action under a name the item no longer has.
+    //
+    // Compared against the row INSIDE the transaction (chatgpt-codex-connector P2, second
+    // round), not the pre-transaction read and not `input.name`. A full-object PATCH that read
+    // name A and resends A, landing after a concurrent rename to B, genuinely changes the row
+    // back from B to A — but `input.name !== existing.name` is false, because both stale
+    // values are A. The only tick emitted was for B, leaving open caches showing a B-titled
+    // action the server now derives as A. What matters is whether this write changed the name
+    // that is actually stored.
+    const renamedGrantingItem = committed.name !== nameBeforeWrite && committed.equipped && committed.ownerType === 'character';
     const actionContentChanged = equippedActionEdited || renamedGrantingItem;
 
     await this.audit.log({
@@ -1016,7 +1265,7 @@ export class InventoryService {
         this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId, userId: user.id });
       }
     }
-    return committed;
+    return (await this.resolveEquippedActions([committed], user, role))[0];
   }
 
   async remove(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
@@ -1074,13 +1323,19 @@ export class InventoryService {
     // character's merged combat-action list exactly like an explicit unequip does (the
     // `.set()` above forces `equipped: false` on the tombstoned row) — signal it the same
     // way `update()`'s equip/unequip path does so live encounter screens don't keep
-    // offering an action that was just deleted. Gate on `equippedAction != null` so
-    // deleting a plain (non-action) piece of gear stays silent, matching `update()`.
-    if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped && existing.equippedAction != null) {
+    // offering an action that was just deleted.
+    //
+    // Issue #2097 review (chatgpt-codex-connector P2): NOT gated on `equippedAction != null`
+    // any more. That column now holds only human-authored actions, so it is null for exactly
+    // the compendium weapons whose action is derived — the gate excluded the common case.
+    // Deriving here just to decide whether to announce would cost a read per delete to save a
+    // refetch; this file's standing rule is that an extra invalidation is harmless while a
+    // missing one is the real defect.
+    if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped) {
       this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: existing.characterId, userId: user.id });
     }
 
-    return (await this.redactEquippedActions([domain], user, role))[0];
+    return (await this.resolveEquippedActions([domain], user, role))[0];
   }
 
   /**
@@ -1096,7 +1351,7 @@ export class InventoryService {
     await this.assertCanRestore(existing, user, role, actor);
 
     if (!existing.deletedAt) {
-      return (await this.redactEquippedActions([toDomain(existing)], user, role))[0];
+      return (await this.resolveEquippedActions([toDomain(existing)], user, role))[0];
     }
 
     // Verify the original owner still exists; otherwise restore to the party stash.
@@ -1122,7 +1377,7 @@ export class InventoryService {
     };
     if (ownerType === 'party') {
       // Party-owned items can never legitimately carry an equipped action.
-      restoreUpdate.equippedAction = null;
+      restoreUpdate.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
     }
     const [row] = await this.db
       .update(inventoryItems)
@@ -1151,7 +1406,7 @@ export class InventoryService {
       }),
     });
 
-    return (await this.redactEquippedActions([domain], user, role))[0];
+    return (await this.resolveEquippedActions([domain], user, role))[0];
   }
 
   private async assertCanRestore(

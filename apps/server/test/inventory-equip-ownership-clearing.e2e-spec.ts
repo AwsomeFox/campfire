@@ -63,10 +63,20 @@ describe('inventory equip-state ownership-change clearing (issue #1326 review, e
     return created.body.id as number;
   }
 
-  function expectFullyCleared(item: { equipped: boolean; equipSlot: string | null; equippedAction: unknown }) {
+  function expectFullyCleared(item: {
+    equipped: boolean;
+    equipSlot: string | null;
+    equippedAction: unknown;
+    equippedActionSource: unknown;
+  }) {
     expect(item.equipped).toBe(false);
     expect(item.equipSlot).toBeNull();
     expect(item.equippedAction).toBeNull();
+    // Issue #2097 widened the triple to a quad. A surviving 'manual' here would outlive the
+    // action it describes AND permanently block the new owner's item from deriving one —
+    // so every path enumerated below has to clear it too, which is exactly what this
+    // shared assertion is for.
+    expect(item.equippedActionSource).toBeNull();
   }
 
   it('1. InventoryService.update() — moving an equipped item to the party stash clears the full triple', async () => {

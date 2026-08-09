@@ -7,6 +7,7 @@ import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
   CAMPAIGN_PURGE_CONFIRM_TOKEN,
+  canonicalJson,
   CampaignClone,
   CampaignCloneMode,
   CampaignCreate,
@@ -84,6 +85,7 @@ import {
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { persistedFogConcealsPixels } from '../../common/fog';
+import { charactersWithDerivedActions } from '../inventory/derived-action-invalidation';
 import { AuditService } from '../audit/audit.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -437,6 +439,16 @@ const characterConditionWriteSetForImport = (row: Rec): { conditions: string; co
   if (names) return sheetConditionWriteSetFromNames(names, instancesText);
   return sheetConditionWriteSetFromInstances(readConditionInstances(instancesText, '[]'));
 };
+
+/** Parse JSON without throwing — a malformed stored value compares as null rather than crashing. */
+function safeJson(text: string | null): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
 
 function toDomain(row: typeof campaigns.$inferSelect): Campaign {
   return {
@@ -1247,8 +1259,25 @@ export class CampaignsService {
     // pin in the same transaction, so an unrelated image never inherits old coordinates.
     let updatedRow: typeof campaigns.$inferSelect | undefined;
     let pinsCleared = 0;
+    /**
+     * The campaign's mechanics as they stood INSIDE the transaction that overwrote them
+     * (issue #2097 review). Sampled there rather than from the pre-read domain object for two
+     * reasons: two overlapping PATCHes would otherwise compare against state neither of them
+     * wrote, and the domain object has been through Zod, so a defaulted field makes an
+     * identical profile look different from its own stored JSON.
+     */
+    let mechanicsBefore: { ruleSystem: string; profile: string | null } | undefined;
+    const sampleMechanics = (tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0]) => {
+      const row = tx
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+        .from(campaigns)
+        .where(eq(campaigns.id, id))
+        .get();
+      mechanicsBefore = { ruleSystem: row?.ruleSystem ?? '', profile: row?.customMechanicsProfile ?? null };
+    };
     if (shouldResetPins) {
       const resetResult = this.db.transaction((tx) => {
+        sampleMechanics(tx);
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
             .set({ hidden: false, updatedAt: ts })
@@ -1302,11 +1331,41 @@ export class CampaignsService {
           );
       }
 
-      [updatedRow] = await this.db
-        .update(campaigns)
-        .set({ ...campaignInput, ...enabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
-        .where(eq(campaigns.id, id))
-        .returning();
+      const written = this.db.transaction((tx) => {
+        sampleMechanics(tx);
+        const row = tx
+          .update(campaigns)
+          .set({ ...campaignInput, ...enabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .returning()
+          .get();
+        return { row };
+      });
+      updatedRow = written.row;
+    }
+
+    // Issue #2097 review (chatgpt-codex-connector P2): a derived equipped action is computed
+    // on read from the campaign's CURRENT adapter, so switching the rule system or the
+    // homebrew profile changes every one of them the instant this commits — no rows to clear,
+    // but the change still has to be announced. `RunSessionPage` refreshes its merged-action
+    // and turn caches only on `character.updated`; without this an open encounter card keeps
+    // offering the previous system's attack and resolving it fails the expected-spec check.
+    //
+    // Compared by EFFECTIVE VALUE (chatgpt-codex-connector P2, from an earlier round on the
+    // clearing version of this): a full-object REST or MCP client resends
+    // `customMechanicsProfile` unchanged on every update, and treating that as a change would
+    // announce an invalidation on every no-op PATCH. Canonical (key-sorted) form is what makes
+    // "unchanged" mean unchanged — the incoming object's key order is the client's, the stored
+    // one's is whatever was serialized before.
+    const mechanicsChanged =
+      updatedRow !== undefined &&
+      mechanicsBefore !== undefined &&
+      (updatedRow.ruleSystem !== mechanicsBefore.ruleSystem ||
+        canonicalJson(safeJson(updatedRow.customMechanicsProfile)) !== canonicalJson(safeJson(mechanicsBefore.profile)));
+    if (mechanicsChanged) {
+      for (const characterId of charactersWithDerivedActions(this.db, id)) {
+        this.events.emit({ type: 'character.updated', campaignId: id, characterId, userId: user.id });
+      }
     }
 
     await this.audit.log({
@@ -3230,6 +3289,9 @@ export class CampaignsService {
             compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
             equipped: grantEquip,
             equipSlot: grantEquip ? trimmedSlot : null,
+            // Only the HUMAN-authored action is imported; a derived one is recomputed on
+            // read in the importing campaign, under ITS rule system and ITS characters'
+            // numbers (issue #2097), so there is nothing to carry across an install.
             equippedAction: importedActionParse?.success ? JSON.stringify(importedActionParse.data) : null,
             createdAt: ts,
             updatedAt: ts,
