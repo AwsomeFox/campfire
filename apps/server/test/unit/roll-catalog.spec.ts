@@ -67,6 +67,15 @@ describe('creature roll catalog — adapter-derived statblocks (issue #1314)', (
     expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(0);
     expect(catalog.find((check) => check.id === 'save:dexterity')?.modifier).toBe(4);
   });
+
+  it('canonicalizes save aliases before preserving nested save precedence over flat fields', () => {
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { saves: { dex: 4 }, dexterity_save: 7 },
+    });
+    expect(catalog.filter((check) => check.category === 'save')).toEqual([
+      expect.objectContaining({ id: 'save:dex', modifier: 4 }),
+    ]);
+  });
 });
 
 /**

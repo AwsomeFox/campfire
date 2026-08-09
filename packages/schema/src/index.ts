@@ -6046,14 +6046,27 @@ function creatureCheckModifierMap(value: unknown): Record<string, number> {
 }
 
 function creatureSaveModifierMap(data: Record<string, unknown>): Record<string, number> {
-  const saves = creatureCheckModifierMap(data.saves ?? data.savingThrows ?? data.saving_throws);
+  const saves: Record<string, number> = {};
+  const canonicalKeys = new Set<string>();
+  for (const [key, modifier] of Object.entries(creatureCheckModifierMap(data.saves ?? data.savingThrows ?? data.saving_throws))) {
+    const normalized = key.trim().toLowerCase();
+    const canonical = creatureAbilityLabel(key).toLowerCase();
+    if (normalized && canonical && !canonicalKeys.has(canonical)) {
+      saves[normalized] = modifier;
+      canonicalKeys.add(canonical);
+    }
+  }
   // Open5e and existing homebrew entries may instead carry final modifiers as `dexterity_save`.
   // The nested map wins when both are present, which preserves an explicit statblock override.
   for (const [key, value] of Object.entries(data)) {
     if (!/_save$/i.test(key)) continue;
     const modifier = creatureCheckModifierMap({ value }).value;
     const normalized = key.replace(/_save$/i, '').trim().toLowerCase();
-    if (modifier !== undefined && normalized && saves[normalized] === undefined) saves[normalized] = modifier;
+    const canonical = creatureAbilityLabel(normalized).toLowerCase();
+    if (modifier !== undefined && normalized && canonical && !canonicalKeys.has(canonical)) {
+      saves[normalized] = modifier;
+      canonicalKeys.add(canonical);
+    }
   }
   return saves;
 }
