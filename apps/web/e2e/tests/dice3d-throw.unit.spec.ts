@@ -6,7 +6,6 @@ import {
   dieScaleFor,
   dieSupportRadius,
   dieVertices,
-  MAX_RENDERED_DICE,
   separateRestingPlaces,
   separationGap,
   simulate,
@@ -163,19 +162,6 @@ test.describe('resting height', () => {
         expect(support + lowest, `d${sides} on face ${i}`).toBeCloseTo(0, 6);
       }
     }
-  });
-});
-
-test.describe('render budget', () => {
-  test('a legal roll can never ask for an unbounded number of rigs', () => {
-    // `expr` allows 40 characters and dice are capped per TERM, not per roll, so
-    // `20d6+20d6+...` eight times over is a legal 160-die roll. Every die is a
-    // mesh, an edge pass and a shadow quad, and separation is all-pairs.
-    const worstCaseExpr = Array.from({ length: 8 }, () => '20d6').join('+');
-    expect(worstCaseExpr.length).toBeLessThanOrEqual(40);
-    expect(Math.min(160, MAX_RENDERED_DICE)).toBe(MAX_RENDERED_DICE);
-    // Still generous enough that the rolls people actually make are drawn whole.
-    expect(MAX_RENDERED_DICE).toBeGreaterThanOrEqual(20);
   });
 });
 

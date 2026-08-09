@@ -19,6 +19,7 @@ import type { Dice3dHandle, Dice3dSettleDie } from '../features/dice/dice3d';
 // Value import, so it must stay three.js-free — see the module doc there.
 import { MAX_ANIMATION_MS } from '../features/dice/dice3dTiming';
 import { natFlourish } from '../features/dice/natFlourish';
+import { renderedDiceIndices } from '../features/dice/renderedDice';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
 
 /**
@@ -250,8 +251,13 @@ export function DiceRollOverlay({
   // flourish there is a gold or red flash, which is exactly the distinction
   // colorVisionAssist exists to back up) and on the die itself in the fallback.
   // Read through ./natFlourish so it always names the flourish the roller is
-  // actually playing.
-  const overlayResult = phase === 'settling' ? natFlourish(dice) : null;
+  // actually playing — and over the dice the roller actually DREW, since a large
+  // roll shows only a selection of them (./renderedDice). Judging the whole roll
+  // here put a star over a tray with no critical in it.
+  const overlayResult =
+    phase === 'settling'
+      ? natFlourish(renderedDiceIndices(sides).map((i) => dice[i]))
+      : null;
 
   return (
     <div

@@ -98,11 +98,18 @@ test.describe('Dice roll overlay contracts (issue #1352)', () => {
 
   test('the crit badge and the crit animation read the same rule', () => {
     const rollerSource3d = readFileSync(resolve(ROOT, 'src/features/dice/dice3d.ts'), 'utf8');
-    expect(overlaySource).toMatch(/natFlourish\(dice\)/);
+    expect(overlaySource).toMatch(/natFlourish\(/);
     expect(rollerSource3d).toMatch(/natFlourishDieIndex\(rolled\)/);
     // Neither may re-derive it: a second copy is how they came to disagree.
     expect(overlaySource).not.toMatch(/value === 20/);
     expect(rollerSource3d).not.toMatch(/results\[i\]\?\.value === 20/);
+    // And both must judge the SAME dice. A large roll draws only a selection, so
+    // a badge weighed against the whole roll promises a flourish the tray never
+    // plays — which is how the render cap reopened this after it was closed.
+    expect(overlaySource).toMatch(/renderedDiceIndices\(sides\)/);
+    expect(rollerSource3d).toMatch(/renderedDiceIndices\(sides\)/);
+    // A drawn die must look up its OWN result, not the one at its tray position.
+    expect(rollerSource3d).toMatch(/results\[picked\[i\]\]/);
   });
 
   test('a backgrounded tab still reaches the result toast', () => {

@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import type { DiceTheme } from '@campfire/schema';
 import { d6Values, faceValues } from './dice3dFaces';
 import { natFlourish, natFlourishDieIndex } from './natFlourish';
+import { renderedDiceIndices } from './renderedDice';
 import {
   ALIGN_MS,
   ALIGN_MS_REDUCED,
@@ -74,22 +75,6 @@ const D6_RADIUS = 0.86;
 /** Half the d6 box edge (BoxGeometry(1.62)) — its face-down support distance. */
 const D6_SUPPORT = 0.81;
 
-/**
- * Most dice a roll draws.
- *
- * The grammar caps dice per TERM at 20 and does not cap terms, and `expr` allows
- * 40 characters — so `20d6+20d6+...` eight times over is a legal 160-die roll.
- * Every die is a mesh, an edge pass and a shadow quad, and separation is
- * all-pairs, so drawing all 160 costs over a thousand draw calls a frame and a
- * five-million-iteration relaxation before the first one. That is a frozen phone
- * in exchange for a pile nobody can count anyway.
- *
- * The overlay is decorative — `role="presentation"`, `aria-hidden` — and the
- * authoritative faces are in the result toast and the shared dice log, which
- * both report the full roll. So past this many, it shows a handful and lets
- * those surfaces carry the result.
- */
-export const MAX_RENDERED_DICE = 24;
 
 const supportRadii = new Map<number, number>();
 
@@ -809,9 +794,10 @@ export function startDiceRoll(
   scene.add(flash);
 
   const group = new THREE.Group();
-  // Drawn dice only — see MAX_RENDERED_DICE. The roll's real faces still arrive in
-  // full through settle(); the ones past the cap simply are not drawn.
-  const drawn = sides.slice(0, MAX_RENDERED_DICE);
+  // Drawn dice only — see ./renderedDice. `settle()` still receives the roll in
+  // full, so `picked` is how a drawn die finds its own result.
+  const picked = renderedDiceIndices(sides);
+  const drawn = picked.map((i) => sides[i]);
   const n = drawn.length;
   const spread = n > 1 ? Math.min(2.5, 5.4 / n) : 0;
   // Sized against the widest solid in the roll, so a mixed 1d20+8d6 is judged by
@@ -1084,7 +1070,7 @@ export function startDiceRoll(
     settle(results) {
       if (released || disposed) return;
       for (const [i, d] of dice.entries()) {
-        const result = results[i];
+        const result = results[picked[i]];
         if (!result) continue;
         const upIdx = upFaceIndex(d.rig.normals, d.traj[d.traj.length - 1].q);
         d.rig.paint(upIdx, result.value);
@@ -1097,8 +1083,8 @@ export function startDiceRoll(
       if (!reducedMotion) {
         const rolled = dice.map((d, i) => ({
           sides: d.rig.sides,
-          value: results[i]?.value,
-          kept: results[i]?.kept ?? false,
+          value: results[picked[i]]?.value,
+          kept: results[picked[i]]?.kept ?? false,
         }));
         const heroAt = natFlourishDieIndex(rolled);
         if (heroAt >= 0) {
