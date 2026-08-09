@@ -77,6 +77,13 @@
   margin: 1.5cm;
 }
 
+/* Screen-only tab state for the dashboard's table rail. Avoid the native `hidden` attribute
+   here: its user-agent rule would also suppress the panel in print, where the whole rail is
+   wanted. Mirrors `.cf-character-sheet-panel-hidden`. */
+.cf-dashboard-rail-panel-hidden {
+  display: none;
+}
+
 @media print {
   :root {
     color-scheme: light;
@@ -149,10 +156,18 @@
     display: block !important;
   }
 
-  .cf-dashboard-rail {
+  .cf-dashboard-rail,
+  .cf-dashboard-rail > * {
     position: static !important;
     max-height: none !important;
     overflow: visible !important;
+  }
+
+  /* Every table-rail panel prints, whichever tab was open on screen — the same reason the
+     character sheet prints both of its panels. See `panelClass` in TableRail.tsx for why this
+     is a class rather than the native `hidden` attribute. */
+  .cf-dashboard-rail-panel-hidden {
+    display: block !important;
   }
 
   .cf-authed-shell,

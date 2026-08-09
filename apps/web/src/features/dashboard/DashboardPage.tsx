@@ -328,7 +328,7 @@ export default function DashboardPage() {
 
       {/*
         Three-pane command deck from the design template
-        `templates/campaign-dashboard/CampaignDashboard.dc.html`: table rail | world | table talk.
+        `templates/campaign-dashboard/CampaignDashboard.dc.html`: session rail | world | table rail.
 
         The template is a `position:fixed` full-viewport shell with its own scroll panes. Here it
         becomes a sticky-rail grid inside the app's normal document flow, the same mapping the
@@ -375,7 +375,7 @@ export default function DashboardPage() {
         </div>
 
         <aside
-          className="cf-dashboard-rail min-w-0 xl:col-span-2 2xl:col-span-1 2xl:sticky 2xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)] 2xl:overflow-y-auto 2xl:overscroll-contain"
+          className="cf-dashboard-rail min-w-0 xl:col-span-2 2xl:col-span-1 2xl:sticky 2xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)]"
           style={{ top: 'calc(var(--app-header-h, 0px) + 1rem)' }}
           aria-label="Table rail"
           data-testid="dashboard-table-rail"

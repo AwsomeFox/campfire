@@ -91,6 +91,49 @@ test.describe('dashboard command deck', () => {
       const results = await new AxeBuilder({ page }).include('[data-testid="dashboard-table-rail"]').analyze();
       expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.html).join(' | ')}`)).toEqual([]);
     });
+
+    test('the open tab is visibly marked, not just announced', async ({ page }) => {
+      const { campaignId } = seed();
+      await page.setViewportSize({ width: 1600, height: 900 });
+      await page.goto(`/c/${campaignId}`);
+
+      const rail = page.getByTestId('dashboard-table-rail');
+      // `.seg-opt`'s own highlight is `:has(input:checked)`-gated and these are plain buttons,
+      // so a sighted user had nothing to read: every tab rendered identically.
+      const ring = (name: string) =>
+        rail.getByRole('tab', { name }).evaluate((el) => getComputedStyle(el).boxShadow);
+      expect(await ring('Notes')).not.toBe('none');
+      expect(await ring('Talk')).toBe('none');
+
+      await rail.getByRole('tab', { name: 'Talk' }).click();
+      expect(await ring('Talk')).not.toBe('none');
+      expect(await ring('Notes')).toBe('none');
+    });
+
+    /**
+     * `entityHref` builds a campaign comment as `/c/:id?comment=N#entity-comment-N`, and
+     * `EntityDeepLinkFocus` focuses that node. A `display:none` node cannot be focused or
+     * scrolled to, so once the discussion moved behind a tab these links — from notifications,
+     * search results and mentions — opened the dashboard and did nothing visible.
+     */
+    test('a deep link to a campaign comment opens the tab that holds it', async ({ page, baseURL }) => {
+      const { campaignId } = seed();
+      const ctx = await request.newContext({ baseURL: baseURL! });
+      await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+      const posted = await ctx.post(`/api/v1/campaigns/${campaignId}/comments`, {
+        data: { entityType: 'campaign', entityId: campaignId, body: 'DECKLINK anchor comment' },
+      });
+      expect(posted.ok()).toBeTruthy();
+      const commentId = (await posted.json()).id as number;
+      await ctx.dispose();
+
+      await page.setViewportSize({ width: 1600, height: 900 });
+      await page.goto(`/c/${campaignId}?comment=${commentId}#entity-comment-${commentId}`);
+
+      const rail = page.getByTestId('dashboard-table-rail');
+      await expect(rail.getByRole('tab', { name: 'Talk' })).toHaveAttribute('aria-selected', 'true');
+      await expect(page.locator(`#entity-comment-${commentId}`)).toBeVisible();
+    });
   });
 
   /**
@@ -142,7 +185,17 @@ test.describe('dashboard command deck', () => {
       expect(deckDisplay).toBe('block');
       const railPosition = await page.getByTestId('dashboard-session-rail').evaluate((el) => getComputedStyle(el).position);
       expect(railPosition).toBe('static');
+
+      // Paper wants the WHOLE rail, whichever tab was open on screen. Native `hidden` cannot be
+      // overridden by a print stylesheet, which is why the inactive panels carry a class instead.
+      for (const id of ['dashboard-rail-panel-notes', 'dashboard-rail-panel-checks', 'dashboard-rail-panel-talk']) {
+        const display = await page.locator(`#${id}`).evaluate((el) => getComputedStyle(el).display);
+        expect(display, `${id} must print`).not.toBe('none');
+      }
       await page.emulateMedia({ media: 'screen' });
+      // ...and back on screen only the open one shows.
+      const talkOnScreen = await page.locator('#dashboard-rail-panel-talk').evaluate((el) => getComputedStyle(el).display);
+      expect(talkOnScreen).toBe('none');
     });
   });
 });
