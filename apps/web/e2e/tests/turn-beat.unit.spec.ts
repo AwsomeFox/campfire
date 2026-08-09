@@ -55,7 +55,8 @@ test.describe('turn-change beat (issue #1906)', () => {
     const encounterQueryEnd = source.indexOf('const encounter = encounterQuery.data ?? null;', encounterQueryStart);
     const encounterQueryBody = source.slice(encounterQueryStart, encounterQueryEnd);
 
-    expect(encounterQueryBody).toMatch(/const reconciled = reconcileEncounterPatchResponse\([\s\S]*?await api\.get<EncounterWithCombatants>/);
+    expect(encounterQueryBody).toMatch(/queryFn: async \(\{ signal \}\) => \{\s*const reconciled = reconcileEncounterPatchResponse\([\s\S]*?await api\.get<EncounterWithCombatants>\(`\$\{API\}\/encounters\/\$\{eid\}`, \{ signal \}\)/);
+    expect(encounterQueryBody).toMatch(/signal\.throwIfAborted\(\);\s*const revision = encounterReadRevisionRef\.current \+ 1;/);
     expect(encounterQueryBody).toMatch(/encounterReadRevisionRef\.current = revision;\s*latestEncounterReadRef\.current = \{ revision, encounterId: eid, encounter: reconciled \};\s*setEncounterReadRevision\(revision\);\s*return reconciled;/);
     expect(source.match(/encounterReadRevisionRef\.current = revision;/g)).toHaveLength(1);
     expect(source).not.toContain('shouldConsumeTurnBeatResync(\n      awaitingTurnBeatResyncRef.current,\n      encounterQuery.dataUpdatedAt');

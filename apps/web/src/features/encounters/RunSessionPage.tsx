@@ -1200,13 +1200,17 @@ export default function RunSessionPage() {
   }
   const encounterQuery = useQuery({
     queryKey: queryKeys.encounter(eid),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const reconciled = reconcileEncounterPatchResponse(
-        await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
+        await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`, { signal }),
         pendingEncounterPatches.current.values(),
         '',
         eid,
       );
+      // An invalidation can supersede an in-flight poll just before its response
+      // publishes. Only the fetch TanStack still accepts may satisfy the one-shot
+      // reconnect/load resync gate.
+      signal.throwIfAborted();
       const revision = encounterReadRevisionRef.current + 1;
       encounterReadRevisionRef.current = revision;
       latestEncounterReadRef.current = { revision, encounterId: eid, encounter: reconciled };
