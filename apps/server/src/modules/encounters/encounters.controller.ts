@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantReorderDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -800,6 +800,33 @@ export class EncountersController {
     return this.encounters.rollCombatantInitiative(id, cid, body.idempotencyKey, body.overwrite, user, role);
   }
 
+  @Post(':id/combatants/:cid/reorder')
+  @ApiOperation({
+    summary: 'Manually reorder a combatant in initiative (issue #1923)',
+    description:
+      'dm role required. Moves the combatant to land immediately after `afterCombatantId` (or `\'top\'` to become first) ' +
+      'under the same order `sortCombatants` renders. Within a tied initiative value only `sortOrder` changes; a move ' +
+      'that crosses initiative values also sets the moved combatant\'s `initiative` between its new neighbors and ' +
+      'clears the now-stale `initiativeBreakdown`. Clears `turnState.delaying` on the moved combatant if set — this is ' +
+      'Delay\'s only mechanical resolution. `expectedTurnVersion` is a compare-and-set against the encounter\'s current ' +
+      '`turnVersion`.',
+  })
+  @ApiResponse({ status: 201, description: 'Updated combatant.' })
+  @ApiResponse({ status: 400, description: 'afterCombatantId references the moved combatant itself.' })
+  @ApiResponse({ status: 403, description: 'Not the DM, or the moved combatant is the current actor.' })
+  @ApiResponse({ status: 404, description: 'Encounter or afterCombatantId combatant not found.' })
+  @ApiResponse({ status: 409, description: 'expectedTurnVersion no longer matches — the turn advanced since this order was loaded.' })
+  async reorderCombatant(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: CombatantReorderDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.reorderCombatant(id, cid, body, user, role);
+  }
+
   @Post(':id/token-batches/preview') @HttpCode(200)
   @ApiOperation({ summary: 'Preview a token batch placement', description: 'dm role required. Returns the computed placements without applying them.' })
   async previewTokenBatch(@Param('id', ParseIntPipe) id: number, @Body() body: TokenBatchPreviewDto, @CurrentUser() user: RequestUser) {
@@ -873,7 +900,7 @@ export class EncountersController {
       'device advancing simultaneously gets a 409 rather than silently skipping a combatant.',
   })
   @ApiResponse({ status: 201, description: 'Encounter with advanced round/turnIndex (or the replayed original response for a retried idempotencyKey).' })
-  @ApiResponse({ status: 400, description: 'Encounter is not running.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not running, or has no combatants (issue #2091) — end the encounter instead of advancing an empty fight.' })
   @ApiResponse({ status: 409, description: 'The turn already advanced (expectedCurrentCombatantId CAS), or the idempotencyKey was reused for a different action.' })
   async nextTurn(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterNextTurnDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);

@@ -17,6 +17,7 @@ import { CharacterAction } from './character-action';
 /** Field-level help for the quick statblock editor and action controls. */
 export const COMBATANT_STATBLOCK_HELP = {
   ac: 'Armor Class — the target number an attack roll must meet or exceed.',
+  hp: 'Max HP for this statblock — the template value. Saving to the campaign library carries it along, and adding from the library seeds the new combatant’s Max HP from it. Leave blank if unknown.',
   abilityScores: 'Ability scores or modifiers used for attack/save math when an action does not carry an explicit bonus.',
   actions: 'Named attacks, spells, and features. Actions with enough structure show a Use button; others keep their full prose.',
   traits: 'Passive special abilities (keen senses, magic resistance, etc.).',
@@ -37,6 +38,18 @@ export const COMBATANT_STATBLOCK_HELP = {
 
 export const CombatantStatblock = z.object({
   ac: z.number().int().min(0).max(40).nullable().default(10),
+  // Max HP TEMPLATE for this statblock (issue #2080) — distinct from the running
+  // combatant row's `hpMax`, which is the live in-encounter total. Nullable, with
+  // NO numeric default: a statblock persisted before this field existed has no
+  // "hp" key at all, and `.default(null)` makes that parse identically to an
+  // explicit `null` rather than throwing — the only way an old campaign-library
+  // row survives this change. A statblock that genuinely has no known HP yet
+  // (a fresh manual monster the DM hasn't stated HP for, a hazard with no HP
+  // concept) stays representable as "unknown" instead of being forced to an
+  // invented number — inventing one here is exactly the `: 10` bug this field
+  // exists to remove; callers that need a concrete Max HP (adding a combatant)
+  // must resolve or ask for one explicitly, same as any other unresolvable HP.
+  hp: z.number().int().min(1).nullable().default(null),
   abilityScores: z.record(z.string(), z.number().int()).default(() => ({
     STR: 10,
     DEX: 10,
@@ -215,6 +228,36 @@ function rechargeFromUsage(raw: unknown): string {
   return '';
 }
 
+/**
+ * Issue #1921: parse a per-day usage limit ("1/Day", "2/Day") into {@link ActionUses.max}.
+ * The open5e importer already normalizes a structured `PER_DAY` usage limit into
+ * `{ type: 'perDay', uses: N, label: 'N/Day' }` (open5e-importer.ts's `usageFrom`); the
+ * `label` regex is the fallback for any other producer that only carries prose. Returns 0
+ * (no per-day pool) for anything else, including a `recharge`-typed usage object.
+ */
+function usesMaxFromUsage(raw: unknown): number {
+  const u = asRecord(raw);
+  if (!u) return 0;
+  // Floor and clamp into `ActionUses.max`'s domain (integer, 0–99). Statblock JSON is
+  // external data — a compendium row, a DDB import, a homebrew paste — so `uses: 100`,
+  // `uses: 2.5`, or a five-digit `N/Day` label are all reachable, and every one of them
+  // makes `ActionSpec.parse` throw. That throw escapes `expandRawStatblockAction`, which
+  // `expandStatblockActions` calls in an unguarded loop, so ONE malformed usage object
+  // takes out the whole creature's action list and `listUsableActions` 500s. Degrading to
+  // a clamped pool matches how every other unparseable statblock field here behaves:
+  // produce nothing rather than throw.
+  const clamp = (n: number) => Math.max(0, Math.min(99, Math.floor(n)));
+  const type = typeof u.type === 'string' ? u.type.toLowerCase() : '';
+  if (type === 'perday') {
+    const n = numberOrNull(u.uses ?? u.param);
+    if (n !== null && n > 0) return clamp(n);
+  }
+  const label = typeof u.label === 'string' ? u.label : '';
+  const m = label.match(/^\s*(\d+)\s*\/\s*Day\s*$/i);
+  if (m) return clamp(Number(m[1]));
+  return 0;
+}
+
 function savingThrowFrom(item: Record<string, unknown>, desc: string): { dc: number; ability: string } | null {
   // A dedicated, explicit opt-out signal (issue #1903 review, PR #1950 round 12 — replacing
   // round 10's overloading of `savingThrow: null`) means the caller has already determined
@@ -296,6 +339,13 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
   const damageParts = damagePartsFrom(item.damage);
   const save = savingThrowFrom(item, desc);
   const recharge = rechargeFromUsage(item.usage);
+  // Issue #1921: a per-day usage ("1/Day") and a recharge condition are mutually exclusive
+  // in practice (a statblock action carries at most one usage note), but nothing stops both
+  // parsers from matching the same raw `usage` object — `usesMaxFromUsage` only fires for
+  // `perDay`/`N/Day` shapes, `rechargeFromUsage` only for `recharge`/`Recharge N-M` shapes,
+  // so passing both through untouched below is safe either way.
+  const usesMax = usesMaxFromUsage(item.usage);
+  const usesSpec = recharge || usesMax > 0 ? { recharge, ...(usesMax > 0 ? { max: usesMax } : {}) } : {};
 
   let spec: ActionSpec | undefined;
   let toHit = '';
@@ -312,7 +362,7 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
       mode: 'attack',
       attack: { bonus: toHit },
       cost: { slot: costSlotForSource(source), count: 1 },
-      uses: recharge ? { recharge } : {},
+      uses: usesSpec,
       targets: { count: 1, allow: 'enemy' },
       outcomes,
       provenance: { ruleSystem, source: 'statblock' },
@@ -329,7 +379,7 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
       mode: 'save',
       save: { ability: save.ability, dc: { kind: 'fixed', dc: save.dc } },
       cost: { slot: costSlotForSource(source), count: 1 },
-      uses: recharge ? { recharge } : {},
+      uses: usesSpec,
       targets: { count: 0, allow: 'enemy' },
       outcomes,
       provenance: { ruleSystem, source: 'statblock' },

@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
+import type { Combatant } from '@campfire/schema';
+import { Dnd5eAdapter } from '@campfire/schema';
 import {
   dbFilePath,
   openDatabase,
@@ -9,6 +11,7 @@ import {
 } from '../../src/db/db.module';
 import { makeTempDataDir, writeOldSchemaDb, columnNames, countRows } from './fixtures';
 import { legacyIcsUid } from '../../src/modules/sessions/ics.util';
+import { sortCombatants } from '../../src/modules/encounters/encounters.logic';
 
 /**
  * Integration coverage for the hand-rolled ADD-COLUMN / table-rebuild migrations
@@ -2747,4 +2750,152 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       sqlite.close();
     }
   });
+
+  it('0174 adds combatants.manual_order on upgrade; a pre-existing (pre-#1923) row reads back null (#1923)', () => {
+    expect(MIGRATION_NAMES).toContain('0174_combatants_manual_order_1923');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'combatants')).toContain('manual_order');
+
+      // writeOldSchemaDb already seeds a pre-existing combatant row (Legacy Goblin) written
+      // before this column existed — it must read back null, not silently gain a manual
+      // reorder position it never had.
+      const row = sqlite.prepare("SELECT manual_order FROM combatants WHERE name = 'Legacy Goblin'").get() as {
+        manual_order: number | null;
+      };
+      expect(row.manual_order).toBeNull();
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("0172 adds users.table_audio and defaults existing rows to 'off' (#1920)", () => {
+    expect(MIGRATION_NAMES).toContain('0172_users_table_audio_1920');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'users')).toContain('table_audio');
+      const user = sqlite.prepare('SELECT table_audio FROM users WHERE id = 1').get() as {
+        table_audio: string;
+      };
+      // NOT NULL DEFAULT 'off' backfills the pre-existing legacy row — table audio
+      // and haptics stay silent for everyone until they opt in via PATCH /me/preferences.
+      expect(user.table_audio).toBe('off');
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('re-running openDatabase on an already-migrated DB is idempotent for users.table_audio (#1920)', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const first = openDatabase(dataDir);
+    first.sqlite.close();
+
+    // Boot is not once-only (DbHolder re-runs it on every restore) — a second
+    // openDatabase call against the now-migrated file must not throw a
+    // "duplicate column" error from re-running the ADD COLUMN.
+    const second = openDatabase(dataDir);
+    try {
+      expect(columnNames(second.sqlite, 'users')).toContain('table_audio');
+    } finally {
+      second.sqlite.close();
+    }
+  });
+
+  /**
+   * Issue #2095 review: upgrade compatibility for #2074's whole-roster manual_order
+   * stamping. #2074 (merged before #2084's narrower fix) stamped EVERY combatant's
+   * `manual_order` on every drag, so any encounter a DM had already reordered under
+   * that code has every row non-null in the database. #2084's narrower stamping never
+   * retroactively cleans that up — this migration is the actual fix for those
+   * already-affected users.
+   *
+   * Simulates that exact legacy state directly against a real, fully-migrated
+   * combatants table (not the old-shaped fixture — `manual_order` already existed by
+   * #1923, this is a DATA cleanup, not a schema change), then proves the two things
+   * that matter: the column is cleared, and — the behavioral consequence the
+   * migration exists for — an untouched tie group actually resolves through the
+   * adapter's own tiebreak (DEX/initMod) afterwards, not the frozen legacy order.
+   */
+  it('0176 clears every legacy manual_order stamp, and an untouched tie group resolves via the adapter afterwards (#2095)', () => {
+    expect(MIGRATION_NAMES).toContain('0176_combatants_clear_legacy_manual_order_2095');
+
+    dataDir = makeTempDataDir();
+    // A fresh DB already runs every migration (including 0176) with nothing to do —
+    // open once to get a fully-migrated, empty schema to seed the legacy data into.
+    const seeding = openDatabase(dataDir);
+    const now = '2026-01-01T00:00:00.000Z';
+    seeding.sqlite.exec(`
+      INSERT INTO campaigns (name, created_at, updated_at) VALUES ('Legacy Reorder Campaign', '${now}', '${now}');
+      INSERT INTO encounters (campaign_id, name, status, created_at, updated_at)
+        VALUES (1, 'Legacy Fight', 'running', '${now}', '${now}');
+    `);
+    // A(20) is unique — not part of any tie. W/X/Y are all tied at 14 with DIFFERENT
+    // initMod, so the adapter's own rule (higher initMod first) would order them
+    // X(3), W(1), Y(0) — but the legacy whole-roster stamp (from some OTHER, unrelated
+    // drag under #2074's code) instead recorded plain add order (W=1, X=2, Y=3),
+    // exactly the "worse while preparing... encodes add order" shape #2084 fixed for
+    // FUTURE writes. The DM never touched this tie group directly.
+    const insertCombatant = seeding.sqlite.prepare(
+      'INSERT INTO combatants (encounter_id, kind, name, initiative, init_mod, sort_order, manual_order) VALUES (1, ?, ?, ?, ?, ?, ?)',
+    );
+    insertCombatant.run('monster', 'A', 20, 0, 0, 0);
+    insertCombatant.run('monster', 'W', 14, 1, 1, 1);
+    insertCombatant.run('monster', 'X', 14, 3, 2, 2);
+    insertCombatant.run('monster', 'Y', 14, 0, 3, 3);
+    // Pretend 0176 has not yet reached this data — it already ran once (harmlessly,
+    // no rows existed yet) when `seeding` first opened this fresh DB.
+    seeding.sqlite.prepare("DELETE FROM __migrations WHERE name = '0176_combatants_clear_legacy_manual_order_2095'").run();
+    seeding.sqlite.close();
+
+    // Re-open: 0176 is no longer recorded as applied, so it runs again — now against
+    // the legacy-shaped data.
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const rows = sqlite
+        .prepare('SELECT id, name, initiative, init_mod, sort_order, manual_order FROM combatants ORDER BY id')
+        .all() as Array<{ id: number; name: string; initiative: number; init_mod: number; sort_order: number; manual_order: number | null }>;
+      expect(rows).toHaveLength(4);
+      expect(rows.every((r) => r.manual_order === null)).toBe(true);
+
+      // The behavioral consequence: feed the post-migration rows through the REAL
+      // sortCombatants + 5e adapter tiebreak. With manual_order cleared, the tie group
+      // must now sort by initMod (adapter), not the legacy add-order stamp.
+      const combatants: Combatant[] = rows.map(
+        (r) =>
+          ({
+            id: r.id,
+            encounterId: 1,
+            kind: 'monster',
+            characterId: null,
+            name: r.name,
+            initiative: r.initiative,
+            initMod: r.init_mod,
+            hpCurrent: null,
+            hpMax: null,
+            hpBand: null,
+            conditions: [],
+            ruleEntryId: null,
+            sortOrder: r.sort_order,
+            manualOrder: r.manual_order,
+          }) as unknown as Combatant,
+      );
+      const sorted = sortCombatants(combatants, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b));
+      // A(20) first, then the tie group ordered by initMod desc: X(3), W(1), Y(0) — the
+      // adapter's answer, NOT the legacy stamp's add order (W, X, Y).
+      expect(sorted.map((c) => c.name)).toEqual(['A', 'X', 'W', 'Y']);
+    } finally {
+      sqlite.close();
+    }
+  });
 });
+

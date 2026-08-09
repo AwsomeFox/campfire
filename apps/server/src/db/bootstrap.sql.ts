@@ -156,6 +156,23 @@ CREATE TABLE IF NOT EXISTS campaigns (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #846: append-only lifecycle-status provenance. One row per status change
+-- (active<->paused<->completed); the newest row is the current provenance shown in
+-- the archived banner/settings. actor_user_id is durable; actor_name is a snapshot.
+-- reason is DM-only and never shown to players. Cascades with the campaign.
+CREATE TABLE IF NOT EXISTS campaign_status_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  actor_user_id TEXT NOT NULL,
+  actor_name TEXT NOT NULL,
+  from_status TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_status_transitions_campaign
+  ON campaign_status_transitions(campaign_id, created_at);
+
 CREATE TABLE IF NOT EXISTS characters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -923,6 +940,7 @@ CREATE TABLE IF NOT EXISTS users (
   animate_others_rolls INTEGER NOT NULL DEFAULT 1,
   can_create_campaigns INTEGER NOT NULL DEFAULT 0,
   color_vision_assist INTEGER NOT NULL DEFAULT 0,
+  table_audio TEXT NOT NULL DEFAULT 'off',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -1814,6 +1832,10 @@ CREATE TABLE IF NOT EXISTS combatants (
   conditions TEXT NOT NULL DEFAULT '[]',
   rule_entry_id INTEGER REFERENCES rule_entries(id) ON DELETE SET NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
+  -- Issue #1923 review finding 1: DM manual-reorder override, consulted by sortCombatants
+  -- ahead of the adapter's initiative tiebreak when both compared rows have a non-null
+  -- value. NULL until the first manual reorder on a running encounter.
+  manual_order INTEGER,
   token_x REAL,
   token_y REAL,
   token_size TEXT NOT NULL DEFAULT 'medium',
@@ -1828,7 +1850,10 @@ CREATE TABLE IF NOT EXISTS combatants (
   -- Issue #425: inline homebrew statblock JSON for manual monsters.
   statblock_json TEXT,
   -- Issue #1926: DM-controlled reveal of this combatant's statblock to non-DM viewers.
-  statblock_revealed INTEGER NOT NULL DEFAULT 0
+  statblock_revealed INTEGER NOT NULL DEFAULT 0,
+  -- Issue #1921: limited-use/recharge action spend, JSON map keyed by fingerprint+source to
+  -- { spent }. Null = nothing spent yet.
+  action_uses TEXT
 );
 
 CREATE TABLE IF NOT EXISTS combatant_removal_undos (
@@ -2292,6 +2317,9 @@ CREATE TABLE IF NOT EXISTS action_apply_chains (
   cost_slot TEXT NOT NULL DEFAULT '', cost_count INTEGER NOT NULL DEFAULT 0, spell_level_spent INTEGER NOT NULL DEFAULT 0,
   concentration_before TEXT, pending_concentration_checks_before_json TEXT NOT NULL DEFAULT '[]',
   started_concentration INTEGER NOT NULL DEFAULT 0, targets_json TEXT NOT NULL DEFAULT '[]',
+  -- Issue #1921: the limited-use/recharge spend key + amount this apply wrote, so undo()
+  -- can refund the exact spend rather than re-deriving it from the current action spec.
+  uses_key TEXT, uses_spent INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, undone_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_apply_chains_encounter ON action_apply_chains(encounter_id);

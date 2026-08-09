@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, CombatantStatblock, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, CombatantStatblock, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantReorderRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 export class QuickRollRequestDto extends createZodDto(QuickRollRequest.strict()) {}
@@ -56,6 +56,9 @@ export class CombatantResourceAdjustDto extends createZodDto(CombatantResourceAd
 export class CombatantRemoveRequestDto extends createZodDto(CombatantRemoveRequest.strict().default({})) {}
 export class DeathSaveRollDto extends createZodDto(DeathSaveRollRequest.strict()) {}
 export class CombatantRollInitiativeDto extends createZodDto(CombatantRollInitiativeRequest.strict()) {}
+// Issue #1923: DM-only manual reorder. .strict() so an unknown key 400s rather than
+// silently no-op'ing, matching every other combatant write body in this file.
+export class CombatantReorderDto extends createZodDto(CombatantReorderRequest.strict()) {}
 export class CombatantRemoveUndoDto extends createZodDto(CombatantRemoveUndo.strict()) {}
 export class RollRequestDto extends createZodDto(RollRequest.strict()) {}
 export class ActionRollRequestDto extends createZodDto(ActionRollRequest.strict()) {}

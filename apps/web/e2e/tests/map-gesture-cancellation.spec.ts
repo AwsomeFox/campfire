@@ -29,9 +29,13 @@ async function dispatchPointer(
 ) {
   await target.evaluate(
     (element, event) => {
-      const surface = document.querySelector<HTMLElement>('[data-testid="battle-map-surface"]');
-      if (!surface) throw new Error('Battle-map surface is missing');
-      const rect = surface.getBoundingClientRect();
+      // Percentages here are MAP percentages, which is what every assertion below
+      // compares against — so aim at the rendered map layer, not at the surface. In the
+      // cockpit the surface fills the whole canvas and `object-contain` letterboxes the
+      // map inside it, so the two boxes no longer coincide.
+      const layer = document.querySelector<HTMLElement>('[data-testid="battle-map-layer"]');
+      if (!layer) throw new Error('Battle-map layer is missing');
+      const rect = layer.getBoundingClientRect();
       element.dispatchEvent(
         new PointerEvent(event.type, {
           bubbles: true,

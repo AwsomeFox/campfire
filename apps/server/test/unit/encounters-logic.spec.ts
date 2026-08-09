@@ -31,6 +31,8 @@ import {
   generateEncounterGroup,
   redactEncounterEventsForViewer,
   UNKNOWN_COMBATANT_LABEL,
+  rollRechargeAtTurnStart,
+  undoActionUsesRecharge,
 } from '../../src/modules/encounters/encounters.logic';
 import type { CombatantHpState, GeneratorCandidate } from '../../src/modules/encounters/encounters.logic';
 
@@ -133,6 +135,80 @@ describe('encounters — sortCombatants', () => {
       combatant({ id: 2, initiative: 15, sortOrder: 1 }),
     ];
     expect(sortCombatants(rows, 'running').map((c) => c.id)).toEqual([2, 1]);
+  });
+
+  /**
+   * Issue #1923's manual-order override must be *absent* here, not merely unused. The
+   * `combatant()` helper above ends in `as Combatant`, so a field it does not set is
+   * `undefined` at runtime while TypeScript stays quiet — and the first version of the
+   * override tested `manualOrder !== null`, which `undefined` passes. The subtraction then
+   * produced NaN, the comparator returned NaN, and the whole tie group came back in an
+   * arbitrary order; that is what broke the four adapter-tiebreak cases in this file.
+   *
+   * These two pin the boundary explicitly rather than leaving it implied by fixtures that
+   * happen to omit the field.
+   */
+  describe('manual-order override (issue #1923)', () => {
+    it('an undefined manualOrder is treated as absent, not as a position — the adapter tiebreak still decides', () => {
+      const rows = [
+        combatant({ id: 1, initiative: 15, initMod: 1, sortOrder: 0 }),
+        combatant({ id: 2, initiative: 15, initMod: 3, sortOrder: 1 }),
+      ];
+      // Neither row has the field at all. Higher initMod must win, exactly as before the
+      // override existed. A NaN comparator returns insertion order [1, 2] here instead.
+      expect(rows.every((r) => r.manualOrder === undefined)).toBe(true);
+      expect(sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id)).toEqual([2, 1]);
+    });
+
+    it('when BOTH rows carry a manualOrder it overrides the adapter tiebreak, even against a higher initMod', () => {
+      const rows = [
+        combatant({ id: 1, initiative: 15, initMod: 1, sortOrder: 0, manualOrder: 0 }),
+        combatant({ id: 2, initiative: 15, initMod: 3, sortOrder: 1, manualOrder: 1 }),
+      ];
+      // The adapter alone would order [2, 1] (initMod 3 beats 1) — the DM's placement wins.
+      expect(sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id)).toEqual([1, 2]);
+    });
+
+    it('a stamped row precedes an unstamped one, beating the adapter tiebreak', () => {
+      const rows = [
+        combatant({ id: 1, initiative: 15, initMod: 1, sortOrder: 0, manualOrder: 0 }),
+        combatant({ id: 2, initiative: 15, initMod: 3, sortOrder: 1 }),
+      ];
+      // The adapter alone would put 2 first (initMod 3 > 1). A combatant added after the
+      // DM's reorder joins the END of the tie group instead — see the transitivity case
+      // right below for why this is a rule, not a preference.
+      expect(sortCombatants(rows, 'running', (a, b) => Dnd5eAdapter.initiativeTiebreak(a, b)).map((c) => c.id)).toEqual([1, 2]);
+    });
+
+    /**
+     * Issue #2084's narrower stamp (moved combatant + the same-tie-group rows it actually
+     * crossed, not the whole roster) makes a tie group mixing stamped and unstamped rows
+     * the ORDINARY case rather than a rare one — so the total-order rule below (originally
+     * #2074 review round 3, relanded as #2088) is load-bearing here, not incidental.
+     * Deciding different pairs in one tie group by different rules makes the comparator
+     * non-transitive, and `Array.prototype.sort` then returns an implementation-defined
+     * order — which `sortCombatants` also feeds into `turnIndex`.
+     */
+    it('a tie mixing stamped and unstamped rows sorts totally, with no cycle and no dependence on input order', () => {
+      // A < B by manualOrder, B < C by initMod, C < A by initMod — a cycle if all three
+      // rules were consulted independently pairwise.
+      const a = combatant({ id: 1, initiative: 14, initMod: 1, sortOrder: 0, manualOrder: 0 });
+      const b = combatant({ id: 2, initiative: 14, initMod: 3, sortOrder: 1, manualOrder: 1 });
+      const c = combatant({ id: 3, initiative: 14, initMod: 2, sortOrder: 2 });
+      const expected = [1, 2, 3];
+
+      // Every permutation must land on the same order. A cyclic comparator does not.
+      for (const perm of [
+        [a, b, c],
+        [a, c, b],
+        [b, a, c],
+        [b, c, a],
+        [c, a, b],
+        [c, b, a],
+      ]) {
+        expect(sortCombatants(perm, 'running', (x, y) => Dnd5eAdapter.initiativeTiebreak(x, y)).map((r) => r.id)).toEqual(expected);
+      }
+    });
   });
 
   it('running: two nulls keep sortOrder order', () => {
@@ -1184,5 +1260,95 @@ describe('initialEncounterTurnState (issue #1459)', () => {
     expect(result.currentCombatantId).toBe(null);
     expect(result.turnIndex).toBe(0);
     expect(result.phase).toBe('combatant');
+  });
+});
+
+describe('rollRechargeAtTurnStart / undoActionUsesRecharge (issue #1921)', () => {
+  it('rolls only spent entries, recharges on a hit, and records a delta for undo', () => {
+    const uses = { 'statblock:abc': { spent: 1 } };
+    const rolls = [6, 5]; // ignored: 6 (>= needs 5) recovers first call
+    let i = 0;
+    const roll = () => rolls[i++];
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5, max: 1 }], roll);
+    expect(result.rolls).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', roll: 6, needs: 5, recovered: true }]);
+    expect(result.uses['statblock:abc']).toEqual({ spent: 0 });
+    expect(result.delta).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', max: 1 }]);
+  });
+
+  it('leaves an action spent on a miss, with no undo delta', () => {
+    const uses = { 'statblock:abc': { spent: 1 } };
+    const roll = () => 3; // below needs 5
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5, max: 1 }], roll);
+    expect(result.rolls).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', roll: 3, needs: 5, recovered: false }]);
+    expect(result.uses['statblock:abc']).toEqual({ spent: 1 });
+    expect(result.delta).toEqual([]);
+  });
+
+  it('never rolls an entry that has not been spent (nothing to recharge)', () => {
+    const uses = {};
+    const roll = jest.fn(() => 6);
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5, max: 1 }], roll);
+    expect(roll).not.toHaveBeenCalled();
+    expect(result.rolls).toEqual([]);
+    expect(result.delta).toEqual([]);
+  });
+
+  it('rolls multiple spent recharge actions independently in one tick', () => {
+    const uses = { 'statblock:a': { spent: 1 }, 'statblock:b': { spent: 1 } };
+    const rollsQueue = [6, 1]; // a recharges, b does not
+    let i = 0;
+    const roll = () => rollsQueue[i++];
+    const result = rollRechargeAtTurnStart(
+      uses,
+      [
+        { key: 'statblock:a', name: 'Breath Weapon', min: 5, max: 1 },
+        { key: 'statblock:b', name: 'Frost Ray', min: 6, max: 1 },
+      ],
+      roll,
+    );
+    expect(result.uses).toEqual({ 'statblock:a': { spent: 0 }, 'statblock:b': { spent: 1 } });
+    expect(result.delta).toEqual([{ key: 'statblock:a', actionName: 'Breath Weapon', max: 1 }]);
+  });
+
+  it('gives back exactly ONE use of a multi-use pool, not the whole pool', () => {
+    // `{ max: 3, recharge: 'recharge-5-6' }` is authorable (statblock editor, MCP
+    // `update_combatant`) and reaches this tick because `parseRechargeRange` matches. Two of
+    // the three uses are spent; one lucky die must return one of them, not both.
+    const uses = { 'statblock:abc': { spent: 2 } };
+    const result = rollRechargeAtTurnStart(uses, [{ key: 'statblock:abc', name: 'Breath Weapon', min: 5, max: 3 }], () => 6);
+    expect(result.uses['statblock:abc']).toEqual({ spent: 1 });
+    expect(result.delta).toEqual([{ key: 'statblock:abc', actionName: 'Breath Weapon', max: 3 }]);
+    // Undo with nothing in between puts the one use straight back.
+    expect(undoActionUsesRecharge(result.uses, result.delta).uses['statblock:abc']).toEqual({ spent: 2 });
+  });
+
+  // Devin review on PR #2062, follow-on to the one-use fix above: the undo used to ASSIGN the
+  // pre-roll count, which silently swallowed a spend made during the undone turn. On a pool of
+  // one the two are indistinguishable (0 and 1 are the only reachable values), which is why
+  // every other case here passes against the bug — seeing it at all requires `max: 3`.
+  it('undoActionUsesRecharge composes with a spend made during the undone turn', () => {
+    const delta = [{ key: 'statblock:abc', actionName: 'Breath Weapon', max: 3 }];
+    // Pre-turn spent 2 -> the roll recharges to 1 -> the monster fires it that turn, back to 2.
+    // Undoing the turn must reach 3: the pre-turn 2, plus the new use, minus the recharge.
+    // Assigning the recorded pre-roll 2 would hand the monster a free extra firing.
+    expect(undoActionUsesRecharge({ 'statblock:abc': { spent: 2 } }, delta).uses['statblock:abc']).toEqual({ spent: 3 });
+    // And it never runs past the pool ceiling.
+    expect(undoActionUsesRecharge({ 'statblock:abc': { spent: 3 } }, delta).uses['statblock:abc']).toEqual({ spent: 3 });
+  });
+
+  it('undoActionUsesRecharge restores spent state from the recorded delta', () => {
+    const afterRecharge = { 'statblock:abc': { spent: 0 } };
+    const { uses, restoredNames } = undoActionUsesRecharge(afterRecharge, [
+      { key: 'statblock:abc', actionName: 'Breath Weapon', max: 1 },
+    ]);
+    expect(uses['statblock:abc']).toEqual({ spent: 1 });
+    expect(restoredNames).toEqual(['Breath Weapon']);
+  });
+
+  it('undoActionUsesRecharge is a no-op for an empty delta', () => {
+    const currentUses = { 'statblock:abc': { spent: 0 } };
+    const { uses, restoredNames } = undoActionUsesRecharge(currentUses, []);
+    expect(uses).toBe(currentUses);
+    expect(restoredNames).toEqual([]);
   });
 });

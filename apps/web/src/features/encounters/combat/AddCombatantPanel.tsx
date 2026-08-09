@@ -68,6 +68,11 @@ export function AddCombatantPanel({
 
   // Campaign library (issue #425)
   const [library, setLibrary] = useState<CampaignLibraryMonster[]>([]);
+  // Issue #2080 (regression fix): per-entry HP typed into a Library-tab card's own inline
+  // input, keyed by library monster id. Only rendered for entries whose stored
+  // statblock.hp is null — the only case where the server has no HP to seed from and the
+  // DM must supply one to add at all.
+  const [libraryHpDrafts, setLibraryHpDrafts] = useState<Record<number, string>>({});
 
   // Compendium
   const [query, setQuery] = useState('');
@@ -245,18 +250,44 @@ export function AddCombatantPanel({
     }
   }
 
-  async function addFromLibrary(entry: CampaignLibraryMonster) {
+  async function addFromLibrary(entry: CampaignLibraryMonster, hpOverride?: number) {
     setSaving(true);
     setError(null);
     try {
-      const resolvedHp = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : 10;
+      // Issue #2080, and the regression a review caught on PR #2086's first attempt at
+      // this fix: entries saved before this field existed (or saved with HP left blank)
+      // have no `entry.statblock.hp` to seed from, and the Library tab is the ONLY place
+      // a DM can add them — the Manual tab's HP field is a different form entirely. This
+      // resolves `hpMax` in priority order, highest first:
+      //   1. `hpOverride` — typed into THIS entry's own inline HP input, rendered on its
+      //      Library-tab card only when `entry.statblock.hp` is null (below). This is what
+      //      makes a pre-#2080 entry addable again without switching tabs.
+      //   2. `manualOverride` — the Manual tab's shared HP field has no visible input on
+      //      the Library tab, so a value here can only be a deliberate override the DM
+      //      typed before switching over. Kept for entries that DO have a stored HP.
+      //   3. Neither present: no hpMax is sent at all, and the server seeds it from the
+      //      saved statblock's template HP (entry.statblock.hp) — the same value the DM
+      //      typed when they saved this entry. (The old code guessed "10" right here
+      //      whenever hpMax was blank — silently discarding whatever HP the entry
+      //      actually carried, or claimed one it never had.) A stored HP of `null` with
+      //      no override supplied surfaces an explicit, translated error instead.
+      const manualOverride = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : undefined;
+      const resolvedOverride = hpOverride ?? manualOverride;
       await api.post(`${API}/encounters/${encounterId}/combatants`, {
         kind: 'monster' as CombatantKind,
         name: entry.name,
         libraryMonsterId: entry.id,
-        hpMax: resolvedHp,
+        ...(resolvedOverride !== undefined ? { hpMax: resolvedOverride } : {}),
         count: parseCount(manualCount),
       });
+      if (hpOverride !== undefined) {
+        setLibraryHpDrafts((prev) => {
+          if (!(entry.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[entry.id];
+          return next;
+        });
+      }
       await onAdded();
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
@@ -273,9 +304,21 @@ export function AddCombatantPanel({
     setSaving(true);
     setError(null);
     try {
+      // Issue #2080: carry the HP the DM typed into the library entry's statblock
+      // template, instead of dropping it on the floor. `manualStatblock.hp` is nullable,
+      // so "present" here means numeric — not merely non-undefined — and the check is
+      // written explicitly rather than via `??`, which would treat an explicit `null`
+      // (the statblock HP field left blank/cleared) the same as "absent" without saying
+      // so. Only a NUMERIC statblock HP (set directly through the statblock editor's own
+      // Max HP field) overrides this tab's separate "HP" field — the value from the bug's
+      // reported repro steps — parsed the same way addManual validates it. Neither
+      // present: save `hp: null` explicitly (a real, representable "unknown"), never a
+      // guessed number.
+      const hpFromField = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : null;
+      const hpToSave = typeof manualStatblock.hp === 'number' ? manualStatblock.hp : hpFromField;
       await api.post(`${API}/campaigns/${cid}/library/monsters`, {
         name: name.trim(),
-        statblock: manualStatblock,
+        statblock: { ...manualStatblock, hp: hpToSave },
       });
       const list = await api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${cid}/library/monsters`);
       setLibrary(list);
@@ -529,21 +572,79 @@ export function AddCombatantPanel({
           <p className="text-muted text-sm">No saved homebrew monsters yet. Build one on the Manual tab and save it to the library.</p>
         ) : (
           <div className="flex flex-col gap-1.5">
-            {library.map((entry) => (
-              <Card
-                key={entry.id}
-                type="button"
-                density="compact" elev="sm" as="button" className="text-left"
-                style={{ border: 0, font: 'inherit', color: 'var(--color-text)', cursor: 'pointer', padding: '8px 12px' }}
-                disabled={saving}
-                onClick={() => void addFromLibrary(entry)}
-              >
-                <span className="font-medium">{entry.name}</span>
-                <span className="text-muted text-xs block">
-                  {entry.statblock.actions.length} action{entry.statblock.actions.length === 1 ? '' : 's'}
-                </span>
-              </Card>
-            ))}
+            {library.map((entry) => {
+              const hpKnown = entry.statblock.hp != null;
+              const hpDraft = libraryHpDrafts[entry.id] ?? '';
+              const hpDraftValid = hpDraft.trim() !== '' && Number.isFinite(Number(hpDraft)) && Number(hpDraft) >= 1;
+
+              if (hpKnown) {
+                return (
+                  <Card
+                    key={entry.id}
+                    type="button"
+                    density="compact" elev="sm" as="button" className="text-left"
+                    style={{ border: 0, font: 'inherit', color: 'var(--color-text)', cursor: 'pointer', padding: '8px 12px' }}
+                    disabled={saving}
+                    onClick={() => void addFromLibrary(entry)}
+                  >
+                    <span className="font-medium">{entry.name}</span>
+                    <span className="text-muted text-xs block">
+                      {entry.statblock.actions.length} action{entry.statblock.actions.length === 1 ? '' : 's'}
+                      {' · '}
+                      {t('encounters.run.library.hpValue', { hp: entry.statblock.hp })}
+                    </span>
+                  </Card>
+                );
+              }
+
+              // Issue #2080 (regression fix): entries with no stored HP — every entry saved
+              // before this field existed, or saved with HP left blank — cannot be added by
+              // a single click on the card; the server has nothing to seed `hpMax` from and
+              // the Library tab is the only place the DM can supply one. Render an explicit
+              // HP input + Add button instead of the click-anywhere card above (an <input>
+              // cannot nest inside a <button>).
+              return (
+                <Card
+                  key={entry.id}
+                  as="div"
+                  density="compact" elev="sm"
+                  style={{ padding: '8px 12px' }}
+                  className="flex flex-wrap items-end gap-2"
+                >
+                  <div className="flex-1" style={{ minWidth: 120 }}>
+                    <span className="font-medium block">{entry.name}</span>
+                    <span className="text-muted text-xs block">
+                      {entry.statblock.actions.length} action{entry.statblock.actions.length === 1 ? '' : 's'}
+                      {' · '}
+                      {t('encounters.run.library.hpNotSet')}
+                    </span>
+                  </div>
+                  <div className="field" style={{ width: 80 }}>
+                    <label htmlFor={`library-hp-${entry.id}`} className="sr-only">
+                      {t('encounters.run.library.hpOverrideLabel')}
+                    </label>
+                    <TextInput
+                      id={`library-hp-${entry.id}`}
+                      aria-label={t('encounters.run.library.hpOverrideLabel')}
+                      placeholder={t('encounters.run.library.hpOverridePlaceholder')}
+                      value={hpDraft}
+                      disabled={saving}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setLibraryHpDrafts((prev) => ({ ...prev, [entry.id]: raw }));
+                      }}
+                    />
+                  </div>
+                  <Btn
+                    type="button"
+                    disabled={saving || !hpDraftValid}
+                    onClick={() => void addFromLibrary(entry, Math.max(1, Number(hpDraft)))}
+                  >
+                    {t('encounters.run.library.addWithHp')}
+                  </Btn>
+                </Card>
+              );
+            })}
           </div>
         )}
       </div>

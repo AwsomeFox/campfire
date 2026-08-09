@@ -3,9 +3,14 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant } from '@campfire/schema';
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
+  // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
+  // the turn tick, the same pure math the resolver uses so this service can never decide a
+  // pool recharges differently than an apply/reject message described it.
+  parseRechargeRange,
+  effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantRemoveResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -51,6 +56,7 @@ import {
   resetLegendaryUsage,
   resetTurnStateForStart,
   retreatEncounterTurn,
+  rollRechargeAtTurnStart,
   sortCombatants,
   sortEncountersForList,
   concentrationCheckForDamage,
@@ -58,6 +64,7 @@ import {
   tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
   turnIndexFor,
+  undoActionUsesRecharge,
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
 import {
@@ -65,7 +72,7 @@ import {
   buildEncounterAftermathRecapDraft,
   suggestedXpFromDifficulty,
 } from './encounter-aftermath.logic';
-import type { CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
+import type { ActionUsesMap, ActionUsesRechargeDelta, CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
@@ -126,6 +133,10 @@ type TurnTickCombatantDelta = {
   conditionExpired: ConditionInstance[];
   effectTicks: TurnTickedEffect[];
   effectExpired: ActiveEffect[];
+  /** Issue #1921: recharge rolls that cleared a spent action on this combatant's turn
+   *  start — empty for the 'ending' side, which never rolls recharge. Lets undoTurn put
+   *  a recharged action back to "spent" without re-deriving it from the current spec. */
+  actionUsesRecharged?: ActionUsesRechargeDelta[];
 };
 type TurnTickDelta = {
   ending?: TurnTickCombatantDelta;
@@ -419,6 +430,8 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     escalationDieHistory: parseEscalationHistory(row.escalationDieHistory),
     turnIndex: row.turnIndex,
     currentCombatantId: row.currentCombatantId,
+    // Issue #1923: the reorder CAS token. Not a secret — every role reads the same value.
+    turnVersion: row.turnVersion,
     turnPhase: (row.turnPhase as EncounterTurnPhase) ?? 'combatant',
     lairResumeCombatantId: row.lairResumeCombatantId ?? null,
     locationId: row.locationId,
@@ -485,6 +498,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     conditions: fromJsonText<string[]>(row.conditions, []),
     ruleEntryId: row.ruleEntryId,
     sortOrder: row.sortOrder,
+    manualOrder: row.manualOrder ?? null,
     tokenX: row.tokenX,
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
@@ -739,8 +753,9 @@ function deathSaveRollEventDetail(
  *
  * Issue #1925: the encounter's `monsterHpDisplay` dial controls how much of that is
  * withheld. `band` (default) is the behaviour above, unchanged. `exact` ships the real
- * hpCurrent/hpMax/hpTemp/sp/rp to non-DMs too (statblock + pendingConcentrationChecks
- * stay stripped regardless — separate secrecy concerns, issue #425/#606). `hidden` ships
+ * hpCurrent/hpMax/hpTemp/sp/rp to non-DMs too (unrevealed statblocks and
+ * pendingConcentrationChecks stay stripped — separate secrecy concerns, issue #425/#606).
+ * A revealed statblock follows the same HP mode for its template `hp` field. `hidden` ships
  * neither the numbers NOR the band — except a combatant at 0 HP still reports
  * `hpBand: 'down'` in every mode, so the table always knows who dropped. This is the
  * SOLE server-side choke point for the mode; there is no client-side hiding anywhere
@@ -754,11 +769,18 @@ function redactMonsterHp(c: Combatant, mode: MonsterHpDisplay): Combatant {
   // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
   // never carries the field until the DM turns it on. HP banding itself is entirely
   // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
+  // A revealed statblock can carry the same exact template HP used to seed hpMax
+  // (issue #2080). Strip that field in band/hidden modes too; otherwise REST and
+  // MCP callers could recover the number even though hpMax itself is null (issue #2093).
   // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
   // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
+  let visibleStatblock = c.statblockRevealed ? c.statblock : null;
+  if (mode !== 'exact' && visibleStatblock) {
+    visibleStatblock = { ...visibleStatblock, hp: null };
+  }
   const redacted: Combatant = {
     ...c,
-    statblock: c.statblockRevealed ? c.statblock : null,
+    statblock: visibleStatblock,
     turnState: {
       ...c.turnState,
       pendingConcentrationChecks: [],
@@ -953,11 +975,14 @@ export class EncountersService {
       expectedUsed: number | undefined;
     },
   ): { entry: T; nextUsed: number } {
-    if (!entry || (opts.requirePositiveMax && entry.max <= 0)) {
+    if (!entry) {
       throw new BadRequestException(opts.existenceMessage);
     }
     if (!Number.isInteger(entry.used) || !Number.isInteger(entry.max)) {
       throw new BadRequestException(`${opts.malformedLabel} is malformed (used/max must be integers)`);
+    }
+    if (opts.requirePositiveMax && entry.max <= 0) {
+      throw new BadRequestException(opts.existenceMessage);
     }
     if (opts.expectedUsed !== undefined && opts.expectedUsed !== entry.used) {
       throw new ConflictException({
@@ -4111,6 +4136,8 @@ export class EncountersService {
    *  - kind='character' + characterId -> pull from the character row
    *  - kind='monster' + ruleEntryId -> try name + hit points from rule_entries.dataJson,
    *    falling back to whatever the caller explicitly provided
+   *  - libraryMonsterId -> hp only, from the saved statblock's template HP
+   *    (CombatantStatblock.hp), when that entry has one stored (issue #2080)
    *  - otherwise the caller must provide name + hpMax directly
    * Throws 400 if, after resolution, we still don't have a name or an hpMax.
    */
@@ -4376,6 +4403,24 @@ export class EncountersService {
       }
     }
 
+    // Issue #2080: a campaign-library monster's statblock carries its own template
+    // Max HP (CombatantStatblock.hp) once the DM has saved one. Fetch it BEFORE the
+    // "hpMax must be resolved" check below so an add-from-library caller (REST, MCP,
+    // or the web UI) that omits hpMax gets that saved value instead of tripping the
+    // generic "provide hpMax explicitly" error — this is the "seeds hpMax from it"
+    // half of the fix. An explicit caller-supplied hpMax always wins (e.g. re-statting
+    // one copy tougher). A library entry with no stored HP (statblock.hp === null —
+    // either it predates this field, or the DM never typed one) intentionally falls
+    // through to the SAME explicit-hpMax requirement every other unresolvable-HP path
+    // already enforces below: never silently invented, which was the literal #2080 bug.
+    let libraryMonster: CampaignLibraryMonster | null = null;
+    if (input.libraryMonsterId !== undefined) {
+      libraryMonster = await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId);
+      if (hpMax === undefined && libraryMonster.statblock.hp != null) {
+        hpMax = libraryMonster.statblock.hp;
+      }
+    }
+
     if (!name) {
       throw new BadRequestException('Unable to resolve a name for this combatant — provide "name" explicitly');
     }
@@ -4389,7 +4434,7 @@ export class EncountersService {
 
     // Issue #425: inline homebrew statblock or campaign-library snapshot.
     if (input.libraryMonsterId !== undefined) {
-      const lib = await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId);
+      const lib = libraryMonster ?? (await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId));
       statblockJson = toJsonText(lib.statblock);
     } else if (input.statblock !== undefined) {
       statblockJson = toJsonText(CombatantStatblock.parse(input.statblock));
@@ -4639,9 +4684,27 @@ export class EncountersService {
             if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
               throw new NotFoundException(`Encounter ${encounterId} not found`);
             }
-            if (freshEncounter.hidden) {
-              throw new ForbiddenException('Death saves cannot be rolled while an encounter is hidden');
-            }
+            // #1759 added an unconditional `if (freshEncounter.hidden) throw
+            // ForbiddenException(...)` here to keep death saves out of a hidden encounter.
+            // Removed in #2090: it was reachable ONLY by the DM, and since encounters
+            // default to hidden it made death saves impossible for the DM in the common
+            // case — the first PC to drop in a fresh fight could not roll at all.
+            //
+            // Why DM-only: `isVisibleTo` is `role === 'dm' || !hidden`, so on a hidden
+            // encounter every non-DM is already turned away with a 404 before reaching
+            // this line. There are THREE such gates on this path, and it is worth being
+            // precise about which does what, because the obvious reading is wrong:
+            //   1. the REST controller's own `isVisibleTo` precheck on this route — the
+            //      one that actually answers a non-DM's HTTP request (added by #1909
+            //      specifically so a hidden encounter 404s rather than 403ing, which
+            //      would have been an id-enumeration oracle);
+            //   2. `rollDeathSave`'s method-entry `isVisibleTo` — the gate for callers
+            //      that never touch the controller, i.e. the MCP surface;
+            //   3. this in-transaction re-check against the FRESH row, which closes the
+            //      window where an encounter is visible at entry and hidden by commit.
+            // Removed rather than re-gated on `role !== 'dm'`: that condition can never
+            // be true here, so it would read as a working player-side guard while being
+            // unreachable dead code.
             if (role !== 'dm') {
               const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, fresh.characterId!)).limit(1).all();
               if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
@@ -4661,6 +4724,23 @@ export class EncountersService {
             }
             const result = this.rollDeathSaveD20();
             result.label = `${fresh.name} · death save`;
+            // Issue #1904 secrecy, reachable for the first time via #2090: the dice log is
+            // campaign-wide, and this row is labelled with the character's name. Until #2090
+            // the DM could not roll here at all while the encounter was hidden, so the
+            // missing tag below was masked by a 403; allowing the roll without it published
+            // the name, the death-save result, and the existence of a hidden fight to every
+            // campaign member.
+            //
+            // Both sibling paths — the bulk roll and the per-combatant initiative roll —
+            // already carry this rule, guarding their dice-log write with `if (!fresh.hidden)`
+            // and passing `encounterId`. Death saves cannot simply skip the write the way
+            // those do: #1462 makes the dice row part of the authoritative outcome, committed
+            // or rolled back with the combatant state, and `rollDeathSave` returns that roll
+            // to its caller. So tag it and let `RollsService.listForCampaign`'s read-time
+            // filter drop it for non-DMs. Tagging is also the stronger mechanism: it keeps
+            // covering the row when an encounter is hidden AFTER the roll was persisted,
+            // which a write-time check cannot.
+            result.encounterId = encounterId;
             roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
             // `updateCombatant` applies this server-only face after the hook returns.
             deathSavePatch.deathSaveRoll = result.total;
@@ -4733,7 +4813,17 @@ export class EncountersService {
         // satisfied by a prior claim still returns the stored response as its body, but
         // the winner already broadcast that die — emitting again put the same d20 in the
         // shared dice tray twice, making one death save look like two.
-        if (!replayedPriorClaim) this.rolls.emitDiceRolled?.(replay.roll);
+        // ...and never for a hidden encounter. `dice.rolled` is in
+        // CAMPAIGN_BROADCAST_SAFE_FRAMES, so `projectCampaignEventForRole` returns it to every
+        // role unchanged — including the `encounterId` this PR now tags the roll with. Filtering
+        // the REST feed alone would still have announced "activity in encounter N" over SSE to
+        // every player and viewer. The per-combatant initiative roll already guards its emit the
+        // same way (`if (roll && !freshEncounterRow.hidden)`); this is that rule applied to the
+        // path #2090 newly opened. Re-read the row rather than trusting the pre-transaction
+        // snapshot, so a reveal or hide committed in between is respected.
+        if (!replayedPriorClaim && !(await this.getRowOrThrow(encounterId, true)).hidden) {
+          this.rolls.emitDiceRolled?.(replay.roll);
+        }
         return replay;
       }
       // A null replay here does NOT always mean nothing was persisted. `replayCommittedDeathSave`
@@ -4757,7 +4847,13 @@ export class EncountersService {
           // returns it unredacted whenever `prior.responseRole === role` — redaction there
           // is reserved for the changed-role re-derivation. Redacting here would make the
           // recovery answer differ from the answer the same caller gets on the normal path.
-          this.rolls.emitDiceRolled?.(roll);
+          //
+          // The BROADCAST is a different question from the response body, and gets the same
+          // hidden-encounter guard as the emit above: returning the die to the caller who
+          // rolled it is correct, announcing it to every campaign stream is not.
+          if (!(await this.getRowOrThrow(encounterId, true)).hidden) {
+            this.rolls.emitDiceRolled?.(roll);
+          }
           return { combatant: committed, roll };
         }
       }
@@ -4889,12 +4985,16 @@ export class EncountersService {
         patch.statblock !== undefined ||
         patch.statblockRevealed !== undefined ||
         patch.eac !== undefined ||
-        patch.kac !== undefined
+        patch.kac !== undefined ||
+        // Issue #1921: DM force-toggle of a limited-use/recharge action's spend state joins
+        // the same absolute-rule list — a player never needs to override their own or a
+        // monster's spend, and (per the acceptance criteria) must get a 403, not a silent no-op.
+        patch.actionUses !== undefined
       ) {
         throw new ForbiddenException({
           code: 'COMBATANT_FIELD_DM_ONLY',
           message:
-            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, eac, or kac — roll your own initiative via the dedicated roll-initiative action.',
+            'Only dm may edit a combatant’s name, hpMax, initMod, tokenSize, initiative, statblock, statblockRevealed, eac, kac, or actionUses — roll your own initiative via the dedicated roll-initiative action.',
         });
       }
       if (!existing.characterId) {
@@ -4987,6 +5087,34 @@ export class EncountersService {
     }
     // Statblock reveal toggle (issue #1926) — DM-only (see the ForbiddenException above).
     if (patch.statblockRevealed !== undefined && isDm) staticUpdate.statblockRevealed = patch.statblockRevealed;
+    // DM force-toggle of a limited-use/recharge action's spend state (issue #1921) — DM-only
+    // (see the ForbiddenException above). The target action is resolved from the CURRENT
+    // sheet/statblock action list by index/name, through the SAME resolveActionUsesTarget a
+    // resolve/apply spend uses, so this can never touch a different action's spend key than
+    // the one the DM actually named. `spent` is clamped into [0, max] server-side — the field
+    // is a direct set (not a delta), so both "force recharge" (spent: 0) and "force exhaust"
+    // (spent: max) are one call.
+    let actionUsesLabel: string | null = null;
+    // Resolved here but MERGED INSIDE the transaction against the fresh row — see the
+    // `actionUsesPatch` block beside the condition rebase below. `action_uses` is one JSON
+    // blob covering every tracked action, so building it from the pre-transaction `existing`
+    // snapshot and writing it wholesale would silently revert any OTHER action's spend that
+    // landed in between (a concurrent apply, or a turn-start recharge) — the same lost-update
+    // hazard conditions already avoid by rebasing (issue #747). Resolving the target here is
+    // safe: it reads the action LIST, not the spend map.
+    let actionUsesPatch: { key: string; spent: number } | null = null;
+    if (patch.actionUses !== undefined && isDm) {
+      if (!this.actionResolver) {
+        throw new BadRequestException('Action-uses override is unavailable.');
+      }
+      const target = this.actionResolver.resolveActionUsesTarget(
+        existing,
+        { actionIndex: patch.actionUses.actionIndex, actionName: patch.actionUses.actionName },
+        encounterRow.campaignId,
+      );
+      actionUsesPatch = { key: target.key, spent: Math.max(0, Math.min(patch.actionUses.spent, target.max)) };
+      actionUsesLabel = target.name;
+    }
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
@@ -5029,6 +5157,10 @@ export class EncountersService {
     if (
       Object.keys(staticUpdate).length === 0 &&
       !recomputeHp &&
+      // `actionUses` no longer lands in `staticUpdate` (it is merged against the fresh row
+      // inside the transaction), so it needs its own term here or an actionUses-only patch
+      // would early-return as a no-op and silently persist nothing.
+      actionUsesPatch === null &&
       !conditionFieldsTouched &&
       !spFieldsTouched &&
       !deathStateTouched &&
@@ -5227,6 +5359,27 @@ export class EncountersService {
         _beforeSucc = fresh.deathSaveSuccesses;
         _beforeFail = fresh.deathSaveFailures;
         const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+        // Issue #2084 finding 1 (the "clear the stamp" half): a DM's manual `initiative`
+        // PATCH (set or clear) moves this combatant out of whatever tie group its
+        // `manualOrder` stamp referred to — that tie no longer exists, so the stamp must
+        // not go on deciding a DIFFERENT tie the combatant lands in later (or continue
+        // being consulted for a tie it no longer belongs to at all). Compared against
+        // `fresh`, the transaction-local row, not the pre-transaction `existing` snapshot,
+        // for the same staleness reason `expectedUpdatedAt` is re-checked against `fresh`
+        // above. A same-value PATCH (idempotent resend) leaves the stamp alone.
+        if (staticUpdate.initiative !== undefined && staticUpdate.initiative !== fresh.initiative) {
+          writeSet.manualOrder = null;
+        }
+        if (actionUsesPatch) {
+          // Rebase the DM's uses override against the FRESH row, for the same reason the
+          // condition block below does (issue #747): `action_uses` is a single JSON map of
+          // EVERY tracked action's spend, so merging into a pre-transaction snapshot would
+          // clobber a concurrent spend or turn-start recharge of a DIFFERENT action rather
+          // than merging with it — letting an already-spent ability quietly become available
+          // again. Only the named key is written; every other key carries over from `fresh`.
+          const currentUses = fromJsonText<Record<string, { spent?: number }>>(fresh.actionUses, {});
+          writeSet.actionUses = toJsonText({ ...currentUses, [actionUsesPatch.key]: { spent: actionUsesPatch.spent } });
+        }
         if (conditionFieldsTouched) {
           // Rebase every condition mutation against the FRESH row (issue #747 / #423).
           // Legacy string deltas and structured instance deltas share this path so a
@@ -5589,6 +5742,7 @@ export class EncountersService {
       staticUpdate.name !== undefined ||
       staticUpdate.initMod !== undefined ||
       staticUpdate.statblockRevealed !== undefined ||
+      actionUsesPatch !== null ||
       defenseOrStatblockChanged ||
       hpMaxChanged;
     if (changedNonHp) {
@@ -5619,6 +5773,21 @@ export class EncountersService {
         target: targetName,
         targetId: combatantId,
         detail: staticUpdate.statblockRevealed ? "'s statblock is revealed to players" : "'s statblock is hidden again",
+      });
+    }
+
+    // Issue #1921: log the DM's manual override of an action's limited-use/recharge spend.
+    // The ability's NAME is deliberately omitted for the same reason as the turn-start
+    // recharge log (see `rechargeRolls` in nextTurn): the combat log is readable by every
+    // campaign member, `redactEncounterEventsForViewer` masks only hidden-combatant
+    // identity rather than action names, and this fires for a monster whose statblock may
+    // be deliberately unrevealed (#1926). `actionUsesLabel` is still resolved — it gates
+    // whether the event is written at all — but only the COMBATANT lands on the event.
+    if (actionUsesPatch && actionUsesLabel) {
+      await this.appendEvent(encounterId, round, 'resource_changed', {
+        target: targetName,
+        targetId: combatantId,
+        detail: 'limited-use ability uses set by DM',
       });
     }
 
@@ -6554,6 +6723,13 @@ export class EncountersService {
         .set({
           initiative: sql`CASE ${combatants.id} ${cases} END`,
           initiativeBreakdown: sql`CASE ${combatants.id} ${breakdownCases} END`,
+          // Issue #2084 finding 1: this row's initiative is moving off null, so any
+          // `manualOrder` it carries can only be leftover from data written under the
+          // pre-#2084 roster-wide stamp (which stamped unrolled `preparing` rows too) —
+          // never a value this narrower scheme would itself have written, since a
+          // null-initiative row is never stamped now. Clear it so a first roll can't hand
+          // a brand-new tie an insertion-order decision instead of the adapter's.
+          manualOrder: null,
         })
         .where(and(inArray(combatants.id, rolled.map((r) => r.id)), isNull(combatants.initiative)))
         .run();
@@ -6641,6 +6817,27 @@ export class EncountersService {
    * single-combatant write here would desync it from the rest of its side. That side-wide
    * roll stays exclusively the bulk `rollInitiative` path.
    */
+  private async redactReplayCombatant(combatant: Combatant, role: Role, encounterId: number): Promise<Combatant> {
+    if (role === 'dm') return combatant;
+    const freshEncounterForReplay = await this.getRowOrThrow(encounterId, true);
+    // The outer visibility check and the fresh role-filtered replay read are separate
+    // queries. If the encounter becomes hidden between them, the latter throws and lands
+    // in the stored-body fallback below. Re-check entity visibility here so that fallback
+    // cannot turn the race into a disclosure of a now-hidden encounter.
+    if (!isVisibleTo({ hidden: freshEncounterForReplay.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    const freshSiblingProtects =
+      freshEncounterForReplay.mapAttachmentId != null &&
+      !fogConcealsPixels(parseFog(freshEncounterForReplay.fog)) &&
+      (await this.attachmentsService.isFogProtectedEncounterMap(freshEncounterForReplay.mapAttachmentId, freshEncounterForReplay.campaignId));
+    const fog = parseFog(freshEncounterForReplay.fog);
+    const invalidFog = freshEncounterForReplay.fog !== null && fog === null;
+    if (invalidFog || freshSiblingProtects) return redactTokenInFog(combatant, { enabled: true, revealed: [] });
+    if (fog?.enabled) return redactTokenInFog(combatant, fog);
+    return combatant;
+  }
+
   async rollCombatantInitiative(
     encounterId: number,
     combatantId: number,
@@ -6687,16 +6884,24 @@ export class EncountersService {
     const resolveReplay = async (prior: EncounterOpPrior): Promise<{ combatant: Combatant; roll: DiceRoll | null } | null> => {
       const parsed = replayResponse(prior.response);
       if (!parsed) return null;
-      if (prior.responseRole === role) return parsed;
-      // Re-derive for a changed role; tolerate a trashed encounter and treat any
-      // visibility failure as best-effort so the original rejection reason is preserved.
       try {
-        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, user.id, true);
         const found = snapshot.combatants.find((c) => c.id === combatantId);
-        if (!found) return null;
         const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
-        return { combatant: found, roll };
+        if (found) {
+          return { combatant: found, roll };
+        }
+        if (prior.responseRole === role) {
+          const redactedCombatant = await this.redactReplayCombatant(parsed.combatant, role, encounterId);
+          return { combatant: redactedCombatant, roll };
+        }
+        return null;
       } catch {
+        if (prior.responseRole === role) {
+          const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+          const redactedCombatant = await this.redactReplayCombatant(parsed.combatant, role, encounterId);
+          return { combatant: redactedCombatant, roll };
+        }
         return null;
       }
     };
@@ -6806,7 +7011,16 @@ export class EncountersService {
         });
 
         tx.update(combatants)
-          .set({ initiative, initiativeBreakdown: toJsonText(breakdown) })
+          .set({
+            initiative,
+            initiativeBreakdown: toJsonText(breakdown),
+            // Issue #2084 finding 1: an overwrite re-roll (or a first roll off a legacy
+            // null-but-stamped row) assigns a fresh initiative value, so whatever tie
+            // group any prior `manualOrder` referred to no longer applies — the DM's next
+            // drag, if any, will re-establish one for wherever this combatant actually
+            // lands now.
+            manualOrder: null,
+          })
           .where(eq(combatants.id, combatantId))
           .run();
 
@@ -6914,6 +7128,311 @@ export class EncountersService {
       }
       throw err;
     }
+  }
+
+  /**
+   * DM-only manual reorder (issue #1923) — POST .../combatants/:cid/reorder. This is the
+   * documented answer to an unresolved initiative tie (initiative-tiebreak.ts's own doc
+   * comment: "the DM can manually reorder") and the only mechanical expression of
+   * Delay/Ready, which otherwise ship as log-only markers that clear themselves without
+   * ever moving the combatant.
+   *
+   * `afterCombatantId` names the combatant the moved one should land immediately after
+   * under `sortCombatants` (or the literal `'top'` to become first). The whole roster's
+   * `sortOrder` is rewritten to the requested display order in one pass — cheap (an
+   * encounter roster is at most a few dozen rows) and it guarantees the write reproduces
+   * exactly under `sortCombatants`'s own comparator, rather than trying to slot one value
+   * between two neighbors that might already be adjacent sortOrder integers.
+   *
+   * `initiative` is only ever touched while the encounter is `running` — `sortCombatants`
+   * ignores `initiative` entirely while `preparing` (plain sortOrder ascending), so a
+   * preparing-time reorder never overrides a rolled value. Whether it also establishes
+   * tie-break order for later depends on whether the moved combatant already has a real
+   * `initiative` at drag time: `manualOrder` is skipped whenever the landing value is
+   * null (see that field's schema doc), which it usually is before `/start` — a
+   * preparing-time drag of two still-unrolled combatants records ONLY `sortOrder`, and
+   * once real values are rolled, a tie between them resolves through the adapter, not
+   * this drag. Only a prep-time reorder among combatants that ALREADY carry a real
+   * `initiative` (set ahead of the roll) establishes real tie-break order. Deciding what
+   * "the DM's ordering intent" even means for combatants that have not rolled yet — which
+   * of them the DM meant relative to which, when the tie groups they will land in do not
+   * exist — is tracked as a follow-up (issue #2102), not attempted here: it is the exact
+   * design question whose rushed first answer (stamping unconditionally during prep)
+   * produced #2084's "encodes add order" defect in the first place. While running, a
+   * move that leaves the moved combatant's own initiative
+   * already sitting between its NEW neighbours' values (the ordinary within-a-tie case,
+   * e.g. reordering a tied 14, but also a move that happens to land back where the value
+   * already belonged) only rewrites `sortOrder` — issue #2084 finding 2: the old
+   * "differs from both neighbours" predicate rewrote a rolled value whenever it merely
+   * differed, including when it already sat correctly between them. A move that truly
+   * crosses initiative values sets the moved combatant's `initiative` to a value between
+   * its NEW neighbors — so the manual placement survives a later resort — and clears the
+   * now-stale `initiativeBreakdown` (#1476: this must never fabricate a breakdown for a
+   * manually-assigned value). `manualOrder` is stamped for every row sharing the moved
+   * combatant's landing initiative — its whole tie group, not the roster and not just the
+   * rows the drag physically crossed (issue #2084 finding 1, corrected to whole-group
+   * scope by issue #2095 review) — see that field's own doc comment in @campfire/schema.
+   *
+   * `expectedTurnVersion` CAS: 409s when it no longer matches the encounter's current
+   * `turnVersion` (bumped on every turn advance) — a drag issued against a roster the DM
+   * is no longer looking at must not silently reorder the new one. Moving the current
+   * actor (`currentCombatantId`) is refused outright — reordering the roster mid-turn
+   * around the acting combatant itself has no sensible meaning. A combatant that was
+   * delaying has that marker cleared and logged in the same transaction: the drag itself
+   * IS Delay's mechanical resolution ("the fighter acts after the wizard now").
+   */
+  async reorderCombatant(
+    encounterId: number,
+    combatantId: number,
+    input: CombatantReorderRequest,
+    user: RequestUser,
+    role: Role,
+  ): Promise<Combatant> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
+    // Adapter lookup reads outside the transaction (rollCombatantInitiative precedent) —
+    // it is deterministic from the campaign's ruleSystem/customMechanicsProfile, which a
+    // concurrent reorder cannot itself change.
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+
+    let committed!: Combatant;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertMutable(fresh);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      if (input.expectedTurnVersion !== undefined && fresh.turnVersion !== input.expectedTurnVersion) {
+        throw new ConflictException({
+          code: 'TURN_VERSION_MISMATCH',
+          message: 'The turn has moved on since this order was loaded — refresh and try again.',
+        });
+      }
+      if (fresh.currentCombatantId === combatantId) {
+        throw new ForbiddenException('Cannot reorder the combatant whose turn it currently is.');
+      }
+
+      const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      const moved = rows.find((r) => r.id === combatantId);
+      if (!moved) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+      if (input.afterCombatantId === combatantId) {
+        throw new BadRequestException('A combatant cannot be reordered after itself.');
+      }
+      if (input.afterCombatantId !== 'top' && !rows.some((r) => r.id === input.afterCombatantId)) {
+        throw new NotFoundException(`Combatant ${input.afterCombatantId} not found in encounter ${encounterId}`);
+      }
+
+      const status = fresh.status as EncounterStatus;
+      const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), status, adapter);
+      const withoutMoved = sorted.filter((c) => c.id !== combatantId);
+      const insertAt = input.afterCombatantId === 'top'
+        ? 0
+        : withoutMoved.findIndex((c) => c.id === input.afterCombatantId) + 1;
+      const prev = insertAt > 0 ? withoutMoved[insertAt - 1] : null;
+      const next = insertAt < withoutMoved.length ? withoutMoved[insertAt] : null;
+
+      // Cross-value initiative reassignment is only meaningful once `sortCombatants`
+      // actually orders by initiative (status === 'running'); see the doc comment above.
+      let newInitiative = moved.initiative;
+      if (status === 'running') {
+        const origInit = moved.initiative;
+        const prevInit = prev?.initiative ?? null;
+        const nextInit = next?.initiative ?? null;
+        // Issue #2084 finding 2 (originally reported as review finding 4): the predicate
+        // used to be "origInit differs from BOTH neighbours", which is true even when
+        // origInit already sits strictly BETWEEN them — its natural, already-correct
+        // position. Roster A(20), M(14), C(6): dragging M to just after A (a no-op, or
+        // "Move after A" from the menu) has prev=20, next=6; 14 differs from both, so the
+        // old code wrote floor((20+6)/2)=13 and nulled a real, already-fine
+        // initiativeBreakdown for a move that changed nothing about the ordering. The
+        // question that matters is whether the CURRENT value already lies within the new
+        // neighbours' bounds, not whether it differs from them.
+        const alreadyBetween =
+          origInit !== null && (prevInit === null || origInit <= prevInit) && (nextInit === null || origInit >= nextInit);
+        // Issue #2095 review (Codex P1): `alreadyBetween` above is `false` unconditionally
+        // whenever `origInit === null` (an unrolled combatant), so a null-origin move used
+        // to fall straight into reassignment below. Roster A(20), B(10), U(null), V(null):
+        // dragging U to just after B — where it already sits — had prevInit=10, nextInit=
+        // null, landing in the `prevInit != null` branch and writing `newInitiative = 9`.
+        // That silently rolls an unrolled combatant in for a drop `sortOrder` alone should
+        // have satisfied — the same class of bug as finding 2 above, at the rolled/null
+        // boundary instead of between two rolled neighbours.
+        //
+        // `nextInit === null` is exactly "the drop still lands inside (or at the end of)
+        // the unrolled tier": `sorted` above places every rolled row before every unrolled
+        // one, so the only way an unrolled combatant's NEXT neighbour can be a rolled row is
+        // a drop at the very top of the whole roster (`insertAt === 0`, `prevInit === null`
+        // too) — deliberately rolling it in ahead of everyone. Any other `nextInit === null`
+        // drop keeps at least the row immediately after it (if any) unrolled, so the
+        // combatant belongs in the unrolled tier regardless of `prevInit`. Preserve `null`
+        // there; only the two cases below (`nextInit !== null`) are actually placing an
+        // unrolled combatant into the rolled region, which — unlike the null-preserving
+        // cases — is a deliberate re-roll-by-position, not an accident of the drop math.
+        const stillUnrolled = origInit === null && nextInit === null;
+        if (!alreadyBetween && !stillUnrolled) {
+          if (prevInit != null && nextInit != null) {
+            newInitiative = prevInit === nextInit ? prevInit : Math.floor((prevInit + nextInit) / 2);
+          } else if (prevInit != null) {
+            newInitiative = prevInit - 1;
+          } else if (nextInit != null) {
+            newInitiative = nextInit + 1;
+          }
+          // else: neither neighbor has a rolled initiative to anchor to (both unrolled or
+          // absent) — leave `initiative` untouched; the roster still lands in a valid
+          // state (unrolled combatants always sort last, regardless of sortOrder).
+        }
+      }
+
+      const orderedIds = [
+        ...withoutMoved.slice(0, insertAt).map((c) => c.id),
+        combatantId,
+        ...withoutMoved.slice(insertAt).map((c) => c.id),
+      ];
+      // Issue #1923 review finding 1: on a running encounter, `sortCombatants` orders by
+      // initiative and breaks ties via the adapter's own comparator (e.g. 5e's
+      // initModDescThenSortOrderAsc, which compares initMod BEFORE sortOrder) — a
+      // sortOrder-only rewrite is silently discarded whenever the tied combatants have
+      // different initMod (different DEX), so the DM's drag has no visible effect. Stamp
+      // `manualOrder` to hold the moved combatant's new position across a re-sort.
+      //
+      // Issue #2084 finding 1: NOT every combatant in the roster. The original fix
+      // stamped the whole roster on every drag, so after one reorder EVERY row carried a
+      // value, and `sortCombatants` consults `manualOrder` ahead of the adapter tiebreak
+      // whenever a stamped row is involved — so `adapter.initiativeTiebreak` never ran
+      // again for this encounter, including for ties the DM never touched. It was worse
+      // while `preparing`, where most rows have no rolled initiative yet and the stamped
+      // index encoded add order, not a DM decision.
+      //
+      // The narrower rule: stamp only rows that share the moved combatant's landing
+      // (possibly just-reassigned) initiative value — its FULL tie group as it exists in
+      // the newly computed order, not merely the ones the drag's own start/end positions
+      // happened to span. A tie group nobody dragged into stays entirely null and keeps
+      // falling through to the adapter, since only same-initiative rows are relevant to a
+      // tiebreak comparison at all (`sortCombatants` never calls into `manualOrder` for
+      // two different initiative values — it decides those numerically first).
+      //
+      // Issue #2095 review (Devin, Codex, and Copilot, same root cause, three independent
+      // repros): an
+      // earlier version stamped only the moved combatant plus whichever OTHER tie-group
+      // members its start/end positions physically crossed — but #2088's
+      // stamped-before-unstamped total-order rule (relanded in this same PR, see
+      // `sortCombatants`) makes ANY stamped row sort ahead of ANY unstamped one within a
+      // tie, with no regard for whether that row was crossed. A partial stamp therefore
+      // does not merely fail to help the untouched members — it ACTIVELY sinks them below
+      // the touched ones, an order the DM never asked for:
+      //
+      //   running A(20), W/X/Y/Z all tied at 14; drag Z to just after X. Crossing only
+      //   spans Y, so the old code stamped {Z, Y} and left W/X null — sorting to
+      //   A, Z, Y, W, X instead of the requested A, W, X, Z, Y.
+      //
+      // Smaller and nastier: a tied [A, B, C], no-op move of B to right after A crosses
+      // NOBODY (insertAt already equals B's old position) — the old code still stamped
+      // only B, and a stamped B alone now sorts ahead of unstamped A and C: a no-op drag
+      // silently reorders its own tie group.
+      //
+      // Stamping the WHOLE landing group, using each member's index in this SAME
+      // `orderedIds` pass, also closes a second issue both reviewers noted: `manualOrder`
+      // is an absolute index into `orderedIds`, so a stamp from an EARLIER drag lives in a
+      // different index space than one from this drag. A partial stamp could leave part of
+      // a tie group holding stale indices from a prior operation while the rest got fresh
+      // ones, risking duplicate or inverted values within one group. Every member of the
+      // group is (re)stamped together here, in one consistent space, every time.
+      //
+      // Deliberately skipped altogether when the moved combatant's landing initiative is
+      // null (unrolled): `sortCombatants` decides an unrolled tie by `sortOrder` alone
+      // (its own null/null branch), same as every row while `preparing` — there is no
+      // adapter tiebreak for a stamp to protect there, and stamping it anyway is exactly
+      // what reproduced the preparing-time "encodes add order" bug even under this
+      // narrower scheme, since prep-time rows are null far more often than not.
+      const finalInitiative = newInitiative;
+      const manualOrderIds = new Set<number>();
+      if (finalInitiative !== null) {
+        manualOrderIds.add(combatantId);
+        for (const c of withoutMoved) {
+          if (c.initiative === finalInitiative) manualOrderIds.add(c.id);
+        }
+      }
+      orderedIds.forEach((id, index) => {
+        tx.update(combatants)
+          .set({ sortOrder: index, ...(manualOrderIds.has(id) ? { manualOrder: index } : {}) })
+          .where(eq(combatants.id, id))
+          .run();
+      });
+      const initiativeChanged = newInitiative !== moved.initiative;
+      if (initiativeChanged) {
+        tx.update(combatants)
+          .set({ initiative: newInitiative, initiativeBreakdown: null })
+          .where(eq(combatants.id, combatantId))
+          .run();
+      }
+
+      const turnState = CombatantTurnState.parse(fromJsonText<unknown>(moved.turnState, null) ?? {});
+      const delayCleared = turnState.delaying === true;
+      if (delayCleared) {
+        turnState.delaying = false;
+        tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, combatantId)).run();
+      }
+
+      // Realign the positional turnIndex with the unchanged identity pointer (issue #49) —
+      // reordering the OTHER combatants around the current actor can shift its position
+      // even though the current actor itself can never be the one being moved (guarded
+      // above). Mirrors rollCombatantInitiative's own late-joiner realignment.
+      if (status === 'running') {
+        const resorted = this.sortCombatantsWithAdapter(
+          tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all().map(combatantToDomain),
+          'running',
+          adapter,
+        );
+        const turnIndex = turnIndexFor(resorted, fresh.currentCombatantId);
+        const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
+        tx.update(encounters)
+          .set({
+            turnIndex,
+            combatantStateVersion: sql`${encounters.combatantStateVersion} + 1`,
+            updatedAt: nextUpdatedAt(currentEnc?.updatedAt ?? fresh.updatedAt),
+          })
+          .where(eq(encounters.id, encounterId))
+          .run();
+      }
+
+      // Name-free detail (issue #869 redaction rule) — actor/target ids carry identity;
+      // listing redacts a hidden NPC's name from `target` at read time.
+      this.appendEventInTransaction(tx, encounterId, fresh.round, 'override', {
+        target: moved.name,
+        targetId: combatantId,
+        // Driven by `initiativeChanged` — the flag that governs whether the write above
+        // actually happened — not by "did the move cross an initiative value". Those two
+        // disagree when the move crosses values but neither neighbour has a rolled
+        // initiative to anchor to: the anchoring block falls through its `else`,
+        // `newInitiative` stays put, nothing is written, and the "(now N)" wording would
+        // have announced a change that did not occur. Reachable by dragging a rolled
+        // combatant down among not-yet-rolled ones mid-fight.
+        detail: initiativeChanged ? `reordered in initiative (now ${newInitiative})` : 'reordered in initiative',
+      });
+      if (delayCleared) {
+        this.appendEventInTransaction(tx, encounterId, fresh.round, 'note', {
+          actor: moved.name,
+          actorId: combatantId,
+          detail: 'is no longer delaying',
+        });
+      }
+
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.combatant.reorder',
+        entityType: 'combatant',
+        entityId: combatantId,
+        campaignId: fresh.campaignId,
+        detail: moved.name,
+      });
+
+      const [updatedRow] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      committed = combatantToDomain(updatedRow);
+    });
+
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    return committed;
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
@@ -7299,6 +7818,9 @@ export class EncountersService {
     let skippedTurns: Array<{ id: number; name: string; round: number }> = [];
     const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
     const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
+    // Issue #1921: recharge rolls for the starting combatant's spent recharge actions,
+    // logged AFTER commit (mirrors expiredEffects/expiredConditions above).
+    const rechargeRolls: Array<{ combatantId: number; combatantName: string; actionName: string; roll: number; needs: number; recovered: boolean }> = [];
     let escalationLogDetail: string | undefined;
     let escalationValue = encounterRow.escalationDie ?? 0;
     const turnTickSnapshot: TurnTickDelta = {
@@ -7352,6 +7874,22 @@ export class EncountersService {
         }
 
         const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+        if (rows.length === 0) {
+          // Issue #2091: removeCombatant deliberately still permits emptying a RUNNING
+          // encounter's roster (including its last combatant) — two pre-existing flows
+          // depend on that: the 30-second combatant-removal undo window, and a death-save
+          // replay that removes its subject and only later calls /end. Guarding the delete
+          // itself would break both. Instead, the invariant is enforced HERE, at the only
+          // place emptying the roster actually harmed the DM: next-turn/end-turn (this
+          // function backs both) must never silently report success and advance the round
+          // on a fight with nobody in it — that silent "success" is what let the campaign's
+          // one-live-fight slot (issue #744) stay wedged with no discoverable way out. The
+          // message names the actual recovery so the DM's very next action tells them what
+          // to do, rather than leaving them to rediscover it via a 409 on a different fight.
+          throw new BadRequestException(
+            'This encounter has no combatants — end the encounter instead of advancing an empty fight.',
+          );
+        }
         const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
         const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
         const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
@@ -7460,6 +7998,45 @@ export class EncountersService {
             starting.id === ending?.id ? (endingConditionKept ?? starting.conditionInstances ?? []) : (starting.conditionInstances ?? []);
           const condTick = tickConditionInstancesAtTurnStart(startConditionPre);
           const conditionDelta = buildConditionTickDelta(startConditionPre, condTick.kept);
+
+          // Issue #1921: roll recharge for every currently-spent recharge action of the
+          // combatant starting its turn, in this SAME transaction as resetTurnStateForStart
+          // below. X/day pools never reach rollRechargeAtTurnStart at all — only entries
+          // whose `uses.recharge` actually parses as `recharge-N-M` are passed in.
+          const startingRow = rows.find((r) => r.id === starting.id);
+          const rechargeEntries = startingRow
+            ? (this.actionResolver?.usesTrackedActions(startingRow, fresh.campaignId) ?? [])
+                .map((entry) => {
+                  const range = parseRechargeRange(entry.uses.recharge);
+                  // `max` rides along so the undo delta can clamp its `spent + 1` revert to
+                  // the pool ceiling without re-resolving the action list at undo time.
+                  return range
+                    ? { key: entry.key, name: entry.name, min: range.min, max: effectiveActionUsesMax(entry.uses) }
+                    : null;
+                })
+                .filter((e): e is { key: string; name: string; min: number; max: number } => e !== null)
+            : [];
+          let actionUsesRecharged: ActionUsesRechargeDelta[] = [];
+          let nextActionUses: ActionUsesMap | null = null;
+          if (startingRow && rechargeEntries.length > 0) {
+            const currentUses = fromJsonText<ActionUsesMap>(startingRow.actionUses, {});
+            const rolled = rollRechargeAtTurnStart(currentUses, rechargeEntries, () => rollDice('1d6').total);
+            if (rolled.rolls.length > 0) {
+              actionUsesRecharged = rolled.delta;
+              nextActionUses = rolled.uses;
+              for (const r of rolled.rolls) {
+                rechargeRolls.push({
+                  combatantId: starting.id,
+                  combatantName: starting.name,
+                  actionName: r.actionName,
+                  roll: r.roll,
+                  needs: r.needs,
+                  recovered: r.recovered,
+                });
+              }
+            }
+          }
+
           // Active effects are not ticked at turn start; no effect delta to record.
           turnTickSnapshot.starting = {
             combatantId: starting.id,
@@ -7467,6 +8044,7 @@ export class EncountersService {
             conditionExpired: conditionDelta.expired,
             effectTicks: [],
             effectExpired: [],
+            actionUsesRecharged,
           };
           const reset = resetTurnStateForStart(starting.turnState);
           const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
@@ -7478,6 +8056,9 @@ export class EncountersService {
               expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
             }
             Object.assign(startSet, conditionWriteSetFromInstances(condTick.kept));
+          }
+          if (nextActionUses) {
+            startSet.actionUses = toJsonText(nextActionUses);
           }
           tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
         } else if (phase === 'lair') {
@@ -7583,6 +8164,37 @@ export class EncountersService {
         detail: `condition expired: ${ex.conditionName}`,
       });
     }
+    // Issue #1921: one combat-log line per recharge roll on the starting combatant's turn —
+    // both outcomes are logged (acceptance criterion), under the NEW round (the roll happens
+    // at the start of the combatant's turn, not the end of the prior one).
+    //
+    // The ability's NAME, the die result, and the THRESHOLD are all deliberately absent from
+    // `detail`. An earlier revision embedded the name, reasoning by analogy with
+    // `resolution.actionName` elsewhere in this file — but that analogy breaks: an action USE
+    // is logged because the table just watched it happen. A recharge roll is invisible
+    // bookkeeping that fires every turn for an ability that may never have been used, on a
+    // monster whose statblock the DM may have deliberately left unrevealed (#1926) and whose
+    // action list 403s a non-DM. The combat log is readable by every campaign member and
+    // `redactEncounterEventsForViewer` masks only hidden-combatant identity, not action
+    // names, so naming the ability here would hand players a statblock the server otherwise
+    // withholds.
+    //
+    // `needed N+` is the same category of secret and had to go with it: it IS the statblock's
+    // recharge condition, stated verbatim. Dropping the threshold alone would not have been
+    // enough either — `rolled 3` plus `stays spent` bounds the threshold from below, and two
+    // or three rounds of those lines converge on it exactly, so the roll goes too. What
+    // survives is the acceptance criterion itself: both outcomes are logged, once per roll.
+    //
+    // Recovering the name, roll, and threshold FOR THE DM needs a DM-only log channel, which
+    // does not exist yet (`metadata.dmText` is only scrubbed when the actor is a hidden NPC,
+    // so it is not one) — that is the follow-up, not a reason to leak now.
+    for (const r of rechargeRolls) {
+      await this.appendEvent(encounterId, newRound, 'resource_changed', {
+        actor: r.combatantName,
+        actorId: r.combatantId,
+        detail: r.recovered ? 'a limited-use ability recharges' : 'a limited-use ability stays spent',
+      });
+    }
     if (escalationLogDetail) {
       await this.appendEvent(encounterId, newRound, 'override', {
         detail: escalationLogDetail,
@@ -7665,6 +8277,7 @@ export class EncountersService {
       combatantName: string;
       conditionNames: string[];
       effectNames: string[];
+      actionUsesNames: string[];
     }> = [];
 
     this.db.transaction((tx) => {
@@ -7778,14 +8391,17 @@ export class EncountersService {
         combatantName: string;
         conditionNames: string[];
         effectNames: string[];
+        actionUsesNames: string[];
       }> = [];
       if (snapshot) {
         type Working = {
           row: typeof combatants.$inferSelect;
           conditions: ConditionInstance[];
           effects: ActiveEffect[];
+          actionUses: ActionUsesMap;
           conditionRestored: string[];
           effectRestored: string[];
+          actionUsesRestored: string[];
         };
         const workByCombatant = new Map<number, Working>();
         for (const side of ['ending', 'starting'] as const) {
@@ -7799,8 +8415,10 @@ export class EncountersService {
               row,
               conditions: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
               effects: parseActiveEffects(row.activeEffects),
+              actionUses: fromJsonText<ActionUsesMap>(row.actionUses, {}),
               conditionRestored: [],
               effectRestored: [],
+              actionUsesRestored: [],
             };
             workByCombatant.set(entry.combatantId, working);
           }
@@ -7811,23 +8429,35 @@ export class EncountersService {
           working.effects = effectResult.merged;
           working.conditionRestored.push(...conditionResult.restoredNames);
           working.effectRestored.push(...effectResult.restoredNames);
+          // Issue #1921: put a recharged action back to "spent" if THIS is the turn-start
+          // tick that recharged it — mirrors condition/effect tick undo above.
+          if (entry.actionUsesRecharged && entry.actionUsesRecharged.length > 0) {
+            const usesResult = undoActionUsesRecharge(working.actionUses, entry.actionUsesRecharged);
+            working.actionUses = usesResult.uses;
+            working.actionUsesRestored.push(...usesResult.restoredNames);
+          }
         }
 
         for (const [combatantId, working] of workByCombatant) {
           const conditionNames = [...new Set(working.conditionRestored)];
           const effectNames = [...new Set(working.effectRestored)];
-          if (conditionNames.length > 0 || effectNames.length > 0) {
+          const actionUsesNames = [...new Set(working.actionUsesRestored)];
+          if (conditionNames.length > 0 || effectNames.length > 0 || actionUsesNames.length > 0) {
             restoredLog.push({
               combatantId,
               combatantName: working.row.name,
               conditionNames,
               effectNames,
+              actionUsesNames,
             });
 
             const writeSet: Partial<typeof combatants.$inferInsert> = {
               activeEffects: toJsonText(working.effects),
               ...conditionWriteSetFromInstances(working.conditions),
             };
+            if (actionUsesNames.length > 0) {
+              writeSet.actionUses = toJsonText(working.actionUses);
+            }
             tx.update(combatants).set(writeSet).where(eq(combatants.id, combatantId)).run();
           }
         }
@@ -7905,6 +8535,16 @@ export class EncountersService {
           actor: entry.combatantName,
           actorId: entry.combatantId,
           detail: `effect restored: ${name}`,
+        });
+      }
+      // Issue #1921: undoing a turn advance that recharged an action puts it back to spent.
+      // The ability's NAME stays out of `detail` for the same secrecy reason as the forward
+      // recharge log — this is player-visible and would expose an unrevealed statblock.
+      for (const _name of entry.actionUsesNames) {
+        await this.appendEvent(encounterId, newRound, 'resource_changed', {
+          actor: entry.combatantName,
+          actorId: entry.combatantId,
+          detail: 'limited-use ability recharge undone',
         });
       }
     }
@@ -8189,7 +8829,7 @@ export class EncountersService {
     };
     if (c.kind === 'character' && c.characterId !== null) {
       const [character] = await this.db
-        .select({ id: characters.id, campaignId: characters.campaignId, actions: characters.actions })
+        .select({ id: characters.id, campaignId: characters.campaignId, actions: characters.actions, stats: characters.stats, level: characters.level })
         .from(characters)
         .where(eq(characters.id, c.characterId))
         .limit(1);
@@ -9519,21 +10159,14 @@ export class EncountersService {
     // combatant row) — so re-deriving just that one projection against CURRENT fog/sibling
     // state is sufficient, not a narrowing of what the previous fix already covered.
     const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant> => {
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, user.id, true);
+      const found = snapshot.combatants.find((c) => c.id === combatantId);
+      if (found) return found;
+
       const body = prior.response as Combatant | null;
       if (body && prior.responseRole === role) {
-        if (role === 'dm') return body;
-        const freshEncounterForReplay = await this.getRowOrThrow(encounterId, true);
-        const freshSiblingProtects =
-          freshEncounterForReplay.mapAttachmentId != null &&
-          !fogConcealsPixels(parseFog(freshEncounterForReplay.fog)) &&
-          (await this.attachmentsService.isFogProtectedEncounterMap(freshEncounterForReplay.mapAttachmentId, freshEncounterForReplay.campaignId));
-        return redactForRole(body, freshEncounterForReplay.fog, freshSiblingProtects);
+        return this.redactReplayCombatant(body, role, encounterId);
       }
-      // Role MISMATCH (or a missing body, which cannot happen for THIS implementation
-      // since the claim and its body are written in the same transaction, but handled the
-      // same defensive way as the sibling keyed mutations that guard on this): mirrors
-      // `rollCombatantInitiative`/`advanceCurrentTurn`/`undoTurn`'s own
-      // `prior.responseRole === role` guard — fall through to a FULL fresh, role-filtered
       // read (`getWithCombatantsOrThrow`), since a role change can affect more projections
       // than fog alone (e.g. a demoted co-DM). This never re-runs the effect a second time;
       // only the returned VIEW is re-derived. Unlike the same-role branch above, THIS path
@@ -9552,10 +10185,7 @@ export class EncountersService {
       // above and the early replay check do — a role-mismatched replay of an
       // already-committed outcome must survive the encounter having since been trashed
       // just as much as a same-role one does.
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
-      const found = snapshot.combatants.find((c) => c.id === combatantId);
-      if (!found) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
-      return found;
+      throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
     };
 
     // Issue #1909 review (Codex): a keyed retry must replay an already-committed outcome

@@ -2,6 +2,20 @@
   "encounters": {
     "title": "المواجهات",
     "combatLogHeading": "سجل القتال",
+    "actions": {
+      "title": "الإجراءات",
+      "use": "استخدام",
+      "useGroup": "تنفيذ للمجموعة",
+      "uses": {
+        "rechargeSingle": "إعادة الشحن {{min}}",
+        "recharge": "إعادة الشحن {{min}}–{{max}}",
+        "spent": "مُستهلَك",
+        "perDay": "{{max}}/يوم",
+        "left": "بقي {{count}}",
+        "left_other": "بقي {{count}}",
+        "disabledReason": "لا توجد استخدامات متبقية ({{label}})"
+      }
+    },
     "vitals": {
       "editMaxHp": "تعديل الحد الأقصى لنقاط الحياة",
       "maxHp": "الحد الأقصى لنقاط الحياة",
@@ -32,6 +46,16 @@
       "presetSeconds": "{{seconds}} ثانية"
     },
     "initiativeChipLabel": "المبادرة: {{value}}",
+    "reorder": {
+      "menuLabel": "إعادة ترتيب {{name}} في المبادرة",
+      "moveUp": "نقل للأعلى",
+      "moveDown": "نقل للأسفل",
+      "moveAfterLabel": "نقل بعد…",
+      "top": "المقدمة",
+      "go": "نقل",
+      "delayingBadge": "مؤجَّل",
+      "announcement": "تم نقل {{name}} في ترتيب المبادرة."
+    },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",
     "addWholeParty": "Add whole party ({{count}})",
@@ -206,10 +230,18 @@
       },
       "ping": {
         "menuLabel": "نية الإشارة",
+        "keyboardHint": "يفتح Shift+Enter قائمة انظر أو خطر أو تحرك هنا.",
         "intents": {
           "look": "انظر",
           "danger": "خطر",
           "move": "تحرك هنا"
+        },
+        "surfaceAriaLabel": "أشر إلى مركز الخريطة للجميع. {{hint}} العرض: +/− للتكبير، 0 لإعادة التعيين، مفاتيح الأسهم للتحريك عند التكبير.",
+        "toolHelp": "انقر على مكان في الخريطة أو اضغط Enter/Space عندما تكون الخريطة مركزة للإشارة إليه للجميع. {{hint}}",
+        "log": {
+          "unknownSender": "شخص ما",
+          "labeled": "أشار {{name}} إلى: {{label}}",
+          "plain": "أشار {{name}} إلى الخريطة"
         }
       },
       "dragDistance": {
@@ -266,7 +298,14 @@
         "pending": "Reopening encounter…"
       },
       "addCombatant": "Add combatant",
-      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
+      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here.",
+      "library": {
+        "hpNotSet": "لم يتم تحديد نقاط الحياة",
+        "hpValue": "{{hp}} نقطة حياة",
+        "hpOverrideLabel": "تحديد نقاط الحياة قبل الإضافة",
+        "hpOverridePlaceholder": "نقاط الحياة",
+        "addWithHp": "إضافة"
+      }
     },
     "checks": {
       "requestCheck": "Request a check",
@@ -301,11 +340,6 @@
       "noTargets": "No legal targets.",
       "systemMathNotice": "تمت التسوية بحسابات لم تُدقَّق لنظام قواعدك — تحقّق من النتيجة."
     },
-    "actions": {
-      "title": "الإجراءات",
-      "use": "استخدام",
-      "useGroup": "تنفيذ للمجموعة"
-    },
     "groupAction": {
       "heading": "{{actorName}} · {{actionName}} · المجموعة",
       "regionLabel": "تنفيذ {{actionName}} للمجموعة",
@@ -325,7 +359,8 @@
         "applied": "تم التنفيذ",
         "skipped": "تم التخطي — لا يوجد إجراء متبقٍ",
         "failed": "فشل",
-        "notRun": "لم يُنفَّذ"
+        "notRun": "لم يُنفَّذ",
+        "skippedNoUses": "تم التخطي — لا توجد استخدامات متبقية"
       },
       "undo": "تراجع",
       "undone": "تم التراجع",
@@ -411,7 +446,9 @@
       "revealedSummary": "بطاقة الإحصائيات (مكشوفة للاعبين)",
       "killPrompt": "وصل {{name}} إلى 0 نقطة حياة — هل تريد كشف بطاقة إحصائياته للاعبين؟",
       "dismiss": "تجاهل",
-      "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات"
+      "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات",
+      "maxHp": "الحد الأقصى لنقاط الحياة",
+      "hpUnknown": "غير معروف"
     },
     "whisper": {
       "button": "همس",
@@ -470,6 +507,20 @@
       "spentToast": "تم استخدام {{name}}",
       "available": "{{available}} من {{max}} من {{name}} متاح",
       "receivedAnnounce": "لقد حصلت على {{name}}!"
+    },
+    "vtt": {
+      "panelLabel": "لوحة المواجهة",
+      "showPanel": "إظهار لوحة المواجهة",
+      "hidePanel": "إخفاء لوحة المواجهة",
+      "tabTurn": "الدور",
+      "tabParty": "المجموعة",
+      "tabLog": "السجل",
+      "tabTable": "الطاولة",
+      "turnBar": "شريط الأدوار",
+      "turnBarToggle": "طيّ شريط الأدوار أو توسيعه",
+      "roll": "ارمِ أي نرد — تظهر النتيجة على كل شاشة حول الطاولة",
+      "noMapTitle": "لا توجد خريطة معركة بعد",
+      "noMapHint": "لم يشارك سيد اللعبة خريطة لهذه المواجهة. ترتيب الأدوار وشخصيتك موجودان في اللوحة الجانبية."
     }
   }
 }

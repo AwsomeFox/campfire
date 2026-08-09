@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import {
+  deriveEquippedItemAction,
   ActionApplyPolicy,
   ActionApplyRequest,
   ActionResolution,
@@ -31,6 +32,7 @@ import {
   CombatantTurnState,
   ConditionInstance,
   criticalDamageRuleForAdapter,
+  hasCriticalHitsForAdapter,
   expandStatblockActions,
   hpModelForAdapter,
   isResolvableSpec,
@@ -68,6 +70,12 @@ import {
   type SpellSlotMap,
   type TargetDefenses,
   type HomebrewMechanicsProfile,
+  // Issue #1921 — limited-use/recharge action pools, shared pure math (server + web read
+  // the same effective-max/label rules so the two surfaces never disagree).
+  type ActionUses,
+  effectiveActionUsesMax,
+  describeActionUses,
+  UsableActionUses,
 } from '@campfire/schema';
 
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -385,14 +393,32 @@ export class ActionResolverService {
    * equipping item's name (issue #1901) so callers can label it "equipped: <item>"
    * without a second inventory lookup.
    */
-  private equippedItemActionRows(characterId: number, campaignId: number): Array<{ action: CharacterAction; itemName: string }> {
+  /**
+   * The actions this character's equipped items grant (issues #1326, #1901, #2097).
+   *
+   * An item's stored `equippedAction` is only ever a HUMAN-authored one. When there is none,
+   * the action is DERIVED here, at read time, from the item's accepted compendium snapshot and
+   * this wielder — the same computation `InventoryService` runs when it serves the item, so
+   * the encounter and the inventory sheet cannot disagree about what a weapon does. Nothing is
+   * cached: the derivation's inputs (snapshot, stats, level, rule system, item name) belong to
+   * four different modules, and computing on the way out is what makes a stale action
+   * unrepresentable rather than merely unlikely.
+   */
+  private equippedItemActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'stats' | 'level'>,
+  ): Array<{ action: CharacterAction; itemName: string }> {
     const rows = this.db
-      .select({ name: inventoryItems.name, equippedAction: inventoryItems.equippedAction })
+      .select({
+        name: inventoryItems.name,
+        equippedAction: inventoryItems.equippedAction,
+        compendiumSnapshot: inventoryItems.compendiumSnapshot,
+        ruleEntryId: inventoryItems.ruleEntryId,
+      })
       .from(inventoryItems)
       .where(
         and(
-          eq(inventoryItems.characterId, characterId),
-          eq(inventoryItems.campaignId, campaignId),
+          eq(inventoryItems.characterId, character.id),
+          eq(inventoryItems.campaignId, character.campaignId),
           eq(inventoryItems.equipped, true),
           isNull(inventoryItems.deletedAt),
         ),
@@ -400,12 +426,40 @@ export class ActionResolverService {
       .orderBy(inventoryItems.id)
       .all();
     const actions: Array<{ action: CharacterAction; itemName: string }> = [];
+    let adapter: RuleSystemAdapter | null = null;
+    const wielder = { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level };
     for (const row of rows) {
-      if (!row.equippedAction) continue;
-      const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
-      if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
+      if (row.equippedAction) {
+        const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
+        if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
+        continue;
+      }
+      const data = this.equippedItemCompendiumData(row.compendiumSnapshot, row.ruleEntryId);
+      if (!data) continue;
+      // Resolved lazily and reused: an inventory of non-weapons should not cost a campaign
+      // lookup, and one with ten weapons should not cost ten.
+      adapter ??= this.adapterForCampaign(character.campaignId);
+      const derived = deriveEquippedItemAction({ itemName: row.name, data, character: wielder, adapter });
+      if (derived) actions.push({ action: derived, itemName: row.name });
     }
     return actions;
+  }
+
+  /**
+   * An equipped item's compendium payload: its ACCEPTED snapshot first, falling back to the
+   * live rule entry only for an item that never took one. The snapshot is authoritative for
+   * the same reason it exists — a compendium edit nobody has accepted must not silently change
+   * what a character's weapon does mid-encounter.
+   */
+  private equippedItemCompendiumData(snapshotJson: string | null, ruleEntryId: number | null): Record<string, unknown> | null {
+    const snapshot = fromJsonText<{ dataJson?: string } | null>(snapshotJson, null);
+    const dataJson =
+      snapshot?.dataJson ??
+      (ruleEntryId != null
+        ? (this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, ruleEntryId)).get()?.dataJson ?? null)
+        : null);
+    if (!dataJson) return null;
+    return fromJsonText<Record<string, unknown> | null>(dataJson, null);
   }
 
   /**
@@ -418,10 +472,10 @@ export class ActionResolverService {
    * of the merge for a caller that wants to label the source (issue #1901).
    */
   characterUsableActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level'>,
   ): Array<{ row: Record<string, unknown>; itemName: string | null }> {
     const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
-    const equipped = this.equippedItemActionRows(character.id, character.campaignId);
+    const equipped = this.equippedItemActionRows(character);
     // Issue #1901 review (chatgpt-codex-connector P2): `character.actions` is itself capped
     // at 100 entries (packages/schema `actions: z.array(CharacterAction).max(100)`), and
     // `ActionResolveRequest.actionIndex` only accepts 0-99 — so a character already at the
@@ -437,13 +491,14 @@ export class ActionResolverService {
   }
 
   private characterActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level'>,
   ): Array<Record<string, unknown>> {
     return this.characterUsableActionRows(character).map((x) => x.row);
   }
 
-  private actionToUsable(a: CharacterAction, index: number): UsableAction {
+  private actionToUsable(a: CharacterAction, index: number, actionUsesJson: string | null): UsableAction {
     const spec = a.spec ?? null;
+    const usesKey = spec ? this.usesKeyFor('statblock', actionFingerprint(a)) : null;
     return UsableAction.parse({
       index,
       name: a.name,
@@ -454,7 +509,97 @@ export class ActionResolverService {
       notes: a.notes ?? '',
       resolvable: isResolvableSpec(spec),
       spec,
+      uses: spec ? this.usesSnapshotFor(actionUsesJson, usesKey, spec.uses) : null,
     });
+  }
+
+  /**
+   * Build the persisted spend-map key for an action (issue #1921) — the server's content
+   * fingerprint plus a source tag distinguishing a character sheet/equipped-item action
+   * from a monster/NPC statblock action, so the two spaces can never collide even if a
+   * coincidental content match ever occurred. The SAME key is used to spend (applyInternal),
+   * refund (undo), list (listUsableActions), and force-toggle (EncountersService.updateCombatant)
+   * a given action's uses — computed here once so none of those call sites can drift apart.
+   */
+  private usesKeyFor(source: 'character' | 'statblock', fingerprint: string): string {
+    return `${source}:${fingerprint}`;
+  }
+
+  /**
+   * Remaining-uses snapshot for one action (issue #1921) — null for an at-will action (no
+   * pool to report). Reads the actor's persisted spend map by the exact key
+   * resolve()/applyInternal() spend against, so a listing can never disagree with what an
+   * apply would actually do. Spend is clamped into `[0, max]` defensively — a statblock
+   * edit that shrinks `uses.max` below a previously-recorded spend must not report a
+   * negative `available`.
+   */
+  private usesSnapshotFor(actionUsesJson: string | null, usesKey: string | null, uses: ActionUses): UsableActionUses | null {
+    const max = effectiveActionUsesMax(uses);
+    if (max <= 0 || !usesKey) return null;
+    const spentRaw = fromJsonText<Record<string, { spent?: number }>>(actionUsesJson, {})[usesKey]?.spent ?? 0;
+    const spent = Math.max(0, Math.min(spentRaw, max));
+    return UsableActionUses.parse({ max, recharge: uses.recharge, spent, available: Math.max(0, max - spent) });
+  }
+
+  /**
+   * All of a combatant's CURRENT actions that carry a limited-use pool (recharge or X/day),
+   * each with the exact spend key applyInternal()/undo() use (issue #1921). Shared by the
+   * turn-tick recharge roll (EncountersService.nextTurn/undoTurn) so it rolls against
+   * precisely the same identity a spend/refund would — a sheet edit that changes an
+   * action's content (and therefore its fingerprint) orphans its old spend key rather than
+   * silently rolling a stale one.
+   */
+  usesTrackedActions(actor: typeof combatants.$inferSelect, campaignId: number): Array<{ key: string; name: string; uses: ActionUses }> {
+    const out: Array<{ key: string; name: string; uses: ActionUses }> = [];
+    const character = this.linkedCharacter(actor);
+    if (character) {
+      for (const { row } of this.characterUsableActionRows(character)) {
+        const parsed = ActionSpec.safeParse((row as Record<string, unknown>)?.spec);
+        if (!parsed.success || effectiveActionUsesMax(parsed.data.uses) <= 0) continue;
+        out.push({
+          key: this.usesKeyFor('character', actionFingerprint(row)),
+          name: String((row as Record<string, unknown>)?.name ?? 'Action'),
+          uses: parsed.data.uses,
+        });
+      }
+      return out;
+    }
+    for (const action of this.combatantActions(actor, campaignId)) {
+      const spec = action.spec;
+      if (!spec || effectiveActionUsesMax(spec.uses) <= 0) continue;
+      out.push({ key: this.usesKeyFor('statblock', actionFingerprint(action)), name: action.name, uses: spec.uses });
+    }
+    return out;
+  }
+
+  /**
+   * Resolve a combatant's uses-tracked action, by index or name, to its current spend key +
+   * effective max (issue #1921) — the DM force-toggle patch (EncountersService.updateCombatant)
+   * shares this with resolve()/apply() so all three agree on exactly the same key, rather than
+   * the DM patch (which names an action by index/name, never the opaque internal key) risking
+   * a second, drifted notion of "this action's identity".
+   */
+  resolveActionUsesTarget(
+    actor: typeof combatants.$inferSelect,
+    actionRef: { actionIndex?: number; actionName?: string },
+    campaignId: number,
+  ): { key: string; max: number; name: string; uses: ActionUses } {
+    const { spec, name, usesKey } = this.resolveSpec(
+      actor,
+      {
+        actorCombatantId: actor.id,
+        actionIndex: actionRef.actionIndex,
+        actionName: actionRef.actionName,
+        targetIds: [],
+        commit: false,
+      },
+      campaignId,
+    );
+    const max = effectiveActionUsesMax(spec.uses);
+    if (max <= 0 || !usesKey) {
+      throw new BadRequestException(`"${name}" has no limited-use pool to override.`);
+    }
+    return { key: usesKey, max, name, uses: spec.uses };
   }
 
   /** Actor ability stats + level for the modifier/DC math (character or monster statblock). */
@@ -524,15 +669,17 @@ export class ActionResolverService {
     actor: typeof combatants.$inferSelect,
     req: ActionResolveRequest,
     campaignId: number,
-  ): { spec: ActionSpec; name: string; actionIndex: number | null; actionFingerprint: string | null } {
+  ): { spec: ActionSpec; name: string; actionIndex: number | null; actionFingerprint: string | null; usesKey: string | null } {
     if (req.spec) {
       const spec = ActionSpec.parse(req.spec);
       if (!isResolvableSpec(spec)) {
         throw new BadRequestException('The inline action spec has no resolvable mode/DC/attack — fall back to a statblock rather than inventing numbers.');
       }
       // Empty string distinguishes an intentionally inline action from a legacy row with no
-      // fingerprint. Inline actions have no sheet identity to compare at apply time.
-      return { spec, name: req.actionName ?? 'Action', actionIndex: null, actionFingerprint: '' };
+      // fingerprint. Inline actions have no sheet identity to compare at apply time — and
+      // therefore no stable identity to key a persisted uses-spend against either (issue
+      // #1921): an ad-hoc spec's uses (if any) are never tracked across calls.
+      return { spec, name: req.actionName ?? 'Action', actionIndex: null, actionFingerprint: '', usesKey: null };
     }
     const character = this.linkedCharacter(actor);
     if (character) {
@@ -556,7 +703,7 @@ export class ActionResolverService {
         );
       }
       this.assertExpectedSpecMatches(req, name, parsed.data);
-      return { spec: parsed.data, name, actionIndex: idx, actionFingerprint: actionFingerprint(raw) };
+      return { spec: parsed.data, name, actionIndex: idx, actionFingerprint: actionFingerprint(raw), usesKey: this.usesKeyFor('character', actionFingerprint(raw)) };
     }
     const statActions = this.combatantActions(actor, campaignId);
     let idx = req.actionIndex ?? -1;
@@ -580,7 +727,7 @@ export class ActionResolverService {
       );
     }
     this.assertExpectedSpecMatches(req, action.name, parsed.data);
-    return { spec: parsed.data, name: action.name, actionIndex: idx, actionFingerprint: actionFingerprint(action) };
+    return { spec: parsed.data, name: action.name, actionIndex: idx, actionFingerprint: actionFingerprint(action), usesKey: this.usesKeyFor('statblock', actionFingerprint(action)) };
   }
 
   // -------------------------------------------------------------------------
@@ -607,6 +754,7 @@ export class ActionResolverService {
       return rows.map(({ row: a, itemName }, index) => {
         const parsed = ActionSpec.safeParse(a?.spec);
         const spec = parsed.success ? parsed.data : null;
+        const usesKey = spec ? this.usesKeyFor('character', actionFingerprint(a)) : null;
         return UsableAction.parse({
           index,
           name: String(a?.name ?? ''),
@@ -619,10 +767,11 @@ export class ActionResolverService {
           spec,
           // Issue #1901: tag which equipped item granted this action; empty for a sheet action.
           source: itemName ? `equipped: ${itemName}`.slice(0, 220) : '',
+          uses: spec ? this.usesSnapshotFor(combatant.actionUses, usesKey, spec.uses) : null,
         });
       });
     }
-    return this.combatantActions(combatant, encounter.campaignId).map((a, index) => this.actionToUsable(a, index));
+    return this.combatantActions(combatant, encounter.campaignId).map((a, index) => this.actionToUsable(a, index, combatant.actionUses));
   }
 
   // -------------------------------------------------------------------------
@@ -671,7 +820,7 @@ export class ActionResolverService {
     }
 
     const adapter = this.adapterForCampaign(encounter.campaignId);
-    const { spec, name, actionIndex, actionFingerprint: selectedActionFingerprint } = this.resolveSpec(actor, req, encounter.campaignId);
+    const { spec, name, actionIndex, actionFingerprint: selectedActionFingerprint, usesKey } = this.resolveSpec(actor, req, encounter.campaignId);
     const { policy, canApply } = this.policyFor(encounter.campaignId, actor, user, role);
 
     // Validate target legality (count + at least one when the action needs a target).
@@ -730,7 +879,18 @@ export class ActionResolverService {
       // ever produce, so a future caller of applyInternal (or a bug in this round trip) cannot
       // silently commit a number the spec itself could never have rolled.
       this.assertResolutionWithinSpecBounds(spec, resolution);
-      undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, chainId, encounter.round, encounter.turnVersion);
+      undoToken = this.applyInternal(
+        encounter,
+        resolution,
+        actor,
+        user,
+        role,
+        spec.targets.allow,
+        chainId,
+        encounter.round,
+        encounter.turnVersion,
+        { key: usesKey, max: effectiveActionUsesMax(spec.uses), label: describeActionUses(spec.uses) },
+      );
       applied = true;
     }
     // Issue #1928: label, don't block — signal whether the maths just run above (d20 vs AC,
@@ -805,7 +965,14 @@ export class ActionResolverService {
       const rollModeForAttack = rollMode === 'advantage' || rollMode === 'disadvantage' ? rollMode : undefined;
       const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll, rollMode: rollModeForAttack });
       const { total, naturalRoll: nat, outcome: resolvedOutcome } = attackResult;
-      outcome = rollMode === 'crit' ? 'crit' : resolvedOutcome;
+      // A forced `crit` is only honoured where the system HAS critical hits (#2115 review).
+      // The client names the mode, so without this an OSR or Open Legend caller could ask for
+      // one through REST or MCP and have the resolver mint an outcome the adapter's own
+      // `resolveAttack` can never return — then commit its doubled damage. Enforced here, in
+      // the shared resolver, so both surfaces are covered by one check rather than each UI
+      // remembering to hide the control.
+      const critRequestable = rollMode === 'crit' && hasCriticalHitsForAdapter(adapter);
+      outcome = critRequestable ? 'crit' : resolvedOutcome;
       // #1598: attack crit — see the save/check branch below for the #1600 counterpart.
       critical = outcome === 'crit';
       base.attackTotal = total;
@@ -928,7 +1095,10 @@ export class ActionResolverService {
       targets,
       costSlot: spec.cost.slot,
       costCount: spec.cost.count,
-      usesSpent: spec.uses.max > 0 ? 1 : 0,
+      // Issue #1921: a bare recharge condition (no explicit X/day max) is a pool of one —
+      // effectiveActionUsesMax is the single place that rule lives, so this can't drift
+      // from the exhausted-action check in applyInternal.
+      usesSpent: effectiveActionUsesMax(spec.uses) > 0 ? 1 : 0,
       spellLevelSpent: spec.uses.spellLevel,
       startsConcentration: spec.uses.concentration,
     });
@@ -1534,7 +1704,7 @@ export class ActionResolverService {
     // This mirrors exactly what the pre-#1451 `apply()` already did; `action_pending_resolutions`
     // does not persist `targetsAllow` at all (unlike `action_apply_chains`, which UNDO
     // deliberately snapshots — undo restores a thing that already happened under the old rule).
-    const { spec, actionFingerprint: currentActionFingerprint } = this.resolveSpec(actor, {
+    const { spec, actionFingerprint: currentActionFingerprint, usesKey } = this.resolveSpec(actor, {
       actorCombatantId: pending.actorCombatantId,
       actionName: pending.actionName,
       // `actionName` is not unique on character sheets. Persisting the selected index keeps
@@ -1559,7 +1729,18 @@ export class ActionResolverService {
       throw new BadRequestException(`Action "${pending.actionName}" changed or moved before it could be applied.`);
     }
 
-    const undoToken = this.applyInternal(encounter, resolution, actor, user, role, spec.targets.allow, pending.id, pending.turnRound, pending.turnVersion);
+    const undoToken = this.applyInternal(
+      encounter,
+      resolution,
+      actor,
+      user,
+      role,
+      spec.targets.allow,
+      pending.id,
+      pending.turnRound,
+      pending.turnVersion,
+      { key: usesKey, max: effectiveActionUsesMax(spec.uses), label: describeActionUses(spec.uses) },
+    );
     return { undoToken };
   }
 
@@ -1587,6 +1768,13 @@ export class ActionResolverService {
     turnRound: number,
     /** Monotonic server-owned turn version, invalidated by advance and undo. */
     turnVersion: number,
+    /**
+     * Issue #1921: the actor's limited-use/recharge spend for THIS action, resolved from the
+     * CURRENT spec by the caller (mirroring how `targetsAllow` above is always the current
+     * spec's, never a resolve-time snapshot). `key` is null for an untracked (at-will or
+     * ad-hoc) action, in which case no spend is validated or written.
+     */
+    usesSpend: { key: string | null; max: number; label: string },
   ): ActionUndoToken {
     const performedBy = this.performedByFrom(user, role);
     const adapter = this.adapterForCampaign(encounter.campaignId);
@@ -1595,6 +1783,11 @@ export class ActionResolverService {
     let concentrationBefore: string | null = null;
     let pendingConcentrationChecksBefore: PendingConcentrationCheck[] = [];
     let actorConcentrationTouched = false;
+    // Issue #1921: the exact spend this apply wrote (or null/0 when the action is untracked),
+    // persisted onto the action_apply_chains row so undo() can refund precisely this amount
+    // without re-deriving it from a possibly-since-edited action spec.
+    let appliedUsesKey: string | null = null;
+    let appliedUsesSpentDelta = 0;
     const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
     let committedEncounter = encounter;
     // Issue #1902 rework (round 19, codex P2): set true only when this specific apply
@@ -1701,7 +1894,7 @@ export class ActionResolverService {
       // and target processing may enqueue a check for this very action; that generated check
       // is not part of the pre-apply state an undo must restore.
       const actorBeforeTargets = tx
-        .select({ turnState: combatants.turnState })
+        .select({ turnState: combatants.turnState, actionUses: combatants.actionUses })
         .from(combatants)
         .where(eq(combatants.id, actor.id))
         .limit(1)
@@ -1735,6 +1928,26 @@ export class ActionResolverService {
               slot: actionEconomyCost.slot,
               remaining,
               max,
+            });
+          }
+        }
+        // Issue #1921 — VALIDATE THE LIMITED-USE/RECHARGE SPEND FIRST too, same convention
+        // (and for the same reason) as the spell-slot and action-economy checks above: fail
+        // before any target consequence or undo snapshot is written, not late-and-unwind. A
+        // second apply of an already-exhausted "Recharge 5–6" or "1/Day" action is refused
+        // here, atomically against the LIVE row, rather than against whatever `spec.uses`
+        // said at resolve time (which could be stale if a concurrent apply already spent it).
+        if (usesSpend.key && resolution.usesSpent > 0) {
+          const currentUses = fromJsonText<Record<string, { spent?: number }>>(actorBeforeTargets.actionUses, {});
+          const spentBefore = currentUses[usesSpend.key]?.spent ?? 0;
+          if (spentBefore + resolution.usesSpent > usesSpend.max) {
+            throw new BadRequestException({
+              code: 'action_uses_exhausted',
+              message:
+                `"${resolution.actionName}" has no uses remaining` +
+                `${usesSpend.label ? ` (${usesSpend.label})` : ''}.`,
+              remaining: Math.max(0, usesSpend.max - spentBefore),
+              max: usesSpend.max,
             });
           }
         }
@@ -1864,7 +2077,20 @@ export class ActionResolverService {
             turnState.concentration = resolution.actionName;
           }
         }
-        tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
+        // Issue #1921: spend the limited-use/recharge pool — already validated above against
+        // `actorBeforeTargets` in this same transaction, so this write cannot exceed `max`.
+        const combatantWrite: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(turnState) };
+        if (usesSpend.key && resolution.usesSpent > 0) {
+          const currentUses = fromJsonText<Record<string, { spent?: number }>>(actorFresh.actionUses, {});
+          appliedUsesSpentDelta = resolution.usesSpent;
+          appliedUsesKey = usesSpend.key;
+          const nextUses = {
+            ...currentUses,
+            [usesSpend.key]: { spent: (currentUses[usesSpend.key]?.spent ?? 0) + resolution.usesSpent },
+          };
+          combatantWrite.actionUses = toJsonText(nextUses);
+        }
+        tx.update(combatants).set(combatantWrite).where(eq(combatants.id, actor.id)).run();
       }
 
       for (const t of resolution.targets) {
@@ -2085,6 +2311,10 @@ export class ActionResolverService {
           concentrationBefore,
           pendingConcentrationChecksBeforeJson: toJsonText(pendingConcentrationChecksBefore),
           startedConcentration: actorConcentrationTouched,
+          // Issue #1921: the exact limited-use/recharge spend this apply wrote, so undo() can
+          // refund precisely this amount.
+          usesKey: appliedUsesKey,
+          usesSpent: appliedUsesSpentDelta,
           targetsJson: toJsonText(undoTargets),
           createdAt: nowIso(),
         })
@@ -2404,7 +2634,19 @@ export class ActionResolverService {
             }));
           }
         }
-        tx.update(combatants).set({ turnState: toJsonText(turnState) }).where(eq(combatants.id, actor.id)).run();
+        const combatantWrite: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(turnState) };
+        // Issue #1921: refund the exact limited-use/recharge spend this chain wrote — the
+        // same asymmetry as the action-economy refund above (a refund can only SUBTRACT
+        // from `spent`, floored at 0, so there is no overshoot direction to reject here).
+        if (chain.usesKey && chain.usesSpent > 0) {
+          const currentUses = fromJsonText<Record<string, { spent?: number }>>(actorFresh.actionUses, {});
+          const spentNow = currentUses[chain.usesKey]?.spent ?? 0;
+          combatantWrite.actionUses = toJsonText({
+            ...currentUses,
+            [chain.usesKey]: { spent: Math.max(0, spentNow - chain.usesSpent) },
+          });
+        }
+        tx.update(combatants).set(combatantWrite).where(eq(combatants.id, actor.id)).run();
       }
       if (chain.spellLevelSpent > 0 && actor.characterId !== null) {
         const character = tx.select().from(characters).where(eq(characters.id, actor.characterId)).get();

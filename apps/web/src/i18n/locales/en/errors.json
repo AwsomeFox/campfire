@@ -23,6 +23,7 @@
     "COMBAT_LOG_ACTOR_DM_ONLY": "Only the DM can set who dealt that damage — it is credited to whoever's turn it is.",
     "TURN_END_NEEDS_DM_CONFIRM": "Ending this turn needs DM confirmation.",
     "TURN_ALREADY_ADVANCED": "Someone else already advanced the turn — resyncing.",
+    "TURN_VERSION_MISMATCH": "The turn has moved on since this order was loaded — refreshing.",
     "HP_SYNC_CONFLICT": "Hit points changed on the server — reload and try again.",
     "REOPEN_NO_COMBATANTS": "Can't reopen — no combatants on the roster.",
     "INVENTORY_QTY_CONFLICT": "Item quantity changed on the server — reload and try again.",

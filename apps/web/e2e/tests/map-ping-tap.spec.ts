@@ -31,9 +31,9 @@ async function dispatchPointer(
 ) {
   await target.evaluate(
     (element, event) => {
-      const surface = document.querySelector<HTMLElement>('[data-testid="battle-map-surface"]');
-      if (!surface) throw new Error('Battle-map surface is missing');
-      const rect = surface.getBoundingClientRect();
+      const layer = document.querySelector<HTMLElement>('[data-testid="battle-map-layer"]');
+      if (!layer) throw new Error('Battle-map layer is missing');
+      const rect = layer.getBoundingClientRect();
       element.dispatchEvent(
         new PointerEvent(event.type, {
           bubbles: true,
@@ -117,13 +117,11 @@ async function dispatchArmingPointerDown(
 ): Promise<{ x: number; y: number }> {
   return target.evaluate(
     (element, event) => {
-      const surface = document.querySelector<HTMLElement>('[data-testid="battle-map-surface"]');
       const layer = document.querySelector<HTMLElement>('[data-testid="battle-map-layer"]');
-      if (!surface || !layer) throw new Error('Battle-map surface/layer is missing');
-      const surfaceRect = surface.getBoundingClientRect();
+      if (!layer) throw new Error('Battle-map layer is missing');
       const layerRect = layer.getBoundingClientRect();
-      const clientX = surfaceRect.left + surfaceRect.width * event.xRatio;
-      const clientY = surfaceRect.top + surfaceRect.height * event.yRatio;
+      const clientX = layerRect.left + layerRect.width * event.xRatio;
+      const clientY = layerRect.top + layerRect.height * event.yRatio;
       element.dispatchEvent(
         new PointerEvent('pointerdown', {
           bubbles: true,
@@ -258,11 +256,12 @@ test.describe('battle-map ping tap completion', () => {
     // the same geometry used to aim the tap made the test self-consistent —
     // a systematic offset in the rendered map layer would shift the derived
     // value and the published ping together, so a `toBeCloseTo(..., 0)` check
-    // (±0.5) could still pass at up to ~0.49pp of real drift. The fixture's
-    // 16:9 map fills the whole surface with no letterbox, so the derived
-    // value must land within the same precision-1 tolerance as the
-    // ping-vs-derived comparison below, or a genuine geometry regression
-    // would slip through undetected.
+    // (±0.5) could still pass at up to ~0.49pp of real drift. Taps are aimed at
+    // ratios of the RENDERED MAP LAYER (the cockpit's surface fills the canvas
+    // and letterboxes a 16:9 map inside it, so surface ratios are not map
+    // percentages), which means the derived value must land within the same
+    // precision-1 tolerance as the ping-vs-derived comparison below, or a
+    // genuine geometry regression would slip through undetected.
     expect(mouseExpected.x).toBeCloseTo(30, 1);
     expect(mouseExpected.y).toBeCloseTo(40, 1);
     expect(pings[0].x).toBeCloseTo(mouseExpected.x, 1);
@@ -346,9 +345,14 @@ test.describe('battle-map ping tap completion', () => {
 
     await surface.focus();
     await expect(surface).toBeFocused();
+    // Issue #2047 widened this label to advertise the Shift+Enter intent-menu path, since a
+    // keyboard user has no other way to discover it. Kept as an exact-string assertion
+    // rather than relaxed to `toContain` — the whole point of asserting the label is that a
+    // screen-reader user hears a specific, complete sentence, and a substring check would
+    // stop noticing if the rest of it were dropped.
     await expect(surface).toHaveAttribute(
       'aria-label',
-      'Ping the map center for everyone. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.',
+      'Ping the map center for everyone. Shift+Enter opens the Look, Danger, or Move here menu. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.',
     );
     await page.keyboard.press('Enter');
     await expect.poll(() => pings.length).toBe(1);

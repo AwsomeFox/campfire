@@ -10,7 +10,7 @@ Design goals:
 
 - **Single Docker image, single volume** — SQLite, no external services
 - **Login via any OIDC provider** (built for [Authentik](https://goauthentik.io)); IdP groups can gate sign-in or grant server-admin access, while campaign roles are assigned in Campfire
-- **AI-operable from day 1** — the same service layer is exposed as a REST API (OpenAPI) and an MCP server (265 tools), so an AI assistant can maintain — or run — the campaign; AI writes can be routed through a DM-approved proposal queue
+- **AI-operable from day 1** — the same service layer is exposed as a REST API (OpenAPI) and an MCP server (266 tools), so an AI assistant can maintain — or run — the campaign; AI writes can be routed through a DM-approved proposal queue
 - **An AI in the DM seat (optional, experimental)** — a per-campaign AI-DM seat runs as a **co-DM** (proposes only; every change lands in the DM's approval queue) or a full **driver** (holds the seat and runs the session), with token budgets, a kill switch, and player recovery levers
 - **Server-enforced secrecy** — DM-only fields, hidden entities and private notes are stripped in the API layer, never hidden client-side
 
@@ -33,7 +33,7 @@ Design goals:
 >   **AI scribe** that drafts recaps into the proposal queue.
 >
 > The same service layer is exposed as a REST API (OpenAPI/Swagger) **and** an MCP
-> server with **265 tools**, so any MCP-capable client (e.g. Claude, via `claude mcp
+> server with **266 tools**, so any MCP-capable client (e.g. Claude, via `claude mcp
 > add`) can read and write — or fully drive — a campaign directly. See
 > [`design/`](design/) for the original approved mockups the UI was built from.
 
@@ -75,7 +75,14 @@ are treated as reservations, so upgrading an in-progress run is safe.
 
 ## Dev setup
 
-Prereqs: **Node ≥ 22**, **[just](https://github.com/casey/just)** (`brew install just`).
+Prereqs: **Node 22.14+, 23.6+, or 24+**, **[just](https://github.com/casey/just)**
+(`brew install just`).
+
+That version list is the real requirement, not a rounded-up minimum:
+better-sqlite3 ships a Node-API 10 binary, and Node added Node-API 10 in 22.14.0
+and 23.6.0. On an older Node the install still succeeds and `npm` only warns,
+then the server dies with a bare segfault the first time it opens the database.
+`node -p process.versions.napi` should print `10` or higher.
 
 ```bash
 git clone https://github.com/AwsomeFox/campfire && cd campfire
@@ -424,7 +431,7 @@ takeover), and — like everything else — every action is audit-logged with ac
 
 ## Roadmap
 
-Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (265 tools), media & maps
+Shipped: entities + notes + OpenAPI, OIDC/roles, MCP server (266 tools), media & maps
 (attachments) with fog of war, real rule systems from open sources (5e / PF2e / Open
 Legend live), encounter/combat tracker, the full game-icons.net icon set, a DM-approval
 proposal queue, the **AI Dungeon Master** (co-DM + driver) and a **scheduled AI scribe**

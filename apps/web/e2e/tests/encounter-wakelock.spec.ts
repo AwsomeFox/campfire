@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 async function installWakeLockMock(page: Page) {
   await page.addInitScript(() => {
@@ -65,6 +66,8 @@ test.describe('Encounter Runner wake lock (#1473)', () => {
 
     const { campaignId, encounterId } = seed();
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    // TurnWorkspace is the cockpit's Turn tab; a DM lands on the roster by default.
+    await openCockpitTab(page, 'turn');
 
     // Wait for workspace to render.
     await expect(page.getByTestId('turn-workspace')).toBeVisible();

@@ -91,6 +91,36 @@ export const campaigns = sqliteTable('campaigns', {
   updatedAt: text('updated_at').notNull(),
 });
 
+/**
+ * Append-only lifecycle-status transition provenance for a campaign (issue #846).
+ * Every status change (active<->paused<->completed) inserts a row, so reactivation
+ * (back to active) and re-archiving keep the full history; the newest row is the
+ * current provenance surfaced in the archived banner and settings.
+ *
+ * `actorUserId` is the durable install-local id; `actorName` is a display-name
+ * snapshot captured at transition time (a later rename does not rewrite history).
+ * `reason` is DM operational text and is NOT shown to players. Cascades with the
+ * campaign so a purge cleans its provenance too.
+ */
+export const campaignStatusTransitions = sqliteTable(
+  'campaign_status_transitions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id')
+      .notNull()
+      .references(() => campaigns.id, { onDelete: 'cascade' }),
+    actorUserId: text('actor_user_id').notNull(),
+    actorName: text('actor_name').notNull(),
+    fromStatus: text('from_status').notNull(),
+    toStatus: text('to_status').notNull(),
+    reason: text('reason').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    campaignTransitionsIdx: index('idx_campaign_status_transitions_campaign').on(t.campaignId, t.createdAt),
+  }),
+);
+
 export const characters = sqliteTable('characters', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
@@ -1025,6 +1055,9 @@ export const users = sqliteTable('users', {
   canCreateCampaigns: integer('can_create_campaigns', { mode: 'boolean' }).notNull().default(false),
   // Color-vision-assist mode: adds non-color channels to combat indicators (issue #1942).
   colorVisionAssist: integer('color_vision_assist', { mode: 'boolean' }).notNull().default(false),
+  // Table audio & haptics level: 'off' | 'low' | 'medium' | 'high' — synthesized dice/turn
+  // cues and vibration, default off (issue #1920).
+  tableAudio: text('table_audio').notNull().default('off'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -2128,6 +2161,13 @@ export const combatants = sqliteTable('combatants', {
   conditions: text('conditions').notNull().default('[]'),
   ruleEntryId: integer('rule_entry_id'), // optional link to compendium rule_entries (monster statblock)
   sortOrder: integer('sort_order').notNull().default(0),
+  // Issue #1923 review finding 1: DM manual-reorder override. Nullable; set on every
+  // combatant row by EncountersService.reorderCombatant on a running encounter. See
+  // @campfire/schema's Combatant.manualOrder doc for why this exists — a pure sortOrder
+  // rewrite is not enough to hold a drag within a tie once the adapter tiebreak compares
+  // initMod before sortOrder. Added by migration on older DBs (see
+  // db/db.module.ts migrateCombatantsTableForManualOrder1923).
+  manualOrder: integer('manual_order'),
   // Battle-map token position (issue #39) — 0–100 percent overlay on the encounter's
   // map image, mirroring locations.map_x/map_y. Nullable; added by migration on older
   // DBs — see db/db.module.ts migrateCombatantsTableForTokenPosition. null = not placed.
@@ -2156,6 +2196,11 @@ export const combatants = sqliteTable('combatants', {
   // NOT NULL DEFAULT false — added by migration on older DBs (see
   // db/db.module.ts migrateCombatantsTableForStatblockRevealed1926).
   statblockRevealed: integer('statblock_revealed', { mode: 'boolean' }).notNull().default(false),
+  // Issue #1921: limited-use/recharge action spend, a JSON map keyed by the server's
+  // action fingerprint+source (see ActionResolverService.actionFingerprint/usesKeyFor) to
+  // `{ spent }`. Nullable; added by migration on older DBs — see db/db.module.ts
+  // migrateActionUsesTracking1921(). null = no action spent yet (all at max).
+  actionUses: text('action_uses'),
 });
 
 /** One-shot, short-lived exact-row snapshots for combatant removal undo (issue #1469). */
@@ -2301,6 +2346,12 @@ export const actionApplyChains = sqliteTable('action_apply_chains', {
   concentrationBefore: text('concentration_before'),
   pendingConcentrationChecksBeforeJson: text('pending_concentration_checks_before_json').notNull().default('[]'),
   startedConcentration: integer('started_concentration', { mode: 'boolean' }).notNull().default(false),
+  // Issue #1921: the limited-use/recharge spend key this apply wrote to the actor's
+  // combatants.action_uses map (null when the action was untracked / at-will), and how much
+  // was spent (0 when usesKey is null). undo() reads these to refund the exact spend rather
+  // than re-deriving it from the (possibly since-edited) action spec.
+  usesKey: text('uses_key'),
+  usesSpent: integer('uses_spent').notNull().default(0),
   // The ActionUndoTarget[] pre-apply snapshot — the authoritative source undo() restores from.
   targetsJson: text('targets_json').notNull().default('[]'),
   createdAt: text('created_at').notNull(),

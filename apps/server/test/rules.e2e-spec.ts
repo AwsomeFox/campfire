@@ -14,7 +14,7 @@ import {
   type FakeOpen5eWithBadPagination,
   type FakeOpen5eFlaky,
 } from './fake-open5e';
-import { OPEN5E_PACK_VERSION } from '../src/modules/rules/open5e-importer';
+import { ALL_OPEN5E_SECTIONS, OPEN5E_PACK_VERSION } from '../src/modules/rules/open5e-importer';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' }; // dev-header users always carry serverRole 'admin'
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
@@ -108,12 +108,12 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(job.status).toBe('completed');
     expect(job.outcome).toBe('created');
     expect(job.pack.slug).toBe('open5e-srd');
-    expect(job.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1); // spells + creatures + magicitems + conditions + classes + species + feats from the fake server
+    expect(job.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2); // spells + creatures + magicitems + conditions + classes + species + feats + weapons + armor from the fake server
     expect(job.pack.license).toContain('Creative Commons');
     // per-section progress was reported (issue #20): one row per section, all done.
-    expect(job.progress.length).toBe(7);
+    expect(job.progress.length).toBe(9);
     expect(job.progress.every((p: { status: string }) => p.status === 'done')).toBe(true);
-    expect(job.completedSections).toBe(7);
+    expect(job.completedSections).toBe(9);
     const packId = job.pack.id;
 
     const listRes = await request(server).get('/api/v1/rules/packs').set(dm);
@@ -152,7 +152,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(reJob.status).toBe('completed');
     expect(reJob.outcome).toBe('updated');
     expect(reJob.added).toBe(0);
-    expect(reJob.skippedExisting).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1);
+    expect(reJob.skippedExisting).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2);
     expect(reJob.changed).toBe(1);
     expect(reJob.removed).toBe(0);
     expect(reJob.pack.version).toBe(OPEN5E_PACK_VERSION);
@@ -160,10 +160,10 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       added: 0,
       changed: 1,
       removed: 0,
-      unchanged: (2 + 2 + 1 + 4 + 2 + 2 + 1) - 1,
+      unchanged: (2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2) - 1,
     });
     expect(reJob.preview.sourceHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(reJob.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1); // unchanged
+    expect(reJob.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2); // unchanged
 
     // search: free text finds the fireball spell
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
@@ -178,7 +178,10 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(searchFacets(facetRes.body)).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'spell', label: 'Spells', count: 2 }),
       expect.objectContaining({ type: 'monster', label: 'Monsters', count: 2 }),
-      expect.objectContaining({ type: 'item', label: 'Items', count: 1 }),
+      // 1 magic item + 4 weapons + 2 armor — the weapons/armor sections (issue #2096) are
+      // ruleEntry.type 'item' too, so they land in the SAME facet as magic items rather
+      // than adding facets of their own.
+      expect.objectContaining({ type: 'item', label: 'Items', count: 1 + 4 + 2 }),
     ]));
     expect(searchFacets(facetRes.body).some((f: { type: string }) => f.type === 'section' || f.type === 'other')).toBe(false);
     // The chip row must add up to the list it labels: with no type filter, the facet
@@ -376,17 +379,18 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
   // Authorising removal off that length would wipe every other section out of the pack.
   it('a repeated-section install never removes the sections it did not fetch (issue #500)', async () => {
     const server = ctx.app.getHttpServer();
-    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1;
+    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2;
 
     const full = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(full.status).toBe('completed');
     expect(full.pack.entryCount).toBe(total);
 
-    // Seven copies of one section: same length as ALL_OPEN5E_SECTIONS, one section covered.
+    // One section repeated ALL_OPEN5E_SECTIONS.length times: same array length as the full
+    // section list, one section actually covered.
     const repeated = await installOpen5e(server, dm, {
       source: 'open5e',
       url: fake.baseUrl,
-      sections: ['conditions', 'conditions', 'conditions', 'conditions', 'conditions', 'conditions', 'conditions'],
+      sections: ALL_OPEN5E_SECTIONS.map(() => 'conditions'),
     });
     expect(repeated.status).toBe('completed');
     expect(repeated.outcome).toBe('updated');
@@ -410,7 +414,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
   it('a complete upstream manifest removes entries upstream no longer has (issue #500)', async () => {
     const server = ctx.app.getHttpServer();
     const db = ctx.app.get<DrizzleDb>(DB);
-    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1;
+    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2;
 
     const first = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(first.status).toBe('completed');
@@ -519,6 +523,57 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // sections not requested weren't imported.
     const spellSearch = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
     expect(searchItems(spellSearch.body)).toEqual([]);
+
+    await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+  });
+
+  // Issue #2096: before this, `items` was the ONLY gear section and it maps to Open5e's
+  // /magicitems/ path — so a Longsword could not be acquired from the compendium at all,
+  // and the equipped-weapon action loop (#1326/#1901) had no 5e data to build on.
+  it('installs mundane weapons and armor as item entries carrying their combat stats (issue #2096)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const job = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl, sections: ['weapons', 'armor'] });
+    expect(job.status).toBe('completed');
+    expect(job.pack.entryCount).toBe(4 + 2); // weapons + armor from the fake server
+
+    const weaponSearch = await request(server).get('/api/v1/rules/search').query({ q: 'longsword', type: 'item' }).set(dm);
+    expect(weaponSearch.status).toBe(200);
+    const longsword = searchItems(weaponSearch.body).find((e: { name: string }) => e.name === 'Longsword');
+    expect(longsword).toBeDefined();
+    expect(longsword.type).toBe('item');
+    const longswordData = JSON.parse(longsword.dataJson);
+    expect(longswordData).toMatchObject({ itemKind: 'weapon', damageDice: '1d8', damageType: 'Slashing', isSimple: false });
+    // The stat a consumer building an attack actually needs, and the one most easily lost:
+    // Versatile's two-handed die lives in the property's `detail`.
+    expect(longswordData.properties).toContainEqual({ name: 'Versatile', type: null, detail: '1d10' });
+
+    // A magic item and a mundane weapon are both `item` entries, so a reader has to be able
+    // to tell them apart from the data alone.
+    const magicJob = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl, sections: ['items'] });
+    expect(magicJob.status).toBe('completed');
+    const bagSearch = await request(server).get('/api/v1/rules/search').query({ q: 'bag of holding', type: 'item' }).set(dm);
+    const bag = searchItems(bagSearch.body).find((e: { name: string }) => e.name === 'Bag of Holding');
+    expect(bag).toBeDefined();
+    expect(JSON.parse(bag.dataJson).itemKind).toBeUndefined();
+
+    const armorSearch = await request(server).get('/api/v1/rules/search').query({ q: 'chain mail', type: 'item' }).set(dm);
+    const chainMail = searchItems(armorSearch.body).find((e: { name: string }) => e.name === 'Chain Mail');
+    expect(chainMail).toBeDefined();
+    expect(JSON.parse(chainMail.dataJson)).toMatchObject({
+      itemKind: 'armor',
+      acBase: 16,
+      grantsStealthDisadvantage: true,
+      strengthScoreRequired: 13,
+    });
+
+    // The Net's damage_dice is the string '0' upstream — not a dice expression. It must
+    // still import rather than being silently dropped for failing a validation this layer
+    // deliberately does not perform.
+    const netSearch = await request(server).get('/api/v1/rules/search').query({ q: 'net', type: 'item' }).set(dm);
+    const net = searchItems(netSearch.body).find((e: { name: string }) => e.name === 'Net');
+    expect(net).toBeDefined();
+    expect(JSON.parse(net.dataJson).damageDice).toBe('0');
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
   });
@@ -1989,11 +2044,26 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       const weapons = await request(server).get('/api/v1/rules/search').query({ q: 'Weapons', type: 'section' }).set(dm);
       expect(searchItems(weapons.body).some((e: { name: string }) => e.name === 'Equipment: Weapons')).toBe(true);
 
-      // A campaign can select the installed Cepheus pack (validateRuleSystem requires it exist).
+      // Issue #2081: Cepheus is a full importer (reference text is fully usable, as proven
+      // above — search, license, attribution all work) but has no registered combat adapter,
+      // so a campaign must NOT be able to select it as its live `ruleSystem` — doing so would
+      // silently run a 2D6 campaign as D&D 5e (d20 initiative, 5e ability modifiers, 5e
+      // conditions/action economy/death saves, maxLevel 20, a concrete 5e XP suggestion).
       const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Cepheus Campaign' });
       const patchRes = await request(server).patch(`/api/v1/campaigns/${campRes.body.id}`).set(dm).send({ ruleSystem: 'cepheus-srd' });
-      expect(patchRes.status).toBe(200);
-      expect(patchRes.body.ruleSystem).toBe('cepheus-srd');
+      expect(patchRes.status).toBe(400);
+      expect(patchRes.body.message).toMatch(/importer-only/i);
+      // Still unset — the rejected write did not partially apply.
+      const afterReject = await request(server).get(`/api/v1/campaigns/${campRes.body.id}`).set(dm);
+      expect(afterReject.body.ruleSystem).toBe('');
+
+      // create() rejects it too, not just update() — both write paths run the same guard.
+      const createRejected = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: 'Cepheus Campaign 2', ruleSystem: 'cepheus-srd' });
+      expect(createRejected.status).toBe(400);
+      expect(createRejected.body.message).toMatch(/importer-only/i);
 
       // Cepheus has no per-statblock section vocabulary; a 5e section is rejected 400.
       const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'cepheus', url: fake.baseUrl, sections: ['spells'] });
@@ -2048,6 +2118,139 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(typeof bySource[s].note).toBe('string');
       expect(bySource[s].note.length).toBeGreaterThan(0);
       expect(typeof bySource[s].license).toBe('string');
+    }
+  });
+});
+
+/**
+ * Issue #2081: an importer-only pack (Cepheus — a full importer, no combat adapter) can no
+ * longer be SELECTED as a campaign's `ruleSystem` (see the sibling-importer-wiring test
+ * above). This suite covers the other half of the acceptance bar: a campaign that ALREADY
+ * stores such a slug — data written before this guard existed, or by direct DB repair — must
+ * not be bricked. The row is written directly via `db.update(campaigns)`, bypassing
+ * CampaignsService entirely, to simulate exactly that pre-existing-data shape rather than
+ * going through the (now-rejecting) write path.
+ *
+ * Decision this test pins: an already-stored adapterless slug keeps resolving through the
+ * same pre-existing "unrecognized ruleSystem falls back to the 5e adapter" path every other
+ * unknown/dangling slug already used (packages/schema's `ruleSystemAdapter` — unchanged by
+ * this issue) — every READ keeps working with no throw. Every WRITE that does not itself
+ * touch `ruleSystem` also keeps working unconditionally. Only a write that explicitly
+ * (re)selects the adapterless slug is rejected, matching the "selecting ... is rejected"
+ * acceptance criterion with no carve-out for "it was already selected".
+ */
+describe('rules / rule packs — a campaign that already stores an importer-only ruleSystem keeps working (issue #2081)', () => {
+  let ctx: TestAppContext;
+  let server: Server;
+  const preexistingDm = { 'x-dev-role': 'dm', 'x-dev-user': 'preexisting-cepheus-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('GET keeps working (no throw), unrelated PATCH keeps working, but re-selecting the same slug is rejected', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    // Install the real Cepheus pack so 'cepheus-srd' genuinely exists in rule_packs (matching
+    // what validateRuleSystem's own pack-existence check requires for every OTHER slug it
+    // resolves, and what a real pre-existing campaign would have pointed at).
+    const { startFakeCepheus } = await import('./fake-cepheus');
+    const fake = await startFakeCepheus();
+    let campaignId: number;
+    try {
+      const install = await request(server).post('/api/v1/rules/packs/install').set(preexistingDm).send({ source: 'cepheus', url: fake.baseUrl });
+      expect(install.status).toBe(202);
+      const job = await pollJob(server, preexistingDm, install.body.id);
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('cepheus-srd');
+
+      const campRes = await request(server).post('/api/v1/campaigns').set(preexistingDm).send({ name: 'Legacy Cepheus Campaign' });
+      expect(campRes.status).toBe(201);
+      campaignId = campRes.body.id;
+
+      // Simulate pre-existing data: write the adapterless slug directly, bypassing
+      // CampaignsService.validateRuleSystem (and therefore this issue's guard) entirely.
+      await db.update(campaigns).set({ ruleSystem: 'cepheus-srd' }).where(eq(campaigns.id, campaignId));
+
+      // Read paths do not throw on the data already sitting in the database.
+      const getRes = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(preexistingDm);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.ruleSystem).toBe('cepheus-srd');
+
+      // An unrelated write (name change) that does not touch ruleSystem keeps working.
+      const renamePatch = await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(preexistingDm)
+        .send({ name: 'Legacy Cepheus Campaign (renamed)' });
+      expect(renamePatch.status).toBe(200);
+      expect(renamePatch.body.name).toBe('Legacy Cepheus Campaign (renamed)');
+      expect(renamePatch.body.ruleSystem).toBe('cepheus-srd'); // untouched, still there
+
+      // A campaign combat action against this campaign does not throw either — it resolves
+      // through the same unknown-slug 5e fallback ruleSystemAdapter has always used, exactly
+      // as it would for any other unrecognized ruleSystem string (unchanged by this issue).
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(preexistingDm)
+        .send({ name: 'Legacy Fight', hidden: false });
+      expect(encRes.status).toBe(201);
+
+      // But an explicit write that RE-SELECTS the same already-stored slug is rejected —
+      // "selecting an importer-only pack is rejected" has no carve-out for "it's already set".
+      const reselect = await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(preexistingDm).send({ ruleSystem: 'cepheus-srd' });
+      expect(reselect.status).toBe(400);
+      expect(reselect.body.message).toMatch(/importer-only/i);
+
+      // The rejected re-select did not change anything — still exactly the pre-existing value.
+      const afterReselect = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(preexistingDm);
+      expect(afterReselect.body.ruleSystem).toBe('cepheus-srd');
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('JSON import (POST /campaigns/import) drops an importer-only ruleSystem instead of selecting it, matching the existing dangling-slug degrade-not-fail path', async () => {
+    // importCampaign() is a THIRD write path for `ruleSystem` — separate from create()/update()
+    // — that inserts a new campaign row directly rather than going through validateRuleSystem.
+    // An untrusted export document naming an installed-but-importer-only pack must not be able
+    // to select it through this path either.
+    const { startFakeCepheus } = await import('./fake-cepheus');
+    const fake = await startFakeCepheus();
+    try {
+      const install = await request(server).post('/api/v1/rules/packs/install').set(preexistingDm).send({ source: 'cepheus', url: fake.baseUrl });
+      expect(install.status).toBe(202);
+      const job = await pollJob(server, preexistingDm, install.body.id);
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('cepheus-srd');
+
+      const doc = {
+        campaign: {
+          name: 'Imported Cepheus Campaign',
+          ruleSystem: 'cepheus-srd',
+          dmControlsProgression: false,
+          dmControlsTurns: false,
+          requireDmTurnConfirmation: false,
+          publicRecapSharingEnabled: true,
+          catalogPrivacy: 'private',
+          aiExternalContentPolicy: 'blocked',
+          narrationLanguage: 'en',
+          status: 'active',
+        },
+      };
+      const importRes = await request(server).post('/api/v1/campaigns/import').set(preexistingDm).send(doc);
+      // The import itself is NOT rejected wholesale (unlike create()/update()) — it degrades
+      // exactly like every other unusable ruleSystem case importCampaign already handles
+      // (an uninstalled pack, an invalid narrationLanguage): the rest of the document still
+      // imports, just without selecting the adapterless slug.
+      expect(importRes.status).toBe(201);
+      expect(importRes.body.ruleSystem).toBe('');
+    } finally {
+      await fake.close();
     }
   });
 });
@@ -2544,7 +2747,7 @@ describe('rules / rule packs — identical re-import short-circuit (#1518)', () 
   });
 
   const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'sc-1518-dm' };
-  const TOTAL = 2 + 2 + 1 + 4 + 2 + 2 + 1; // spells + creatures + magicitems + conditions + classes + species + feats
+  const TOTAL = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2; // spells + creatures + magicitems + conditions + classes + species + feats + weapons + armor
 
   it('stamps the manifest hash on install and short-circuits a byte-identical re-import to a no-op', async () => {
     const server = ctx.app.getHttpServer();

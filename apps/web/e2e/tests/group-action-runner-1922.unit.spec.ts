@@ -226,6 +226,22 @@ test.describe('runGroupActionSequence (issue #1922 — the sequential loop)', ()
     expect(outcome.results[1].reason).toBe('noAction');
   });
 
+  test('skips (never errors) an actor whose limited-use pool is exhausted, and keeps going', async () => {
+    // Issue #1921 + #1922: the "Run for group" button is gated on the SOURCE row's remaining
+    // uses, but each candidate carries its own action_uses entry, so the loop still meets
+    // exhausted ones. That must skip, not abort the run.
+    const candidates = [candidate(1, 'Goblin 1'), candidate(2, 'Goblin 2'), candidate(3, 'Goblin 3')];
+    const outcome = await runGroupActionSequence(candidates, async (c) => {
+      if (c.combatantId === 2) throw new ApiError(400, 'no uses left', [], 'action_uses_exhausted');
+      return resolveResult(c.combatantId, 'hits');
+    });
+    expect(outcome.stoppedEarly).toBe(false);
+    expect(outcome.results.map((r) => r.status)).toEqual(['applied', 'skipped', 'applied']);
+    // A DISTINCT reason from a spent action slot: this combatant still HAS its action,
+    // the ability is what ran out. The summary card renders a different sentence for each.
+    expect(outcome.results[1].reason).toBe('noUses');
+  });
+
   test('a mid-loop non-economy failure stops the loop and reports applied vs not-run', async () => {
     const candidates = [candidate(1, 'Goblin 1'), candidate(2, 'Goblin 2'), candidate(3, 'Goblin 3'), candidate(4, 'Goblin 4')];
     const outcome = await runGroupActionSequence(candidates, async (c) => {
@@ -291,5 +307,9 @@ test.describe('the cross-package contract this runner depends on (issue #1922)',
     // invariant and is covered there; what is unguarded — and what this test exists for — is
     // the code string crossing the package boundary.
     expect(src).toContain("code: 'action_economy_exhausted',");
+    // Issue #1921 added a SECOND exhaustion code. It has the same silent-inversion risk: if
+    // the runner does not skip on it, a pack where one monster already used the ability
+    // aborts the whole group run.
+    expect(src).toContain("code: 'action_uses_exhausted',");
   });
 });

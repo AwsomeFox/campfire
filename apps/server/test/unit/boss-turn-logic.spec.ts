@@ -39,6 +39,7 @@ function combatant(id: number, initiative: number | null): Combatant {
     conditions: [],
     ruleEntryId: null,
     sortOrder: id,
+    manualOrder: null,
     tokenX: null,
     tokenY: null,
     tokenSize: 'medium',

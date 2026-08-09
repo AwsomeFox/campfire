@@ -1,18 +1,14 @@
 {
   "apps/web/src/features/encounters/ActionUseFlow.tsx": 1,
-  "apps/web/src/features/encounters/CheckRequests.tsx": 6,
-  "apps/web/src/features/encounters/CombatantActionsList.tsx": 1,
   "apps/web/src/features/encounters/CombatantStatblockEditor.tsx": 5,
   "apps/web/src/features/encounters/EncounterAftermathPanel.tsx": 7,
   "apps/web/src/features/encounters/EncounterListPage.tsx": 4,
-  "apps/web/src/features/encounters/PlayerVitalsHeader.tsx": 6,
-  "apps/web/src/features/encounters/ResourceTrackerPanel.tsx": 1,
-  "apps/web/src/features/encounters/RulesLookupPanel.tsx": 3,
-  "apps/web/src/features/encounters/RunSessionPage.tsx": 30,
+  "apps/web/src/features/encounters/PlayerVitalsHeader.tsx": 3,
+  "apps/web/src/features/encounters/RunSessionPage.tsx": 23,
   "apps/web/src/features/encounters/SpellbookPanel.tsx": 10,
   "apps/web/src/features/encounters/TurnWorkspace.tsx": 8,
-  "apps/web/src/features/encounters/combat/AddCombatantPanel.tsx": 12,
+  "apps/web/src/features/encounters/combat/AddCombatantPanel.tsx": 11,
   "apps/web/src/features/encounters/combat/CombatantRow.tsx": 28,
   "apps/web/src/features/encounters/combat/DeathSaves.tsx": 2,
-  "apps/web/src/features/encounters/map/BattleMap.tsx": 50
+  "apps/web/src/features/encounters/map/BattleMap.tsx": 46
 }

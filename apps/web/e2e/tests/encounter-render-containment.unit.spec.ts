@@ -14,7 +14,7 @@ const COMBATANT_ROW = resolve(__dirname, '../../src/features/encounters/combat/C
 const COMBATANT_STATBLOCK = resolve(__dirname, '../../src/features/encounters/combat/CombatantStatblock.tsx');
 
 test.describe('encounter cockpit memo boundaries (issue #1917 stage 1)', () => {
-  test('CombatantRow, ApplyDamageBar, and BattleMap stay React.memo-wrapped', () => {
+  test('BattleMap and ApplyDamageBar stay React.memo-wrapped', () => {
     const source = readFileSync(BATTLE_MAP, 'utf8');
     expect(source).toContain('export const BattleMap = memo(function BattleMap(');
     expect(source).toContain('export const ApplyDamageBar = memo(function ApplyDamageBar(');
@@ -41,12 +41,17 @@ test.describe('encounter cockpit memo boundaries (issue #1917 stage 1)', () => {
     // BattleMap itself — it now lives only in GridOverlay.
     expect(battleMapSource).not.toContain('data-testid="battle-map-grid"');
     expect(battleMapSource).toContain("import { GridOverlay } from './GridOverlay';");
-    // Match the actual JSX usage (prop-attribute line right after the opening tag), not just
-    // the string "<GridOverlay" — that substring alone would also match this file's own
-    // doc-comments referencing `` `<GridOverlay>` ``, which stay present even if the real JSX
-    // usage is ever reverted to the old inline block. A regex probe that a mutation-removed
-    // JSX usage still satisfies is not testing what it claims to.
-    expect(battleMapSource).toContain('<GridOverlay\n                  gridOn={gridOn}');
+    // Match the actual JSX usage — the opening tag followed by a real prop — not just the
+    // string "<GridOverlay", which would also match this file's own doc-comments referencing
+    // `` `<GridOverlay>` ``; those survive even if the JSX usage is reverted to the old inline
+    // block, so the bare-substring version of this assertion passed under exactly the mutation
+    // it exists to catch.
+    //
+    // Whitespace-tolerant on purpose: pinning the literal indentation (`'<GridOverlay\n' +
+    // 18 spaces + 'gridOn={gridOn}'`) made the guard fail on a Prettier reflow that changes
+    // nothing it cares about. `\s+` still requires `gridOn={gridOn}` to be the FIRST thing
+    // after the tag, so a doc-comment mention cannot satisfy it.
+    expect(battleMapSource).toMatch(/<GridOverlay\s+gridOn=\{gridOn\}/);
 
     const gridOverlaySource = readFileSync(GRID_OVERLAY, 'utf8');
     expect(gridOverlaySource).toContain('export const GridOverlay = memo(function GridOverlay(');

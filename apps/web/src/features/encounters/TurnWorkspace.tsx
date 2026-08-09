@@ -16,13 +16,16 @@ import { useTranslation } from 'react-i18next';
  * and the suggested-action search is a labelled text input. Keyboard/mobile flows reuse the
  * app's standard focusable controls (no custom key handling that would trap focus).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec, CustomMechanicsProfile } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useAuth } from '../../app/auth';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { isImeComposing } from '../../lib/compositionSafeSubmit';
+import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
+import { tableAudioEngine, vibrateIfEnabled, YOUR_TURN_VIBRATION_PATTERN } from '../../lib/tableAudio';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
 import { GatedControl } from '../../components/GatedControl';
@@ -180,6 +183,8 @@ export function TurnWorkspace({
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const announce = useAnnounce();
+  const { me } = useAuth();
+  const tableAudioLevel = me?.user?.tableAudio ?? 'off';
   const [actionFilter, setActionFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [readiedDraft, setReadiedDraft] = useState(currentTurnState?.readied ?? '');
@@ -224,6 +229,22 @@ export function TurnWorkspace({
       });
     }
   }, [announce, encounterId, isYourTurn, currentId, currentName, turnRound]);
+
+  // Issue #1920 — table audio chime + haptic on the same your-turn edge as the
+  // announce above, deduped the same way (a key per encounter+actor+round) so a
+  // background refetch that resolves the same turn again doesn't replay it.
+  // tableAudioEngine.playTurnChime is itself a no-op when the preference is off
+  // or the AudioContext hasn't been gesture-unlocked yet (see RollResultToastContext,
+  // the only place that ever calls tableAudioEngine.unlock()).
+  const lastTurnCueKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isYourTurn || currentId == null) return;
+    const key = `your-turn:${encounterId}:${currentId}:${turnRound}`;
+    if (lastTurnCueKeyRef.current === key) return;
+    lastTurnCueKeyRef.current = key;
+    tableAudioEngine.playTurnChime(tableAudioLevel);
+    vibrateIfEnabled(YOUR_TURN_VIBRATION_PATTERN, tableAudioLevel, prefersReducedMotion());
+  }, [encounterId, isYourTurn, currentId, turnRound, tableAudioLevel]);
 
   useEffect(() => {
     setReadiedDraft(currentTurnState?.readied ?? '');
@@ -311,7 +332,7 @@ export function TurnWorkspace({
   const actionDisabled = controlsDisabled || actionSpent;
 
   return (
-    <Card className="space-y-3" data-testid="turn-workspace">
+    <Card className="space-y-3" id="turn-workspace" data-testid="turn-workspace">
       {/* Prominent actor / round / next actor + Spellbook toggle. */}
       <div className="flex items-center justify-between gap-2.5 flex-wrap">
         <div className="flex items-center gap-2.5 flex-wrap">

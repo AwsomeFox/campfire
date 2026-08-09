@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
-import { test, expect } from '@playwright/test';
+import { test, expect, request } from '@playwright/test';
+import { CREDS } from '../global-setup';
 import { seed, stateFor } from './seed';
 
 function paths() {
@@ -240,11 +241,39 @@ test.describe('Unicode markdown mentions (issue #627)', () => {
 test.describe('notification deep links', () => {
   test.use({ storageState: stateFor('player') });
 
+  /**
+   * Re-post the seeded recap so the notification under test is the newest one.
+   *
+   * The bell fetches only `?limit=30`, and global setup writes this recap before every
+   * other spec runs. Any shard whose earlier specs generate thirty player notifications
+   * pushes the seeded one out of the window, and the click times out — which is what
+   * happened here once a shard rebalance changed which specs precede this file. Nothing
+   * about the deep link is shard-dependent, so the test stops depending on the seed's
+   * position in a shared list and produces its own notification instead.
+   *
+   * `recap_posted` fires only on the empty -> non-empty transition, so clearing and
+   * restoring the same text is what re-emits it; the session ends up exactly as seeded.
+   */
+  test.beforeAll(async ({ baseURL }) => {
+    const { navigation } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const before = await ctx.get(`/api/v1/sessions/${navigation.sessionId}`);
+    expect(before.ok()).toBeTruthy();
+    const { recap } = (await before.json()) as { recap: string };
+    expect(recap.trim()).not.toBe('');
+    expect((await ctx.patch(`/api/v1/sessions/${navigation.sessionId}`, { data: { recap: '' } })).ok()).toBeTruthy();
+    expect((await ctx.patch(`/api/v1/sessions/${navigation.sessionId}`, { data: { recap } })).ok()).toBeTruthy();
+    await ctx.dispose();
+  });
+
   test('a recap notification opens and focuses the selected session', async ({ page }) => {
     const { campaignId, navigation } = seed();
     await page.goto(`/c/${campaignId}`);
     await page.getByRole('button', { name: /Notifications/ }).click();
-    await page.getByRole('button', { name: /Recap posted for Session 1/ }).click();
+    // `.first()` — the re-post above leaves the seeded notification behind it, and both
+    // deep-link to the same session.
+    await page.getByRole('button', { name: /Recap posted for Session 1/ }).first().click();
     await expectFocused(page, `entity-session-${navigation.sessionId}`);
   });
 });

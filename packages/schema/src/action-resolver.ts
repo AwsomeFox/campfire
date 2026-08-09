@@ -70,6 +70,20 @@ export interface ResolverAdapter {
    */
   readonly criticalDamage?: CriticalDamageRule;
   /**
+   * OPTIONAL — declare `false` if this system has no critical hit at all (issue #1598 review).
+   *
+   * Distinct from {@link criticalDamage}, which answers "how much does a crit multiply?" and
+   * therefore presupposes that crits exist. A damage formula is not evidence either way: every
+   * adapter has one, including the systems whose attack resolution can only come out hit or
+   * miss, so a UI that offered a crit wherever damage dice existed was reading the wrong field.
+   *
+   * Omission means `true` — the same direction as `criticalDamage`'s default, and for the same
+   * reason: an unaudited adapter keeps the behaviour it has always had rather than being guessed
+   * into a rules change. Declare `false` only where the system's own {@link resolveAttack} is
+   * incapable of returning `crit`.
+   */
+  readonly hasCriticalHits?: boolean;
+  /**
    * OPTIONAL, OPT-IN — see {@link ResolverMathProfile}. An adapter that does not declare it is
    * treated as NOT implemented by the structured resolver, which is the safe direction.
    */
@@ -211,6 +225,31 @@ export function checkProficiencyBonusForAdapter(adapter: ResolverAdapter, level:
  */
 export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'criticalDamage'>): CriticalDamageRule {
   return adapter.criticalDamage ?? 'double-dice';
+}
+
+/**
+ * Whether this system has critical hits at all (issue #1598 review).
+ *
+ * The question a crit-offering control must ask. It used to be answered by
+ * {@link criticalDamageRuleForAdapter} returning a formula, but that function answers
+ * "by how much", defaults for every undeclared adapter, and so said yes even for OSR,
+ * whose `resolveAttack` returns only `hit` or `miss`. A sheet gated on the formula could
+ * commit doubled damage that resolving the same attack authoritatively never produces.
+ */
+export function hasCriticalHitsForAdapter(adapter: Pick<ResolverAdapter, 'hasCriticalHits'>): boolean {
+  return adapter.hasCriticalHits !== false;
+}
+
+/**
+ * Whether this system reports DEGREES of success (PF2e/SF2e) rather than a flat pass/fail.
+ *
+ * The same test `classifySaveOutcome` makes — a system only ever produces `critSuccess` /
+ * `critFailure` when it declares `degreeOfSuccess`. Distinct from {@link hasCriticalHitsForAdapter},
+ * which governs ATTACK crits: a system can have one without the other, so a caller reasoning
+ * about a degree outcome must ask this rather than the attack-crit capability.
+ */
+export function hasDegreesOfSuccessForAdapter(adapter: Pick<ResolverAdapter, 'degreeOfSuccess'>): boolean {
+  return typeof adapter.degreeOfSuccess === 'function';
 }
 
 /**
@@ -358,6 +397,63 @@ export const ActionUses = z.object({
   resourceCost: z.number().int().min(0).max(99).default(0),
 });
 export type ActionUses = z.infer<typeof ActionUses>;
+
+/**
+ * Parse a `recharge-N-M` (or bare `recharge-N`) condition string into its die threshold
+ * (issue #1921) — `min` is the lowest d6 face that recharges the action, `max` is the
+ * highest face the statblock prose named (informational only; the roll compares against
+ * `min`). Returns null for anything else (an empty string, a rest cadence like
+ * `long-rest`, or unparseable text) so a caller can tell "not a recharge action" apart
+ * from a malformed one without throwing.
+ */
+export function parseRechargeRange(recharge: string): { min: number; max: number } | null {
+  const m = /^recharge-(\d+)(?:-(\d+))?$/.exec(recharge.trim());
+  if (!m) return null;
+  const min = Number(m[1]);
+  const max = m[2] ? Number(m[2]) : 6;
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min < 1 || max > 20 || min > max) return null;
+  return { min, max };
+}
+
+/**
+ * The effective size of an action's limited-use pool (issue #1921): an explicit X/day
+ * `max` wins outright; a bare recharge condition with no `max` implies a pool of exactly
+ * one ("spent until it recharges"); an action with neither is at-will (0 = untracked, no
+ * spend is ever persisted for it). Read this — never `uses.max` directly — anywhere a
+ * caller needs to know whether an action's spend should be tracked at all.
+ */
+export function effectiveActionUsesMax(uses: ActionUses): number {
+  if (uses.max > 0) return uses.max;
+  // Only a DIE-ROLL recharge condition implies an untyped pool of one. `recharge` also
+  // carries rest cadences ('short-rest', 'long-rest', 'dawn'), and those have no
+  // in-encounter refresh path: the turn-start tick filters candidates through
+  // `parseRechargeRange`, which returns null for them, and nothing resets
+  // `combatants.action_uses` on a rest yet. Treating a rest cadence as a one-use pool
+  // would therefore permanently exhaust an ability that used to be at-will, with no way
+  // to get it back inside the fight.
+  return parseRechargeRange(uses.recharge) ? 1 : 0;
+}
+
+/**
+ * Human-readable label for an action's limited-use pool (issue #1921) — "Recharge 5–6",
+ * "Recharge 6", "3/Day" — or '' for an at-will action (no pool).
+ *
+ * Used by the server's exhausted-action rejection message. The web action-list badge does
+ * NOT call this: it formats the same pool through the i18n catalog
+ * (`encounters.actions.uses.*`) so the label can be translated, which a plain string helper
+ * in the locale-free schema package cannot do. The two are deliberately parallel
+ * implementations of one format, not a shared one.
+ */
+export function describeActionUses(uses: ActionUses): string {
+  // Only a DIE-ROLL condition describes as a recharge. A rest cadence ('long-rest', 'dawn')
+  // used to be returned raw, which then read as `"X" has no uses remaining (long-rest).` in
+  // the apply-time rejection — naming the cadence instead of the pool the caller overran.
+  const range = parseRechargeRange(uses.recharge);
+  if (range) {
+    return range.min === range.max ? `Recharge ${range.min}` : `Recharge ${range.min}–${range.max}`;
+  }
+  return uses.max > 0 ? `${uses.max}/Day` : '';
+}
 
 /** Attack-roll definition (mode='attack'). Either an explicit bonus or ability+proficiency. */
 export const AttackSpec = z.object({
@@ -760,6 +856,20 @@ export const ActionUndoToken = z.object({
 });
 export type ActionUndoToken = z.infer<typeof ActionUndoToken>;
 
+/**
+ * Remaining-uses summary attached to a {@link UsableAction} (issue #1921) — server-computed
+ * from the persisted spend so REST/MCP/web clients never derive spend state key math
+ * themselves. `max` is the {@link effectiveActionUsesMax} pool size (never 0 — a null `uses`
+ * on the parent action already means at-will). `available` is `max - spent`, floored at 0.
+ */
+export const UsableActionUses = z.object({
+  max: z.number().int().min(1),
+  recharge: z.string().max(40).default(''),
+  spent: z.number().int().min(0).default(0),
+  available: z.number().int().min(0).default(0),
+});
+export type UsableActionUses = z.infer<typeof UsableActionUses>;
+
 /** One usable action surfaced for a combatant (issue #414): its structure + whether it can auto-resolve. */
 export const UsableAction = z.object({
   index: z.number().int().min(0),
@@ -780,6 +890,13 @@ export const UsableAction = z.object({
    * combat action came from gear vs. the sheet without a second lookup.
    */
   source: z.string().max(220).default(''),
+  /**
+   * Issue #1921: limited-use / recharge pool state, or null for an at-will action — so a
+   * client never has to compute "is this exhausted" itself from `spec.uses` plus a raw
+   * spend map key it cannot construct. Present only when {@link effectiveActionUsesMax}
+   * of the action's `spec.uses` is greater than 0.
+   */
+  uses: UsableActionUses.nullable().default(null),
 });
 export type UsableAction = z.infer<typeof UsableAction>;
 

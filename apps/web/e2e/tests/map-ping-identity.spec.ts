@@ -338,4 +338,59 @@ test.describe('battle-map ping identity + intent menu (issue #1937)', () => {
     await expect(page.getByTestId('map-ping-intent-menu')).toHaveCount(0);
     await settleNoPing(page, pings, 0);
   });
+
+  // Issue #2047: long-press (touch) and right-click (mouse), covered above, have no
+  // keyboard equivalent — these drive the real Shift+Enter/Space keyboard path in an
+  // actual browser, alongside the pointer-path coverage this file already has.
+  test('Shift+Enter on the focused map surface opens the intent menu; choosing Look sends a labeled ping at the map center', async ({ page }) => {
+    const { surface, pings } = await openPingFixture(page);
+    await surface.focus();
+    await expect(page.getByTestId('map-ping-intent-menu')).toHaveCount(0);
+
+    await page.keyboard.press('Shift+Enter');
+    const menu = page.getByTestId('map-ping-intent-menu');
+    await expect(menu).toBeVisible();
+    expect(pings).toHaveLength(0);
+
+    await page.getByTestId('map-ping-intent-look').click();
+    await expect.poll(() => pings.length).toBe(1);
+    expect(pings[0].label).toBe('Look');
+    // Keyboard activation always lands at the map center, matching the existing
+    // Enter/Space plain-ping keyboard path (MAP_PING_KEYBOARD_POINT).
+    expect(pings[0].x).toBe(50);
+    expect(pings[0].y).toBe(50);
+    await expect(menu).toHaveCount(0);
+  });
+
+  test('Shift+Space also opens the intent menu', async ({ page }) => {
+    const { surface, pings } = await openPingFixture(page);
+    await surface.focus();
+
+    await page.keyboard.press('Shift+Space');
+    await expect(page.getByTestId('map-ping-intent-menu')).toBeVisible();
+    expect(pings).toHaveLength(0);
+  });
+
+  test('plain Enter (no Shift) on the focused map surface still sends an unlabeled ping and never opens the intent menu', async ({ page }) => {
+    const { surface, pings } = await openPingFixture(page);
+    await surface.focus();
+
+    await page.keyboard.press('Enter');
+    await expect.poll(() => pings.length).toBe(1);
+    expect(pings[0].label).toBeNull();
+    await expect(page.getByTestId('map-ping-intent-menu')).toHaveCount(0);
+  });
+
+  test('Escape closes a Shift+Enter-opened menu without sending a ping, and returns focus to the map surface', async ({ page }) => {
+    const { surface, pings } = await openPingFixture(page);
+    await surface.focus();
+
+    await page.keyboard.press('Shift+Enter');
+    await expect(page.getByTestId('map-ping-intent-menu')).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('map-ping-intent-menu')).toHaveCount(0);
+    await settleNoPing(page, pings, 0);
+    await expect(surface).toBeFocused();
+  });
 });

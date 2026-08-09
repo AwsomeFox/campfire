@@ -25,6 +25,17 @@ export interface CampaignAccessFlags {
   canPlayerWrite: boolean;
   /** Any non-viewer member write (notes, inbox, dice rolls, …). */
   canMemberWrite: boolean;
+  /**
+   * EVERY member — viewers included — on a writable campaign.
+   *
+   * This is the client-side mirror of the server's `requireMemberOnWritableCampaign`, which
+   * asserts membership and writability and nothing about role. `canMemberWrite` deliberately
+   * excludes viewers and is the right gate for surfaces the product reserves for
+   * participants; it is the WRONG gate for an endpoint that accepts viewers, because a
+   * viewer who owns a character can read their own sheet (`getOrThrow` checks ownership, not
+   * a role floor) and the server would accept the roll a stricter flag had hidden.
+   */
+  canAnyMemberWrite: boolean;
 }
 
 export function deriveCampaignAccess(
@@ -45,6 +56,7 @@ export function deriveCampaignAccess(
     canDmWrite: isDm && writable,
     canPlayerWrite: (isDm || isPlayer) && writable,
     canMemberWrite: isMember && !isViewer && writable,
+    canAnyMemberWrite: isMember && writable,
   };
 }
 

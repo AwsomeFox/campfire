@@ -1,6 +1,7 @@
 import { test, expect, request, type Locator, type Page } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #428 — at phone widths, encounter combat + map controls must meet
@@ -106,7 +107,12 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
 
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
+        // TurnWorkspace is the cockpit's Turn tab; the roster is Party. This drill
+        // measures controls from both, so it walks the tabs explicitly.
         await expect(page.getByRole('heading', { name: `Touch size ${viewport.name}` })).toBeVisible();
+        // Roster controls (pips, HP steppers, condition chips) are the Party tab; the
+        // action-economy controls further down are the Turn tab. Walk both.
+        await openCockpitTab(page, 'party');
 
         const charName = `Touch Target ${viewport.name}`;
         const charRow = page.locator('[data-testid^="combatant-row-"]').filter({ hasText: charName });
@@ -147,11 +153,13 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         await assertMinTarget(charRow.getByRole('button', { name: 'Remove Prone' }), 'condition chip remove');
 
         // Action-economy use/undo controls in the turn workspace.
+        await openCockpitTab(page, 'turn');
         const workspace = page.getByTestId('turn-workspace');
         await assertMinTarget(workspace.getByRole('button', { name: 'Use' }).first(), 'action-economy use');
         await assertMinTarget(workspace.getByRole('button', { name: 'Undo' }).first(), 'action-economy undo');
 
         // Add-combatant tab bar — each tab must be a 44×44 target.
+        await openCockpitTab(page, 'party');
         const addTabs = page.getByTestId('add-combatant-tabs').locator('button');
         const tabCount = await addTabs.count();
         expect(tabCount).toBeGreaterThanOrEqual(2);
