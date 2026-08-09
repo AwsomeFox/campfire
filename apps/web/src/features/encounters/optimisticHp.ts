@@ -1,4 +1,4 @@
-import type { Combatant, HpModel, RuleSystemAdapter, CustomMechanicsProfile } from '@campfire/schema';
+import type { Combatant, EncounterWithCombatants, HpModel, RuleSystemAdapter, CustomMechanicsProfile } from '@campfire/schema';
 import {
   applyStarfinderDamage,
   ruleSystemAdapter,
@@ -75,6 +75,28 @@ export type OptimisticHpDelta = {
   combatantId: number;
   delta: number;
 };
+
+/**
+ * Moves an optimistic HP ledger onto a newer encounter snapshot without
+ * double-applying operations that the newer response may already contain.
+ * Pending targets retain their original base combatants; all encounter-level
+ * state and unrelated combatants advance to the newer snapshot.
+ */
+export function rebaseOptimisticHpEncounter(
+  base: EncounterWithCombatants,
+  updated: EncounterWithCombatants,
+  operations: Iterable<OptimisticHpDelta>,
+): EncounterWithCombatants {
+  const pendingCombatantIds = new Set([...operations].map(({ combatantId }) => combatantId));
+  if (pendingCombatantIds.size === 0) return updated;
+  const baseCombatants = new Map(base.combatants.map((combatant) => [combatant.id, combatant]));
+  return {
+    ...updated,
+    combatants: updated.combatants.map((combatant) =>
+      pendingCombatantIds.has(combatant.id) ? baseCombatants.get(combatant.id) ?? combatant : combatant,
+    ),
+  };
+}
 
 /** Rebuilds the optimistic encounter cache from a committed base plus pending writes. */
 export function replayOptimisticHpDeltas(

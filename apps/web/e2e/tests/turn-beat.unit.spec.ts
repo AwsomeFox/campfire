@@ -106,7 +106,7 @@ test.describe('turn-change beat (issue #1906)', () => {
     const nextTurnMutStart = source.indexOf('const nextTurnMut = useKeyedMutation({');
     const nextTurnMutBody = source.slice(nextTurnMutStart, source.indexOf('const undoTurnMut', nextTurnMutStart));
     expect(nextTurnMutBody).toMatch(/api\.post<EncounterWithCombatants>\(`\$\{API\}\/encounters\/\$\{eid\}\/next-turn`/);
-    expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*queryClient\.setQueryData\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) => preferNewerEncounterSnapshot\(\s*current,\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\),\s*\),\s*\);\s*\},/);
+    expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*const seeded = queryClient\.setQueryData<EncounterWithCombatants>\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) => preferNewerEncounterSnapshot\(\s*current,\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\),\s*\),\s*\);/);
   });
 
   test('emits an undo edge after a silent refetch baseline advances past a missed frame', () => {

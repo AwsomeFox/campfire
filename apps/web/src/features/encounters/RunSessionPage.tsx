@@ -34,7 +34,7 @@ import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampa
 import { inlineCharacterSheetsInteractive, inlineCharacterSheetsStatusLabel, shouldInvalidateInlineCharacters } from './inlineCharacterCards';
 import { endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
-import { applyOptimisticHpDelta, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
+import { applyOptimisticHpDelta, rebaseOptimisticHpEncounter, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
 import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
 import { FloatingNumbers } from './FloatingNumbers';
 import { diffHpFeedback, hpFeedbackSnapshot, sameHpFeedbackSnapshot, withOptimisticHpFeedbackTargets, type HpFeedbackEvent, type HpFeedbackSnapshot } from './hpFeedback';
@@ -2469,13 +2469,22 @@ export default function RunSessionPage() {
     // reconciliation the regular GET applies, so the next click already sees the turn
     // that just committed.
     onSuccess: (data) => {
-      queryClient.setQueryData(
+      const seeded = queryClient.setQueryData<EncounterWithCombatants>(
         queryKeys.encounter(eid),
         (current: EncounterWithCombatants | undefined) => preferNewerEncounterSnapshot(
           current,
           reconcileEncounterPatchResponse(data, pendingEncounterPatches.current.values(), '', eid),
         ),
       );
+      const hpQueue = optimisticHpQueueRef.current;
+      if (seeded && hpQueue.encounterId === eid && hpQueue.base && hpQueue.operations.size > 0) {
+        // HP steppers remain enabled while Next Turn runs. Move their replay ledger onto
+        // the advanced turn before another HP callback can rebuild the cache from its old
+        // base. Pending targets retain the pre-operation combatant so replaying every
+        // queued delta once cannot double-apply a write already present in `seeded`.
+        hpQueue.base = rebaseOptimisticHpEncounter(hpQueue.base, seeded, hpQueue.operations.values());
+        replayPendingOptimisticHpDeltas();
+      }
     },
     onError: (err) => {
       if (isAmbiguousOutcome(err)) enterReconciling();
