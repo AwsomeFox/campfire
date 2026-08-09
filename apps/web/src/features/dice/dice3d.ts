@@ -26,6 +26,13 @@
 import * as THREE from 'three';
 import type { DiceTheme } from '@campfire/schema';
 import { d6Values, faceValues } from './dice3dFaces';
+import {
+  ALIGN_MS,
+  ALIGN_MS_REDUCED,
+  dieDelayMs,
+  LINGER_MS,
+  LINGER_MS_FLOURISH,
+} from './dice3dTiming';
 
 interface ThemeSpec {
   body: number;
@@ -52,17 +59,6 @@ const FLOOR_BOUNCE = 0.42;
 const FLOOR_FRICTION = 0.74;
 const WALL_X = 3.3;
 const WALL_Z = 1.5;
-
-/** Alignment nudge after the die is already at rest — a few degrees of rocking flat. */
-const ALIGN_MS = 220;
-const ALIGN_MS_REDUCED = 120;
-/**
- * How long the flourish plays before the overlay hands off to the result toast.
- * A plain roll only needs the eye to register the faces; a crit/fumble needs its
- * ring, flash and sparks to read.
- */
-const LINGER_MS = 260;
-const LINGER_MS_FLOURISH = 620;
 
 const DROPPED_OPACITY = 0.3;
 
@@ -668,7 +664,7 @@ export function startDiceRoll(
       rest,
       init,
       shadow,
-      delay: i * 70,
+      delay: dieDelayMs(i, n),
       settleAt: 0,
       from: null,
       target: null,
@@ -741,6 +737,16 @@ export function startDiceRoll(
     d.target = flat.multiply(d.rig.group.quaternion.clone());
   }
 
+  /**
+   * Park the flourish ring under the hero die on BOTH floor axes. Dice are thrown
+   * forwards and come to rest at a nonzero z far more often than not, so tracking
+   * x alone leaves the ring visibly adrift of the die it is celebrating.
+   */
+  function centreRingOn(g: THREE.Object3D): void {
+    ring.position.x = g.position.x;
+    ring.position.z = g.position.z;
+  }
+
   function playFlourish(now: number, dt: number): void {
     if (!hero || !flourish) return;
     const ft = (now - landedAt) / 1000;
@@ -759,7 +765,7 @@ export function startDiceRoll(
       flash.color.setHex(0xfbbf24);
       flash.intensity = Math.max(0, 2.4 - ft * 2.2);
       ringMat.color.setHex(0xfbbf24);
-      ring.position.x = g.position.x;
+      centreRingOn(g);
       ring.scale.setScalar(0.4 + ft * 3.4);
       ringMat.opacity = Math.max(0, 0.85 - ft * 0.85);
       for (const [i, sp] of sparks.entries()) {
@@ -781,7 +787,7 @@ export function startDiceRoll(
       camera.position.y = 5.1 + Math.cos(ft * 39) * shake * 0.6;
       camera.lookAt(0, 0.2, 0);
       ringMat.color.setHex(0xf87171);
-      ring.position.x = g.position.x;
+      centreRingOn(g);
       ring.scale.setScalar(Math.max(0.35, 2.6 - ft * 3.4));
       ringMat.opacity = Math.max(0, 0.55 - ft * 0.8);
     }

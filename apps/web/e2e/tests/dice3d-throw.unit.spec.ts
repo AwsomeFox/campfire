@@ -1,7 +1,16 @@
 import { expect, test } from '@playwright/test';
 import * as THREE from 'three';
+import { DICE_ROLL_MAX_SETTLE_MS } from '../../src/components/DiceRollOverlay';
 import { dieFaceNormals, nudgeApart, simulate, upFaceIndex } from '../../src/features/dice/dice3d';
 import { faceValues } from '../../src/features/dice/dice3dFaces';
+import {
+  dieDelayMs,
+  LINGER_MS_FLOURISH,
+  MAX_ANIMATION_MS,
+  MAX_TOTAL_STAGGER_MS,
+  MAX_TRAJECTORY_MS,
+  STAGGER_MS,
+} from '../../src/features/dice/dice3dTiming';
 
 /**
  * The throw and the numbering meet here. `simulate` decides where the die comes
@@ -80,6 +89,47 @@ test.describe('recorded throw', () => {
     expect(dieFaceNormals(8)).toHaveLength(8);
     expect(dieFaceNormals(6)).toHaveLength(6);
     expect(dieFaceNormals(4)).toHaveLength(4);
+  });
+});
+
+test.describe('timing budget', () => {
+  test('no flight outruns MAX_TRAJECTORY_MS', () => {
+    // MAX_ANIMATION_MS is built on this number, and the overlay's settle backstop
+    // is built on that — so a change to gravity, bounce or the settle threshold
+    // that lengthens flights would push the animation under its own guard and
+    // strand dice in mid-air. Sampled across the scales the roller actually uses.
+    let worst = 0;
+    for (let i = 0; i < 400; i++) {
+      for (const rest of [0.86 * 0.66, 0.96 * 0.82, 0.96 * 1.05]) {
+        worst = Math.max(worst, (simulate(throwN(i), rest).length / 60) * 1000);
+      }
+    }
+    expect(worst).toBeLessThanOrEqual(MAX_TRAJECTORY_MS);
+  });
+
+  test('the stagger stays inside its budget however many dice are thrown', () => {
+    // The server caps dice per TERM at 20 but does not cap terms, so 20d6+20d6+20d6
+    // is a legal 60-die roll. At a flat 70ms each the last die began falling 4.1s
+    // in — past the old fixed backstop, so it was cut off having never landed.
+    for (const count of [1, 2, 3, 8, 20, 60, 200]) {
+      const last = dieDelayMs(count - 1, count);
+      expect(last, `${count} dice`).toBeLessThanOrEqual(MAX_TOTAL_STAGGER_MS);
+      expect(dieDelayMs(0, count), `${count} dice: first die waits`).toBe(0);
+      for (let i = 1; i < count; i++) {
+        expect(dieDelayMs(i, count), `${count} dice: die ${i} out of order`)
+          .toBeGreaterThan(dieDelayMs(i - 1, count));
+      }
+    }
+    // Small rolls keep the full, unhurried gap.
+    expect(dieDelayMs(1, 2)).toBe(STAGGER_MS);
+    expect(dieDelayMs(7, 8)).toBe(7 * STAGGER_MS);
+  });
+
+  test('the overlay backstop outlasts the longest legitimate roll', () => {
+    expect(DICE_ROLL_MAX_SETTLE_MS).toBeGreaterThan(MAX_ANIMATION_MS);
+    expect(MAX_ANIMATION_MS).toBeGreaterThanOrEqual(
+      MAX_TOTAL_STAGGER_MS + MAX_TRAJECTORY_MS + LINGER_MS_FLOURISH,
+    );
   });
 });
 

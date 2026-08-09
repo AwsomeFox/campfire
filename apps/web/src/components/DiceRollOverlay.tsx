@@ -16,6 +16,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DiceTheme } from '@campfire/schema';
 import type { Dice3dHandle, Dice3dSettleDie } from '../features/dice/dice3d';
+// Value import, so it must stay three.js-free — see the module doc there.
+import { MAX_ANIMATION_MS } from '../features/dice/dice3dTiming';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
 
 /**
@@ -35,9 +37,14 @@ export const DICE_ROLL_SETTLE_MS = 550;
 /**
  * Backstop for the 3D path. requestAnimationFrame does not run in a background
  * tab, so without this a roll started and then backgrounded would never reach
- * `onSettled` and the result toast would never appear.
+ * `onSettled` and the result toast would never appear. It also covers the chunk
+ * never arriving at all, where there is no roller to fail and no `catch` to fire.
+ *
+ * Derived from the roller's own budget rather than picked by hand: as a fixed
+ * 4s it sat UNDER the animation it was guarding once a 60-die roll's stagger was
+ * counted, and cut legitimate rolls off in mid-air.
  */
-export const DICE_ROLL_MAX_SETTLE_MS = 4000;
+export const DICE_ROLL_MAX_SETTLE_MS = MAX_ANIMATION_MS + 1000;
 
 export type DiceRollOverlayPhase = 'tumbling' | 'settling';
 
