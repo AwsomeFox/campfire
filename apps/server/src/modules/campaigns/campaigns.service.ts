@@ -456,6 +456,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     sessionCount: row.sessionCount,
     latestSessionNumber: row.latestSessionNumber,
     ruleSystem: row.ruleSystem,
+    enabledPackSlugs: fromJsonText<string[]>(row.enabledPackSlugs, []),
     customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row.customMechanicsProfile, null),
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
@@ -671,8 +672,13 @@ export class CampaignsService {
    */
   private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
     if (!ruleSystem) return;
+    const [pack] = await this.db.select({ id: rulePacks.id, kind: rulePacks.kind }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
+    if (pack && pack.kind !== 'base') {
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" is a ${pack.kind} content pack and cannot drive campaign mechanics. Enable it as additional content instead.`,
+      );
+    }
     if (hasCustomMechanicsProfile) return;
-    const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
     if (!pack) {
       throw new BadRequestException(
         `ruleSystem "${ruleSystem}" does not match any installed rule pack (or provide a matching customMechanicsProfile)`,
@@ -685,6 +691,34 @@ export class CampaignsService {
           'search, and AI rules lookups are unaffected.',
       );
     }
+  }
+
+  /** Validate and canonicalize content-only pack selection for one campaign. */
+  private async validateEnabledPackSlugs(slugs: string[] | undefined, primaryRuleSystem: string): Promise<string[] | undefined> {
+    if (slugs === undefined) return undefined;
+    const normalized = [...new Set(slugs.map((slug) => slug.trim()).filter(Boolean))]
+      .filter((slug) => slug !== primaryRuleSystem);
+    if (normalized.length === 0) return [];
+
+    const rows = await this.db
+      .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
+      .from(rulePacks)
+      .where(inArray(rulePacks.slug, normalized));
+    const bySlug = new Map(rows.map((row) => [row.slug, row]));
+    const missing = normalized.filter((slug) => !bySlug.has(slug));
+    if (missing.length > 0) {
+      throw new BadRequestException(`enabledPackSlugs contains pack(s) that are not installed: ${missing.join(', ')}`);
+    }
+    const enabled = new Set([primaryRuleSystem, ...normalized].filter(Boolean));
+    for (const slug of normalized) {
+      const pack = bySlug.get(slug)!;
+      if (pack.kind === 'extension' && (!pack.extendsPackSlug || !enabled.has(pack.extendsPackSlug))) {
+        throw new BadRequestException(
+          `Extension pack "${slug}" requires its base pack "${pack.extendsPackSlug ?? '(not declared)'}" to be primary or enabled`,
+        );
+      }
+    }
+    return normalized;
   }
 
   /**
@@ -763,6 +797,7 @@ export class CampaignsService {
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
     this.validateCustomMechanicsProfile(input.ruleSystem ?? '', input.customMechanicsProfile ?? null);
     await this.validateRuleSystem(input.ruleSystem, input.customMechanicsProfile != null);
+    const enabledPackSlugs = await this.validateEnabledPackSlugs(input.enabledPackSlugs ?? [], input.ruleSystem ?? '');
     // A brand-new campaign has no locations/attachments of its own yet, so any
     // non-null currentLocationId/mapAttachmentId on create can never be valid.
     if (input.currentLocationId != null) {
@@ -797,6 +832,7 @@ export class CampaignsService {
             sessionCount: 0,
             latestSessionNumber: 0,
             ruleSystem: input.ruleSystem ?? '',
+            enabledPackSlugs: JSON.stringify(enabledPackSlugs ?? []),
             customMechanicsProfile: input.customMechanicsProfile ? JSON.stringify(input.customMechanicsProfile) : null,
             mapAttachmentId: input.mapAttachmentId ?? null,
             // Issue #851: the operator's default quota, inherited atomically with the row
@@ -935,7 +971,13 @@ export class CampaignsService {
     // customMechanicsProfile is pulled out too (issue #1502) — it needs cross-field validation
     // against the EFFECTIVE ruleSystem and JSON serialization before it can join campaignInput,
     // which is spread directly into `.set()` below.
-    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, statusChangeReason, ...campaignInput } = input;
+    const {
+      mapAlignment,
+      customMechanicsProfile: customMechanicsProfileInput,
+      enabledPackSlugs: enabledPackSlugsInput,
+      statusChangeReason,
+      ...campaignInput
+    } = input;
     const shouldResetPins =
       mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
@@ -958,6 +1000,14 @@ export class CampaignsService {
     // value, or the campaign's existing one when this request doesn't touch ruleSystem — so a
     // customMechanicsProfile write is validated against the slug it will actually pair with.
     const effectiveRuleSystem = input.ruleSystem !== undefined ? input.ruleSystem : existing.ruleSystem;
+    // A primary-system switch can also change whether an extension still has its
+    // required base. Revalidate the stored list even when the PATCH only mentions
+    // ruleSystem, and remove a newly-primary slug from the supplemental set.
+    const enabledPackSlugsToValidate =
+      enabledPackSlugsInput ?? (input.ruleSystem !== undefined ? existing.enabledPackSlugs : undefined);
+    const nextEnabledPackSlugs = await this.validateEnabledPackSlugs(enabledPackSlugsToValidate, effectiveRuleSystem);
+    const enabledPackSlugsPatch =
+      nextEnabledPackSlugs !== undefined ? { enabledPackSlugs: JSON.stringify(nextEnabledPackSlugs) } : {};
     // #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule pack, so
     // the rule-pack requirement has to be satisfied by the profile the campaign will actually
     // have after this write — not only by one re-sent in the same request. Without the second
@@ -1125,7 +1175,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, ...enabledPackSlugsPatch, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1213,7 +1263,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
+          .set({ ...campaignInput, ...enabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1254,7 +1304,7 @@ export class CampaignsService {
 
       [updatedRow] = await this.db
         .update(campaigns)
-        .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
+        .set({ ...campaignInput, ...enabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
         .where(eq(campaigns.id, id))
         .returning();
     }
@@ -1721,6 +1771,7 @@ export class CampaignsService {
           sessionCount: template ? 0 : source.sessionCount,
           latestSessionNumber: template ? 0 : source.latestSessionNumber,
           ruleSystem: source.ruleSystem,
+          enabledPackSlugs: JSON.stringify(source.enabledPackSlugs ?? []),
           // Issue #1502: carry the paired homebrew mechanics profile with its ruleSystem slug —
           // otherwise a clone of a homebrew campaign would silently resolve to the 5e adapter
           // fallback (no ADAPTERS entry for the slug, no profile to pair it with).
@@ -2601,6 +2652,26 @@ export class CampaignsService {
       // narrationLanguage/aiExternalContentPolicy). The rest of the export still imports.
       if (pack && !isImporterOnlyRuleSystemSlug(ruleSystemSrc, true)) ruleSystem = ruleSystemSrc;
     }
+    const requestedEnabledPackSlugs = Array.isArray(campaignSrc.enabledPackSlugs)
+      ? campaignSrc.enabledPackSlugs.filter((value): value is string => typeof value === 'string')
+      : [];
+    // Import degrades gracefully when supplemental packs are not installed on this
+    // server, matching the existing primary-ruleSystem policy. Invalid/missing
+    // dependencies are dropped rather than blocking the rest of the campaign document.
+    const installedEnabledRows = requestedEnabledPackSlugs.length
+      ? await this.db
+          .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
+          .from(rulePacks)
+          .where(inArray(rulePacks.slug, requestedEnabledPackSlugs))
+      : [];
+    const availableBases = new Set([ruleSystem, ...installedEnabledRows.filter((row) => row.kind === 'base').map((row) => row.slug)]);
+    const importableEnabledPackSlugs = requestedEnabledPackSlugs.filter((slug) => {
+      const row = installedEnabledRows.find((candidate) => candidate.slug === slug);
+      if (!row) return false;
+      if (row.kind !== 'extension') return true;
+      return Boolean(row.extendsPackSlug && availableBases.has(row.extendsPackSlug));
+    });
+    const enabledPackSlugs = (await this.validateEnabledPackSlugs(importableEnabledPackSlugs, ruleSystem)) ?? [];
     const narrationLanguageParsed = NarrationLanguage.safeParse(campaignSrc.narrationLanguage);
     const narrationLanguage = narrationLanguageParsed.success ? narrationLanguageParsed.data : 'en';
     const aiExternalContentPolicyParsed = AiExternalContentPolicy.safeParse(campaignSrc.aiExternalContentPolicy);
@@ -2807,6 +2878,7 @@ export class CampaignsService {
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           latestSessionNumber: Math.max(0, intOr(campaignSrc.latestSessionNumber, 0)),
           ruleSystem,
+          enabledPackSlugs: JSON.stringify(enabledPackSlugs),
           customMechanicsProfile,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
           // Issue #851: the operator's default quota, inherited atomically with the

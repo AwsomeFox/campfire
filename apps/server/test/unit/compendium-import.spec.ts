@@ -16,6 +16,8 @@ describe('compendium-import (unit)', () => {
     version: '2.0',
     license: 'OGL',
     sourceUrl: 'https://example.com',
+    kind: 'base',
+    extendsPackSlug: null,
     installedAt: '2026-01-01T00:00:00.000Z',
     entryCount: 1,
     manifestHash: 'test-manifest-hash',

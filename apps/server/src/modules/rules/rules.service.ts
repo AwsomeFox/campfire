@@ -13,6 +13,7 @@ import {
   type RuleEntry,
   type RuleEntryType,
   type RulePack,
+  type RulePackKind,
   type RulePackInstall,
   type RulePackInstallJob,
   type RulePackUpdatePreview,
@@ -27,6 +28,7 @@ import {
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
 import { rulePacks, ruleEntries, ruleEntryRevisions, combatants, campaigns, importJobs } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { fromJsonText } from '../../common/json';
 import { foldForSearch } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole } from '../../common/user.types';
@@ -156,6 +158,17 @@ type PersistPackOptions = {
   rewritePackProvenance?: boolean;
 };
 
+type PersistPackMeta = {
+  slug: string;
+  name: string;
+  version: string;
+  license: string;
+  sourceUrl: string;
+  sectionLabels: string[];
+  kind?: RulePackKind;
+  extendsPackSlug?: string | null;
+};
+
 export type PersistPackResult = RulePack & {
   /**
    * Which branch of persistPack produced this result: 'created' for a fresh install,
@@ -196,6 +209,8 @@ function packToDomain(row: typeof rulePacks.$inferSelect): RulePack {
     version: row.version,
     license: row.license,
     sourceUrl: row.sourceUrl,
+    kind: row.kind as RulePack['kind'],
+    extendsPackSlug: row.extendsPackSlug,
     installedAt: row.installedAt,
     entryCount: row.entryCount,
   };
@@ -303,7 +318,7 @@ function storedEntryHash(row: typeof ruleEntries.$inferSelect): string {
 }
 
 function packManifestHash(
-  meta: { slug: string; name: string; version: string; license: string; sourceUrl: string; sectionLabels: string[] },
+  meta: PersistPackMeta,
   entries: ImportedEntry[],
 ): string {
   // CONTENT-ONLY fingerprint of the pack's provenance plus every fetched entry's content
@@ -664,7 +679,7 @@ export class RulesService implements OnModuleInit {
     let pack: RulePack | null = null;
     if (packSlug && row.status === 'completed') {
       const [packRow] = this.db.select().from(rulePacks).where(eq(rulePacks.slug, packSlug)).all();
-      if (packRow) pack = { id: packRow.id, slug: packRow.slug, name: packRow.name, version: packRow.version, license: packRow.license, sourceUrl: packRow.sourceUrl, installedAt: packRow.installedAt, entryCount: packRow.entryCount };
+      if (packRow) pack = packToDomain(packRow);
     }
     return {
       id: row.id,
@@ -1177,7 +1192,7 @@ export class RulesService implements OnModuleInit {
    * License open-ness is validated synchronously here so a bad-license upload gets a
    * clean 400 at the POST rather than a failed job the caller must poll to discover.
    */
-  enqueueUploadInstall(input: RulePackUpload, user: RequestUser): RulePackInstallJob {
+  async enqueueUploadInstall(input: RulePackUpload, user: RequestUser): Promise<RulePackInstallJob> {
     // License open-ness is validated synchronously here so a bad-license upload gets a
     // clean 400 at the POST rather than a failed job the caller must poll to discover.
     // BOTH the pack license AND every entry's effective license (entry license or pack
@@ -1185,6 +1200,7 @@ export class RulesService implements OnModuleInit {
     // rejected with an indexed error naming the offender, before any job/mutation (#734).
     this.assertOpenLicense(input.pack.license);
     this.assertEntriesOpenLicensed(input);
+    await this.validatePackRelationship(input.pack.slug, input.pack.kind ?? 'base', input.pack.extendsPackSlug ?? null);
     const types = [...new Set(input.entries.map((e) => e.type))];
     const job = this.newJob('upload', types, user, { pack: input.pack } as unknown as Record<string, unknown>);
     queueMicrotask(() =>
@@ -1193,6 +1209,26 @@ export class RulesService implements OnModuleInit {
       ),
     );
     return this.getJobOrThrow(job.id);
+  }
+
+  private async validatePackRelationship(slug: string, kind: RulePackKind, extendsPackSlug: string | null): Promise<void> {
+    if (extendsPackSlug === slug) throw new BadRequestException('A rule pack cannot extend itself');
+    if (kind === 'extension' && !extendsPackSlug) {
+      throw new BadRequestException('Extension packs must declare extendsPackSlug');
+    }
+    if (kind === 'base' && extendsPackSlug) {
+      throw new BadRequestException('Base packs cannot declare extendsPackSlug');
+    }
+    if (!extendsPackSlug) return;
+    const [base] = await this.db
+      .select({ kind: rulePacks.kind })
+      .from(rulePacks)
+      .where(eq(rulePacks.slug, extendsPackSlug))
+      .limit(1);
+    if (!base) throw new BadRequestException(`extendsPackSlug "${extendsPackSlug}" is not installed`);
+    if (base.kind !== 'base') {
+      throw new BadRequestException(`extendsPackSlug "${extendsPackSlug}" must identify a base pack`);
+    }
   }
 
   private assertOpenLicense(license: string): void {
@@ -1250,13 +1286,13 @@ export class RulesService implements OnModuleInit {
    */
   private async countCampaignsByRuleSystem(): Promise<Map<string, number>> {
     const rows = await this.db
-      .select({ ruleSystem: campaigns.ruleSystem, count: sql<number>`count(*)` })
+      .select({ ruleSystem: campaigns.ruleSystem, enabledPackSlugs: campaigns.enabledPackSlugs })
       .from(campaigns)
-      .where(isNull(campaigns.deletedAt))
-      .groupBy(campaigns.ruleSystem);
+      .where(isNull(campaigns.deletedAt));
     const map = new Map<string, number>();
     for (const r of rows) {
-      if (r.ruleSystem) map.set(r.ruleSystem, Number(r.count));
+      const slugs = new Set([r.ruleSystem, ...fromJsonText<string[]>(r.enabledPackSlugs, [])].filter(Boolean));
+      for (const slug of slugs) map.set(slug, (map.get(slug) ?? 0) + 1);
     }
     return map;
   }
@@ -1973,6 +2009,7 @@ export class RulesService implements OnModuleInit {
   ): Promise<PersistPackResult> {
     this.assertOpenLicense(input.pack.license);
     this.assertEntriesOpenLicensed(input);
+    await this.validatePackRelationship(input.pack.slug, input.pack.kind ?? 'base', input.pack.extendsPackSlug ?? null);
 
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence — the
     // (pack_id, type, slug) unique index (issue #143) would otherwise reject an upload that
@@ -2016,6 +2053,8 @@ export class RulesService implements OnModuleInit {
         license: input.pack.license,
         sourceUrl: input.pack.sourceUrl ?? '',
         sectionLabels: [...byType.keys()],
+        kind: input.pack.kind ?? 'base',
+        extendsPackSlug: input.pack.extendsPackSlug ?? null,
       },
       entries,
       user,
@@ -2047,7 +2086,7 @@ export class RulesService implements OnModuleInit {
    * rest 'updated' rather than a raw 500 (see the class docs / issue history).
    */
   private async persistPack(
-    meta: { slug: string; name: string; version: string; license: string; sourceUrl: string; sectionLabels: string[] },
+    meta: PersistPackMeta,
     rawEntries: ImportedEntry[],
     user: RequestUser,
     detailSuffix: string,
@@ -2105,6 +2144,8 @@ export class RulesService implements OnModuleInit {
             version: meta.version,
             license: meta.license,
             sourceUrl: meta.sourceUrl,
+            kind: meta.kind ?? 'base',
+            extendsPackSlug: meta.extendsPackSlug ?? null,
             installedAt: ts,
             entryCount: entries.length,
             manifestHash: sourceHash,
@@ -2167,7 +2208,7 @@ export class RulesService implements OnModuleInit {
    */
   private async syncExistingPack(
     packRow: typeof rulePacks.$inferSelect,
-    meta: { slug: string; name: string; version: string; license: string; sourceUrl: string; sectionLabels: string[] },
+    meta: PersistPackMeta,
     fetchedEntries: ImportedEntry[],
     sourceHash: string,
     user: RequestUser,
@@ -2264,7 +2305,11 @@ export class RulesService implements OnModuleInit {
         const nothingToRemove = !options.removeMissing || before.entryCount === fetchedEntries.length;
         const provenanceAlreadySet =
           !options.rewritePackProvenance ||
-          (before.name === meta.name && before.sourceUrl === meta.sourceUrl && before.license === meta.license);
+          (before.name === meta.name &&
+            before.sourceUrl === meta.sourceUrl &&
+            before.license === meta.license &&
+            before.kind === (meta.kind ?? 'base') &&
+            before.extendsPackSlug === (meta.extendsPackSlug ?? null));
         if (manifestUnchanged && nothingToRemove && provenanceAlreadySet) {
           // Content identical -> skip the per-entry classification. Only the displayed
           // `version` label moves (#1518 keeps it out of the content hash, so it may differ
@@ -2299,6 +2344,10 @@ export class RulesService implements OnModuleInit {
         const nextLicense = options.rewritePackProvenance
           ? meta.license
           : canonicalLicense(before.license, meta.license);
+        const nextKind = options.rewritePackProvenance ? (meta.kind ?? 'base') : before.kind;
+        const nextExtendsPackSlug = options.rewritePackProvenance
+          ? (meta.extendsPackSlug ?? null)
+          : before.extendsPackSlug;
 
         const existingRows = tx.select().from(ruleEntries).where(eq(ruleEntries.packId, packRow.id)).all();
         const existingByKey = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r]));
@@ -2379,6 +2428,8 @@ export class RulesService implements OnModuleInit {
             version: meta.version,
             license: nextLicense,
             sourceUrl: nextSourceUrl,
+            kind: nextKind,
+            extendsPackSlug: nextExtendsPackSlug,
             entryCount: nextEntryCount,
             manifestHash: sourceHash,
           })
@@ -2499,14 +2550,27 @@ export class RulesService implements OnModuleInit {
     // entries are gone — null it out in the SAME transaction as the entries/pack delete,
     // so there's never a window where the FK-shaped reference points at nothing.
     this.db.transaction((tx) => {
-      const usage = tx
-        .select({ count: sql<number>`count(*)` })
+      const liveCampaigns = tx
+        .select({ ruleSystem: campaigns.ruleSystem, enabledPackSlugs: campaigns.enabledPackSlugs })
         .from(campaigns)
-        .where(and(eq(campaigns.ruleSystem, pack.slug), isNull(campaigns.deletedAt)))
-        .get();
-      if (Number(usage?.count ?? 0) > 0) {
+        .where(isNull(campaigns.deletedAt))
+        .all();
+      const usageCount = liveCampaigns.filter((campaign) =>
+        campaign.ruleSystem === pack.slug || fromJsonText<string[]>(campaign.enabledPackSlugs, []).includes(pack.slug),
+      ).length;
+      if (usageCount > 0) {
         throw new ConflictException(
-          `Rule pack "${pack.name}" is currently selected by ${usage?.count} campaign(s). Uninstall is blocked to avoid silently changing their rule system and encounter behavior. Migrate those campaigns to another installed pack or homebrew first.`,
+          `Rule pack "${pack.name}" is currently selected by ${usageCount} campaign(s) as a primary or enabled content pack. Uninstall is blocked to avoid silently removing their rules content. Disable or replace it in those campaigns first.`,
+        );
+      }
+      const dependents = tx
+        .select({ name: rulePacks.name })
+        .from(rulePacks)
+        .where(eq(rulePacks.extendsPackSlug, pack.slug))
+        .all();
+      if (dependents.length > 0) {
+        throw new ConflictException(
+          `Rule pack "${pack.name}" is required by installed extension pack(s): ${dependents.map((row) => row.name).join(', ')}`,
         );
       }
       // Trashed campaigns do not use live rules and cannot block the uninstall, but clear
@@ -2517,6 +2581,15 @@ export class RulesService implements OnModuleInit {
         .set({ ruleSystem: '' })
         .where(and(eq(campaigns.ruleSystem, pack.slug), isNotNull(campaigns.deletedAt)))
         .run();
+      const trashed = tx
+        .select({ id: campaigns.id, enabledPackSlugs: campaigns.enabledPackSlugs })
+        .from(campaigns)
+        .where(isNotNull(campaigns.deletedAt))
+        .all();
+      for (const campaign of trashed) {
+        const next = fromJsonText<string[]>(campaign.enabledPackSlugs, []).filter((slug) => slug !== pack.slug);
+        tx.update(campaigns).set({ enabledPackSlugs: JSON.stringify(next) }).where(eq(campaigns.id, campaign.id)).run();
+      }
       const entryIds = tx.select({ id: ruleEntries.id }).from(ruleEntries).where(eq(ruleEntries.packId, id)).all().map((row) => row.id);
       for (const entryId of entryIds) {
         tx.update(combatants).set({ ruleEntryId: null }).where(eq(combatants.ruleEntryId, entryId)).run();
@@ -2559,15 +2632,17 @@ export class RulesService implements OnModuleInit {
    * campaign has a rule system configured (issue #1898 review). A homebrew row is
    * admitted by campaign membership alone; `pack` never applies to it.
    */
-  private ruleScopeCondition(campaignId?: number, packId?: number) {
-    const globalScope = packId !== undefined ? and(isNull(ruleEntries.campaignId), eq(ruleEntries.packId, packId)) : isNull(ruleEntries.campaignId);
+  private ruleScopeCondition(campaignId?: number, packIds?: number[]) {
+    const globalScope = packIds !== undefined
+      ? and(isNull(ruleEntries.campaignId), inArray(ruleEntries.packId, packIds))
+      : isNull(ruleEntries.campaignId);
     return campaignId !== undefined
       ? or(globalScope, and(eq(ruleEntries.campaignId, campaignId), isNull(ruleEntries.archivedAt)))
       : globalScope;
   }
 
   async search(
-    params: { q: string; type?: RuleEntryType; pack?: string; cursor?: string; limit?: number; campaignId?: number },
+    params: { q: string; type?: RuleEntryType; pack?: string; packs?: string[]; cursor?: string; limit?: number; campaignId?: number },
     limitArg?: number,
     user?: RequestUser,
   ): Promise<RuleSearchPage> {
@@ -2579,8 +2654,24 @@ export class RulesService implements OnModuleInit {
       await this.homebrewRole(params.campaignId, user);
     }
 
-    const packFilter = params.pack ? await this.db.select().from(rulePacks).where(eq(rulePacks.slug, params.pack)).limit(1) : undefined;
-    const packRequestedButMissing = Boolean(params.pack) && (!packFilter || packFilter.length === 0);
+    let requestedSlugs = params.packs?.length ? [...new Set(params.packs)] : params.pack ? [params.pack] : [];
+    // Campaign-aware callers that omit an explicit pack filter get the authoritative
+    // primary + enabled content set. This is the path used by MCP/AI lookups.
+    if (params.campaignId !== undefined && requestedSlugs.length === 0) {
+      const [campaign] = await this.db
+        .select({ ruleSystem: campaigns.ruleSystem, enabledPackSlugs: campaigns.enabledPackSlugs })
+        .from(campaigns)
+        .where(eq(campaigns.id, params.campaignId))
+        .limit(1);
+      requestedSlugs = [...new Set([
+        campaign?.ruleSystem ?? '',
+        ...fromJsonText<string[]>(campaign?.enabledPackSlugs, []),
+      ].filter(Boolean))];
+    }
+    const packFilter = requestedSlugs.length
+      ? await this.db.select().from(rulePacks).where(inArray(rulePacks.slug, requestedSlugs))
+      : undefined;
+    const packRequestedButMissing = requestedSlugs.length > 0 && (!packFilter || packFilter.length === 0);
     // Issue #1898 review: `campaign.ruleSystem` is free-text (never validated against
     // installed packs), and the picker always forwards it as `pack` alongside
     // `campaignId`. Short-circuiting to fully empty here — as the no-campaignId path
@@ -2591,26 +2682,26 @@ export class RulesService implements OnModuleInit {
     // "no pack" sentinel) — the global half of the scope then correctly returns
     // nothing while the campaign homebrew half is unaffected.
     if (packRequestedButMissing && params.campaignId === undefined) return empty();
-    const packId = packRequestedButMissing ? 0 : packFilter?.[0]?.id;
-    const packSlug = packFilter?.[0]?.slug;
+    const packIds = packRequestedButMissing ? [0] : packFilter?.map((pack) => pack.id);
+    const packSlug = packFilter?.length === 1 ? packFilter[0]?.slug : undefined;
 
     if (!params.q.trim()) {
-      return this.searchBrowse({ type: params.type, packId, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
+      return this.searchBrowse({ type: params.type, packIds, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
     }
 
     if (this.ftsAvailable) {
       const ftsQuery = toFtsQuery(params.q);
       if (!ftsQuery) return empty();
-      return this.searchFts({ q: params.q, ftsQuery, type: params.type, packId, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
+      return this.searchFts({ q: params.q, ftsQuery, type: params.type, packIds, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
     }
 
-    return this.searchLike({ q: params.q, type: params.type, packId, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
+    return this.searchLike({ q: params.q, type: params.type, packIds, packSlug, cursor: params.cursor, limit, campaignId: params.campaignId });
   }
 
   /** Empty-query browse: deterministic lower(name), id order with keyset cursor. */
   private async searchBrowse(opts: {
     type?: RuleEntryType;
-    packId?: number;
+    packIds?: number[];
     packSlug?: string;
     cursor?: string;
     limit: number;
@@ -2618,7 +2709,7 @@ export class RulesService implements OnModuleInit {
   }): Promise<RuleSearchPage> {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'browse') as BrowseCursor | undefined;
     const baseConditions = [
-      this.ruleScopeCondition(opts.campaignId, opts.packId),
+      this.ruleScopeCondition(opts.campaignId, opts.packIds),
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
@@ -2631,7 +2722,7 @@ export class RulesService implements OnModuleInit {
     // serves both "which categories exist in this pack" and "how many match".
     const [total, packTypeCounts] = await Promise.all([
       this.countEntries(baseConditions),
-      this.groupEntryCounts(this.packScopeConditions(opts.packId, opts.campaignId)),
+      this.groupEntryCounts(this.packScopeConditions(opts.packIds, opts.campaignId)),
     ]);
     const facets = buildRuleFacets(packTypeCounts, packTypeCounts, opts.packSlug);
     const rows = await this.db
@@ -2664,7 +2755,7 @@ export class RulesService implements OnModuleInit {
     q: string;
     ftsQuery: string;
     type?: RuleEntryType;
-    packId?: number;
+    packIds?: number[];
     packSlug?: string;
     cursor?: string;
     limit: number;
@@ -2673,7 +2764,7 @@ export class RulesService implements OnModuleInit {
     const cursor = decodeRuleSearchCursor(opts.cursor, 'fts') as FtsCursor | undefined;
     const rankExpr = nameMatchRank(opts.q);
     const baseConditions = [
-      this.ruleScopeCondition(opts.campaignId, opts.packId),
+      this.ruleScopeCondition(opts.campaignId, opts.packIds),
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2688,12 +2779,12 @@ export class RulesService implements OnModuleInit {
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const matchConditions = [
-      this.ruleScopeCondition(opts.campaignId, opts.packId),
+      this.ruleScopeCondition(opts.campaignId, opts.packIds),
       sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
       this.countFts(baseConditions),
-      this.groupEntryCounts(this.packScopeConditions(opts.packId, opts.campaignId)),
+      this.groupEntryCounts(this.packScopeConditions(opts.packIds, opts.campaignId)),
       this.groupFtsCounts(matchConditions),
     ]);
     const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
@@ -2729,7 +2820,7 @@ export class RulesService implements OnModuleInit {
   private async searchLike(opts: {
     q: string;
     type?: RuleEntryType;
-    packId?: number;
+    packIds?: number[];
     packSlug?: string;
     cursor?: string;
     limit: number;
@@ -2747,7 +2838,7 @@ export class RulesService implements OnModuleInit {
       ? sql`(${ruleEntries.name} LIKE ${rawLike} OR ${foldedName} LIKE ${foldedLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${foldedSummary} LIKE ${foldedLike} OR ${ruleEntries.body} LIKE ${rawLike} OR ${foldedBody} LIKE ${foldedLike})`
       : sql`(${ruleEntries.name} LIKE ${rawLike} OR ${ruleEntries.summary} LIKE ${rawLike} OR ${ruleEntries.body} LIKE ${rawLike})`;
     const baseConditions = [
-      this.ruleScopeCondition(opts.campaignId, opts.packId),
+      this.ruleScopeCondition(opts.campaignId, opts.packIds),
       likeClause,
       opts.type ? eq(ruleEntries.type, opts.type) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
@@ -2762,12 +2853,12 @@ export class RulesService implements OnModuleInit {
     const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
 
     const matchConditions = [
-      this.ruleScopeCondition(opts.campaignId, opts.packId),
+      this.ruleScopeCondition(opts.campaignId, opts.packIds),
       likeClause,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
     const [total, packTypeCounts, matchTypeCounts] = await Promise.all([
       this.countEntries(baseConditions),
-      this.groupEntryCounts(this.packScopeConditions(opts.packId, opts.campaignId)),
+      this.groupEntryCounts(this.packScopeConditions(opts.packIds, opts.campaignId)),
       this.groupEntryCounts(matchConditions),
     ]);
     const facets = buildRuleFacets(packTypeCounts, matchTypeCounts, opts.packSlug);
@@ -2812,8 +2903,8 @@ export class RulesService implements OnModuleInit {
    * half of the scope — campaign homebrew (a different internal pack) still counts
    * toward these facet/total figures alongside the requested pack (issue #1898 review).
    */
-  private packScopeConditions(packId?: number, campaignId?: number): Array<ReturnType<typeof sql> | ReturnType<typeof eq> | ReturnType<typeof isNull> | ReturnType<typeof or>> {
-    return [this.ruleScopeCondition(campaignId, packId)];
+  private packScopeConditions(packIds?: number[], campaignId?: number): Array<ReturnType<typeof sql> | ReturnType<typeof eq> | ReturnType<typeof isNull> | ReturnType<typeof or> | ReturnType<typeof inArray>> {
+    return [this.ruleScopeCondition(campaignId, packIds)];
   }
 
   private async groupEntryCounts(

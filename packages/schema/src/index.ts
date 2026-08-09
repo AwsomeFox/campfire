@@ -278,6 +278,10 @@ export const Campaign = z.object({
   // (after gaps or deletes) as the current session number. Denormalized and recomputed.
   latestSessionNumber: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
+  // Additional installed packs whose content is available to this campaign without
+  // changing the primary rules adapter. The primary `ruleSystem` continues to own
+  // combat math, sheets and AI mechanics; these packs only widen compendium lookups.
+  enabledPackSlugs: z.array(z.string().min(1).max(80)).max(50).default([]),
   // Issue #1502: a per-campaign, DM-authored homebrew mechanics profile — the same closed-enum
   // ability-table/AC-convention/initiative-model/tiebreak shape `createOsrVariantAdapter`
   // already builds a complete RuleSystemAdapter from for the six built-in OSR retroclones
@@ -326,7 +330,7 @@ export const CampaignStatusTransition = z.object({
 });
 export type CampaignStatusTransition = z.infer<typeof CampaignStatusTransition>;
 
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, mapAttachmentId: true, customMechanicsProfile: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, enabledPackSlugs: true, mapAttachmentId: true, customMechanicsProfile: true });
 export const CampaignUpdate = CampaignCreate.partial().extend({
   // Map replacement lifecycle (issue #870). 'reset' clears location pin coordinates
   // in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.
@@ -3596,6 +3600,9 @@ export type NotificationPreferencesUpdate = z.infer<typeof NotificationPreferenc
 // Installed, server-wide rules content (spells/monsters/items/…) imported from
 // an open-licensed source (currently Open5e). Read by any authed user;
 // install/uninstall is server-admin only (see rules.controller.ts).
+export const RulePackKind = z.enum(['base', 'extension', 'supplement']);
+export type RulePackKind = z.infer<typeof RulePackKind>;
+
 export const RulePack = z.object({
   id: Id,
   slug: z.string().min(1).max(80), // e.g. "open5e-srd", unique
@@ -3603,6 +3610,11 @@ export const RulePack = z.object({
   version: z.string().max(40).default(''),
   license: z.string().max(120).default(''), // e.g. "OGL 1.0a", "CC-BY-4.0"
   sourceUrl: z.string().max(500).refine((url) => !url || /^https?:\/\//i.test(url), 'Source URL must be http(s)').default(''),
+  // `base` packs may drive a campaign's primary rules adapter. `extension` packs
+  // require the named base pack and contribute content only. `supplement` packs are
+  // independent content libraries and may optionally identify a compatible base.
+  kind: RulePackKind.default('base'),
+  extendsPackSlug: z.string().min(1).max(80).nullable().default(null),
   installedAt: IsoDate,
   entryCount: z.number().int().nonnegative().default(0),
   // Authoritative, server-wide count of campaigns whose `ruleSystem` == this pack's slug
@@ -6515,6 +6527,8 @@ export const RulePackUpload = z.object({
     version: z.string().max(40).optional(),
     license: z.string().min(1).max(120), // required — must be an open license (see isOpenLicense)
     sourceUrl: z.string().max(500).optional(),
+    kind: RulePackKind.optional(),
+    extendsPackSlug: z.string().min(1).max(80).nullable().optional(),
   }),
   entries: z.array(RulePackUploadEntry).min(1).max(20_000),
 });

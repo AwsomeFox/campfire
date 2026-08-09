@@ -185,6 +185,7 @@ export class RulesController {
   @ApiQuery({ name: 'q', required: false, description: 'Free-text search against entry name/summary. Empty returns all (subject to type/pack filters).' })
   @ApiQuery({ name: 'type', required: false, enum: ['spell', 'monster', 'hazard', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other'], description: 'Filter to one entry type.' })
   @ApiQuery({ name: 'pack', required: false, description: 'Filter to one pack by slug.' })
+  @ApiQuery({ name: 'packs', required: false, description: 'Comma-separated pack slugs to search as a union. `pack` remains supported for backward compatibility.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size (default 50, max 100).' })
   @ApiQuery({ name: 'cursor', required: false, description: 'Opaque cursor from a previous page\'s nextCursor.' })
   @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Campaign ID to include campaign homebrew for members.' })
@@ -193,6 +194,7 @@ export class RulesController {
     @Query('q') q: string | undefined,
     @Query('type') type: string | undefined,
     @Query('pack') pack: string | undefined,
+    @Query('packs') packs: string | undefined,
     @Query('limit') limit: string | undefined,
     @Query('cursor') cursor: string | undefined,
     @Query('campaignId') campaignIdStr: string | undefined,
@@ -214,10 +216,23 @@ export class RulesController {
       }
       campaignId = n;
     }
+    const parsedPacks = packs === undefined
+      ? undefined
+      : [...new Set(packs.split(',').map((slug) => slug.trim()).filter(Boolean))];
+    if (parsedPacks && parsedPacks.length === 0) {
+      throw new BadRequestException('`packs` must contain at least one pack slug');
+    }
+    if (parsedPacks && parsedPacks.length > 50) {
+      throw new BadRequestException('`packs` may contain at most 50 pack slugs');
+    }
+    if (parsedPacks?.some((slug) => slug.length > 80)) {
+      throw new BadRequestException('Each `packs` slug must be at most 80 characters');
+    }
     return this.rules.search({
       q: q ?? '',
       type: type as RuleEntryType | undefined,
       pack,
+      packs: parsedPacks,
       cursor,
       limit: parsedLimit,
       campaignId,

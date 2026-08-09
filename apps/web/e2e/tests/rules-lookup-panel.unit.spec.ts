@@ -49,6 +49,10 @@ test.describe('RulesLookupPanel unit logic (#1929)', () => {
     const emptyQuery = buildSearchUrlParams('', 'open5e-srd');
     expect(emptyQuery.has('q')).toBe(false);
     expect(emptyQuery.get('pack')).toBe('open5e-srd');
+
+    const multiPack = buildSearchUrlParams('owl', 'open5e-srd', 8, ['shared-bestiary', 'open5e-srd']);
+    expect(multiPack.has('pack')).toBe(false);
+    expect(multiPack.get('packs')).toBe('open5e-srd,shared-bestiary');
   });
 
   test('filterHomebrewEntries returns empty array when query is empty and filters homebrew when active', () => {

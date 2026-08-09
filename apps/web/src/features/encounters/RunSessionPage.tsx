@@ -106,6 +106,9 @@ export { BattleMap } from './map/BattleMap';
  * that maps to their own character (via campaign characters' ownerUserId).
  */
 
+const EMPTY_PACK_SLUGS: string[] = [];
+const EMPTY_RULE_PACKS: RulePack[] = [];
+
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
   running: 'Running',
@@ -4995,6 +4998,8 @@ export default function RunSessionPage() {
               characters={characters}
               existingCombatantCharacterIds={new Set(encounter.combatants.map((c) => c.characterId).filter((id): id is number => id != null))}
               rulePack={campaign?.ruleSystem || ''}
+              enabledPackSlugs={campaign?.enabledPackSlugs ?? EMPTY_PACK_SLUGS}
+              installedPacks={packsQuery.data ?? EMPTY_RULE_PACKS}
               customMechanicsProfile={campaign?.customMechanicsProfile}
               onAdded={() => queryClient.invalidateQueries({ queryKey: queryKeys.encounter(eid) })}
             />
@@ -5009,7 +5014,12 @@ export default function RunSessionPage() {
 
           <SharedDiceLog campaignId={cid} />
 
-          <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} customMechanicsProfile={campaign?.customMechanicsProfile} />
+          <RulesLookupPanel
+            campaignId={cid}
+            ruleSystem={campaign?.ruleSystem || ''}
+            enabledPackSlugs={campaign?.enabledPackSlugs ?? []}
+            customMechanicsProfile={campaign?.customMechanicsProfile}
+          />
         </aside>
       </div>
 

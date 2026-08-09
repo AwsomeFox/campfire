@@ -4,7 +4,7 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { notifications, rulePacks } from '../src/db/schema';
+import { notifications, ruleEntries, rulePacks } from '../src/db/schema';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 
@@ -21,6 +21,17 @@ describe('campaigns (e2e)', () => {
     await db
       .insert(rulePacks)
       .values({ slug: 'dnd5e-srd', name: 'D&D 5e SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 });
+    const seededPacks = await db.insert(rulePacks).values([
+      { slug: 'pf2e-srd', name: 'PF2e SRD', version: '1', license: 'ORC', sourceUrl: '', kind: 'base', installedAt: ts, entryCount: 0 },
+      { slug: 'shared-bestiary', name: 'Shared Bestiary', version: '1', license: 'CC-BY-4.0', sourceUrl: '', kind: 'supplement', installedAt: ts, entryCount: 1 },
+      { slug: 'dnd5e-expansion', name: 'D&D 5e Expansion', version: '1', license: 'CC-BY-4.0', sourceUrl: '', kind: 'extension', extendsPackSlug: 'dnd5e-srd', installedAt: ts, entryCount: 1 },
+    ]).returning();
+    const supplement = seededPacks.find((pack) => pack.slug === 'shared-bestiary')!;
+    const extension = seededPacks.find((pack) => pack.slug === 'dnd5e-expansion')!;
+    await db.insert(ruleEntries).values([
+      { packId: supplement.id, slug: 'clockwork-owl', name: 'Clockwork Owl', type: 'monster', summary: 'Supplement sentinel', body: '', createdAt: ts, updatedAt: ts },
+      { packId: extension.id, slug: 'ember-drake', name: 'Ember Drake', type: 'monster', summary: 'Extension sentinel', body: '', createdAt: ts, updatedAt: ts },
+    ]);
   });
 
   afterAll(async () => {
@@ -156,6 +167,57 @@ describe('campaigns (e2e)', () => {
     // campaign is unchanged after the rejected PATCH
     const getRes = await request(server).get(`/api/v1/campaigns/${id}`).set(dm);
     expect(getRes.body.ruleSystem).toBe('');
+  });
+
+  it('keeps primary mechanics separate from enabled content packs (#1319)', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Mixed Pack Campaign', ruleSystem: 'dnd5e-srd', enabledPackSlugs: ['shared-bestiary'] });
+    expect(created.status).toBe(201);
+    expect(created.body.ruleSystem).toBe('dnd5e-srd');
+    expect(created.body.enabledPackSlugs).toEqual(['shared-bestiary']);
+
+    const lookup = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'clockwork owl', campaignId: created.body.id })
+      .set(dm);
+    expect(lookup.status).toBe(200);
+    expect(lookup.body.items.map((entry: { name: string }) => entry.name)).toContain('Clockwork Owl');
+
+    const switched = await request(server)
+      .patch(`/api/v1/campaigns/${created.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: 'pf2e-srd' });
+    expect(switched.status).toBe(200);
+    expect(switched.body.ruleSystem).toBe('pf2e-srd');
+    expect(switched.body.enabledPackSlugs).toEqual(['shared-bestiary']);
+
+    const packs = await request(server).get('/api/v1/rules/packs').set(dm);
+    expect(packs.body.find((pack: { slug: string }) => pack.slug === 'shared-bestiary').usageCount).toBe(1);
+
+    const primaryExtension = await request(server)
+      .patch(`/api/v1/campaigns/${created.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: 'dnd5e-expansion' });
+    expect(primaryExtension.status).toBe(400);
+  });
+
+  it('enforces extension dependencies when enabling content packs (#1319)', async () => {
+    const server = ctx.app.getHttpServer();
+    const withoutBase = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Bad Extension Campaign', ruleSystem: 'pf2e-srd', enabledPackSlugs: ['dnd5e-expansion'] });
+    expect(withoutBase.status).toBe(400);
+
+    const withBase = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Good Extension Campaign', ruleSystem: 'dnd5e-srd', enabledPackSlugs: ['dnd5e-expansion'] });
+    expect(withBase.status).toBe(201);
+    expect(withBase.body.enabledPackSlugs).toEqual(['dnd5e-expansion']);
   });
 
   /**

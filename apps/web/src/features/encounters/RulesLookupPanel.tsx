@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 export interface RulesLookupPanelProps {
   campaignId: number;
   ruleSystem?: string | null;
+  enabledPackSlugs?: string[];
   customMechanicsProfile?: CustomMechanicsProfile | null;
 }
 
@@ -69,11 +70,13 @@ export function updateRecentLookups(prev: RuleEntry[], entry: RuleEntry): RuleEn
 }
 
 /** Build search query params for /rules/search endpoint. Omits `pack` when ruleSystem is empty. */
-export function buildSearchUrlParams(query: string, ruleSystem?: string | null, limit = 8): URLSearchParams {
+export function buildSearchUrlParams(query: string, ruleSystem?: string | null, limit = 8, enabledPackSlugs: string[] = []): URLSearchParams {
   const params = new URLSearchParams();
   const trimmed = query.trim();
   if (trimmed) params.set('q', trimmed);
-  if (ruleSystem) params.set('pack', ruleSystem);
+  const packSlugs = [...new Set([ruleSystem ?? '', ...enabledPackSlugs].filter(Boolean))];
+  if (packSlugs.length === 1) params.set('pack', packSlugs[0]!);
+  else if (packSlugs.length > 1) params.set('packs', packSlugs.join(','));
   params.set('limit', String(limit));
   return params;
 }
@@ -95,7 +98,7 @@ export function resolvePackSlug(packId: number | undefined, packSlugMap: Map<num
   return packSlugMap.get(packId) ?? null;
 }
 
-export function RulesLookupPanel({ campaignId, ruleSystem, customMechanicsProfile }: RulesLookupPanelProps) {
+export function RulesLookupPanel({ campaignId, ruleSystem, enabledPackSlugs = [], customMechanicsProfile }: RulesLookupPanelProps) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -153,11 +156,12 @@ export function RulesLookupPanel({ campaignId, ruleSystem, customMechanicsProfil
   }, [installedPacks]);
 
   const effectivePack = ruleSystem || '';
-  const searchParams = buildSearchUrlParams(debouncedQuery, effectivePack, 8);
+  const effectivePacksKey = [...new Set([effectivePack, ...enabledPackSlugs].filter(Boolean))].join(',');
+  const searchParams = buildSearchUrlParams(debouncedQuery, effectivePack, 8, enabledPackSlugs);
   const isQueryActive = Boolean(debouncedQuery.trim());
 
   const { data: searchPage, isLoading: searchLoading, isError: searchError, error: searchErrorObj } = useQuery<RuleSearchPage>({
-    queryKey: ['rules', 'search', debouncedQuery.trim(), effectivePack],
+    queryKey: ['rules', 'search', debouncedQuery.trim(), effectivePacksKey],
     queryFn: () => api.get<RuleSearchPage>(`${API}/rules/search?${searchParams.toString()}`),
     staleTime: 60 * 1000,
     enabled: !collapsed && isQueryActive,
@@ -260,7 +264,7 @@ export function RulesLookupPanel({ campaignId, ruleSystem, customMechanicsProfil
             <ul className="space-y-1.5 min-w-0" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {displayedResults.map((entry) => {
                 const isExpanded = expandedEntryId === entry.id;
-                const packName = !entry.isHomebrew && !effectivePack && entry.packId ? resolvePackName(entry.packId, packNameMap) : null;
+                const packName = !entry.isHomebrew && entry.packId ? resolvePackName(entry.packId, packNameMap) : null;
                 const statblockSystem = !entry.isHomebrew && entry.packId ? (resolvePackSlug(entry.packId, packSlugMap) || ruleSystem) : ruleSystem;
                 return (
                   <li key={entry.id} className="border border-subtle rounded p-2 text-xs space-y-2 min-w-0">

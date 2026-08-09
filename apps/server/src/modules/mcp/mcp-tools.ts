@@ -1331,8 +1331,7 @@ export class McpToolsService {
       'Search installed rule packs (spells, monsters, items, conditions, etc.) for a rules question. Returns up to 5 ' +
         'matches; the top match includes its full body text so the caller can quote/cite it directly. Pass `pack` ' +
         '(a rule pack slug from list_rule_packs) to scope the search to a single rule system — the campaign-scoped ' +
-        'path the AI table uses for its rules help (issue #717), so a multi-pack server answers a 5e question from ' +
-        'the 5e pack, not whichever pack happens to match first.',
+        'path derives the campaign primary + enabled content packs when no explicit pack filter is given.',
       {
         query: z.string().min(1).max(200).describe('Free-text search query'),
         type: RuleEntryType.optional().describe('Filter by entry type'),
@@ -1344,6 +1343,11 @@ export class McpToolsService {
           .describe(
             'Filter to a single installed rule pack by slug (e.g. "open5e-srd", "pf2e-srd") — the campaign-scoped path (issue #717).',
           ),
+        packs: z
+          .array(z.string().min(1).max(80))
+          .max(50)
+          .optional()
+          .describe('Search a union of installed rule-pack slugs. Omit with campaignId to use that campaign\'s configured content packs.'),
         campaignId: z
           .number()
           .int()
@@ -1351,9 +1355,9 @@ export class McpToolsService {
           .optional()
           .describe('Optional campaign id to include campaign homebrew entries in search results for members.'),
       },
-      async ({ query, type, pack, campaignId }) => {
+      async ({ query, type, pack, packs, campaignId }) => {
         const page = await this.rules.search(
-          { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined, campaignId: campaignId as number | undefined },
+          { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined, packs: packs as string[] | undefined, campaignId: campaignId as number | undefined },
           5,
           user,
         );

@@ -1774,6 +1774,7 @@ function RuleSystemCard({
 }) {
   const [packs, setPacks] = useState<RulePack[] | null>(null);
   const [selected, setSelected] = useState<string>(campaign.ruleSystem ?? '');
+  const [enabledPackSlugs, setEnabledPackSlugs] = useState<string[]>(campaign.enabledPackSlugs ?? []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1798,6 +1799,7 @@ function RuleSystemCard({
     try {
       const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, {
         ruleSystem: selected,
+        enabledPackSlugs: enabledPackSlugs.filter((slug) => slug !== selected),
       });
       onSaved(updated);
     } catch (err) {
@@ -1817,7 +1819,11 @@ function RuleSystemCard({
   const currentProfile = packs ? rulesetCapabilitiesForSelection(currentSlug, packs) : null;
 
   // The pending switch — what mechanically changes if the admin applies `selected` (#348).
-  const dirty = selected !== currentSlug;
+  const currentEnabled = campaign.enabledPackSlugs ?? [];
+  const normalizedEnabled = enabledPackSlugs.filter((slug) => slug !== selected);
+  const primaryDirty = selected !== currentSlug;
+  const dirty = primaryDirty ||
+    [...normalizedEnabled].sort().join('\n') !== [...currentEnabled].sort().join('\n');
   const targetPack = packs?.find((p) => p.slug === selected);
   const targetLabel = selected ? targetPack?.name ?? selected : 'None / homebrew';
   const targetProfile = packs ? rulesetCapabilitiesForSelection(selected, packs) : null;
@@ -1859,8 +1865,8 @@ function RuleSystemCard({
         )}
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Powers the compendium, character math, statblocks, encounter generation, difficulty and AI rules lookups.
-        None / homebrew is allowed, but it has no rules compendium and uses disclosed fallback combat behavior.
+        The primary system powers character math, statblocks, encounter generation and difficulty.
+        None / homebrew is allowed; without additional content it has no rules compendium and uses disclosed fallback combat behavior.
         Switching keeps existing sheets and combatant stats and only re-interprets them.
       </p>
       {currentPack && currentMechanics && (
@@ -1887,16 +1893,83 @@ function RuleSystemCard({
             className="input"
             value={selected}
             disabled={saving}
-            onChange={(e) => setSelected(e.target.value)}
+            onChange={(e) => {
+              const nextPrimary = e.target.value;
+              setSelected(nextPrimary);
+              setEnabledPackSlugs((current) => {
+                const nextEnabled = current.filter((slug) => slug !== nextPrimary);
+                for (const enabledSlug of nextEnabled) {
+                  const enabledPack = packs.find((pack) => pack.slug === enabledSlug);
+                  if (
+                    enabledPack?.kind === 'extension' &&
+                    enabledPack.extendsPackSlug &&
+                    enabledPack.extendsPackSlug !== nextPrimary &&
+                    !nextEnabled.includes(enabledPack.extendsPackSlug)
+                  ) {
+                    nextEnabled.push(enabledPack.extendsPackSlug);
+                  }
+                }
+                return nextEnabled;
+              });
+            }}
           >
             <option value="">None / homebrew</option>
-            {packs.map((pack) => (
+            {packs.filter((pack) => pack.kind === 'base').map((pack) => (
               <option key={pack.id} value={pack.slug}>
                 {pack.name} (v{pack.version})
               </option>
             ))}
           </select>
         </div>
+      )}
+      {packs && packs.length > 0 && (
+        <fieldset className="field" style={{ margin: 0 }} disabled={saving}>
+          <legend style={{ fontSize: 12.5, fontWeight: 600 }}>Additional content packs</legend>
+          <p className="text-muted" style={{ margin: '2px 0 8px', fontSize: 11.5 }}>
+            These packs add searchable compendium, encounter-picker, and AI lookup content. They never change combat math.
+          </p>
+          <div className="flex flex-col gap-2">
+            {packs.filter((pack) => pack.slug !== selected).map((pack) => {
+              const checked = normalizedEnabled.includes(pack.slug);
+              return (
+                <label key={pack.id} className="flex gap-2 items-start" style={{ fontSize: 12 }}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(event) => setEnabledPackSlugs((current) =>
+                      event.target.checked
+                        ? [...new Set([
+                            ...current,
+                            ...(pack.kind === 'extension' && pack.extendsPackSlug && pack.extendsPackSlug !== selected
+                              ? [pack.extendsPackSlug]
+                              : []),
+                            pack.slug,
+                          ])]
+                        : current.filter(
+                            (slug) =>
+                              slug !== pack.slug &&
+                              !packs.some(
+                                (candidate) =>
+                                  candidate.slug === slug &&
+                                  candidate.kind === 'extension' &&
+                                  candidate.extendsPackSlug === pack.slug,
+                              ),
+                          )
+                    )}
+                  />
+                  <span>
+                    <strong>{pack.name}</strong>{' '}
+                    <span className="tag tag-neutral" style={{ fontSize: 9 }}>{pack.kind}</span>
+                    {pack.extendsPackSlug ? <span className="text-muted"> · requires {pack.extendsPackSlug}</span> : null}
+                    <span className="text-muted" style={{ display: 'block' }}>
+                      {pack.license || 'License not specified'}{pack.sourceUrl ? ' · attribution/source link available in entries' : ''}
+                    </span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
       )}
       {dirty && packs && packs.length > 0 && (
         <div
@@ -1909,16 +1982,16 @@ function RuleSystemCard({
           className="flex flex-col gap-1.5"
         >
           <p style={{ margin: 0, color: 'var(--color-text)' }}>
-            Switch to <strong>{targetLabel}</strong>?
+            {primaryDirty ? <>Switch to <strong>{targetLabel}</strong>?</> : 'Update additional content packs?'}
           </p>
-          <p className="text-muted" style={{ margin: 0 }}>
-            {targetMechanics}
-          </p>
-          <p className="text-muted" style={{ margin: 0 }}>
-            Existing encounters and combatants keep their stored numbers — only the interpretation (initiative,
-            DC model, condition list, degrees of success) changes at read time. Nothing is recalculated or lost.
-          </p>
-          {targetProfile && (
+          {primaryDirty && <p className="text-muted" style={{ margin: 0 }}>{targetMechanics}</p>}
+          {primaryDirty && (
+            <p className="text-muted" style={{ margin: 0 }}>
+              Existing encounters and combatants keep their stored numbers — only the interpretation (initiative,
+              DC model, condition list, degrees of success) changes at read time. Nothing is recalculated or lost.
+            </p>
+          )}
+          {primaryDirty && targetProfile && (
             <>
               <ul className="text-muted" style={{ margin: 0, paddingLeft: '1rem' }}>
                 {targetProfile.migrationPreview.map((line) => (
@@ -1945,13 +2018,16 @@ function RuleSystemCard({
           )}
           <div className="flex gap-2 items-center" style={{ marginTop: 4 }}>
             <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving} onClick={applyRuleSystem}>
-              {saving ? 'Applying…' : 'Apply change'}
+              {saving ? 'Applying…' : 'Save pack settings'}
             </button>
             <button
               className="btn btn-ghost"
               style={{ fontSize: 12.5 }}
               disabled={saving}
-              onClick={() => setSelected(currentSlug)}
+              onClick={() => {
+                setSelected(currentSlug);
+                setEnabledPackSlugs(currentEnabled);
+              }}
             >
               Cancel
             </button>

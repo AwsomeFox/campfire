@@ -7246,6 +7246,10 @@ export class AiDriverService {
     const campaign = await this.campaigns.getOrThrow(campaignId);
     const slug = campaign.ruleSystem ?? '';
     const pack = slug ? await this.rules.getPackBySlug(slug) : undefined;
+    const enabledPacks = (await Promise.all(
+      (campaign.enabledPackSlugs ?? []).map((enabledSlug) => this.rules.getPackBySlug(enabledSlug)),
+    )).filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate));
+    const displayPack = pack ?? enabledPacks[0];
 
     const auditDetail = `rules lookup by ${user.id}: ${excerpt(query, 120)}` + (pack ? ` (pack ${pack.slug})` : ' (no rule system)');
     await this.audit.log({
@@ -7257,11 +7261,11 @@ export class AiDriverService {
       detail: auditDetail,
     });
 
-    const page = await this.rules.search({ q: query, pack: pack?.slug, campaignId }, 5, user);
+    const page = await this.rules.search({ q: query, campaignId }, 5, user);
     if (page.items.length === 0) {
-      return { query, result: pack ? renderNoMatch(query, pack) : renderNoRuleSystem(query) };
+      return { query, result: displayPack ? renderNoMatch(query, displayPack) : renderNoRuleSystem(query) };
     }
-    return { query, result: renderRulesAnswer(query, pack ?? null, page.items, campaignId) };
+    return { query, result: renderRulesAnswer(query, displayPack ?? null, page.items, campaignId) };
   }
 
   /**
