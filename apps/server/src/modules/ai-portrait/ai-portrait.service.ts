@@ -211,6 +211,12 @@ export class AiPortraitService {
     // key each invoke the paid provider before the ledger is populated. We reserve both here and
     // release the reservation below if setup fails before generation starts.
     this.enforceRateAndConcurrency(campaignId);
+    // Reserve the rate-limit window SYNCHRONOUSLY too (review feedback round 7): without this,
+    // two concurrent requests both pass enforceRateAndConcurrency because lastStart is still unset,
+    // and each later reaches the deferred lastStart.set and starts a provider call. Stamping it now
+    // closes that window. If the prompt is moderated-blocked or setup fails, we clear it below so
+    // the caller is not locked out.
+    this.lastStart.set(campaignId, Date.now());
 
     const prompt = composePortraitPrompt(request);
     const moderation = moderatePortraitPrompt(prompt);
@@ -301,6 +307,10 @@ export class AiPortraitService {
       record.job = base;
 
       if (moderation.flagged) {
+        // Release the synchronously-reserved rate-limit slot: a blocked prompt runs no renderer
+        // and costs nothing, so it must not lock the campaign out (issue #1321, mirroring the
+        // ai-map fix at ai-map.service.ts:237-242).
+        this.lastStart.delete(campaignId);
         await this.audit.log({
           actor: auditActor(user),
           actorRole: role,
@@ -313,11 +323,7 @@ export class AiPortraitService {
         return record.job;
       }
 
-      // Charge the rate-limit slot only once a generation actually STARTS — a blocked prompt
-      // runs no renderer and costs nothing, so it must not lock the campaign out (issue #1321,
-      // mirroring the ai-map fix at ai-map.service.ts:237-242).
-      this.lastStart.set(campaignId, Date.now());
-
+      // The rate-limit slot was reserved synchronously before the first await (see above).
       await this.runGeneration(record, config, user, role, caller);
       return record.job;
     } catch (err) {
@@ -457,9 +463,6 @@ export class AiPortraitService {
     // so authority should not fail here — but a race, concurrent edit, or audit/hide write failure
     // could still throw.
     let effectiveAttachment = attachment;
-    // Track whether the entity linkage actually committed so the catch block restores the prior
-    // portrait URL only when this request's URL is the one on the entity (review feedback).
-    let linkageCommitted = false;
     try {
       // If the target NPC is hidden, the generated portrait MUST also be hidden — otherwise a non-DM
       // member could enumerate it through the attachment list and fetch the bytes even though the NPC
@@ -495,16 +498,23 @@ export class AiPortraitService {
       } else {
         await this.npcs.update(body.entityId, { portraitUrl }, user, role);
       }
-      linkageCommitted = true;
     } catch (err) {
       // Defensive: the pre-validation should have caught authority issues, but a race, a concurrent
       // edit, or an audit-write failure could still throw after the attachment was committed. Roll
       // back the just-created attachment so the campaign is not charged quota for an unlinked portrait.
-      // Only restore the portrait URL if THIS request actually committed the linkage (review feedback):
-      // if setHidden or the audit failed before the entity update, a concurrent user may have changed
-      // the portrait, and unconditionally restoring would clobber their newer value.
-      if (linkageCommitted) {
-        try {
+      //
+      // Restore the prior portrait URL only if THIS request's URL is the one currently on the entity
+      // (review feedback): the update may have committed the DB write and then thrown on its post-
+      // write audit, so a simple boolean flag is insufficient. We re-read the entity and check
+      // whether its portraitUrl contains this attachment's id — if so, this request's linkage landed
+      // and restoring the prior URL is safe; if not, a concurrent user already changed it and we
+      // must not clobber their value.
+      try {
+        const currentRow = body.entityType === 'character'
+          ? await this.characters.getRowOrThrow(body.entityId)
+          : await this.npcs.getRowOrThrow(body.entityId);
+        const currentUrl = currentRow.portraitUrl ?? '';
+        if (currentUrl.includes(`/attachments/${attachment.id}/file`)) {
           if (body.entityType === 'character') {
             await this.characters.update(
               body.entityId,
@@ -520,13 +530,13 @@ export class AiPortraitService {
               role,
             );
           }
-        } catch (restoreErr) {
+        }
+      } catch (restoreErr) {
         this.logger.error(
           `AI portrait attach could not restore prior portrait for ${body.entityType}:${body.entityId}: ${
             restoreErr instanceof Error ? restoreErr.message : String(restoreErr)
           }`,
         );
-        }
       }
       try {
         await this.attachments.remove(attachment.id, user, role);
