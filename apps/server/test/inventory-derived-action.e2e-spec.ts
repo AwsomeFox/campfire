@@ -1438,6 +1438,32 @@ describe('derived equipped-item actions (issue #2097)', () => {
     }
   });
 
+  it('an item with no accepted snapshot derives from the live entry, and tracks its content', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+
+    // Strip the snapshot so the derivation takes the live rule-entry fallback — the path
+    // whose fence previously recorded only `ruleEntryId`, which stays constant even when
+    // `RulesService.updatePack()` rewrites the row's content underneath it.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
+
+    const first = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'live-entry-slot' });
+    expect(first.status).toBe(200);
+    expect(first.body.equippedAction.damage).toContain('1d8+3');
+
+    // The entry's content changes; the id does not. A re-equip must follow the content.
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+      const second = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'live-entry-slot' });
+      expect(second.status).toBe(200);
+      expect(second.body.equippedAction.damage).toContain('2d6+3');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

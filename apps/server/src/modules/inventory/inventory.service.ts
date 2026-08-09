@@ -65,6 +65,15 @@ interface DerivedActionResult {
   characterRevision: string | null;
   /** The campaign mechanics the calculation ran under — see `adapterForCampaign`. */
   mechanicsRevision: string | null;
+  /**
+   * The LIVE rule-entry data this derivation read, when it fell back to one (no accepted
+   * snapshot). Null otherwise, because a snapshot is already fingerprinted by value.
+   *
+   * Review (chatgpt-codex-connector P2): fencing on `ruleEntryId` alone only says the item
+   * still points at the same entry, not that the entry still says the same thing —
+   * `RulesService.updatePack()` can rewrite that row mid-derivation, and the id is unchanged.
+   */
+  entryDataRevision: string | null;
 }
 
 export const CLEARED_EQUIP_STATE: {
@@ -332,7 +341,7 @@ export class InventoryService {
         .from(characters)
         .where(eq(characters.id, characterId))
         .get();
-      if (!character) return { action: null, characterRevision: null, mechanicsRevision };
+      if (!character) return { action: null, characterRevision: null, mechanicsRevision, entryDataRevision: null };
 
       // Review (chatgpt-codex-connector P2): the SNAPSHOT wins, not the live rule entry.
       // The snapshot is the revision this campaign actually accepted at acquire time; when
@@ -350,6 +359,7 @@ export class InventoryService {
       // snapshot that says nothing about weapons means this item grants nothing; the live
       // entry is consulted only when there is no accepted snapshot at all.
       let data: unknown = null;
+      let entryDataRevision: string | null = null;
       if (existing.compendiumSnapshot) {
         const snapshot = sanitizeCompendiumSnapshot(safeJson(existing.compendiumSnapshot));
         if (snapshot?.dataJson) data = safeJson(snapshot.dataJson);
@@ -360,11 +370,15 @@ export class InventoryService {
           .where(eq(ruleEntries.id, existing.ruleEntryId))
           .get();
         if (entry?.dataJson) data = safeJson(entry.dataJson);
+        // Recorded whether or not it parsed: what the fence compares is the row's content as
+        // this derivation saw it.
+        entryDataRevision = entry?.dataJson ?? null;
       }
-      if (data == null) return { action: null, characterRevision: character.updatedAt, mechanicsRevision };
+      if (data == null) return { action: null, characterRevision: character.updatedAt, mechanicsRevision, entryDataRevision };
 
       return {
         mechanicsRevision,
+        entryDataRevision,
         action: deriveEquippedItemAction({
           itemName: finalName,
           data,
@@ -381,7 +395,7 @@ export class InventoryService {
       // Equipping is the user's action; deriving is a convenience on top of it. A failure
       // here leaves the item equipped with no granted action — recoverable by hand — rather
       // than failing a write the caller did ask for.
-      return { action: null, characterRevision: null, mechanicsRevision: null };
+      return { action: null, characterRevision: null, mechanicsRevision: null, entryDataRevision: null };
     }
   }
 
@@ -982,6 +996,7 @@ export class InventoryService {
       row: Pick<typeof inventoryItems.$inferSelect, 'characterId' | 'compendiumSnapshot' | 'ruleEntryId'>,
       characterRevision: string | null,
       mechanicsRevision: string | null,
+      entryDataRevision: string | null,
     ) =>
       JSON.stringify({
         characterId: row.characterId,
@@ -994,6 +1009,11 @@ export class InventoryService {
         // would write the pre-switch action straight back over that cleanup, under the new
         // adapter. The refresh path fences on the same value in its conditional UPDATE.
         mechanicsRevision,
+        // The live rule-entry CONTENT, when the derivation fell back to one because the item
+        // has no accepted snapshot. `ruleEntryId` above only says the item still points at
+        // the same row; this says the row still says the same thing, which
+        // `RulesService.updatePack()` can change without touching the id.
+        entryDataRevision,
       });
     // Captured from `existing` — the row as it stood when this request read it. `fresh` is
     // read inside the transaction BEFORE this request's own update lands, so comparing the
@@ -1011,6 +1031,7 @@ export class InventoryService {
       existing,
       derivation?.characterRevision ?? null,
       derivation?.mechanicsRevision ?? null,
+      derivation?.entryDataRevision ?? null,
     );
     /**
      * The name the derivation titled its action with. Review (chatgpt-codex-connector P2):
@@ -1181,6 +1202,13 @@ export class InventoryService {
           freshCampaign?.ruleSystem ?? '',
           freshCampaign?.customMechanicsProfile ?? null,
         ]);
+        // Re-read only when the derivation actually used the live entry; a snapshot-sourced
+        // one is already fingerprinted by value.
+        const freshEntryDataRevision =
+          derivation?.entryDataRevision == null || fresh.ruleEntryId == null
+            ? null
+            : (tx.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, fresh.ruleEntryId)).get()
+                ?.dataJson ?? null);
         const actionWrite = resolveEquippedActionWrite({
           ...derivationTrigger,
           authoredIsAction: !!input.equippedAction,
@@ -1191,7 +1219,7 @@ export class InventoryService {
           // before this request's own update lands, and comparing them would flag every
           // legitimate handoff as interference.
           derivationInputsUnchanged:
-            derivationInputs(fresh, freshCharacterRevision, freshMechanicsRevision) === derivedFromInputs &&
+            derivationInputs(fresh, freshCharacterRevision, freshMechanicsRevision, freshEntryDataRevision) === derivedFromInputs &&
             (fresh.name === existing.name || fresh.name === derivedActionName),
           derivationProducedAction: derivedOnEquip != null,
         });
