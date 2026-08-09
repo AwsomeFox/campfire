@@ -35,7 +35,7 @@ import {
   type AiDmMode,
   type AiDmTranscriptPage,
 } from '@campfire/schema';
-import { useAiDmSeat, useAiDmSession, invalidateAiDm, invalidateAiDmToolConfirmations } from '../../lib/query';
+import { queryKeys, useAiDmSeat, useAiDmSession, invalidateAiDm, invalidateAiDmToolConfirmations } from '../../lib/query';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
@@ -342,6 +342,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
               && transcriptRequestGenerationRef.current === requestGeneration
             ) setTranscriptFetched(true);
           });
+        } else if (event.type === 'grounding') {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.aiDmGrounding(campaignId) });
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||

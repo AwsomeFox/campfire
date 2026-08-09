@@ -18,6 +18,7 @@ import { resolveUndoPostError } from './aiDmUndoLever';
 import { StuckLadder } from './StuckLadder';
 import { AiPathGuide } from './AiSetupChecklist';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
+import { GroundingPanel } from './GroundingPanel';
 import { TranscriptRow } from './AiDmTranscriptUi';
 import { useAiDmLiveActivity } from './useAiDmLiveActivity';
 import {
@@ -26,7 +27,7 @@ import {
   shouldScrollTranscriptToTailOnMount,
   unreadAfterFeedGrowth,
 } from './feedScrollFollow';
-import { NARRATION_VISUAL_TRANSCRIPT } from './narrationAccessibility';
+import { NARRATION_LOG_LIVE_REGION, NARRATION_STATUS_LIVE_REGION, NARRATION_VISUAL_TRANSCRIPT } from './narrationAccessibility';
 import { useDisclosure } from '../../components/useDisclosure';
 import { Btn, Card, Chip, EmptyState } from '../../components/ui';
 import { Field } from '../../components/Field';
@@ -75,6 +76,19 @@ export function EncounterAiDriverPanel({
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [undoBusy, setUndoBusy] = useState(false);
   const [undoError, setUndoError] = useState<string | null>(null);
+  const [narrationStatus, setNarrationStatus] = useState('');
+  const announcedIdsRef = useRef(new Set<string>());
+  const [narrationAnnouncements, setNarrationAnnouncements] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (streaming) setNarrationStatus(t('table.composerLockedStreaming'));
+    else setNarrationStatus(canCompose ? t('table.composerUnlocked') : t('table.narrationReady'));
+  }, [canCompose, streaming, t]);
+  useEffect(() => {
+    const additions = transcript.entries.filter((entry) => entry.kind !== 'dm' || entry.status === 'done').filter((entry) => !announcedIdsRef.current.has(entry.id));
+    additions.forEach((entry) => announcedIdsRef.current.add(entry.id));
+    if (additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...additions.map((entry) => entry.kind === 'dm' ? entry.committed.join('\n\n') : entry.kind === 'player' ? entry.text : entry.kind === 'tool' ? entry.name : entry.text ?? '')]);
+  }, [transcript.entries]);
 
   const charactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(campaignId),
@@ -407,6 +421,7 @@ export function EncounterAiDriverPanel({
             the transcript scrolls it out of view.
           */}
           <ToolConfirmationsPanel campaignId={campaignId} isDm={isDm} knownEntities={confirmationEntities} />
+          <GroundingPanel campaignId={campaignId} isDm={isDm} />
 
           <AiPathGuide compact />
 
@@ -529,6 +544,10 @@ export function EncounterAiDriverPanel({
           )}
         </div>
       )}
+      <div {...NARRATION_STATUS_LIVE_REGION} className="sr-only">{narrationStatus}</div>
+      <div {...NARRATION_LOG_LIVE_REGION} aria-label={t('table.narrationLogLabel')} className="sr-only">
+        {narrationAnnouncements.map((announcement, index) => <p key={index}>{announcement}</p>)}
+      </div>
     </Card>
   );
 }
