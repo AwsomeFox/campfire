@@ -198,8 +198,12 @@ function branchLines(branch: {
     const rounds = effect.rounds != null ? ` (${effect.rounds} round${effect.rounds === 1 ? '' : 's'})` : '';
     const ends = effect.saveEnds ? ', save ends' : '';
     const ongoing = effect.ongoingDamage > 0 ? `${effect.ongoingDamage} ongoing damage` : '';
+    // No condition means the RESOLVER drops this effect outright
+    // (`ActionResolverService.resolveOneTarget`: `if (!eff.condition) continue`), so a
+    // standalone `ongoingDamage` never actually lands. Describing it here would promise
+    // recurring damage that using the action does not apply — better silent than untrue.
+    if (!condition) continue;
     if (name) lines.push(`${name}${rounds}${ends}${ongoing ? ` · ${ongoing}` : ''}`);
-    else if (ongoing) lines.push(`${ongoing}${rounds}${ends}`);
   }
   return lines;
 }

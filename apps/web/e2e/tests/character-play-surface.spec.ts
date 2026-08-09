@@ -645,6 +645,53 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): creation was the one mutation still relying entirely
+   * on the refetch — the POST response was discarded — so a successful add whose follow-up
+   * GET failed left the new item missing from both the inventory list and the Play pack.
+   */
+  test('an added item reaches Play even when the inventory refetch fails', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Adds While Offline', className: 'Fighter', level: 2 },
+    })).json()).id as number;
+
+    try {
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=build`);
+      const inventory = page.getByTestId('character-inventory');
+      await expect(inventory).toBeVisible();
+
+      // Every inventory refetch fails from the moment the create POST goes out.
+      let created = false;
+      await page.route(`**/api/v1/campaigns/${campaignId}/inventory`, async (route) => {
+        const method = route.request().method();
+        if (method === 'POST') {
+          created = true;
+          return route.fallback();
+        }
+        if (method === 'GET' && created) return route.abort('failed');
+        return route.fallback();
+      });
+
+      await inventory.getByRole('button', { name: '+ Add item' }).click();
+      // The label carries a required marker, so match it loosely.
+      await inventory.getByLabel('Item name').fill('Rope, hempen');
+      await inventory.getByRole('button', { name: 'Add', exact: true }).click();
+
+      // The create response carries the item, so it lands without the refetch.
+      await expect(inventory.getByText('Rope, hempen')).toBeVisible();
+    } finally {
+      const items = await (await ctx.get(`/api/v1/campaigns/${campaignId}/inventory`)).json();
+      for (const item of items as Array<{ id: number; characterId: number | null }>) {
+        if (item.characterId === characterId) await ctx.delete(`/api/v1/inventory/${item.id}`);
+      }
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
    * Regression (Codex review on #2115): the sheet learns the pack from the inventory
    * section, which used to republish only after a refetch. A successful unequip whose
    * follow-up GET failed therefore left Build showing the item stowed while Play still

@@ -219,11 +219,11 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     expect(actionSpecEffects(spec)[0].lines).toEqual(['Prone']);
   });
 
-  test('either field alone still reads', () => {
+  test('a condition alone still reads; prose alone does not (the resolver needs the condition)', () => {
     expect(actionSpecEffects(ActionSpec.parse({ outcomes: { hit: { effects: [{ condition: 'Blinded' }] } } }))[0].lines)
       .toEqual(['Blinded']);
-    expect(actionSpecEffects(ActionSpec.parse({ outcomes: { hit: { effects: [{ text: 'Pushed 10 feet' }] } } }))[0].lines)
-      .toEqual(['Pushed 10 feet']);
+    expect(actionSpecEffects(ActionSpec.parse({ outcomes: { hit: { effects: [{ text: 'Pushed 10 feet' }] } } })))
+      .toEqual([]);
   });
 
   test('ongoing damage rides with the condition it belongs to', () => {
@@ -231,6 +231,19 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
       outcomes: { hit: { effects: [{ condition: 'Burning', rounds: 3, ongoingDamage: 5 }] } },
     });
     expect(actionSpecEffects(spec)[0].lines).toEqual(['Burning (3 rounds) · 5 ongoing damage']);
+  });
+
+  /**
+   * `ActionResolverService.resolveOneTarget` skips any effect with no condition
+   * (`if (!eff.condition) continue`), so a standalone `ongoingDamage` never lands. Describing
+   * it would promise recurring damage that using the action does not apply.
+   */
+  test('an effect with no condition is omitted — the resolver drops it', () => {
+    const spec = ActionSpec.parse({ outcomes: { hit: { effects: [{ ongoingDamage: 5, rounds: 3 }] } } });
+    expect(actionSpecEffects(spec)).toEqual([]);
+    // Prose without a condition is dropped for the same reason.
+    const prose = ActionSpec.parse({ outcomes: { hit: { effects: [{ text: 'Smoulders ominously' }] } } });
+    expect(actionSpecEffects(prose)).toEqual([]);
   });
 
   test('a branch that truly says nothing still contributes no group', () => {

@@ -4646,6 +4646,21 @@ export interface RuleSystemAdapter {
    */
   readonly hasNeutralD20Checks?: boolean;
   /**
+   * OPTIONAL — the ability/attribute this system's initiative derives from ('DEX', 'AGILITY'),
+   * for adapters that use the neutral roll catalog.
+   *
+   * `initiativeModifier` computes the number but does not say what it read, so the neutral
+   * catalog had to publish `ability: null` — and a caller that gates on "is the source score
+   * actually set" (the character sheet does, so a draft sheet cannot roll a fabricated +0)
+   * had nothing to gate on. Declaring it also gives the breakdown an honest label instead of
+   * the generic "initiative".
+   *
+   * Omit it for a system whose initiative reads no ability at all (Starforged's flat 0);
+   * `null`/absent then keeps today's ability-independent behaviour. Adapters with their own
+   * `buildCheckCatalog` (5e, PF2e) already publish the ability directly and ignore this.
+   */
+  readonly initiativeAbility?: string;
+  /**
    * OPTIONAL — whether this system rolls initiative AT ALL. Default true.
    *
    * Distinct from {@link initiativeModel}, which answers "individual or group" for a system
@@ -5254,6 +5269,9 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   // d20 + modifier, so the neutral catalog cannot describe its checks — and the server
   // resolves that same definition, so an offered check would persist a wrong result.
   hasNeutralD20Checks: false,
+  // Turn order is Agility-monotonic (see `initiativeModifier` below), so the catalog can
+  // name the score it reads rather than publishing an ability-less initiative.
+  initiativeAbility: 'AGILITY',
   attributeDicePool(score: number): AttributeDicePool {
     return openLegendAttributeDicePool(score);
   },
@@ -5733,7 +5751,10 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
   const initBase = adapter.initiativeModifier(stats, 'score', character.level);
   const initLevel = adapter.levelInitiativeBonus?.(character.level) ?? 0;
   const initMod = initBase + initLevel;
-  const initiativeLabel = adapter.id === ARCHMAGE_ADAPTER_ID ? 'DEX' : 'initiative';
+  // The adapter's own declaration, when it has one — this used to special-case a single
+  // adapter id for the label and publish no ability at all (see `initiativeAbility`).
+  const initiativeAbility = adapter.initiativeAbility ?? null;
+  const initiativeLabel = initiativeAbility ?? 'initiative';
   // A system with no initiative roll gets no initiative check — its `initiativeDie` exists
   // only to satisfy the generic roller seam (see `hasInitiativeRoll`), so emitting an entry
   // would let REST and MCP discover and persist a turn-order roll the game does not have.
@@ -5741,7 +5762,7 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
     id: 'initiative',
     label: 'Initiative',
     category: 'initiative',
-    ability: null,
+    ability: initiativeAbility,
     proficiency: null,
     favorite: true,
     modifier: initMod,

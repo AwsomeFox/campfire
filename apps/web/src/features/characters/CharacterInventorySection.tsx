@@ -88,6 +88,12 @@ export function CharacterInventorySection({
             ? withDisplaced.map((i) => (i.id === next.id ? next : i))
             : [...withDisplaced, next];
         });
+      } else if (change && 'created' in change) {
+        // Creation was the one mutation still relying entirely on the refetch: the POST
+        // response was discarded, so a successful add with a failed GET left the new item
+        // missing from both this list and the sheet's pack.
+        const made = change.created;
+        setItems((prev) => (prev.some((i) => i.id === made.id) ? prev : [...prev, made]));
       } else if (change && 'deletedId' in change) {
         setItems((prev) => prev.filter((i) => i.id !== change.deletedId));
       }
@@ -168,9 +174,9 @@ export function CharacterInventorySection({
               owners={writableOwners}
               defaultOwner={String(character.id)}
               onCancel={() => setAdding(false)}
-              onCreated={() => {
+              onCreated={(change) => {
                 setAdding(false);
-                void load();
+                applyChange(change);
               }}
             />
           )}
@@ -181,9 +187,9 @@ export function CharacterInventorySection({
               owners={writableOwners}
               defaultOwner={String(character.id)}
               onClose={() => setShowCompendiumPicker(false)}
-              onCreated={() => {
+              onCreated={(change) => {
                 setShowCompendiumPicker(false);
-                void load();
+                applyChange(change);
               }}
             />
           )}

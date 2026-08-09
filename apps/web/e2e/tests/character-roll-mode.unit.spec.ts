@@ -1,6 +1,9 @@
 import { expect, test } from '@playwright/test';
 import {
+  Archmage13aAdapter,
+  BasicFantasyAdapter,
   Dnd5eAdapter,
+  OSR_VARIANT_ADAPTERS,
   OpenLegendAdapter,
   StarforgedAdapter,
   checkCatalogForAdapter,
@@ -196,5 +199,37 @@ test.describe('checkCatalogForAdapter — offers nothing a system cannot actuall
     expect(hasNeutralD20ChecksForAdapter({})).toBe(true);
     expect(hasNeutralD20ChecksForAdapter(null)).toBe(true);
     expect(hasInitiativeRollForAdapter({})).toBe(true);
+  });
+});
+
+/**
+ * Codex review on #2115 — the neutral catalog computed initiative through
+ * `initiativeModifier` but published `ability: null`, so a caller gating on "is the source
+ * score actually set" (the sheet does, so a draft cannot roll a fabricated +0) had nothing
+ * to gate on. Adapters that read an ability now declare it.
+ */
+test.describe('neutral initiative declares the score it reads', () => {
+  const character = { level: 3, stats: { DEX: 14, AGILITY: 5 }, saveProficiencies: [], skills: {} };
+  const initiativeOf = (adapter: Parameters<typeof checkCatalogForAdapter>[0]) =>
+    checkCatalogForAdapter(adapter, character).find((c) => c.category === 'initiative') ?? null;
+
+  test('13th Age names DEX', () => {
+    expect(initiativeOf(Archmage13aAdapter)?.ability).toBe('DEX');
+  });
+
+  test('Open Legend names AGILITY', () => {
+    expect(initiativeOf(OpenLegendAdapter)?.ability).toBe('AGILITY');
+  });
+
+  test('an OSR variant that adds the DEX modifier names it; one that does not stays ability-less', () => {
+    expect(BasicFantasyAdapter.initiativeModel?.usesDexModifier).toBe(true);
+    expect(initiativeOf(BasicFantasyAdapter)?.ability).toBe('DEX');
+    const bareD6 = OSR_VARIANT_ADAPTERS['swords-wizardry'];
+    expect(bareD6.initiativeModel?.usesDexModifier).toBe(false);
+    expect(bareD6.initiativeAbility).toBeUndefined();
+  });
+
+  test('5e already published its own — unchanged', () => {
+    expect(initiativeOf(Dnd5eAdapter)?.ability).toBe('DEX');
   });
 });

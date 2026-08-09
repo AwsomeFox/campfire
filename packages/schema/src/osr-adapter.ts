@@ -437,6 +437,9 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
       mode: profile.initiativeMode,
       usesDexModifier: profile.initiativeUsesDexMod,
     },
+    // Only the variants that actually add the DEX modifier name it; the rest roll a bare d6
+    // and stay ability-independent, so the catalog publishes no source score for them.
+    ...(profile.initiativeUsesDexMod ? { initiativeAbility: 'DEX' } : {}),
     initiativeModifier(
       abilities: Record<string, unknown> | null | undefined,
       representation: AbilityRepresentation = 'score',

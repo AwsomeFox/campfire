@@ -55,6 +55,7 @@ export type InventoryItemChange =
    * slot-conflicting items at once until a refetch happened to succeed.
    */
   | { readonly updated: InventoryItem; readonly displacedId?: number }
+  | { readonly created: InventoryItem }
   | { readonly deletedId: number };
 
 export function ItemSection({
@@ -582,7 +583,7 @@ export function AddItemForm({
   /** Initial owner select value — 'party' or a character id string. */
   defaultOwner?: string;
   onCancel: () => void;
-  onCreated: () => void;
+  onCreated: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState('');
@@ -628,8 +629,8 @@ export function AddItemForm({
         body.ownerType = 'character';
         body.characterId = Number(owner);
       }
-      await api.post(`${API}/campaigns/${campaignId}/inventory`, body);
-      onCreated();
+      const created = await api.post<InventoryItem>(`${API}/campaigns/${campaignId}/inventory`, body);
+      onCreated(created && typeof created.id === 'number' ? { created } : undefined);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.addItem' }));
     } finally {
@@ -753,9 +754,9 @@ export function AddItemForm({
           owners={owners}
           defaultOwner={owner}
           onClose={() => setShowCompendiumPicker(false)}
-          onCreated={() => {
+          onCreated={(change) => {
             setShowCompendiumPicker(false);
-            onCreated();
+            onCreated(change);
           }}
         />
       )}
@@ -774,7 +775,7 @@ export function CompendiumItemPickerModal({
   owners: Character[];
   defaultOwner?: string;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const dialogRef = useDialog({ onClose });
@@ -833,7 +834,7 @@ export function CompendiumItemPickerModal({
       const ownerType = owner === 'party' ? 'party' : 'character';
       const characterId = owner === 'party' ? null : Number(owner);
       const qtyParsed = Math.max(1, Number(qty) || 1);
-      await api.post(`${API}/campaigns/${campaignId}/inventory/from-compendium`, {
+      const created = await api.post<InventoryItem>(`${API}/campaigns/${campaignId}/inventory/from-compendium`, {
         ruleEntryId: selectedEntry.id,
         ownerType,
         characterId,
@@ -841,7 +842,7 @@ export function CompendiumItemPickerModal({
         notes: notes.trim(),
         duplicateMode,
       });
-      onCreated();
+      onCreated(created && typeof created.id === 'number' ? { created } : undefined);
       onClose();
     } catch (err) {
       const code = err instanceof Error && 'body' in err ? (err as { body?: { code?: string } }).body?.code : '';
