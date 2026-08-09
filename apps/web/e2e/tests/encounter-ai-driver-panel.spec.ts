@@ -174,6 +174,7 @@ test.describe('encounter Driver live session (#1318)', () => {
       campaignId,
       status: 'idle',
       state: 'running',
+      phase: 'active',
       scene: 'The gatehouse',
       lastNarration: null,
       lastTurnAt: null,
@@ -218,6 +219,10 @@ test.describe('encounter Driver live session (#1318)', () => {
         for (const publish of streamWaiters) publish();
         return route.fulfill({ status: 201, contentType: 'application/json', body: '{}' });
       }
+      if (path.endsWith('/ai-dm/wrap-up') && method === 'POST') {
+        session.phase = 'ended';
+        return route.fulfill({ status: 201, contentType: 'application/json', body: '{}' });
+      }
       if (path.endsWith('/ai-dm/session')) return json(session);
       if (path.endsWith('/ai-dm/seat') || (path.endsWith('/ai-dm') && method === 'GET')) return json(seat);
       if (path.endsWith('/ai-dm/tool-confirmations')) return json([]);
@@ -227,6 +232,8 @@ test.describe('encounter Driver live session (#1318)', () => {
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
     await openCockpitTab(page, 'table');
     await page.getByTestId('encounter-ai-driver-toggle').click();
+    await expect(page.getByRole('button', { name: 'Start Session' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Wrap Up' })).toBeVisible();
 
     const composer = page.getByTestId('encounter-ai-driver-composer');
     await composer.getByRole('textbox', { name: 'Your action' }).fill('I lift the gate.');
@@ -238,5 +245,89 @@ test.describe('encounter Driver live session (#1318)', () => {
     await expect(transcript).toContainText('I lift the gate.');
     await expect(transcript).toContainText('The portcullis groans open.', { timeout: 15_000 });
     await expect(transcript.getByRole('link', { name: 'Next turn' })).toHaveAttribute('href', `/c/${campaignId}/encounters/${encounterId}`);
+
+    const wrapRequest = page.waitForRequest(
+      (request) => request.url().endsWith('/ai-dm/wrap-up') && request.method() === 'POST',
+    );
+    await page.getByRole('button', { name: 'Wrap Up' }).click();
+    await wrapRequest;
+    await expect(composer.getByRole('textbox', { name: 'Your action' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Start Session' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Wrap Up' })).toHaveCount(0);
+  });
+
+  test('a player can restart an ended session from the encounter dock', async ({ browser }) => {
+    const context = await browser.newContext({ storageState: stateFor('player') });
+    const page = await context.newPage();
+    try {
+      const { campaignId, encounterId } = seed();
+      const seat = {
+        campaignId,
+        mode: 'driver',
+        enabled: true,
+        model: 'test',
+        instructions: '',
+        tokenBudget: 10_000,
+        tokensUsed: 0,
+        turnCount: 0,
+        lastTurnAt: null,
+        createdAt: '2026-08-09T00:00:00.000Z',
+        updatedAt: '2026-08-09T00:00:00.000Z',
+      };
+      const session = {
+        campaignId,
+        status: 'idle',
+        state: 'running',
+        phase: 'ended',
+        scene: null,
+        lastNarration: null,
+        lastTurnAt: null,
+        turnCount: 0,
+        stuck: null,
+        levers: [],
+        actingDm: null,
+        vote: null,
+        takeoverRequestedBy: null,
+      };
+
+      await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        const method = route.request().method();
+        const json = (body: unknown) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+        if (path.endsWith('/events') || path.endsWith('/ai-dm/stream')) {
+          return route.fulfill({
+            status: 200,
+            contentType: 'text/event-stream',
+            body: ': keepalive\n\n',
+          });
+        }
+        if (path.endsWith('/ai-dm/start-session') && method === 'POST') {
+          session.phase = 'active';
+          return route.fulfill({ status: 201, contentType: 'application/json', body: '{}' });
+        }
+        if (path.endsWith('/ai-dm/session')) return json(session);
+        if (path.endsWith('/ai-dm/seat') || (path.endsWith('/ai-dm') && method === 'GET')) return json(seat);
+        if (path.endsWith('/ai-dm/tool-confirmations')) return json([]);
+        return route.fallback();
+      });
+
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await openCockpitTab(page, 'table');
+      await page.getByTestId('encounter-ai-driver-toggle').click();
+
+      const composer = page.getByTestId('encounter-ai-driver-composer');
+      await expect(composer.getByRole('textbox', { name: 'Your action' })).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Start Session' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Wrap Up' })).toHaveCount(0);
+
+      const startRequest = page.waitForRequest(
+        (request) => request.url().endsWith('/ai-dm/start-session') && request.method() === 'POST',
+      );
+      await page.getByRole('button', { name: 'Start Session' }).click();
+      await startRequest;
+      await expect(composer.getByRole('textbox', { name: 'Your action' })).toBeEnabled();
+    } finally {
+      await context.close();
+    }
   });
 });

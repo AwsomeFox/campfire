@@ -184,8 +184,7 @@
     "driver": {
       "toggle": "Live session chat",
       "panelLabel": "Live session chat controls",
-      "transcriptLabel": "Driver transcript",
-      "openTable": "Open full table"
+      "transcriptLabel": "Driver transcript"
     },
     "turnBeat": {
       "takeover": "دورك الآن — {{name}}",

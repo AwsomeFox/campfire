@@ -9,7 +9,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, Combatant, EncounterWithCombatants } from '@campfire/schema';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { queryKeys, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { aiDmPauseRequest } from './aiDmPause';
@@ -70,6 +70,8 @@ export function EncounterAiDriverPanel({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
   const charactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(campaignId),
@@ -95,9 +97,11 @@ export function EncounterAiDriverPanel({
   );
 
   const paused = session?.state === 'paused';
+  const phase = session?.phase ?? 'active';
   const humanControl = session?.state === 'human_control';
   const awaiting = session?.state === 'awaiting_players';
-  const locked = streaming || paused || humanControl || awaiting;
+  const ended = phase === 'ended';
+  const locked = streaming || paused || humanControl || awaiting || ended;
   const lockReason = streaming
     ? t('table.composerLockedStreaming')
     : paused
@@ -106,7 +110,9 @@ export function EncounterAiDriverPanel({
         ? t('table.composerLockedHuman')
         : awaiting
           ? t('table.composerLockedAwaiting')
-          : null;
+          : ended
+            ? t('table.composerLockedEnded')
+            : null;
 
   const placeholder =
     encounter.status === 'running'
@@ -164,6 +170,21 @@ export function EncounterAiDriverPanel({
       setPauseError(t('table.pauseFailed'));
     } finally {
       setPauseBusy(false);
+    }
+  }
+
+  async function onLifecycle(action: 'start-session' | 'wrap-up') {
+    setLifecycleBusy(true);
+    setLifecycleError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
+      invalidateAiDm(queryClient, campaignId);
+    } catch (err) {
+      setLifecycleError(
+        err instanceof ApiError && err.message ? err.message : t('table.lifecycleFailed'),
+      );
+    } finally {
+      setLifecycleBusy(false);
     }
   }
 
@@ -299,6 +320,29 @@ export function EncounterAiDriverPanel({
             {statusLabel}
           </Chip>
         </Btn>
+        <div className="flex-1" />
+        {canCompose && phase !== 'greeting' && phase !== 'wrap_up' && (
+          <div className="flex gap-1.5">
+            <Btn
+              density="xs"
+              ghost
+              onClick={() => void onLifecycle('start-session')}
+              disabled={lifecycleBusy}
+            >
+              {t('table.startSession')}
+            </Btn>
+            {isDm && phase !== 'ended' && (
+              <Btn
+                density="xs"
+                ghost
+                onClick={() => void onLifecycle('wrap-up')}
+                disabled={lifecycleBusy}
+              >
+                {t('table.wrapUp')}
+              </Btn>
+            )}
+          </div>
+        )}
       </div>
 
       {open && (
@@ -334,6 +378,12 @@ export function EncounterAiDriverPanel({
             )}
           </div>
           {pauseError && <p className="text-xs text-rose-400 m-0">{pauseError}</p>}
+          {phase !== 'active' && (
+            <p className="text-xs text-secondary m-0" data-testid="encounter-ai-phase-note">
+              {t(`table.phaseNote.${phase}`)}
+            </p>
+          )}
+          {lifecycleError && <p className="text-xs text-rose-400 m-0">{lifecycleError}</p>}
 
           {session && (
             <StuckLadder

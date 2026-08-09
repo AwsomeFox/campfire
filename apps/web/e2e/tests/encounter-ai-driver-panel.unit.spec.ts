@@ -26,6 +26,9 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/useAiDmLiveActivity/);
     expect(panel).toMatch(/onTogglePause/);
     expect(panel).toMatch(/AiPathGuide/);
+    expect(panel).toMatch(/onLifecycle\('start-session'\)/);
+    expect(panel).toMatch(/onLifecycle\('wrap-up'\)/);
+    expect(panel).toMatch(/composerLockedEnded/);
   });
 
   test('shared live activity carries transcript for the dock', () => {
