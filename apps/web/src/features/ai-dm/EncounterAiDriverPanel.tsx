@@ -27,7 +27,7 @@ import {
   shouldScrollTranscriptToTailOnMount,
   unreadAfterFeedGrowth,
 } from './feedScrollFollow';
-import { NARRATION_LOG_LIVE_REGION, NARRATION_STATUS_LIVE_REGION, NARRATION_VISUAL_TRANSCRIPT } from './narrationAccessibility';
+import { NARRATION_LOG_LIVE_REGION, NARRATION_STATUS_LIVE_REGION, NARRATION_VISUAL_TRANSCRIPT, nextComposerStatusAnnouncement, resolveComposerA11ySnapshot, type ComposerA11ySnapshot } from './narrationAccessibility';
 import { useDisclosure } from '../../components/useDisclosure';
 import { Btn, Card, Chip, EmptyState } from '../../components/ui';
 import { Field } from '../../components/Field';
@@ -78,14 +78,17 @@ export function EncounterAiDriverPanel({
   const [undoError, setUndoError] = useState<string | null>(null);
   const [narrationStatus, setNarrationStatus] = useState('');
   const announcedIdsRef = useRef(new Set<string>());
+  const narrationBaselineRef = useRef(false);
+  const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
   const [narrationAnnouncements, setNarrationAnnouncements] = useState<string[]>([]);
-
   useEffect(() => {
-    if (streaming) setNarrationStatus(t('table.composerLockedStreaming'));
-    else setNarrationStatus(canCompose ? t('table.composerUnlocked') : t('table.narrationReady'));
-  }, [canCompose, streaming, t]);
-  useEffect(() => {
-    const additions = transcript.entries.filter((entry) => entry.kind !== 'dm' || entry.status === 'done').filter((entry) => !announcedIdsRef.current.has(entry.id));
+    const finished = transcript.entries.filter((entry) => entry.kind !== 'dm' || entry.status === 'done');
+    if (!narrationBaselineRef.current) {
+      finished.forEach((entry) => announcedIdsRef.current.add(entry.id));
+      narrationBaselineRef.current = true;
+      return;
+    }
+    const additions = finished.filter((entry) => !announcedIdsRef.current.has(entry.id));
     additions.forEach((entry) => announcedIdsRef.current.add(entry.id));
     if (additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...additions.map((entry) => entry.kind === 'dm' ? entry.committed.join('\n\n') : entry.kind === 'player' ? entry.text : entry.kind === 'tool' ? entry.name : entry.text ?? '')]);
   }, [transcript.entries]);
@@ -130,6 +133,16 @@ export function EncounterAiDriverPanel({
           : ended
             ? t('table.composerLockedEnded')
             : null;
+
+  useEffect(() => {
+    const next = resolveComposerA11ySnapshot(streaming, lockReason);
+    const message = nextComposerStatusAnnouncement(composerA11yRef.current, next, {
+      streaming: t('table.composerLockedStreaming'),
+      ready: canCompose ? t('table.composerUnlocked') : t('table.narrationReady'),
+    });
+    composerA11yRef.current = next;
+    if (message) setNarrationStatus(message);
+  }, [canCompose, lockReason, streaming, t]);
 
   const placeholder =
     encounter.status === 'running'
