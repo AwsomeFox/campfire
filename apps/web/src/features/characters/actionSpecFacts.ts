@@ -180,9 +180,13 @@ function branchLines(branch: {
   if (branch.text) lines.push(branch.text);
 
   const damage = (branch.damage ?? []).map(damagePartText).filter(Boolean);
-  if (damage.length > 0) lines.push(`${damage.join(' + ')} damage`);
-  // Save-for-half with no damage of its own halves the failure branch's — say so either way.
-  if (branch.halfDamage) lines.push(damage.length > 0 ? 'Half damage on a success' : 'Half damage');
+  // `halfDamage` is branch-neutral: a schema-valid `miss`, `failure` or `critFailure` may
+  // carry it too, and each line already sits under a heading naming its own outcome. Saying
+  // "on a success" here put that phrase under "On a failure" and misstated the rule. When
+  // the branch has damage of its own the halving qualifies THAT amount, so it reads as one
+  // line rather than two that look additive.
+  if (damage.length > 0) lines.push(`${damage.join(' + ')} damage${branch.halfDamage ? ' (halved)' : ''}`);
+  else if (branch.halfDamage) lines.push('Half damage');
   if (branch.healing.trim()) lines.push(`Heals ${branch.healing.trim()}`);
   if (branch.tempHp.trim()) lines.push(`${branch.tempHp.trim()} temporary hit points`);
 

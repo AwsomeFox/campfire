@@ -189,6 +189,20 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     expect(actionSpecEffects(spec)[0].lines).toEqual(['Heals 2d8+3', '5 temporary hit points']);
   });
 
+  /**
+   * `halfDamage` is branch-neutral — a `miss`/`failure`/`critFailure` may carry it — and the
+   * group heading already names the outcome, so the line must not name one itself.
+   */
+  test('a branch that halves its OWN damage says so on that damage, without naming an outcome', () => {
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      outcomes: { failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }], halfDamage: true } },
+    });
+    expect(actionSpecEffects(spec)).toEqual([
+      { outcome: 'failure', label: 'On a failure', lines: ['8d6 fire damage (halved)'] },
+    ]);
+  });
+
   test('save-for-half is stated even when the branch carries no damage of its own', () => {
     const spec = ActionSpec.parse({
       mode: 'save',
