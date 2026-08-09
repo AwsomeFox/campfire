@@ -26,7 +26,7 @@ test.describe('parseDiceSidesFromExpr (issue #1352)', () => {
 
 test.describe('buildOverlayDice (issue #1352)', () => {
   test('marks dropped dice on advantage settle', () => {
-    const dice = buildOverlayDice([20, 20], [14, 18], [18]);
+    const dice = buildOverlayDice([20, 20], [14, 18], [false, true]);
     expect(dice).toHaveLength(2);
     expect(dice[0].kept).toBe(false);
     expect(dice[1].kept).toBe(true);
@@ -98,11 +98,18 @@ test.describe('Dice roll overlay contracts (issue #1352)', () => {
 
   test('the crit badge and the crit animation read the same rule', () => {
     const rollerSource3d = readFileSync(resolve(ROOT, 'src/features/dice/dice3d.ts'), 'utf8');
-    expect(overlaySource).toMatch(/natFlourish\(/);
-    expect(rollerSource3d).toMatch(/natFlourishDieIndex\(rolled\)/);
+    expect(overlaySource).toMatch(/flourishHeroIndex\(/);
+    expect(rollerSource3d).toMatch(/flourishHeroIndex\(/);
     // Neither may re-derive it: a second copy is how they came to disagree.
     expect(overlaySource).not.toMatch(/value === 20/);
     expect(rollerSource3d).not.toMatch(/results\[i\]\?\.value === 20/);
+    // The tray must not decide crit/fumble for itself: d20Flavor already knows
+    // that a pooled `2d20` has no natural result and that a compound roll's kept
+    // dice live in `terms[]`. Re-deriving it from side counts made the dice
+    // disagree with the toast, the audio cue and the announcer.
+    expect(contextSource).toMatch(/flavor: d20Flavor\(r\)/);
+    expect(contextSource).toMatch(/keptFlags: keptFaceFlags\(r\)/);
+    expect(overlaySource).toMatch(/flavor\?: D20Flavor \| null/);
     // And both must judge the SAME dice. A large roll draws only a selection, so
     // a badge weighed against the whole roll promises a flourish the tray never
     // plays — which is how the render cap reopened this after it was closed.

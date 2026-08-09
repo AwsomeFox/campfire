@@ -18,8 +18,9 @@ import type { DiceTheme } from '@campfire/schema';
 import type { Dice3dHandle, Dice3dSettleDie } from '../features/dice/dice3d';
 // Value import, so it must stay three.js-free — see the module doc there.
 import { MAX_ANIMATION_MS } from '../features/dice/dice3dTiming';
-import { natFlourish } from '../features/dice/natFlourish';
+import { flourishHeroIndex } from '../features/dice/natFlourish';
 import { renderedDiceIndices } from '../features/dice/renderedDice';
+import type { D20Flavor } from '../lib/d20Flavor';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
 
 /**
@@ -60,43 +61,41 @@ function randomFace(sides: number): number {
   return 1 + Math.floor(Math.random() * sides);
 }
 
-function keptFlags(rolls: number[], kept?: number[]): boolean[] {
-  if (!kept) return rolls.map(() => true);
-  const remaining = new Map<number, number>();
-  for (const v of kept) remaining.set(v, (remaining.get(v) ?? 0) + 1);
-  return rolls.map((v) => {
-    const left = remaining.get(v) ?? 0;
-    if (left > 0) {
-      remaining.set(v, left - 1);
-      return true;
-    }
-    return false;
-  });
-}
-
+/**
+ * `keptFlags` are POSITIONAL — one per face, from ../lib/keptFaceFlags — not the
+ * kept FACES the roll publishes. Matching faces here could not see a compound
+ * roll's per-term structure, so `2d20kh1+1d4` faded nothing.
+ */
 export function buildOverlayDice(
   sides: number[],
   values?: number[],
-  kept?: number[],
+  keptFlags?: boolean[],
 ): DiceRollOverlayDie[] {
   const count = values?.length ?? sides.length;
-  const flags = values ? keptFlags(values, kept) : sides.map(() => true);
   return Array.from({ length: count }, (_, i) => ({
     sides: sides[i] ?? sides[sides.length - 1] ?? 20,
     value: values?.[i],
-    kept: flags[i] ?? true,
+    kept: keptFlags?.[i] ?? true,
   }));
 }
 
 export function DiceRollOverlay({
   dice,
   phase,
+  flavor = null,
   theme = 'nocturne',
   colorVisionAssist = false,
   onSettled,
 }: {
   dice: DiceRollOverlayDie[];
   phase: DiceRollOverlayPhase;
+  /**
+   * Whether this roll crit or fumbled, from ../lib/d20Flavor — the app's single
+   * answer, shared with the toast, the audio cue and the announcer. Deciding it
+   * here from side counts made the tray flourish on pooled `2d20` rolls that
+   * have no natural-result semantics at all.
+   */
+  flavor?: D20Flavor | null;
   theme?: DiceTheme | null;
   /**
    * Issue #1942: adds a star/skull glyph badge to the crit/fumble flourish so the
@@ -123,6 +122,8 @@ export function DiceRollOverlay({
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
   const settleResultsRef = useRef<Dice3dSettleDie[]>([]);
+  const flavorRef = useRef<D20Flavor | null>(flavor);
+  flavorRef.current = flavor;
   const settleOnce = useCallback(() => {
     if (settledRef.current) return;
     settledRef.current = true;
@@ -201,7 +202,7 @@ export function DiceRollOverlay({
         // fresh handle that did not ask for the faces here would hold its dice in
         // the air until the backstop gave up on them.
         if (phaseRef.current === 'settling') {
-          handle.settle(settleResultsRef.current);
+          handle.settle(settleResultsRef.current, flavorRef.current);
           armBackstop();
         }
       })
@@ -218,7 +219,7 @@ export function DiceRollOverlay({
 
   useEffect(() => {
     if (cssFallback || phase !== 'settling') return;
-    handleRef.current?.settle(settleResults);
+    handleRef.current?.settle(settleResults, flavorRef.current);
     armBackstop();
   }, [cssFallback, phase, settleResults, armBackstop]);
 
@@ -250,14 +251,14 @@ export function DiceRollOverlay({
   // The crit/fumble glyph badge rides on top of the canvas in the 3D path (the
   // flourish there is a gold or red flash, which is exactly the distinction
   // colorVisionAssist exists to back up) and on the die itself in the fallback.
-  // Read through ./natFlourish so it always names the flourish the roller is
-  // actually playing — and over the dice the roller actually DREW, since a large
-  // roll shows only a selection of them (./renderedDice). Judging the whole roll
-  // here put a star over a tray with no critical in it.
-  const overlayResult =
-    phase === 'settling'
-      ? natFlourish(renderedDiceIndices(sides).map((i) => dice[i]))
-      : null;
+  // The badge describes the die the roller actually lifted: same flavor, same
+  // selection (a large roll draws only some of its dice), so it can never
+  // announce a critical the tray never plays.
+  const drawn = renderedDiceIndices(sides);
+  const heroAt = phase === 'settling' ? flourishHeroIndex(flavor, drawn.map((i) => dice[i])) : -1;
+  const overlayResult = heroAt >= 0 ? flavor : null;
+  // Same die, in the fallback's own indexing.
+  const fallbackHero = heroAt >= 0 ? drawn[heroAt] : -1;
 
   return (
     <div
@@ -295,8 +296,11 @@ export function DiceRollOverlay({
         <div className="cf-dice-roll-overlay__stage">
           {dice.map((die, i) => {
             const val = displayFaces[i];
-            const isCrit = phase === 'settling' && die.sides === 20 && val === 20;
-            const isFumble = phase === 'settling' && die.sides === 20 && val === 1;
+            // The same die the 3D path would lift, on the same authority — not
+            // "any face showing 20", which flourished on pooled rolls and on
+            // dice a keep clause had thrown away.
+            const isCrit = i === fallbackHero && flavor === 'crit';
+            const isFumble = i === fallbackHero && flavor === 'fumble';
 
             return (
               <div

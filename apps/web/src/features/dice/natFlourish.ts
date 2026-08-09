@@ -1,40 +1,40 @@
 /**
- * Which d20 flourish a settled roll earns.
+ * Which die the crit/fumble flourish plays on.
  *
- * Shared because two surfaces have to agree on it: the 3D roller picks the
- * animation (gold ring and sparks, or red flash and camera shake) and the
- * overlay picks the colour-vision assist badge that explains it. They encoded
- * the rule separately, and disagreed on a kept `2d20` of [1, 20] — the roller
- * looked for a 20 across all the dice first and played the critical, while the
- * badge took whichever came first and drew a skull over it. A badge that
- * contradicts the animation is worse than no badge.
+ * WHETHER a roll earns one is not decided here — `../../lib/d20Flavor` owns that,
+ * and has since issue #67. It already knows the things a side count cannot: that
+ * a pooled `2d20+5` sums its faces and so has no single natural result, that a
+ * compound roll's kept dice live in `terms[]`, and that a manual total is not a
+ * roll at all. Deciding again from `sides === 20` made the dice tray disagree
+ * with the toast, the audio cue and the screen reader about the same roll.
+ *
+ * What is left is a rendering question the flavor cannot answer: WHICH die on the
+ * tray to lift and ring. Shared, because the roller animates that die and the
+ * overlay's colour-vision badge describes what it animated — and the tray draws
+ * only a selection of a large roll, so a badge that assumed the die was present
+ * would promise a flourish nobody could see.
  */
-export interface NatFlourishDie {
+import type { D20Flavor } from '../../lib/d20Flavor';
+
+export interface FlourishDie {
   sides: number;
   value?: number;
-  /** Discarded advantage dice do not set off a flourish. */
+  /** Discarded advantage dice are not the die the flourish belongs to. */
   kept: boolean;
 }
 
-export type NatFlourish = 'crit' | 'fumble' | null;
-
 /**
- * A natural 20 on any KEPT d20 wins; a natural 1 only counts when no 20 does.
- * Ties go to the crit deliberately — a roll that produced a 20 is a hit at the
- * table however many 1s came with it.
+ * Index of the die to play `flavor` on, among the dice actually DRAWN, or -1.
+ *
+ * -1 is a real answer, not a failure: the flourish's die may be one the tray had
+ * no room for. Both surfaces read this, so they stay silent together rather than
+ * one of them claiming a critical the other never shows.
  */
-export function natFlourish(dice: readonly NatFlourishDie[]): NatFlourish {
-  const has = (value: number) =>
-    dice.some((d) => d.sides === 20 && d.kept && d.value === value);
-  if (has(20)) return 'crit';
-  if (has(1)) return 'fumble';
-  return null;
-}
-
-/** Index of the die the flourish plays on, or -1. */
-export function natFlourishDieIndex(dice: readonly NatFlourishDie[]): number {
-  const flourish = natFlourish(dice);
-  if (!flourish) return -1;
-  const value = flourish === 'crit' ? 20 : 1;
-  return dice.findIndex((d) => d.sides === 20 && d.kept && d.value === value);
+export function flourishHeroIndex(
+  flavor: D20Flavor | null,
+  dice: readonly FlourishDie[],
+): number {
+  if (!flavor) return -1;
+  const face = flavor === 'crit' ? 20 : 1;
+  return dice.findIndex((d) => d.sides === 20 && d.kept && d.value === face);
 }

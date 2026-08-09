@@ -21,11 +21,48 @@ function renderer(): string | null {
 }
 
 describe('DiceRollOverlay without WebGL', () => {
+  test('a pooled 2d20 gets no flourish, whatever its faces show', async () => {
+    // `2d20` sums both faces, so there is no natural result — d20Flavor says so,
+    // and the tray must not disagree with it. Judging from `sides === 20` here
+    // put a critical ring on a roll the toast called ordinary.
+    render(
+      <DiceRollOverlay
+        dice={buildOverlayDice([20, 20], [20, 1], [true, true])}
+        phase="settling"
+        flavor={null}
+        colorVisionAssist
+        onSettled={() => {}}
+      />,
+    );
+    await waitFor(() => expect(renderer()).toBe('css'), { timeout: 10_000 });
+    expect(screen.queryByTestId('dice-roll-overlay-assist-glyph')).toBeNull();
+    expect(document.querySelector('.cf-dice-roll-overlay__crit-ring')).toBeNull();
+    expect(document.querySelector('.cf-dice-roll-overlay__fumble-void')).toBeNull();
+  }, 20_000);
+
+  test('a dropped d20 never wears the flourish', async () => {
+    // Disadvantage keeps the 1: the 20 was thrown away and must not ring.
+    render(
+      <DiceRollOverlay
+        dice={buildOverlayDice([20, 20], [20, 1], [false, true])}
+        phase="settling"
+        flavor="fumble"
+        colorVisionAssist
+        onSettled={() => {}}
+      />,
+    );
+    await waitFor(() => expect(renderer()).toBe('css'), { timeout: 10_000 });
+    expect(screen.getByTestId('dice-roll-overlay-assist-glyph').getAttribute('data-result'))
+      .toBe('fumble');
+    expect(document.querySelector('.cf-dice-roll-overlay__crit-ring')).toBeNull();
+    expect(document.querySelectorAll('.cf-dice-roll-overlay__fumble-void')).toHaveLength(1);
+  }, 20_000);
+
   test('falls back to the CSS dice and still settles', async () => {
     const onSettled = vi.fn();
     render(
       <DiceRollOverlay
-        dice={buildOverlayDice([20], [20], [20])}
+        dice={buildOverlayDice([20], [20], [true])}
         phase="settling"
         theme="nocturne"
         onSettled={onSettled}
@@ -52,7 +89,7 @@ describe('DiceRollOverlay without WebGL', () => {
     // and strand the result. This test pins both halves of that contract.
     const onSettled = vi.fn();
     const props = (value: number) => ({
-      dice: buildOverlayDice([20], [value], [value]),
+      dice: buildOverlayDice([20], [value], [true]),
       phase: 'settling' as const,
       onSettled,
     });
@@ -75,8 +112,9 @@ describe('DiceRollOverlay without WebGL', () => {
   test('shows the crit glyph only when colour-vision assist is on', async () => {
     const { rerender } = render(
       <DiceRollOverlay
-        dice={buildOverlayDice([20], [20], [20])}
+        dice={buildOverlayDice([20], [20], [true])}
         phase="settling"
+        flavor="crit"
         onSettled={() => {}}
       />,
     );
@@ -85,8 +123,9 @@ describe('DiceRollOverlay without WebGL', () => {
 
     rerender(
       <DiceRollOverlay
-        dice={buildOverlayDice([20], [20], [20])}
+        dice={buildOverlayDice([20], [20], [true])}
         phase="settling"
+        flavor="crit"
         colorVisionAssist
         onSettled={() => {}}
       />,

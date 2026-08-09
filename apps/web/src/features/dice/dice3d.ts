@@ -25,8 +25,9 @@
  */
 import * as THREE from 'three';
 import type { DiceTheme } from '@campfire/schema';
+import type { D20Flavor } from '../../lib/d20Flavor';
 import { d6Values, faceValues } from './dice3dFaces';
-import { natFlourish, natFlourishDieIndex } from './natFlourish';
+import { flourishHeroIndex } from './natFlourish';
 import { renderedDiceIndices } from './renderedDice';
 import {
   ALIGN_MS,
@@ -225,8 +226,12 @@ export interface Dice3dOptions {
 }
 
 export interface Dice3dHandle {
-  /** Paint the rolled faces and release the held dice into the recorded throw. */
-  settle: (dice: Dice3dSettleDie[]) => void;
+  /**
+   * Paint the rolled faces and release the held dice into the recorded throw.
+   * `flavor` comes from ../../lib/d20Flavor — the app's one answer to whether a
+   * roll crit or fumbled — rather than being re-derived from the faces here.
+   */
+  settle: (dice: Dice3dSettleDie[], flavor: D20Flavor | null) => void;
   /** Cancel the loop and release every GPU resource this roll allocated. */
   dispose: () => void;
 }
@@ -1102,7 +1107,7 @@ export function startDiceRoll(
   raf = requestAnimationFrame(frame);
 
   return {
-    settle(results) {
+    settle(results, flavor) {
       if (released || disposed) return;
       for (const [i, d] of dice.entries()) {
         const result = results[picked[i]];
@@ -1112,19 +1117,22 @@ export function startDiceRoll(
         d.rig.faceNormal = d.rig.normals[upIdx].clone();
         if (!result.kept) d.rig.fade();
       }
-      // Which flourish, and whose, comes from ./natFlourish — the same rule the
-      // overlay's colour-vision badge reads, so the badge can never describe a
-      // different outcome from the one being animated.
-      if (!reducedMotion) {
-        const rolled = dice.map((d, i) => ({
-          sides: d.rig.sides,
-          value: results[picked[i]]?.value,
-          kept: results[picked[i]]?.kept ?? false,
-        }));
-        const heroAt = natFlourishDieIndex(rolled);
+      // WHICH die wears the flourish is a rendering question; WHETHER there is
+      // one is the caller's answer, from d20Flavor. Both this and the overlay's
+      // badge read ./natFlourish over the dice actually drawn, so neither can
+      // claim a critical the other does not show.
+      if (!reducedMotion && flavor) {
+        const heroAt = flourishHeroIndex(
+          flavor,
+          dice.map((d, i) => ({
+            sides: d.rig.sides,
+            value: results[picked[i]]?.value,
+            kept: results[picked[i]]?.kept ?? false,
+          })),
+        );
         if (heroAt >= 0) {
           hero = dice[heroAt];
-          flourish = natFlourish(rolled);
+          flourish = flavor;
         }
       }
       released = true;

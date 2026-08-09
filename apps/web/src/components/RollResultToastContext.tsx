@@ -5,7 +5,8 @@
  */
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { DiceRoll } from '@campfire/schema';
-import { d20Flavor } from '../lib/d20Flavor';
+import { d20Flavor, type D20Flavor } from '../lib/d20Flavor';
+import { keptFaceFlags } from '../lib/keptFaceFlags';
 import { looksLikeDamageRoll } from '../lib/looksLikeDamageRoll';
 import { expandDiceSidesFromExpr } from '../lib/parseDiceSidesFromExpr';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
@@ -79,7 +80,18 @@ interface OverlayState {
   sides: number[];
   phase: DiceRollOverlayPhase;
   values?: number[];
-  kept?: number[];
+  /**
+   * POSITIONAL kept flags, not the roll's kept faces: a compound keep/drop roll
+   * (`2d20kh1+1d4`) has no unambiguous flat `kept`, so the server omits it and
+   * the truth lives in `terms[]` — see ../lib/keptFaceFlags.
+   */
+  keptFlags?: boolean[];
+  /**
+   * The app's single crit/fumble answer for this roll (../lib/d20Flavor), shared
+   * with the toast, the audio cue and the announcer. The overlay must not
+   * re-derive it: a side count cannot tell a pooled `2d20` from an attack.
+   */
+  flavor?: D20Flavor | null;
 }
 
 interface RollResultToastContextValue {
@@ -209,7 +221,8 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
           sides: options?.animationSides ?? prev.sides,
           phase: 'settling',
           values: r.rolls,
-          kept: r.kept,
+          keptFlags: keptFaceFlags(r),
+          flavor: d20Flavor(r),
         };
       });
     };
@@ -260,7 +273,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     (rollApplyHandler != null || looksLikeDamageRoll(roll));
 
   const overlayDice = overlay
-    ? buildOverlayDice(overlay.sides, overlay.values, overlay.kept)
+    ? buildOverlayDice(overlay.sides, overlay.values, overlay.keptFlags)
     : [];
 
   return (
@@ -273,6 +286,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
           key={overlay.id}
           dice={overlayDice}
           phase={overlay.phase}
+          flavor={overlay.flavor ?? null}
           theme={me?.user?.diceTheme}
           colorVisionAssist={me?.user?.colorVisionAssist ?? false}
           onSettled={handleOverlaySettled}

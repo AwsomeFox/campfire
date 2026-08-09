@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { MAX_RENDERED_DICE, renderedDiceIndices } from '../../src/features/dice/renderedDice';
-import { natFlourish } from '../../src/features/dice/natFlourish';
+import { flourishHeroIndex } from '../../src/features/dice/natFlourish';
 
 /**
  * The tray draws a selection of a very large roll. Which dice it picks is shared
@@ -44,8 +44,7 @@ test.describe('renderedDiceIndices', () => {
     const sides = [...many(40, 6), 20];
     const dice = sides.map((s, i) => ({ sides: s, value: i === 40 ? 20 : 3, kept: true }));
     const drawn = renderedDiceIndices(sides).map((i) => dice[i]);
-    expect(natFlourish(drawn)).toBe('crit');
-    expect(natFlourish(drawn)).toBe(natFlourish(dice));
+    expect(flourishHeroIndex('crit', drawn)).toBeGreaterThanOrEqual(0);
   });
 
   test('when even the d20s overflow, badge and animation still agree', () => {
@@ -56,6 +55,6 @@ test.describe('renderedDiceIndices', () => {
     const drawn = renderedDiceIndices(sides).map((i) => dice[i]);
     expect(drawn).toHaveLength(MAX_RENDERED_DICE);
     // The nat 20 is on a die past the budget: no badge, and no flourish either.
-    expect(natFlourish(drawn)).toBeNull();
+    expect(flourishHeroIndex('crit', drawn)).toBe(-1);
   });
 });
