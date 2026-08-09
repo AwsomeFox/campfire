@@ -174,6 +174,54 @@ test.describe('encounter cockpit — gated tool hints', () => {
   });
 });
 
+test.describe('encounter cockpit — short narrow canvas', () => {
+  test('the dice tray keeps a usable scroller in a short landscape phone canvas', async ({ page }) => {
+    await restoreSeedEncounter(page);
+    const { campaignId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Short landscape drill', hidden: false },
+    });
+    expect(created.ok()).toBe(true);
+    const id = ((await created.json()) as { id: number }).id;
+    const up = await page.request.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+      multipart: { kind: 'map', file: { name: 'landscape.png', mimeType: 'image/png', buffer: PNG } },
+    });
+    expect(up.ok()).toBe(true);
+    const mapAttachmentId = ((await up.json()) as { id: number }).id;
+    await page.request.patch(`/api/v1/encounters/${id}`, { data: { mapAttachmentId, gridSize: 8, gridScale: 5 } });
+
+    try {
+      // Under the 900px branch, where the tray is pinned to both canvas edges instead of
+      // sized. The panel stacks below the map here, so this leaves a ~150px canvas —
+      // measured — against a top inset plus a 150px reserve that consumed all of it.
+      await page.setViewportSize({ width: 720, height: 600 });
+      await page.goto(`/c/${campaignId}/encounters/${id}`);
+      await expect(page.getByTestId('battle-map-surface')).toBeVisible();
+
+      await openCockpitDiceTray(page);
+      const tray = await page.evaluate(() => {
+        const el = document.querySelector('.cf-vtt-tray') as HTMLElement | null;
+        const canvas = document.querySelector('.cf-vtt-main') as HTMLElement | null;
+        if (!el || !canvas) return null;
+        const a = el.getBoundingClientRect();
+        const b = canvas.getBoundingClientRect();
+        return {
+          height: Math.round(a.height),
+          overhang: Math.round(Math.max(0, a.bottom - b.bottom, b.top - a.top)),
+          canvasHeight: Math.round(b.height),
+        };
+      });
+      expect(tray, 'the dice tray must exist once opened').not.toBeNull();
+      // A scroller, not a sliver — and entirely inside the canvas that clips it.
+      expect(tray!.height).toBeGreaterThan(40);
+      expect(tray!.overhang, 'the tray must not hang past the canvas edge').toBeLessThanOrEqual(1);
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
+});
+
 test.describe('encounter cockpit — short canvas', () => {
   test('grid & fog stays usable when the canvas is barely taller than its own reserve', async ({ page }) => {
     await restoreSeedEncounter(page);

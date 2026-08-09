@@ -3770,7 +3770,11 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
      handles the rest. */
   .cf-vtt-tray {
     top: var(--space-2);
-    bottom: 150px;
+    /* Pinned to both edges, so the 150px reserve below is also the tray's HEIGHT budget:
+       on a canvas shorter than top + 150 the scroll viewport collapsed to a sliver and the
+       now-reachable Roll button opened something with no usable dice controls. Give the
+       reserve up as the canvas runs out, same as the wide variants. */
+    bottom: min(150px, max(8px, calc(100% - 96px)));
     max-height: none;
     width: min(320px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-3)));
   }
