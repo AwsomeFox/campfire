@@ -3915,7 +3915,9 @@ export default function RunSessionPage() {
   // A prompt that demands a decision must not sit inside a collapsed panel. These arrive
   // unprompted — a co-DM's damage raises a concentration save, an MCP action resolves an
   // attack — so the viewer has no reason to look, and the reopen tab carries no badge.
-  // Reopen for them; leave the viewer's tab choice alone, since each prompt renders above
+  // Reopen for them and scroll the panel body back up (the prompts render above the tab
+  // sections in the same scroller, so a scrolled-down panel hides them just as well as a
+  // collapsed one); leave the viewer's tab choice alone, since each prompt renders above
   // the tab switch and is visible whichever section is showing.
   const attentionKey = pendingConcentrationCheck
     ? `concentration:${pendingConcentrationCheck.id}`

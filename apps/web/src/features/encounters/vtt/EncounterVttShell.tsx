@@ -13,6 +13,7 @@
  * RunSessionPage keeps every permission, secrecy and sync decision it already had.
  */
 import { useEffect, useRef, type ReactNode } from 'react';
+import { scrollBehavior } from '../../../lib/prefersReducedMotion';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 import { useImmersiveChromeInset } from './useImmersiveChromeInset';
@@ -199,8 +200,20 @@ export function EncounterVttShell({
   panelOpenRef.current = panelOpen;
   const onPanelOpenChangeRef = useRef(onPanelOpenChange);
   onPanelOpenChangeRef.current = onPanelOpenChange;
+  // The prompts render ABOVE the tab sections inside one shared scroller, so on an
+  // already-open panel that the viewer had scrolled down (a long roster, the setup table)
+  // a new prompt is prepended out of sight and the panel does not move — reopening alone
+  // only covers the collapsed case. Scroll the shared body back to the prompts too.
+  const panelBodyRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (attentionKey && !panelOpenRef.current) onPanelOpenChangeRef.current(true);
+    if (!attentionKey) return;
+    if (!panelOpenRef.current) onPanelOpenChangeRef.current(true);
+    // Next frame: a panel that was just reopened has not been laid out yet, and
+    // scrollTo on a `hidden` element does nothing.
+    const frame = requestAnimationFrame(() => {
+      panelBodyRef.current?.scrollTo({ top: 0, behavior: scrollBehavior() });
+    });
+    return () => cancelAnimationFrame(frame);
   }, [attentionKey]);
 
   useEffect(() => {
@@ -356,7 +369,9 @@ export function EncounterVttShell({
               </button>
           </div>
           {/* Scroll container only — each `VttPanelSection` inside is its own tabpanel. */}
-          <div className="cf-vtt-panel-body">{panelSlot}</div>
+          <div className="cf-vtt-panel-body" ref={panelBodyRef}>
+            {panelSlot}
+          </div>
         </aside>
       </div>
 

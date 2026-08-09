@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 test.use({ storageState: stateFor('dm') });
 
@@ -310,6 +311,54 @@ test.describe('encounter cockpit panel collapse', () => {
 
       await expect(page.getByTestId('concentration-check-prompt')).toBeVisible({ timeout: 15_000 });
       await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+
+  test('scrolls a waiting prompt into view on a panel that was already open', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+      // Table is the long one — enough content to scroll away from the top.
+      await openCockpitTab(page, 'table');
+
+      const body = page.locator('.cf-vtt-panel-body');
+      await body.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      const scrolled = await body.evaluate((el) => el.scrollTop);
+      test.skip(scrolled < 40, 'panel body is not scrollable at this viewport');
+
+      const combatants = (await (
+        await page.request.get(`/api/v1/encounters/${fixture.encounterId}`)
+      ).json()) as { combatants: Array<{ id: number }> };
+      const target = combatants.combatants[0];
+      expect(target, 'fixture needs a combatant').toBeTruthy();
+      await page.request.post(
+        `/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}/turn-state`,
+        { data: { concentration: 'Bless' } },
+      );
+      await page.request.patch(`/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}`, {
+        data: { hpDelta: -6 },
+      });
+
+      // The prompt is prepended ABOVE the tab sections in the same scroller, so without
+      // scrolling the body it lands out of sight on a panel nobody had collapsed.
+      const prompt = page.getByTestId('concentration-check-prompt');
+      await expect(prompt).toBeVisible({ timeout: 15_000 });
+      await expect(async () => {
+        const inView = await prompt.evaluate((el) => {
+          const scroller = el.closest('.cf-vtt-panel-body');
+          if (!scroller) return false;
+          const a = el.getBoundingClientRect();
+          const b = scroller.getBoundingClientRect();
+          return a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
+        });
+        expect(inView, 'prompt must sit inside the panel scroller viewport').toBe(true);
+      }).toPass({ timeout: 5_000 });
     } finally {
       await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       await restoreSeedEncounter(page);
