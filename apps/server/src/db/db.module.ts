@@ -5105,6 +5105,38 @@ function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): v
   }
 }
 
+/**
+ * Issue #2112: hidden encounter status rows must carry private authority context
+ * so bell reads and digest delivery can fail closed after a DM demotion, removal,
+ * ownership transfer, or visibility change. Legacy rows cannot supply the affected
+ * character/audience safely, so every context-less `character_downed`
+ * encounter-status row is removed during the upgrade rather than surviving a
+ * later visibility change.
+ */
+function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Database): void {
+  const campaignsTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'campaigns'").get();
+  for (const table of ['notifications', 'notification_digest_queue']) {
+    const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    if (!exists) continue;
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'hidden_status_context')) {
+      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN hidden_status_context TEXT`);
+    }
+    // Reduced fixtures may retain notification tables while omitting their
+    // campaign foreign-key parent. The additive column migration is still
+    // safe; only the legacy cleanup requires a complete campaign schema.
+    if (!campaignsTable) continue;
+    // Legacy rows lack the affected character and audience. Retaining even a
+    // currently-visible row would let a subsequent hide bypass revalidation.
+    sqlite.prepare(
+      `DELETE FROM ${table}
+       WHERE hidden_status_context IS NULL
+         AND type = 'character_downed'
+         AND entity_type = 'encounter'`,
+    ).run();
+  }
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -5471,6 +5503,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0178_rule_pack_relationships_1319', run: migrateRulePackRelationships1319 },
   // #1319 claimed 0178 on main before #1941 shipped, so controller delegation uses 0179.
   { name: '0179_combatants_controller_user_id_1941', run: migrateCombatantsTableForControllerUserId },
+  { name: '0180_hidden_status_notification_authorization_2112', run: migrateHiddenStatusNotificationAuthorization2112 },
 ];
 
 /**

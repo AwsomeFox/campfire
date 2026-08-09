@@ -1,7 +1,39 @@
 import request from 'supertest';
-import { sql } from 'drizzle-orm';
-import { DB, type DrizzleDb } from '../src/db/db.module';
+import { and, eq, sql } from 'drizzle-orm';
+import { DB, DB_HOLDER, type DbHolder, type DrizzleDb } from '../src/db/db.module';
+import { campaignMembers, campaigns, characters, encounters, notificationDigestQueue, notifications as notificationRows } from '../src/db/schema';
+import type { RequestUser } from '../src/common/user.types';
+import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+
+type InstrumentedStatementMethod = (...args: unknown[]) => unknown;
+type InstrumentedStatement = Partial<Record<'run' | 'get' | 'all' | 'iterate', InstrumentedStatementMethod>>;
+type InstrumentedDatabase = { prepare: (source: string) => InstrumentedStatement };
+
+function instrumentSql(ctx: TestAppContext): { executed: string[]; restore: () => void } {
+  const raw = ctx.app.get<DbHolder>(DB_HOLDER).raw as unknown as InstrumentedDatabase;
+  const executed: string[] = [];
+  const originalPrepare = raw.prepare.bind(raw);
+  raw.prepare = (source: string) => {
+    const statement = originalPrepare(source);
+    for (const method of ['run', 'get', 'all', 'iterate'] as const) {
+      const originalMethod = statement[method];
+      if (typeof originalMethod === 'function') {
+        statement[method] = function tracked(...args: unknown[]) {
+          executed.push(source);
+          return originalMethod.apply(statement, args);
+        };
+      }
+    }
+    return statement;
+  };
+  return {
+    executed,
+    restore: () => {
+      raw.prepare = originalPrepare;
+    },
+  };
+}
 
 /**
  * In-app notifications (issue #11): recap posted, note reply, added to
@@ -526,15 +558,22 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   let ctx: TestAppContext;
   let dm: ReturnType<typeof request.agent>; // campaign creator/dm
   let player: ReturnType<typeof request.agent>; // a player
+  let coDm: ReturnType<typeof request.agent>;
+  let spectator: ReturnType<typeof request.agent>;
+  let guestDm: ReturnType<typeof request.agent>;
   // Venue/room/template MUTATION is @ServerRoles('admin'); applying a template
   // only needs `dm` on the target campaign. Both agents are therefore needed to
   // exercise the apply path end to end.
   let admin: ReturnType<typeof request.agent>;
   let playerId: number;
+  let coDmId: number;
+  let spectatorId: number;
+  let guestDmId: number;
   let campaignId: number;
 
   type Notification = {
     id: number;
+    campaignId: number;
     type: string;
     title: string;
     body: string;
@@ -563,11 +602,29 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .post('/api/v1/users')
       .send({ username: 'cov-player', password: 'password-pl-1', displayName: 'Pat Player' });
     playerId = createPlayer.body.id;
+    const createCoDm = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'cov-co-dm', password: 'password-codm-1', displayName: 'Cora Co-DM' });
+    coDmId = createCoDm.body.id;
+    const createSpectator = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'cov-spectator', password: 'password-spec-1', displayName: 'Sam Spectator' });
+    spectatorId = createSpectator.body.id;
+    const createGuestDm = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'cov-guest-dm', password: 'password-guest-dm-1', displayName: 'Gale Guest DM' });
+    guestDmId = createGuestDm.body.id;
 
     dm = request.agent(server);
     await dm.post('/api/v1/auth/login').send({ username: 'cov-dm', password: 'password-dm-1' });
     player = request.agent(server);
     await player.post('/api/v1/auth/login').send({ username: 'cov-player', password: 'password-pl-1' });
+    coDm = request.agent(server);
+    await coDm.post('/api/v1/auth/login').send({ username: 'cov-co-dm', password: 'password-codm-1' });
+    spectator = request.agent(server);
+    await spectator.post('/api/v1/auth/login').send({ username: 'cov-spectator', password: 'password-spec-1' });
+    guestDm = request.agent(server);
+    await guestDm.post('/api/v1/auth/login').send({ username: 'cov-guest-dm', password: 'password-guest-dm-1' });
 
     const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Coverage Keep' });
     campaignId = campaign.body.id;
@@ -849,6 +906,893 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     const after = ofType(await listFor(player), 'quest_updated');
     expect(after.length).toBe(before + 1);
     expect(after[0].title).toContain('Secret pact');
+  });
+
+  it('keeps hidden-encounter downed and died notifications to permanent DMs and the affected owner, while visible encounters still notify the party (#2112)', async () => {
+    const hiddenCampaign = await dm.post('/api/v1/campaigns').send({ name: 'Hidden Notification Keep' });
+    expect(hiddenCampaign.status).toBe(201);
+    const hiddenCampaignId = hiddenCampaign.body.id as number;
+
+    for (const [userId, role] of [[playerId, 'player'], [coDmId, 'dm'], [spectatorId, 'player'], [guestDmId, 'player']] as const) {
+      const add = await dm.post(`/api/v1/campaigns/${hiddenCampaignId}/members`).send({ userId, role });
+      expect(add.status).toBe(201);
+    }
+    const guestGrant = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/members/grants`)
+      .send({ granteeUserId: guestDmId, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    expect(guestGrant.status).toBe(201);
+
+    const ownerCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Hidden Hero', hpCurrent: 10, hpMax: 10 });
+    expect(ownerCharacter.status).toBe(201);
+    const hiddenEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Unseen Ambush', hidden: true });
+    expect(hiddenEncounter.status).toBe(201);
+    // Encounter creation auto-seeds active characters into its roster.
+    const hiddenRoster = await dm.get(`/api/v1/encounters/${hiddenEncounter.body.id}`);
+    expect(hiddenRoster.status).toBe(200);
+    const hiddenCombatant = hiddenRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === ownerCharacter.body.id,
+    );
+    expect(hiddenCombatant).toBeDefined();
+
+    const statusNotifications = async (
+      agent: ReturnType<typeof request.agent>,
+      title: string,
+      expected: number,
+      encounterId?: number,
+      bodyIncludes?: string,
+    ) => {
+      let matching: Notification[] = [];
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        matching = (await listFor(agent)).filter(
+          (notification) =>
+            notification.type === 'character_downed' &&
+            notification.campaignId === hiddenCampaignId &&
+            notification.title === title &&
+            (encounterId === undefined || notification.entityId === encounterId) &&
+            (bodyIncludes === undefined || notification.body.includes(bodyIncludes)),
+        );
+        if (matching.length === expected) {
+          // Notification dispatch is intentionally best-effort and starts after
+          // the encounter PATCH. Keep an absence assertion alive long enough to
+          // catch a delayed forbidden fan-out, while positive assertions return
+          // as soon as their expected row is durable.
+          if (expected > 0) return matching;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          matching = (await listFor(agent)).filter(
+            (notification) =>
+              notification.type === 'character_downed' &&
+              notification.campaignId === hiddenCampaignId &&
+              notification.title === title &&
+              (encounterId === undefined || notification.entityId === encounterId) &&
+              (bodyIncludes === undefined || notification.body.includes(bodyIncludes)),
+          );
+          if (matching.length === 0) return matching;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error(`Timed out waiting for ${expected} ${title} notifications; found ${matching.length}`);
+    };
+
+    // #2112: a co-DM demoted after recipient discovery cannot retain the
+    // hidden encounter id through the awaited durable notification write.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const notifications = ctx.app.get(NotificationsService);
+    const guardedNotify = notifications.notifyUserIfHiddenEncounterRecipient.bind(notifications);
+    const demoteAtWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[0] === coDmId && args[4].kind === 'permanent_dm') {
+        db.update(campaignMembers)
+          .set({ role: 'player' })
+          .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
+          .run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      const downed = await dm
+        .patch(`/api/v1/encounters/${hiddenEncounter.body.id}/combatants/${hiddenCombatant.id}`)
+        .send({ hpSet: 0 });
+      expect(downed.status).toBe(200);
+    } finally {
+      demoteAtWrite.mockRestore();
+    }
+
+    const ownerDowned = await statusNotifications(player, 'Character downed!', 1);
+    const coDmDowned = await statusNotifications(coDm, 'Character downed!', 0);
+    const guestDmDowned = await statusNotifications(guestDm, 'Character downed!', 0);
+    const spectatorDowned = await statusNotifications(spectator, 'Character downed!', 0);
+    expect(ownerDowned[0].title).toBe('Character downed!');
+    expect(ownerDowned[0].body).toContain('Hidden Hero was downed');
+    expect(ownerDowned[0].entityType).toBeNull();
+    expect(ownerDowned[0].entityId).toBeNull();
+    expect(ownerDowned[0]).not.toHaveProperty('hiddenStatusContext');
+    expect(coDmDowned).toEqual([]);
+    // A guest/co-DM may inspect the hidden encounter while their grant is active,
+    // but no durable status row may survive a later revoke, handback, or expiry.
+    expect(guestDmDowned).toEqual([]);
+    expect(spectatorDowned).toEqual([]);
+
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+
+    const handBack = await guestDm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/members/grants/${guestGrant.body.id}/handback`)
+      .send();
+    expect(handBack.status).toBe(201);
+
+    const died = await dm
+      .patch(`/api/v1/encounters/${hiddenEncounter.body.id}/combatants/${hiddenCombatant.id}`)
+      .send({ deathState: 'dead' });
+    expect(died.status).toBe(200);
+
+    const ownerDied = await statusNotifications(player, 'Character died!', 1);
+    const coDmDied = await statusNotifications(coDm, 'Character died!', 1);
+    const guestDmDied = await statusNotifications(guestDm, 'Character died!', 0);
+    const spectatorDied = await statusNotifications(spectator, 'Character died!', 0);
+    const ownerDeathNotice = ownerDied[0];
+    expect(ownerDeathNotice?.body).toContain('Hidden Hero has died');
+    expect(ownerDeathNotice?.entityType).toBeNull();
+    expect(ownerDeathNotice?.entityId).toBeNull();
+    expect(coDmDied.some((notification) => notification.title === 'Character died!' && notification.entityId === hiddenEncounter.body.id)).toBe(true);
+    expect(guestDmDied).toEqual([]);
+    expect(spectatorDied).toEqual([]);
+
+    // #2112: if a recipient is both a permanent co-DM and the character owner,
+    // a demotion at the durable-write boundary must fall back to their still
+    // authorized personal-status notification, with no encounter deep-link.
+    const dualRoleCharacter = await coDm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      // A DM-created character is otherwise intentionally unowned. Establish
+      // the dual DM + current-owner authority this regression covers.
+      .send({ name: 'Dual Role Hero', hpCurrent: 10, hpMax: 10, ownerUserId: String(coDmId) });
+    expect(dualRoleCharacter.status).toBe(201);
+    const dualRoleEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Dual Role Ambush', hidden: true });
+    expect(dualRoleEncounter.status).toBe(201);
+    const dualRoleRoster = await dm.get(`/api/v1/encounters/${dualRoleEncounter.body.id}`);
+    const dualRoleCombatant = dualRoleRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === dualRoleCharacter.body.id,
+    );
+    expect(dualRoleCombatant).toBeDefined();
+
+    const demoteDualRoleDmAtWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[0] === coDmId && args[4].kind === 'permanent_dm') {
+        db.update(campaignMembers)
+          .set({ role: 'player' })
+          .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
+          .run();
+      }
+      if (args[0] === coDmId && args[4].kind === 'character_owner') {
+        db.update(encounters).set({ hidden: false }).where(eq(encounters.id, dualRoleEncounter.body.id)).run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      const dualRoleDowned = await dm
+        .patch(`/api/v1/encounters/${dualRoleEncounter.body.id}/combatants/${dualRoleCombatant.id}`)
+        .send({ hpSet: 0 });
+      expect(dualRoleDowned.status).toBe(200);
+    } finally {
+      demoteDualRoleDmAtWrite.mockRestore();
+    }
+
+    const dualRoleOwnerDowned = await statusNotifications(coDm, 'Character downed!', 1, dualRoleEncounter.body.id);
+    expect(dualRoleOwnerDowned[0].body).toContain('Dual Role Hero was downed');
+    expect(dualRoleOwnerDowned[0].entityId).toBe(dualRoleEncounter.body.id);
+    expect((await statusNotifications(spectator, 'Character downed!', 1, dualRoleEncounter.body.id))[0].entityId).toBe(dualRoleEncounter.body.id);
+
+    // #2112: ownership may move after the initial recipient snapshot but
+    // before the stale owner's guarded write. The former owner is skipped;
+    // one bounded refreshed pass must notify the current owner safely.
+    const transferredOwnerCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Transferred Owner Hero', hpCurrent: 10, hpMax: 10 });
+    expect(transferredOwnerCharacter.status).toBe(201);
+    const transferredOwnerEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Transferred Owner Ambush', hidden: true });
+    expect(transferredOwnerEncounter.status).toBe(201);
+    const transferredOwnerRoster = await dm.get(`/api/v1/encounters/${transferredOwnerEncounter.body.id}`);
+    const transferredOwnerCombatant = transferredOwnerRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === transferredOwnerCharacter.body.id,
+    );
+    expect(transferredOwnerCombatant).toBeDefined();
+    const transferOwnerAtWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[0] === playerId && args[4].kind === 'character_owner' && args[5] === transferredOwnerEncounter.body.id) {
+        db.update(characters)
+          .set({ ownerUserId: String(spectatorId) })
+          .where(eq(characters.id, transferredOwnerCharacter.body.id))
+          .run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      expect((await dm
+        .patch(`/api/v1/encounters/${transferredOwnerEncounter.body.id}/combatants/${transferredOwnerCombatant.id}`)
+        .send({ hpSet: 0 })).status).toBe(200);
+    } finally {
+      transferOwnerAtWrite.mockRestore();
+    }
+    expect((await listFor(player)).find(
+      (row) => row.body.includes('Transferred Owner Hero was downed'),
+    )).toBeUndefined();
+    const transferredOwnerNotice = (await statusNotifications(
+      spectator,
+      'Character downed!',
+      1,
+      undefined,
+      'Transferred Owner Hero was downed',
+    ))[0];
+    expect(transferredOwnerNotice).toMatchObject({ entityType: null, entityId: null });
+
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+
+    const visibleCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Visible Hero', hpCurrent: 10, hpMax: 10 });
+    expect(visibleCharacter.status).toBe(201);
+    const visibleEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Open Fight', hidden: false });
+    expect(visibleEncounter.status).toBe(201);
+    const visibleRoster = await dm.get(`/api/v1/encounters/${visibleEncounter.body.id}`);
+    expect(visibleRoster.status).toBe(200);
+    const visibleCombatant = visibleRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === visibleCharacter.body.id,
+    );
+    expect(visibleCombatant).toBeDefined();
+
+    const visibleDowned = await dm
+      .patch(`/api/v1/encounters/${visibleEncounter.body.id}/combatants/${visibleCombatant.id}`)
+      .send({ hpSet: 0 });
+    expect(visibleDowned.status).toBe(200);
+    const spectatorVisible = await statusNotifications(spectator, 'Character downed!', 1, visibleEncounter.body.id);
+    expect(spectatorVisible[0].title).toBe('Character downed!');
+    expect(spectatorVisible[0].entityId).toBe(visibleEncounter.body.id);
+
+    // #2112 P1: make the only real interleaving deterministic. The encounter
+    // starts visible, recipient resolution begins, then another DM hides it at
+    // the campaign-fan-out boundary. The guarded transaction must decline the
+    // broad durable write and fall back to the hidden-recipient policy.
+    const raceCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Race Hero', hpCurrent: 10, hpMax: 10 });
+    expect(raceCharacter.status).toBe(201);
+    const raceEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Race Window', hidden: false });
+    expect(raceEncounter.status).toBe(201);
+    const raceRoster = await dm.get(`/api/v1/encounters/${raceEncounter.body.id}`);
+    const raceCombatant = raceRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === raceCharacter.body.id,
+    );
+    expect(raceCombatant).toBeDefined();
+
+    const notifyWhenVisible = notifications.notifyCampaignIfEncounterVisible.bind(notifications);
+    const hideAtFanout = jest.spyOn(notifications, 'notifyCampaignIfEncounterVisible').mockImplementation(async (...args) => {
+      if (args[1] === raceEncounter.body.id) {
+        db.update(encounters).set({ hidden: true }).where(eq(encounters.id, raceEncounter.body.id)).run();
+      }
+      return notifyWhenVisible(...args);
+    });
+    try {
+      const racedDowned = await dm
+        .patch(`/api/v1/encounters/${raceEncounter.body.id}/combatants/${raceCombatant.id}`)
+        .send({ hpSet: 0 });
+      expect(racedDowned.status).toBe(200);
+    } finally {
+      hideAtFanout.mockRestore();
+    }
+
+    const racedStatusNotifications = async (agent: ReturnType<typeof request.agent>, expected: number) => {
+      let matching: Notification[] = [];
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        matching = (await listFor(agent)).filter(
+          (notification) => notification.type === 'character_downed' && notification.body.includes('Race Hero was downed'),
+        );
+        if (matching.length === expected) {
+          if (expected > 0) return matching;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          matching = (await listFor(agent)).filter(
+            (notification) => notification.type === 'character_downed' && notification.body.includes('Race Hero was downed'),
+          );
+          if (matching.length === 0) return matching;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error(`Timed out waiting for ${expected} raced hidden-status notifications; found ${matching.length}`);
+    };
+
+    const raceOwner = await racedStatusNotifications(player, 1);
+    const raceCoDm = await racedStatusNotifications(coDm, 1);
+    expect(await racedStatusNotifications(spectator, 0)).toEqual([]);
+    expect(raceOwner[0].entityType).toBeNull();
+    expect(raceOwner[0].entityId).toBeNull();
+    expect(raceCoDm[0].entityId).toBe(raceEncounter.body.id);
+
+    // The inverse transition is also a durable-write race: an initially
+    // hidden encounter can be revealed after broad fan-out declines but before
+    // the first narrow recipient write. Retry broad delivery once and do not
+    // duplicate the recipients that may already have received a narrow row.
+    const revealRaceCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Reveal Race Hero', hpCurrent: 10, hpMax: 10 });
+    expect(revealRaceCharacter.status).toBe(201);
+    const revealRaceEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Reveal Race Window', hidden: true });
+    expect(revealRaceEncounter.status).toBe(201);
+    const revealRaceRoster = await dm.get(`/api/v1/encounters/${revealRaceEncounter.body.id}`);
+    const revealRaceCombatant = revealRaceRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === revealRaceCharacter.body.id,
+    );
+    expect(revealRaceCombatant).toBeDefined();
+    const revealAtNarrowWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[5] === revealRaceEncounter.body.id) {
+        db.update(encounters).set({ hidden: false }).where(eq(encounters.id, revealRaceEncounter.body.id)).run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      expect((await dm
+        .patch(`/api/v1/encounters/${revealRaceEncounter.body.id}/combatants/${revealRaceCombatant.id}`)
+        .send({ hpSet: 0 })).status).toBe(200);
+    } finally {
+      revealAtNarrowWrite.mockRestore();
+    }
+    const waitForRevealRace = async (agent: ReturnType<typeof request.agent>) => {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const rows = (await listFor(agent)).filter((row) => row.body.includes('Reveal Race Hero was downed'));
+        if (rows.length === 1) return rows[0];
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error('Timed out waiting for one reveal-race notification');
+    };
+    expect((await waitForRevealRace(player)).entityId).toBe(revealRaceEncounter.body.id);
+    expect((await waitForRevealRace(coDm)).entityId).toBe(revealRaceEncounter.body.id);
+    expect((await waitForRevealRace(spectator)).entityId).toBe(revealRaceEncounter.body.id);
+
+    // A muted co-DM produces no narrow durable row, but its suppressed path
+    // must still observe a reveal and restart the visible fan-out.
+    const suppressedRevealCharacter = await player.post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Suppressed Reveal Hero', hpCurrent: 10, hpMax: 10 });
+    const suppressedRevealEncounter = await dm.post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Suppressed Reveal Window', hidden: true });
+    const suppressedRevealRoster = await dm.get(`/api/v1/encounters/${suppressedRevealEncounter.body.id}`);
+    const suppressedRevealCombatant = suppressedRevealRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === suppressedRevealCharacter.body.id,
+    );
+    const coDmMute = await coDm.post(`/api/v1/campaigns/${hiddenCampaignId}/safety/mutes`)
+      .send({ entityType: 'encounter', entityId: suppressedRevealEncounter.body.id });
+    expect(coDmMute.status).toBe(201);
+    const revealAtSuppressedWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[0] === coDmId && args[5] === suppressedRevealEncounter.body.id) {
+        db.update(encounters).set({ hidden: false }).where(eq(encounters.id, suppressedRevealEncounter.body.id)).run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      expect((await dm.patch(`/api/v1/encounters/${suppressedRevealEncounter.body.id}/combatants/${suppressedRevealCombatant.id}`)
+        .send({ hpSet: 0 })).status).toBe(200);
+    } finally {
+      revealAtSuppressedWrite.mockRestore();
+    }
+    let suppressedRows: Notification[] = [];
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      suppressedRows = (await listFor(spectator)).filter((row) => row.body.includes('Suppressed Reveal Hero was downed'));
+      if (suppressedRows.length === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(suppressedRows).toHaveLength(1);
+    expect(suppressedRows[0].entityId).toBe(suppressedRevealEncounter.body.id);
+  });
+
+  it('removes persisted hidden-status rows when a recipient loses DM or owner authority, including before digest delivery (#2112)', async () => {
+    const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Hidden Status Read Guard' });
+    expect(campaign.status).toBe(201);
+    const guardedCampaignId = campaign.body.id as number;
+    for (const [userId, role] of [[playerId, 'player'], [coDmId, 'dm'], [spectatorId, 'player']] as const) {
+      expect((await dm.post(`/api/v1/campaigns/${guardedCampaignId}/members`).send({ userId, role })).status).toBe(201);
+    }
+    // A second campaign gives the PAT regression a real campaign binding to
+    // enforce; the co-DM must not read this campaign's private rows through it.
+    expect((await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: coDmId, role: 'dm' })).status).toBe(201);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const notifications = ctx.app.get(NotificationsService);
+    const waitForStoredRow = async (userId: number, body: string, deferred = false) => {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const rows = deferred
+          ? db.select().from(notificationDigestQueue).where(and(eq(notificationDigestQueue.userId, userId), eq(notificationDigestQueue.campaignId, guardedCampaignId))).all()
+          : db.select().from(notificationRows).where(and(eq(notificationRows.userId, userId), eq(notificationRows.campaignId, guardedCampaignId))).all();
+        if (rows.some((row) => row.body.includes(body))) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error(`Timed out waiting for ${deferred ? 'deferred' : 'immediate'} hidden-status row: ${body}`);
+    };
+    const createHiddenCombatant = async (name: string, hidden = true, owner = player) => {
+      const character = await owner
+        .post(`/api/v1/campaigns/${guardedCampaignId}/characters`)
+        // DMs may create unowned characters; this helper's explicit `owner`
+        // argument must still produce an owned character when exercising the
+        // dual-role read and delivery paths.
+        .send({ name, hpCurrent: 10, hpMax: 10, ...(owner === coDm ? { ownerUserId: String(coDmId) } : {}) });
+      expect(character.status).toBe(201);
+      const encounter = await dm
+        .post(`/api/v1/campaigns/${guardedCampaignId}/encounters`)
+        .send({ name: `${name} Encounter`, hidden });
+      expect(encounter.status).toBe(201);
+      const roster = await dm.get(`/api/v1/encounters/${encounter.body.id}`);
+      const combatant = roster.body.combatants.find(
+        (row: { characterId: number | null }) => row.characterId === character.body.id,
+      );
+      expect(combatant).toBeDefined();
+      return { character, encounter, combatant };
+    };
+
+    const demoted = await createHiddenCombatant('Demotion Read Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${demoted.encounter.body.id}/combatants/${demoted.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Demotion Read Hero was downed');
+    const demotionRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Demotion Read Hero was downed%'}`,
+    )).get();
+    expect(demotionRow).toBeDefined();
+    db.update(campaignMembers)
+      .set({ role: 'player' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    // The same transaction that authorizes the row also performs the mark, so
+    // a demotion cannot slip between a prior cleanup pass and this mutation.
+    expect((await coDm.post(`/api/v1/notifications/${demotionRow!.id}/read`).send()).status).toBe(404);
+    expect((await listFor(coDm)).some((row) => row.body.includes('Demotion Read Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Demotion Read Hero was downed'))).toBe(false);
+
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+
+    // A recipient who is both the permanent DM and affected-character owner
+    // loses the full DM projection on demotion, but keeps the owner-safe row.
+    const dualRole = await createHiddenCombatant('Dual Role Read Hero', true, coDm);
+    expect((await dm
+      .patch(`/api/v1/encounters/${dualRole.encounter.body.id}/combatants/${dualRole.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Dual Role Read Hero was downed');
+    db.update(campaignMembers)
+      .set({ role: 'player' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    const dualRoleAfterDemotion = (await listFor(coDm)).find((row) => row.body.includes('Dual Role Read Hero was downed'));
+    expect(dualRoleAfterDemotion).toMatchObject({ entityType: null, entityId: null });
+    const dualRoleRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Dual Role Read Hero was downed%'}`,
+    )).get();
+    expect(dualRoleRow).toMatchObject({ entityType: null, entityId: null, data: null });
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+
+    const server = ctx.app.getHttpServer();
+    const viewerToken = await coDm.post('/api/v1/tokens').send({
+      name: 'hidden-status-viewer-read',
+      scope: 'viewer',
+      writeScope: 'none',
+      campaignId: guardedCampaignId,
+    });
+    expect(viewerToken.status).toBe(201);
+    const viewerScoped = await createHiddenCombatant('Viewer PAT Read Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${viewerScoped.encounter.body.id}/combatants/${viewerScoped.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Viewer PAT Read Hero was downed');
+    const viewerRead = await request(server)
+      .get('/api/v1/notifications')
+      .set('Authorization', `Bearer ${viewerToken.body.token}`);
+    expect(viewerRead.status).toBe(200);
+    expect((viewerRead.body.items ?? viewerRead.body).some((row: Notification) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(true);
+    expect((await listFor(coDm)).some((row) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(true);
+
+    // A same-campaign PAT capped below DM remains entitled to the affected
+    // character's owner-safe status projection, without rewriting the durable
+    // full-DM row that the ordinary session may still read.
+    const scopedOwner = await createHiddenCombatant('Scoped Owner PAT Hero', true, coDm);
+    expect((await dm
+      .patch(`/api/v1/encounters/${scopedOwner.encounter.body.id}/combatants/${scopedOwner.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Scoped Owner PAT Hero was downed');
+    const scopedOwnerRead = await request(server)
+      .get('/api/v1/notifications')
+      .set('Authorization', `Bearer ${viewerToken.body.token}`);
+    expect(scopedOwnerRead.status).toBe(200);
+    expect((scopedOwnerRead.body.items ?? scopedOwnerRead.body).find(
+      (row: Notification) => row.body.includes('Scoped Owner PAT Hero was downed'),
+    )).toMatchObject({ entityType: null, entityId: null });
+    const scopedOwnerRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Scoped Owner PAT Hero was downed%'}`,
+    )).get();
+    expect(scopedOwnerRow).toMatchObject({ entityType: 'encounter', entityId: scopedOwner.encounter.body.id });
+    expect((await listFor(coDm)).find((row) => row.body.includes('Scoped Owner PAT Hero was downed')))
+      .toMatchObject({ entityType: 'encounter', entityId: scopedOwner.encounter.body.id });
+
+    const boundToken = await coDm.post('/api/v1/tokens').send({
+      name: 'hidden-status-bound-read',
+      scope: 'dm',
+      writeScope: 'none',
+      campaignId,
+    });
+    expect(boundToken.status).toBe(201);
+    const boundScoped = await createHiddenCombatant('Bound PAT Read Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${boundScoped.encounter.body.id}/combatants/${boundScoped.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Bound PAT Read Hero was downed');
+    const boundRead = await request(server)
+      .get('/api/v1/notifications')
+      .set('Authorization', `Bearer ${boundToken.body.token}`);
+    expect(boundRead.status).toBe(200);
+    expect((boundRead.body.items ?? boundRead.body).some((row: Notification) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(true);
+    expect((await listFor(coDm)).some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(true);
+
+    // A scope-capped request may retain more private rows than SQLite accepts
+    // in a single `NOT IN` predicate. Its request-only filtering must neither
+    // expose nor delete those rows; a later loss of durable authority must
+    // purge the same oversized set without exceeding SQLite's bind limit.
+    const sqliteVariableLimitRows = 32_767;
+    const sqliteGuardTitle = 'SQLite guarded notification';
+    const scopedVisibleRows = db.insert(notificationRows).values([
+      {
+        userId: coDmId,
+        campaignId: guardedCampaignId,
+        type: 'quest_updated',
+        title: 'Scoped visible notification one',
+        body: 'Visible to the scoped PAT',
+        entityType: null,
+        entityId: null,
+        commentId: null,
+        data: null,
+        hiddenStatusContext: null,
+        actorName: '',
+        actorUserId: null,
+        readAt: null,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        userId: coDmId,
+        campaignId: guardedCampaignId,
+        type: 'quest_updated',
+        title: 'Scoped visible notification two',
+        body: 'Also visible to the scoped PAT',
+        entityType: null,
+        entityId: null,
+        commentId: null,
+        data: null,
+        hiddenStatusContext: null,
+        actorName: '',
+        actorUserId: null,
+        readAt: null,
+        createdAt: new Date().toISOString(),
+      },
+    ]).returning().all();
+    const sqliteGuardContext = JSON.stringify({
+      encounterId: demoted.encounter.body.id,
+      characterId: demoted.character.body.id,
+      audience: 'permanent_dm',
+    });
+    const sqliteGuardCreatedAt = new Date().toISOString();
+    for (let start = 0; start < sqliteVariableLimitRows; start += 500) {
+      const rows = Array.from({ length: Math.min(500, sqliteVariableLimitRows - start) }, () => ({
+        userId: coDmId,
+        campaignId: guardedCampaignId,
+        type: 'quest_updated',
+        title: sqliteGuardTitle,
+        body: 'SQLite guarded notification body',
+        entityType: 'encounter',
+        entityId: demoted.encounter.body.id,
+        commentId: null,
+        data: null,
+        hiddenStatusContext: sqliteGuardContext,
+        actorName: '',
+        actorUserId: null,
+        readAt: null,
+        createdAt: sqliteGuardCreatedAt,
+      }));
+      db.insert(notificationRows).values(rows).run();
+    }
+    const scopedGuardUser: RequestUser = {
+      id: String(coDmId),
+      name: 'Co-DM',
+      serverRole: 'user',
+      tokenContext: {
+        tokenId: 0,
+        name: 'hidden-status-viewer-read',
+        scope: 'viewer',
+        writeScope: 'none',
+        campaignId: guardedCampaignId,
+        adminEnabled: false,
+      },
+    };
+    const scopedGuardRead = await notifications.listForUser(scopedGuardUser, {
+      campaignId: guardedCampaignId,
+      type: 'quest_updated',
+      limit: 1,
+    });
+    expect(scopedGuardRead.items.some((row) => row.title === sqliteGuardTitle)).toBe(false);
+    expect(scopedGuardRead).toMatchObject({ total: 2, hasMore: true });
+    expect(scopedGuardRead.items).toHaveLength(1);
+    expect(scopedGuardRead.items[0].id).toBe(scopedVisibleRows[1].id);
+    const scopedGuardSecondPage = await notifications.listForUser(scopedGuardUser, {
+      campaignId: guardedCampaignId,
+      type: 'quest_updated',
+      limit: 1,
+      cursor: scopedGuardRead.nextCursor!,
+    });
+    expect(scopedGuardSecondPage).toMatchObject({ total: 2, hasMore: false });
+    expect(scopedGuardSecondPage.items.map((row) => row.id)).toEqual([scopedVisibleRows[0].id]);
+    const boundedPatPoll = instrumentSql(ctx);
+    try {
+      await notifications.unreadSummary(scopedGuardUser);
+    } finally {
+      boundedPatPoll.restore();
+    }
+    const notificationScans = boundedPatPoll.executed.filter((source) => /from\s+["`]notifications["`]/i.test(source));
+    expect(notificationScans.length).toBeGreaterThan(2);
+    expect(notificationScans.every((source) => /limit\s+\?/i.test(source))).toBe(true);
+    const scopedBulkRead = await notifications.markReadBulk(scopedGuardUser, { campaignId: guardedCampaignId, all: true });
+    expect(scopedBulkRead.updatedIds).toEqual(expect.arrayContaining(scopedVisibleRows.map((row) => row.id)));
+    expect(db.select().from(notificationRows).where(eq(notificationRows.title, sqliteGuardTitle)).all().every((row) => row.readAt === null)).toBe(true);
+    const scopedBulkUnread = await notifications.markUnreadBulk(scopedGuardUser, { ids: scopedVisibleRows.map((row) => row.id) });
+    expect(scopedBulkUnread.updatedIds).toEqual(expect.arrayContaining(scopedVisibleRows.map((row) => row.id)));
+    expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      eq(notificationRows.title, sqliteGuardTitle),
+    )).get()?.value).toBe(sqliteVariableLimitRows);
+    db.update(campaignMembers)
+      .set({ role: 'player' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    await notifications.unreadSummary({ id: String(coDmId), name: 'Co-DM', serverRole: 'user' });
+    expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      eq(notificationRows.title, sqliteGuardTitle),
+    )).get()?.value).toBe(0);
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+
+    // Context preloads use their own ID lists. Distinct, nonexistent entity
+    // references make the guard deny these rows after exercising both the
+    // encounter and character lookup batches without creating 32,767 entities.
+    const sqlitePreloadTitle = 'SQLite preload notification';
+    for (let start = 0; start < sqliteVariableLimitRows; start += 500) {
+      const rows = Array.from({ length: Math.min(500, sqliteVariableLimitRows - start) }, (_, offset) => {
+        const id = start + offset + 1;
+        return {
+          userId: coDmId,
+          campaignId: guardedCampaignId,
+          type: 'character_downed',
+          title: sqlitePreloadTitle,
+          body: 'SQLite preload notification body',
+          entityType: 'encounter',
+          entityId: 1_000_000 + id,
+          commentId: null,
+          data: null,
+          hiddenStatusContext: JSON.stringify({
+            encounterId: 1_000_000 + id,
+            characterId: 2_000_000 + id,
+            audience: 'permanent_dm',
+          }),
+          actorName: '',
+          actorUserId: null,
+          readAt: null,
+          createdAt: sqliteGuardCreatedAt,
+        };
+      });
+      db.insert(notificationRows).values(rows).run();
+    }
+    await notifications.unreadSummary({ id: String(coDmId), name: 'Co-DM', serverRole: 'user' });
+    expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      eq(notificationRows.title, sqlitePreloadTitle),
+    )).get()?.value).toBe(0);
+
+    // The membership preload has a separate campaign-ID predicate. Distinct
+    // campaigns with no seats exercise that path before the guard denies and
+    // removes the rows without needing a matching encounter or character.
+    const sqliteCampaignPreloadTitle = 'SQLite campaign preload notification';
+    for (let start = 0; start < sqliteVariableLimitRows; start += 500) {
+      const campaignRows = Array.from({ length: Math.min(500, sqliteVariableLimitRows - start) }, (_, offset) => {
+        const id = 3_000_000 + start + offset + 1;
+        return { id, name: `SQLite preload campaign ${id}`, createdAt: sqliteGuardCreatedAt, updatedAt: sqliteGuardCreatedAt };
+      });
+      db.insert(campaigns).values(campaignRows).run();
+      db.insert(notificationRows).values(campaignRows.map((campaign) => ({
+        userId: coDmId,
+        campaignId: campaign.id,
+        type: 'character_downed',
+        title: sqliteCampaignPreloadTitle,
+        body: 'SQLite campaign preload notification body',
+        entityType: 'encounter',
+        entityId: demoted.encounter.body.id,
+        commentId: null,
+        data: null,
+        hiddenStatusContext: sqliteGuardContext,
+        actorName: '',
+        actorUserId: null,
+        readAt: null,
+        createdAt: sqliteGuardCreatedAt,
+      }))).run();
+    }
+    await notifications.unreadSummary({ id: String(coDmId), name: 'Co-DM', serverRole: 'user' });
+    expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(eq(
+      notificationRows.title,
+      sqliteCampaignPreloadTitle,
+    )).get()?.value).toBe(0);
+
+    expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
+    const visibleThenHidden = await createHiddenCombatant('Visible Then Hidden Hero', false);
+    expect((await dm
+      .patch(`/api/v1/encounters/${visibleThenHidden.encounter.body.id}/combatants/${visibleThenHidden.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(playerId, 'Visible Then Hidden Hero was downed');
+    await waitForStoredRow(spectatorId, 'Visible Then Hidden Hero was downed');
+    await waitForStoredRow(coDmId, 'Visible Then Hidden Hero was downed', true);
+    db.update(encounters).set({ hidden: true }).where(eq(encounters.id, visibleThenHidden.encounter.body.id)).run();
+
+    const ownerAfterHide = (await listFor(player)).find((row) => row.body.includes('Visible Then Hidden Hero was downed'));
+    expect(ownerAfterHide).toMatchObject({ entityType: null, entityId: null });
+    expect((await listFor(spectator)).some((row) => row.body.includes('Visible Then Hidden Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, spectatorId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Visible Then Hidden Hero was downed'))).toBe(false);
+    await notifications.flushDigests();
+    const dmAfterHide = (await listFor(coDm)).find((row) => row.body.includes('Visible Then Hidden Hero was downed'));
+    expect(dmAfterHide).toMatchObject({ entityType: 'encounter', entityId: visibleThenHidden.encounter.body.id });
+
+    // A visible-fan-out row retains the campaign-member audience. Once the
+    // encounter is hidden, a same-campaign viewer PAT for the co-DM who owns
+    // the character receives only the transient owner-safe projection.
+    expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'immediate' } })).status).toBe(200);
+    const scopedVisibleOwner = await createHiddenCombatant('Scoped Visible Owner PAT Hero', false, coDm);
+    expect((await dm
+      .patch(`/api/v1/encounters/${scopedVisibleOwner.encounter.body.id}/combatants/${scopedVisibleOwner.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Scoped Visible Owner PAT Hero was downed');
+    db.update(encounters).set({ hidden: true }).where(eq(encounters.id, scopedVisibleOwner.encounter.body.id)).run();
+    const scopedVisibleOwnerRead = await request(server)
+      .get('/api/v1/notifications')
+      .set('Authorization', `Bearer ${viewerToken.body.token}`);
+    expect(scopedVisibleOwnerRead.status).toBe(200);
+    expect((scopedVisibleOwnerRead.body.items ?? scopedVisibleOwnerRead.body).find(
+      (row: Notification) => row.body.includes('Scoped Visible Owner PAT Hero was downed'),
+    )).toMatchObject({ entityType: null, entityId: null });
+    const scopedVisibleOwnerRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Scoped Visible Owner PAT Hero was downed%'}`,
+    )).get();
+    expect(scopedVisibleOwnerRow).toMatchObject({
+      entityType: 'encounter',
+      entityId: scopedVisibleOwner.encounter.body.id,
+    });
+
+    // If a visible encounter is hidden at the durable fan-out boundary, the
+    // owner-safe fallback must still respect the recipient's existing mute of
+    // that encounter even though its public payload has no entity identity.
+    const mutedOwner = await createHiddenCombatant('Muted Owner Fallback Hero', false, coDm);
+    const mute = await coDm
+      .post(`/api/v1/campaigns/${guardedCampaignId}/safety/mutes`)
+      .send({ entityType: 'encounter', entityId: mutedOwner.encounter.body.id });
+    expect(mute.status).toBe(201);
+    const notifyMutedWhenVisible = notifications.notifyCampaignIfEncounterVisible.bind(notifications);
+    const hideMutedAtFanout = jest.spyOn(notifications, 'notifyCampaignIfEncounterVisible').mockImplementation(async (...args) => {
+      if (args[1] === mutedOwner.encounter.body.id) {
+        db.update(encounters).set({ hidden: true }).where(eq(encounters.id, mutedOwner.encounter.body.id)).run();
+      }
+      return notifyMutedWhenVisible(...args);
+    });
+    try {
+      expect((await dm
+        .patch(`/api/v1/encounters/${mutedOwner.encounter.body.id}/combatants/${mutedOwner.combatant.id}`)
+        .send({ hpSet: 0 })).status).toBe(200);
+    } finally {
+      hideMutedAtFanout.mockRestore();
+    }
+    expect((await listFor(coDm)).some((row) => row.body.includes('Muted Owner Fallback Hero was downed'))).toBe(false);
+    expect((await coDm.delete(`/api/v1/campaigns/${guardedCampaignId}/safety/controls/${mute.body.id}`)).status).toBe(200);
+
+    // Bell polling must not re-run membership, encounter, and ownership
+    // lookups for every retained hidden-status row. Reconciliation and the
+    // atomic scoped exposure scan each preload their authorization facts once.
+    const retainedHiddenRows = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+    )).all().filter((row) => row.hiddenStatusContext !== null);
+    expect(retainedHiddenRows.length).toBeGreaterThan(1);
+    const queryProbe = instrumentSql(ctx);
+    try {
+      const scopedOwnerUser: RequestUser = {
+        id: String(coDmId),
+        name: 'Co-DM',
+        serverRole: 'user',
+        tokenContext: {
+          tokenId: 0,
+          name: 'hidden-status-viewer-read',
+          scope: 'viewer',
+          writeScope: 'none',
+          campaignId: guardedCampaignId,
+          adminEnabled: false,
+        },
+      };
+      expect((await notifications.unreadSummary(scopedOwnerUser)).count).toBeGreaterThan(0);
+    } finally {
+      queryProbe.restore();
+    }
+    for (const table of ['campaign_members', 'encounters', 'characters']) {
+      expect(queryProbe.executed.filter((source) => new RegExp(`from\\s+["\`]${table}["\`]`, 'i').test(source))).toHaveLength(2);
+    }
+    expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
+
+    const removed = await createHiddenCombatant('Removal Digest Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${removed.encounter.body.id}/combatants/${removed.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Removal Digest Hero was downed', true);
+    db.delete(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    await notifications.flushDigests();
+    expect((await listFor(coDm)).some((row) => row.body.includes('Removal Digest Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationDigestQueue).where(and(eq(notificationDigestQueue.userId, coDmId), eq(notificationDigestQueue.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Removal Digest Hero was downed'))).toBe(false);
+
+    const transferred = await createHiddenCombatant('Ownership Transfer Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${transferred.encounter.body.id}/combatants/${transferred.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(playerId, 'Ownership Transfer Hero was downed');
+    const transferRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, playerId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Ownership Transfer Hero was downed%'}`,
+    )).get();
+    expect(transferRow).toBeDefined();
+    db.update(characters)
+      .set({ ownerUserId: String(spectatorId) })
+      .where(and(eq(characters.id, transferred.character.body.id), eq(characters.campaignId, guardedCampaignId)))
+      .run();
+    // Ownership transfer is guarded at the same mark/read boundary as a
+    // membership demotion; the old owner cannot mutate or observe the row.
+    expect((await player.post(`/api/v1/notifications/${transferRow!.id}/read`).send()).status).toBe(404);
+    expect((await listFor(player)).some((row) => row.body.includes('Ownership Transfer Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, playerId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Ownership Transfer Hero was downed'))).toBe(false);
   });
 
   it('sharing a note with the party notifies the party (not the author)', async () => {

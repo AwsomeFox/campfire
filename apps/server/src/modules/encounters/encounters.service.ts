@@ -34,7 +34,7 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationsService, type NotificationEvent } from '../notifications/notifications.service';
 import { ActionResolverService } from './action-resolver.service';
 import {
   actionEconomySlotMax,
@@ -6101,7 +6101,7 @@ export class EncountersService {
 
     if (row.kind === 'character' && row.characterId) {
       if (beforeDeath !== 'dead' && afterDeath === 'dead') {
-        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+        this.notifyCharacterStatusChange(encounterRow, row.characterId, user, {
           type: 'character_downed',
           title: 'Character died!',
           body: `${row.name} has died in combat.`,
@@ -6109,7 +6109,7 @@ export class EncountersService {
           entityId: encounterId,
         }).catch(() => {});
       } else if (beforeHp > 0 && afterHp === 0 && afterDeath !== 'dead') {
-        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+        this.notifyCharacterStatusChange(encounterRow, row.characterId, user, {
           type: 'character_downed',
           title: 'Character downed!',
           body: `${row.name} was downed in combat.`,
@@ -6121,6 +6121,108 @@ export class EncountersService {
 
     const domain = combatantToDomain(row);
     return isDm ? domain : redactMonsterHp(domain, encounterRow.monsterHpDisplay as MonsterHpDisplay, user.id);
+  }
+
+  /**
+   * Hidden encounters are wholesale DM-only to non-DMs, so a notification with
+   * their id or a character's status is itself secret. The character owner is
+   * the sole non-DM recipient entitled to that personal status, but receives no
+   * encounter deep-link or id; permanent DM members retain their normal
+   * campaign-management payload. A temporary guest/co-DM grant deliberately
+   * does not receive a durable hidden-status row: notifications and digests
+   * can outlive a grant's revocation, handback, or expiry, while the guest can
+   * inspect the hidden encounter directly for the grant's active lifetime.
+   * A visible fan-out is guarded at its durable-write boundary, so a
+   * concurrent hide cannot turn it into an id leak. Visible encounters keep
+   * the established whole-campaign fan-out.
+   */
+  private async notifyCharacterStatusChange(
+    encounterRow: Pick<typeof encounters.$inferSelect, 'id' | 'campaignId'>,
+    characterId: number,
+    user: RequestUser,
+    event: NotificationEvent,
+  ): Promise<void> {
+    if (await this.notifications.notifyCampaignIfEncounterVisible(encounterRow.campaignId, encounterRow.id, characterId, user, event)) {
+      return;
+    }
+
+    const [character] = await this.db
+      .select({ ownerUserId: characters.ownerUserId })
+      .from(characters)
+      .where(and(eq(characters.id, characterId), eq(characters.campaignId, encounterRow.campaignId)))
+      .limit(1);
+    const roles = await this.notifications.memberRoles(encounterRow.campaignId);
+    const narrowlyDelivered = new Set<number>();
+    let retriedVisibleFanout = false;
+    const deliverNarrow = async (send: () => ReturnType<NotificationsService['notifyUserIfHiddenEncounterRecipient']>) => {
+      let outcome = await send();
+      if (outcome === 'visible' && !retriedVisibleFanout) {
+        retriedVisibleFanout = true;
+        if (await this.notifications.notifyCampaignIfEncounterVisible(
+          encounterRow.campaignId,
+          encounterRow.id,
+          characterId,
+          user,
+          event,
+          narrowlyDelivered,
+        )) return { outcome, broadDelivered: true };
+        // One terminal narrow recheck after the one-shot broad retry; never
+        // recurse or attempt another broad fan-out if visibility flips again.
+        outcome = await send();
+      }
+      return { outcome, broadDelivered: false };
+    };
+    const deliverRecipient = async (memberId: number, memberRole: string, isOwner: boolean): Promise<boolean> => {
+      const isDm = memberRole === 'dm';
+      if ((!isDm && !isOwner) || narrowlyDelivered.has(memberId)) return false;
+      // The player may learn their character's state, but a hidden encounter
+      // remains a DM-only entity and must not become a notification deep-link.
+      const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
+      const primary = await deliverNarrow(() => this.notifications.notifyUserIfHiddenEncounterRecipient(
+        memberId,
+        encounterRow.campaignId,
+        user,
+        recipientEvent,
+        isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
+        encounterRow.id,
+      ));
+      if (primary.broadDelivered) return true;
+      if (primary.outcome === 'delivered') narrowlyDelivered.add(memberId);
+      // A recipient can legitimately hold both authorities. If their DM
+      // membership changed after discovery, retry only their personal-status
+      // payload under the independently revalidated ownership authority.
+      if (primary.outcome === 'skipped' && isDm && isOwner) {
+        const owner = await deliverNarrow(() => this.notifications.notifyUserIfHiddenEncounterRecipient(
+          memberId,
+          encounterRow.campaignId,
+          user,
+          { ...event, entityType: null, entityId: null },
+          { kind: 'character_owner', characterId },
+          encounterRow.id,
+        ));
+        if (owner.broadDelivered) return true;
+        if (owner.outcome === 'delivered') narrowlyDelivered.add(memberId);
+      }
+      return false;
+    };
+    for (const [memberId, memberRole] of roles) {
+      if (await deliverRecipient(memberId, memberRole, String(memberId) === character?.ownerUserId)) return;
+    }
+
+    // Membership and ownership can both change between the initial recipient
+    // discovery and an awaited guarded write. Re-resolve them once after the
+    // first pass so a newly appointed permanent DM or current character owner
+    // gets the same transaction-bound delivery attempt. `narrowlyDelivered`
+    // prevents duplicate rows, and this bounded second pass never recurses.
+    const [currentCharacter] = await this.db
+      .select({ ownerUserId: characters.ownerUserId })
+      .from(characters)
+      .where(and(eq(characters.id, characterId), eq(characters.campaignId, encounterRow.campaignId)))
+      .limit(1);
+    const currentRoles = await this.notifications.memberRoles(encounterRow.campaignId);
+    for (const [memberId, memberRole] of currentRoles) {
+      if (await deliverRecipient(memberId, memberRole, String(memberId) === currentCharacter?.ownerUserId)) return;
+    }
   }
 
   async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role, idempotencyKey?: string): Promise<CombatantRemoveResult> {
