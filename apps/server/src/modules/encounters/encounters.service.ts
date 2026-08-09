@@ -908,7 +908,7 @@ export class EncountersService {
    * with no equivalent check, so it still returned success (a no-op with the round floored at
    * 1 via `retreatEncounterTurn`'s empty-sorted branch) on the exact state next-turn/end-turn
    * now reject. A DM cannot tell "nothing to undo" apart from "your undo worked" from a 200
-   * response, and undoTurn still wrote a real audit log entry and an "turn advance undone"
+   * response, and undoTurn still wrote a real audit log entry and a "turn advance undone"
    * event for a turn that never moved — worse than silence. Sharing one definition (rather
    * than a second copy of the check, which is how these two drifted apart the first time)
    * keeps every future turn-movement entry point honest by construction.
