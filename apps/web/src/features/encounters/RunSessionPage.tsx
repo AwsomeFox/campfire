@@ -2648,7 +2648,7 @@ export default function RunSessionPage() {
         saveOutcome === undefined &&
         isCrit === undefined &&
         damageDice === undefined
-          ? { combatantId, delta, sequence: queue.nextSequence++ }
+          ? { combatantId, delta, sequence: queue.nextSequence++, reflected: false }
           : undefined;
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
@@ -2688,6 +2688,11 @@ export default function RunSessionPage() {
       return { previousCombatant };
     },
     onSuccess: (combatant, vars, ctx) => {
+      const queue = optimisticHpQueueRef.current;
+      if (ctx?.encounterId === eid && ctx.optimisticOperationId && queue.encounterId === eid) {
+        const operation = queue.operations.get(ctx.optimisticOperationId);
+        if (operation) operation.reflected = true;
+      }
       if (!vars.isCrit) return;
       if (!ctx?.previousCombatant) return;
       const before = ctx.previousCombatant;

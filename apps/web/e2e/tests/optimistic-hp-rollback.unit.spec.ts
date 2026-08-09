@@ -71,7 +71,7 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
         { id: 2, hpCurrent: 9, hpMax: 20 } as Combatant,
       ],
     };
-    const operations = [{ combatantId: 1, delta: -5 }];
+    const operations = [{ combatantId: 1, delta: -5, reflected: true }];
 
     const rebased = rebaseOptimisticHpEncounter(base, advanced, operations);
     const replayed = replayOptimisticHpDeltas(rebased.combatants, operations);
@@ -98,7 +98,7 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
       turnVersion: 5,
       combatants: [{ ...combatant, hpCurrent: 12 }],
     } as EncounterWithCombatants;
-    const operations = [{ combatantId: 1, delta: -5 }];
+    const operations = [{ combatantId: 1, delta: -5, reflected: true }];
 
     const rebased = rebaseOptimisticHpEncounter(base, advanced, operations);
     const replayed = replayOptimisticHpDeltas(rebased.combatants, operations);
@@ -106,6 +106,28 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(rebased.combatants[0]?.hpCurrent).toBe(17);
     expect(replayed[0]?.hpCurrent).toBe(12);
     expect(replayOptimisticHpDeltas(rebased.combatants, [])[0]?.hpCurrent).toBe(17);
+  });
+
+  test('does not subtract a pending delta that the newer turn has not reflected', () => {
+    const base = {
+      id: 8,
+      currentCombatantId: 1,
+      turnVersion: 4,
+      combatants: [combatant],
+    } as EncounterWithCombatants;
+    const advanced = {
+      ...base,
+      currentCombatantId: 2,
+      turnVersion: 5,
+    };
+    const operations = [{ combatantId: 1, delta: -5, reflected: false }];
+
+    const rebased = rebaseOptimisticHpEncounter(base, advanced, operations);
+    const replayed = replayOptimisticHpDeltas(rebased.combatants, operations);
+
+    expect(rebased.combatants[0]?.hpCurrent).toBe(20);
+    expect(replayed[0]?.hpCurrent).toBe(15);
+    expect(replayOptimisticHpDeltas(rebased.combatants, [])[0]?.hpCurrent).toBe(20);
   });
 
   test('retains the concurrent lifecycle baseline when combined damage crosses zero', () => {
@@ -129,7 +151,7 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
       turnVersion: 5,
       combatants: [{ ...baseCombatant, hpCurrent: 0, deathState: 'dying' as const }],
     } as EncounterWithCombatants;
-    const operations = [{ combatantId: 1, delta: -5 }];
+    const operations = [{ combatantId: 1, delta: -5, reflected: true }];
 
     const rebased = rebaseOptimisticHpEncounter(base, advanced, operations);
     const replayed = replayOptimisticHpDeltas(rebased.combatants, operations);
@@ -145,6 +167,8 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(source).toContain('optimisticHpQueueRef');
     expect(source).toContain('ctx?.encounterId === eid');
     expect(source).toContain('successful operations stay in');
+    expect(source).toContain('reflected: false');
+    expect(source).toContain('operation.reflected = true');
     expect(source).toContain('hpQueue.base = rebaseOptimisticHpEncounter');
     expect(source).toMatch(/hpQueue\.base = rebaseOptimisticHpEncounter\([\s\S]*?replayPendingOptimisticHpDeltas\(\);/);
     expect(source).not.toContain('rollbackOptimisticHpDelta');

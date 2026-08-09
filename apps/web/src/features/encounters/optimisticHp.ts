@@ -74,7 +74,19 @@ export function applyOptimisticHpDelta(
 export type OptimisticHpDelta = {
   combatantId: number;
   delta: number;
+  /** True once this client's PATCH response proves the operation committed. */
+  reflected?: boolean;
 };
+
+function sameOptimisticHpFields(left: Combatant, right: Combatant): boolean {
+  return left.hpCurrent === right.hpCurrent
+    && left.hpTemp === right.hpTemp
+    && left.spCurrent === right.spCurrent
+    && left.rpCurrent === right.rpCurrent
+    && left.deathState === right.deathState
+    && left.deathSaveSuccesses === right.deathSaveSuccesses
+    && left.deathSaveFailures === right.deathSaveFailures;
+}
 
 function removeOptimisticNumberChange(before: number, optimistic: number, updated: number): number;
 function removeOptimisticNumberChange(
@@ -112,7 +124,7 @@ export function rebaseOptimisticHpEncounter(
   const pendingCombatantIds = new Set(pendingOperations.map(({ combatantId }) => combatantId));
   if (pendingCombatantIds.size === 0) return updated;
   const baseCombatants = new Map(base.combatants.map((combatant) => [combatant.id, combatant]));
-  const optimisticCombatants = new Map(
+  const fullyOptimisticCombatants = new Map(
     replayOptimisticHpDeltas(base.combatants, pendingOperations, ruleSystem, customMechanicsProfile)
       .map((combatant) => [combatant.id, combatant]),
   );
@@ -121,8 +133,24 @@ export function rebaseOptimisticHpEncounter(
     combatants: updated.combatants.map((combatant) => {
       if (!pendingCombatantIds.has(combatant.id)) return combatant;
       const previous = baseCombatants.get(combatant.id);
-      const optimistic = optimisticCombatants.get(combatant.id);
-      if (!previous || !optimistic) return combatant;
+      const fullyOptimistic = fullyOptimisticCombatants.get(combatant.id);
+      if (!previous || !fullyOptimistic) return combatant;
+      const targetOperations = pendingOperations.filter(({ combatantId }) => combatantId === combatant.id);
+      const explicitlyReflected = targetOperations.filter(({ reflected }) => reflected === true);
+      // A response equal to the complete optimistic projection also proves that
+      // all target operations are reflected, even if their PATCH callbacks have
+      // not run yet. Otherwise only committed callbacks are safe to subtract.
+      const reflectedOperations = sameOptimisticHpFields(combatant, fullyOptimistic)
+        ? targetOperations
+        : explicitlyReflected;
+      if (reflectedOperations.length === 0) return combatant;
+      const optimistic = replayOptimisticHpDeltas(
+        [previous],
+        reflectedOperations,
+        ruleSystem,
+        customMechanicsProfile,
+      )[0];
+      if (!optimistic) return combatant;
       const rebased = {
         ...combatant,
         hpCurrent: removeOptimisticNumberChange(previous.hpCurrent, optimistic.hpCurrent, combatant.hpCurrent),
@@ -141,10 +169,9 @@ export function rebaseOptimisticHpEncounter(
           combatant.deathSaveFailures,
         ),
       };
-      const pendingForCombatant = pendingOperations.filter(({ combatantId }) => combatantId === combatant.id);
       const replayedWithPreviousLifecycle = replayOptimisticHpDeltas(
         [rebased],
-        pendingForCombatant,
+        reflectedOperations,
         ruleSystem,
         customMechanicsProfile,
       )[0];
