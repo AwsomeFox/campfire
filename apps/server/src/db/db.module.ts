@@ -5113,6 +5113,7 @@ function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): v
  * encounter which is now hidden are removed during the upgrade.
  */
 function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Database): void {
+  const encountersTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'encounters'").get();
   for (const table of ['notifications', 'notification_digest_queue']) {
     const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     if (!exists) continue;
@@ -5120,6 +5121,10 @@ function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Datab
     if (!columns.some((column) => column.name === 'hidden_status_context')) {
       sqlite.exec(`ALTER TABLE ${table} ADD COLUMN hidden_status_context TEXT`);
     }
+    // Reduced test/import fixtures may carry notification tables without the
+    // encounter module. The additive column migration remains safe there;
+    // only the legacy cleanup needs the encounter table to identify secrecy.
+    if (!encountersTable) continue;
     sqlite.prepare(
       `DELETE FROM ${table}
        WHERE hidden_status_context IS NULL

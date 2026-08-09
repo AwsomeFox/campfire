@@ -2964,4 +2964,27 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       upgraded.sqlite.close();
     }
   });
+
+  it('0180 keeps the additive notification migration safe for reduced fixtures without encounters (#2112)', () => {
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    const reduced = new Database(dbFilePath(dataDir));
+    try {
+      reduced.pragma('foreign_keys = OFF');
+      reduced.exec('DROP TABLE encounters');
+      reduced.prepare("DELETE FROM __migrations WHERE name = '0180_hidden_status_notification_authorization_2112'").run();
+    } finally {
+      reduced.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'notifications')).toContain('hidden_status_context');
+      expect(columnNames(upgraded.sqlite, 'notification_digest_queue')).toContain('hidden_status_context');
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
 });
