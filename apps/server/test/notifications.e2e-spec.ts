@@ -528,6 +528,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   let player: ReturnType<typeof request.agent>; // a player
   let coDm: ReturnType<typeof request.agent>;
   let spectator: ReturnType<typeof request.agent>;
+  let guestDm: ReturnType<typeof request.agent>;
   // Venue/room/template MUTATION is @ServerRoles('admin'); applying a template
   // only needs `dm` on the target campaign. Both agents are therefore needed to
   // exercise the apply path end to end.
@@ -535,6 +536,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   let playerId: number;
   let coDmId: number;
   let spectatorId: number;
+  let guestDmId: number;
   let campaignId: number;
 
   type Notification = {
@@ -575,6 +577,10 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .post('/api/v1/users')
       .send({ username: 'cov-spectator', password: 'password-spec-1', displayName: 'Sam Spectator' });
     spectatorId = createSpectator.body.id;
+    const createGuestDm = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'cov-guest-dm', password: 'password-guest-dm-1', displayName: 'Gale Guest DM' });
+    guestDmId = createGuestDm.body.id;
 
     dm = request.agent(server);
     await dm.post('/api/v1/auth/login').send({ username: 'cov-dm', password: 'password-dm-1' });
@@ -584,6 +590,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     await coDm.post('/api/v1/auth/login').send({ username: 'cov-co-dm', password: 'password-codm-1' });
     spectator = request.agent(server);
     await spectator.post('/api/v1/auth/login').send({ username: 'cov-spectator', password: 'password-spec-1' });
+    guestDm = request.agent(server);
+    await guestDm.post('/api/v1/auth/login').send({ username: 'cov-guest-dm', password: 'password-guest-dm-1' });
 
     const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Coverage Keep' });
     campaignId = campaign.body.id;
@@ -867,15 +875,19 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(after[0].title).toContain('Secret pact');
   });
 
-  it('keeps hidden-encounter downed and died notifications to DMs and the affected owner, while visible encounters still notify the party (#2112)', async () => {
+  it('keeps hidden-encounter downed and died notifications to effective DMs and the affected owner, while visible encounters still notify the party (#2112)', async () => {
     const hiddenCampaign = await dm.post('/api/v1/campaigns').send({ name: 'Hidden Notification Keep' });
     expect(hiddenCampaign.status).toBe(201);
     const hiddenCampaignId = hiddenCampaign.body.id as number;
 
-    for (const [userId, role] of [[playerId, 'player'], [coDmId, 'dm'], [spectatorId, 'player']] as const) {
+    for (const [userId, role] of [[playerId, 'player'], [coDmId, 'dm'], [spectatorId, 'player'], [guestDmId, 'player']] as const) {
       const add = await dm.post(`/api/v1/campaigns/${hiddenCampaignId}/members`).send({ userId, role });
       expect(add.status).toBe(201);
     }
+    const guestGrant = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/members/grants`)
+      .send({ granteeUserId: guestDmId, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    expect(guestGrant.status).toBe(201);
 
     const ownerCharacter = await player
       .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
@@ -893,11 +905,14 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     );
     expect(hiddenCombatant).toBeDefined();
 
-    const notificationsForEncounter = async (agent: ReturnType<typeof request.agent>, encounterId: number, expected: number) => {
+    const statusNotifications = async (agent: ReturnType<typeof request.agent>, title: string, expected: number) => {
       let matching: Notification[] = [];
       for (let attempt = 0; attempt < 20; attempt += 1) {
         matching = (await listFor(agent)).filter(
-          (notification) => notification.type === 'character_downed' && notification.entityId === encounterId,
+          (notification) =>
+            notification.type === 'character_downed' &&
+            notification.campaignId === hiddenCampaignId &&
+            notification.title === title,
         );
         if (matching.length === expected) return matching;
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -910,12 +925,16 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .send({ hpSet: 0 });
     expect(downed.status).toBe(200);
 
-    const ownerDowned = await notificationsForEncounter(player, hiddenEncounter.body.id, 1);
-    const coDmDowned = await notificationsForEncounter(coDm, hiddenEncounter.body.id, 1);
-    const spectatorDowned = await notificationsForEncounter(spectator, hiddenEncounter.body.id, 0);
+    const ownerDowned = await statusNotifications(player, 'Character downed!', 1);
+    const coDmDowned = await statusNotifications(coDm, 'Character downed!', 1);
+    const guestDmDowned = await statusNotifications(guestDm, 'Character downed!', 1);
+    const spectatorDowned = await statusNotifications(spectator, 'Character downed!', 0);
     expect(ownerDowned[0].title).toBe('Character downed!');
     expect(ownerDowned[0].body).toContain('Hidden Hero was downed');
+    expect(ownerDowned[0].entityType).toBeNull();
+    expect(ownerDowned[0].entityId).toBeNull();
     expect(coDmDowned[0].entityId).toBe(hiddenEncounter.body.id);
+    expect(guestDmDowned[0].entityId).toBe(hiddenEncounter.body.id);
     expect(spectatorDowned).toEqual([]);
 
     const died = await dm
@@ -923,12 +942,16 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .send({ deathState: 'dead' });
     expect(died.status).toBe(200);
 
-    const ownerDied = await notificationsForEncounter(player, hiddenEncounter.body.id, 2);
-    const coDmDied = await notificationsForEncounter(coDm, hiddenEncounter.body.id, 2);
-    const spectatorDied = await notificationsForEncounter(spectator, hiddenEncounter.body.id, 0);
-    const ownerDeathNotice = ownerDied.find((notification) => notification.title === 'Character died!');
+    const ownerDied = await statusNotifications(player, 'Character died!', 1);
+    const coDmDied = await statusNotifications(coDm, 'Character died!', 1);
+    const guestDmDied = await statusNotifications(guestDm, 'Character died!', 1);
+    const spectatorDied = await statusNotifications(spectator, 'Character died!', 0);
+    const ownerDeathNotice = ownerDied[0];
     expect(ownerDeathNotice?.body).toContain('Hidden Hero has died');
+    expect(ownerDeathNotice?.entityType).toBeNull();
+    expect(ownerDeathNotice?.entityId).toBeNull();
     expect(coDmDied.some((notification) => notification.title === 'Character died!' && notification.entityId === hiddenEncounter.body.id)).toBe(true);
+    expect(guestDmDied.some((notification) => notification.title === 'Character died!' && notification.entityId === hiddenEncounter.body.id)).toBe(true);
     expect(spectatorDied).toEqual([]);
 
     const visibleCharacter = await player
@@ -950,7 +973,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .patch(`/api/v1/encounters/${visibleEncounter.body.id}/combatants/${visibleCombatant.id}`)
       .send({ hpSet: 0 });
     expect(visibleDowned.status).toBe(200);
-    const spectatorVisible = await notificationsForEncounter(spectator, visibleEncounter.body.id, 1);
+    const spectatorVisible = await statusNotifications(spectator, 'Character downed!', 1);
     expect(spectatorVisible[0].title).toBe('Character downed!');
     expect(spectatorVisible[0].entityId).toBe(visibleEncounter.body.id);
   });

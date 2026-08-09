@@ -35,6 +35,7 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { NotificationsService, type NotificationEvent } from '../notifications/notifications.service';
+import { RoleResolver } from '../membership/role-resolver.service';
 import { ActionResolverService } from './action-resolver.service';
 import {
   actionEconomySlotMax,
@@ -886,6 +887,13 @@ export class EncountersService {
      * character branch below falls back to its pre-#1901 sheet-only behavior.
      */
     @Optional() private readonly actionResolver?: ActionResolverService,
+    /**
+     * Notification recipients use effective role, not only the durable member
+     * row: an active guest/co-DM grant may make a player a DM for the current
+     * encounter notification. Optional and last to preserve positional test
+     * constructions that do not exercise notification delivery.
+     */
+    @Optional() @Inject(RoleResolver) private readonly roleResolver?: Pick<RoleResolver, 'effectiveRole'>,
   ) {}
 
   private async assertControllerIsCampaignMember(campaignId: number, controllerUserId: number): Promise<void> {
@@ -6126,17 +6134,27 @@ export class EncountersService {
   /**
    * Hidden encounters are wholesale DM-only to non-DMs, so a notification with
    * their id or a character's status is itself secret. The character owner is
-   * the sole non-DM recipient entitled to that personal status; DM-role members
-   * retain their normal campaign-management visibility. Visible encounters keep
-   * the established whole-campaign fan-out.
+   * the sole non-DM recipient entitled to that personal status, but receives no
+   * encounter deep-link or id; DM-role members retain their normal
+   * campaign-management payload, including an active guest/co-DM grant.
+   * Visibility is re-read at send time so a concurrent hide cannot turn a
+   * once-visible encounter notification into an id leak. Visible encounters
+   * keep the established whole-campaign fan-out.
    */
   private async notifyCharacterStatusChange(
-    encounterRow: Pick<typeof encounters.$inferSelect, 'campaignId' | 'hidden'>,
+    encounterRow: Pick<typeof encounters.$inferSelect, 'id' | 'campaignId'>,
     characterId: number,
     user: RequestUser,
     event: NotificationEvent,
   ): Promise<void> {
-    if (!encounterRow.hidden) {
+    const [currentEncounter] = await this.db
+      .select({ hidden: encounters.hidden })
+      .from(encounters)
+      .where(eq(encounters.id, encounterRow.id))
+      .limit(1);
+    // A missing row must not downgrade to a campaign-wide notification: after
+    // deletion there is no safe visibility state to disclose.
+    if (currentEncounter && !currentEncounter.hidden) {
       await this.notifications.notifyCampaign(encounterRow.campaignId, user, event);
       return;
     }
@@ -6148,8 +6166,19 @@ export class EncountersService {
       .limit(1);
     const roles = await this.notifications.memberRoles(encounterRow.campaignId);
     for (const [memberId, memberRole] of roles) {
-      if (memberRole !== 'dm' && String(memberId) !== character?.ownerUserId) continue;
-      await this.notifications.notifyUser(memberId, encounterRow.campaignId, user, event);
+      const grantedDm =
+        memberRole !== 'dm' &&
+        (await this.roleResolver?.effectiveRole(
+          { id: String(memberId), name: '', serverRole: 'user' },
+          encounterRow.campaignId,
+        )) === 'dm';
+      const isDm = memberRole === 'dm' || grantedDm;
+      const isOwner = String(memberId) === character?.ownerUserId;
+      if (!isDm && !isOwner) continue;
+      // The player may learn their character's state, but a hidden encounter
+      // remains a DM-only entity and must not become a notification deep-link.
+      const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
+      await this.notifications.notifyUser(memberId, encounterRow.campaignId, user, recipientEvent);
     }
   }
 
