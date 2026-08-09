@@ -38,6 +38,7 @@ import {
   settings,
   users,
 } from '../../db/schema';
+import { charactersWithDerivedActions } from '../inventory/derived-action-invalidation';
 import { AuditService, type AuditLogParams } from '../audit/audit.service';
 import { auditBestEffort } from '../audit/audit-best-effort';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -1902,11 +1903,30 @@ function planChange(
       // another admin installing the pack between preview and Apply flipped a shown
       // skip into an unshown rule-system change.
       if (!input.rulePack) return `rule pack '${next}' is not installed on this server`;
+      // Captured by `apply` inside the transaction, announced by `afterCommit` once it lands.
+      let affectedCharacterIds: number[] = [];
       return {
         summary: { field: 'ruleSystem', before: row.ruleSystem || 'unset', after: next },
         apply: (tx) => {
           {
             tx.update(campaigns).set({ ruleSystem: next, updatedAt: ts }).where(eq(campaigns.id, id)).run();
+            // Issue #2097 review (chatgpt-codex-connector P2): a derived equipped action is
+            // computed on read against the campaign's CURRENT adapter, so this write changes
+            // every one of them — and `campaigns.ruleSystem` is written from here as well as
+            // from `CampaignsService.update`, which is why the "who is affected" query is a
+            // shared function rather than a method on one service. Read in the same
+            // transaction as the write so the two cannot disagree about which campaign state
+            // the list belongs to.
+            affectedCharacterIds = charactersWithDerivedActions(tx, id);
+          }
+        },
+        // Announced after the commit, like every other event on this path, so nothing is
+        // published that the transaction might still roll back. `RunSessionPage` refreshes
+        // its merged-action cache only on `character.updated`; without this, open encounter
+        // and party views keep offering the previous rule system's attacks.
+        afterCommit: () => {
+          for (const characterId of affectedCharacterIds) {
+            ctx.events.emit({ type: 'character.updated', campaignId: id, characterId, userId: actor.actor });
           }
         },
       };

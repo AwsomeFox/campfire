@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { inventoryItems, ruleEntries } from '../src/db/schema';
+import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 
 const dm = { 'x-dev-user': 'dm', 'x-dev-role': 'dm' };
 const player = { 'x-dev-user': 'player', 'x-dev-role': 'player' };
@@ -448,6 +449,59 @@ describe('derived equipped-item actions (issue #2097)', () => {
       expect(refreshed.body.equippedActionSource).toBe('derived');
       expect(refreshed.body.equippedAction.damage).toContain('2d6+3');
     } finally {
+      restoreLongswordEntry();
+    }
+  });
+
+  it('accepting a refresh announces the change to open encounter screens', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'refresh-tick-slot' });
+
+    // Review (chatgpt-codex-connector P2): read-time derivation removed the invalidation WORK
+    // (there is no stored action to regenerate) but not the need to ANNOUNCE — `RunSessionPage`
+    // refreshes its merged-action and turn caches only on `character.updated`, so without this
+    // an already-open encounter card keeps offering the previous revision's attack and
+    // resolving it fails the expected-spec check.
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string; characterId?: number }> = [];
+    const spy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string; characterId?: number });
+    });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+      expect(refreshed.body.equippedAction.damage).toContain('2d6+3');
+      expect(emitted.some((e) => e.type === 'character.updated' && e.characterId === characterId)).toBe(true);
+    } finally {
+      spy.mockRestore();
+      restoreLongswordEntry();
+    }
+  });
+
+  it('a refresh over a MANUAL action announces nothing — it changed nothing', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'refresh-silent-slot' });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Untouched', kind: 'melee', toHit: '+7', damage: '1d8+4 slashing', targetAc: '', notes: '' } });
+
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string }> = [];
+    const spy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string });
+    });
+    try {
+      await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      // A stored action is returned verbatim whatever the snapshot says, so the merged list
+      // is unchanged and there is nothing for an open card to refetch.
+      expect(emitted.some((e) => e.type === 'character.updated')).toBe(false);
+    } finally {
+      spy.mockRestore();
       restoreLongswordEntry();
     }
   });

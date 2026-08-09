@@ -611,6 +611,16 @@ export class InventoryService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    // Issue #2097 review (chatgpt-codex-connector P2): accepting a new revision changes what
+    // an equipped weapon derives on the very next read, and `RunSessionPage` refreshes its
+    // merged-action cache only on `character.updated` — without this an open encounter card
+    // keeps offering the previous revision's attack, which resolving then rejects as changed.
+    // Gated on there being no STORED action: a human's action is returned verbatim and a
+    // refresh does not touch it.
+    if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped && existing.equippedAction == null) {
+      this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: existing.characterId, userId: user.id });
+    }
+
     const refreshed = await this.withCompendiumState(row);
     return (await this.resolveEquippedActions([refreshed], user, role))[0];
   }
@@ -1231,9 +1241,15 @@ export class InventoryService {
     // character's merged combat-action list exactly like an explicit unequip does (the
     // `.set()` above forces `equipped: false` on the tombstoned row) — signal it the same
     // way `update()`'s equip/unequip path does so live encounter screens don't keep
-    // offering an action that was just deleted. Gate on `equippedAction != null` so
-    // deleting a plain (non-action) piece of gear stays silent, matching `update()`.
-    if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped && existing.equippedAction != null) {
+    // offering an action that was just deleted.
+    //
+    // Issue #2097 review (chatgpt-codex-connector P2): NOT gated on `equippedAction != null`
+    // any more. That column now holds only human-authored actions, so it is null for exactly
+    // the compendium weapons whose action is derived — the gate excluded the common case.
+    // Deriving here just to decide whether to announce would cost a read per delete to save a
+    // refetch; this file's standing rule is that an extra invalidation is harmless while a
+    // missing one is the real defect.
+    if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped) {
       this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: existing.characterId, userId: user.id });
     }
 
