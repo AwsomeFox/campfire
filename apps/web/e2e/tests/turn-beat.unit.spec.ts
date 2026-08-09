@@ -26,29 +26,39 @@ test.describe('turn-change beat (issue #1906)', () => {
 
   test('clears a previous encounter baseline on encounter switch, and only resyncs it from a REST refetch on load or reconnect (issue #2092)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = turnBeatLoadWatermark\.dataUpdatedAt;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = turnBeatLoadWatermark\.readRevision;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
     expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
-    expect(source).toMatch(/if \(!encounter \|\| encounter\.id !== eid\) return;\s*if \(!shouldConsumeTurnBeatResync\([\s\S]*?encounterQuery\.dataUpdatedAt,[\s\S]*?encounterQuery\.isFetching,[\s\S]*?encounterQuery\.isSuccess,[\s\S]*?\)\) return;\s*awaitingTurnBeatResyncRef\.current = null;[\s\S]*previousTurnBeatRef\.current = \{/);
+    expect(source).toMatch(/const completedRead = latestEncounterReadRef\.current;\s*if \(!completedRead \|\| completedRead\.encounterId !== eid\) return;\s*if \(!shouldConsumeTurnBeatResync\(\s*awaitingTurnBeatResyncRef\.current,\s*completedRead\.revision,\s*\)\) return;\s*awaitingTurnBeatResyncRef\.current = null;[\s\S]*previousTurnBeatRef\.current = \{/);
     expect(source).not.toContain('previousTurnBeatRef.current?.encounterId === eid ||');
   });
 
-  test('captures the load resync watermark before useQuery can finish the mount refetch', () => {
+  test('captures the actual-read watermark before useQuery can finish the mount refetch', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     const watermarkCapture = source.indexOf('const [turnBeatLoadWatermark, setTurnBeatLoadWatermark] = useState');
     const encounterQuery = source.indexOf('const encounterQuery = useQuery({');
 
     expect(watermarkCapture).toBeGreaterThan(-1);
     expect(watermarkCapture).toBeLessThan(encounterQuery);
-    expect(source).toMatch(/const \[turnBeatLoadWatermark, setTurnBeatLoadWatermark\] = useState\(\(\) => \(\{\s*encounterId: eid,\s*dataUpdatedAt: queryClient\.getQueryState\(queryKeys\.encounter\(eid\)\)\?\.dataUpdatedAt \?\? 0,\s*\}\)\);/);
-    expect(source).toMatch(/if \(turnBeatLoadWatermark\.encounterId !== eid\) \{\s*setTurnBeatLoadWatermark\(\{\s*encounterId: eid,\s*dataUpdatedAt: queryClient\.getQueryState\(queryKeys\.encounter\(eid\)\)\?\.dataUpdatedAt \?\? 0,\s*\}\);\s*\}/);
+    expect(source).toMatch(/const \[turnBeatLoadWatermark, setTurnBeatLoadWatermark\] = useState\(\(\) => \(\{\s*encounterId: eid,\s*readRevision: encounterReadRevisionRef\.current,\s*\}\)\);/);
+    expect(source).toMatch(/if \(turnBeatLoadWatermark\.encounterId !== eid\) \{\s*setTurnBeatLoadWatermark\(\{\s*encounterId: eid,\s*readRevision: encounterReadRevisionRef\.current,\s*\}\);\s*\}/);
   });
 
-  test('consumes a resync only after a newer successful encounter fetch, including structurally shared data', () => {
-    expect(shouldConsumeTurnBeatResync(null, 20, false, true)).toBe(false);
-    expect(shouldConsumeTurnBeatResync(20, 20, false, true)).toBe(false);
-    expect(shouldConsumeTurnBeatResync(20, 21, true, true)).toBe(false);
-    expect(shouldConsumeTurnBeatResync(20, 21, false, false)).toBe(false);
-    expect(shouldConsumeTurnBeatResync(20, 21, false, true)).toBe(true);
+  test('consumes a resync only after a newer successful encounter query function completes', () => {
+    expect(shouldConsumeTurnBeatResync(null, 20)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(20, 20)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(20, 21)).toBe(true);
+  });
+
+  test('does not let an optimistic cache write impersonate the catch-up encounter read', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const encounterQueryStart = source.indexOf('const encounterQuery = useQuery({');
+    const encounterQueryEnd = source.indexOf('const encounter = encounterQuery.data ?? null;', encounterQueryStart);
+    const encounterQueryBody = source.slice(encounterQueryStart, encounterQueryEnd);
+
+    expect(encounterQueryBody).toMatch(/const reconciled = reconcileEncounterPatchResponse\([\s\S]*?await api\.get<EncounterWithCombatants>/);
+    expect(encounterQueryBody).toMatch(/encounterReadRevisionRef\.current = revision;\s*latestEncounterReadRef\.current = \{ revision, encounterId: eid, encounter: reconciled \};\s*setEncounterReadRevision\(revision\);\s*return reconciled;/);
+    expect(source.match(/encounterReadRevisionRef\.current = revision;/g)).toHaveLength(1);
+    expect(source).not.toContain('shouldConsumeTurnBeatResync(\n      awaitingTurnBeatResyncRef.current,\n      encounterQuery.dataUpdatedAt');
   });
 
   // Issue #2092: `dataUpdatedAt` records when a response LANDED, not when the server
@@ -68,8 +78,8 @@ test.describe('turn-change beat (issue #1906)', () => {
 
     // And once disarmed, the gate refuses every completed-fetch shape — including a fetch
     // strictly newer than the one that armed it, which is precisely the late catch-up read.
-    expect(shouldConsumeTurnBeatResync(null, 21, false, true)).toBe(false);
-    expect(shouldConsumeTurnBeatResync(null, Number.MAX_SAFE_INTEGER, false, true)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(null, 21)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(null, Number.MAX_SAFE_INTEGER)).toBe(false);
   });
 
   // Issue #2092: this REST-driven baseline resync used to re-run on EVERY `encounter`
@@ -86,10 +96,10 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(source).toMatch(/const awaitingTurnBeatResyncRef = useRef<number \| null>\(0\);/);
     const reconnectStart = source.indexOf('onReconnect: useCallback');
     const reconnectBranch = source.slice(reconnectStart, source.indexOf('onStreamRecovery: useCallback', reconnectStart));
-    expect(reconnectBranch).toContain('awaitingTurnBeatResyncRef.current = encounterQuery.dataUpdatedAt;');
+    expect(reconnectBranch).toContain('awaitingTurnBeatResyncRef.current = encounterReadRevisionRef.current;');
     const recoveryStart = source.indexOf('onStreamRecovery: useCallback');
     const recoveryBranch = source.slice(recoveryStart, source.indexOf('onStatusChange: useCallback', recoveryStart));
-    expect(recoveryBranch).toContain('awaitingTurnBeatResyncRef.current = encounterQuery.dataUpdatedAt;');
+    expect(recoveryBranch).toContain('awaitingTurnBeatResyncRef.current = encounterReadRevisionRef.current;');
   });
 
   // Issue #2092: the Next Turn button re-enables (`headerBusy` tracks only

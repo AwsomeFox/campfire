@@ -13,20 +13,16 @@ export type TurnBeatSnapshot = {
 export type TurnBeatKind = 'your-turn' | 'turn' | 'round-wrap';
 
 /**
- * A reconnect/load baseline must come from a completed encounter read newer than
- * the cache state that armed it. `dataUpdatedAt` changes after every successful
- * TanStack Query fetch even when structural sharing retains the same data object.
+ * A reconnect/load baseline must come from a completed encounter query function
+ * newer than the read revision that armed it. Cache timestamps are insufficient:
+ * TanStack Query advances `dataUpdatedAt` for local `setQueryData` writes too.
  */
 export function shouldConsumeTurnBeatResync(
-  armedAfterDataUpdatedAt: number | null,
-  dataUpdatedAt: number,
-  isFetching: boolean,
-  isSuccess: boolean,
+  armedAfterReadRevision: number | null,
+  completedReadRevision: number,
 ): boolean {
-  return armedAfterDataUpdatedAt != null
-    && isSuccess
-    && !isFetching
-    && dataUpdatedAt > armedAfterDataUpdatedAt;
+  return armedAfterReadRevision != null
+    && completedReadRevision > armedAfterReadRevision;
 }
 
 export function turnBeatKey(snapshot: TurnBeatSnapshot): string | null {

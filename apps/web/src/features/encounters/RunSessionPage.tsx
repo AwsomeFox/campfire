@@ -1175,28 +1175,44 @@ export default function RunSessionPage() {
   // (refetchInterval pauses in the background by default) as a backstop to the SSE
   // push below; SSE remains the fast path (invalidate-on-event), the poll only catches
   // anything a dropped stream missed. The ~5s cadence matches the pre-SSE poll.
-  // Capture the retained cache timestamp before useQuery can start this encounter's
-  // mount refetch. Reading it later from a passive effect can observe the completed
-  // response instead, leaving the turn-beat resync gate armed until an unrelated read.
+  // Track successful query-function completions separately from TanStack's cache
+  // timestamp. Local optimistic `setQueryData` writes advance `dataUpdatedAt`, so that
+  // timestamp cannot prove that the reconnect/load catch-up GET actually completed.
+  const encounterReadRevisionRef = useRef(0);
+  const latestEncounterReadRef = useRef<{
+    revision: number;
+    encounterId: number;
+    encounter: EncounterWithCombatants;
+  } | null>(null);
+  const [encounterReadRevision, setEncounterReadRevision] = useState(0);
+  // Capture the last actual read revision before useQuery can start this encounter's
+  // mount refetch. Reading the ref later from a passive effect can observe the completed
+  // response instead, leaving the turn-beat resync gate armed until another read.
   const [turnBeatLoadWatermark, setTurnBeatLoadWatermark] = useState(() => ({
     encounterId: eid,
-    dataUpdatedAt: queryClient.getQueryState(queryKeys.encounter(eid))?.dataUpdatedAt ?? 0,
+    readRevision: encounterReadRevisionRef.current,
   }));
   if (turnBeatLoadWatermark.encounterId !== eid) {
     setTurnBeatLoadWatermark({
       encounterId: eid,
-      dataUpdatedAt: queryClient.getQueryState(queryKeys.encounter(eid))?.dataUpdatedAt ?? 0,
+      readRevision: encounterReadRevisionRef.current,
     });
   }
   const encounterQuery = useQuery({
     queryKey: queryKeys.encounter(eid),
-    queryFn: async () =>
-      reconcileEncounterPatchResponse(
+    queryFn: async () => {
+      const reconciled = reconcileEncounterPatchResponse(
         await api.get<EncounterWithCombatants>(`${API}/encounters/${eid}`),
         pendingEncounterPatches.current.values(),
         '',
         eid,
-      ),
+      );
+      const revision = encounterReadRevisionRef.current + 1;
+      encounterReadRevisionRef.current = revision;
+      latestEncounterReadRef.current = { revision, encounterId: eid, encounter: reconciled };
+      setEncounterReadRevision(revision);
+      return reconciled;
+    },
     enabled: Number.isFinite(eid),
     refetchInterval: 5_000,
   });
@@ -1401,12 +1417,12 @@ export default function RunSessionPage() {
   const [characterOwnershipRefreshPending, setCharacterOwnershipRefreshPending] = useState(false);
   const turnBeatSequence = useRef(0);
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
-  // Freshness watermark for (re)deriving `previousTurnBeatRef` from the REST-fetched
+  // Freshness revision for (re)deriving `previousTurnBeatRef` from the REST-fetched
   // `encounter` row (issue #2092). Starts at zero so the first successful load
   // establishes a silent baseline; the reconnect/stream-recovery handlers below
-  // capture the last successful query timestamp before requesting a catch-up read.
-  // The baseline only consumes a completed read newer than that timestamp, including
-  // when TanStack Query structurally shares the same encounter object. It must NOT
+  // capture the last successful query-function revision before requesting a catch-up
+  // read. The baseline only consumes a completed read newer than that revision,
+  // including when TanStack Query structurally shares the same encounter object. It must NOT
   // remain armed across an ordinary `encounter.updated`-triggered
   // refetch: that refetch is paired with (and always precedes) the very
   // `encounter.turn_changed` frame that updates this same ref directly, and racing
@@ -1472,14 +1488,14 @@ export default function RunSessionPage() {
 
   useEffect(() => {
     previousTurnBeatRef.current = null;
-    awaitingTurnBeatResyncRef.current = turnBeatLoadWatermark.dataUpdatedAt;
+    awaitingTurnBeatResyncRef.current = turnBeatLoadWatermark.readRevision;
     ownedTurnFeedbackRef.current = null;
     setTurnOwnerFromEvent(null);
     setTurnOwnerPendingCombatantId(null);
     setTurnBeat(null);
     setTurnPulse(false);
     if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
-  }, [eid, turnBeatLoadWatermark.dataUpdatedAt]);
+  }, [eid, turnBeatLoadWatermark.readRevision]);
 
   // A loaded encounter is a silent baseline. This prevents opening an already
   // running encounter from replaying a turn-start beat, and (via
@@ -1489,26 +1505,26 @@ export default function RunSessionPage() {
   // the ref's own comment for why that used to race the paired SSE turn edge
   // (issue #2092).
   useEffect(() => {
-    if (!encounter || encounter.id !== eid) return;
+    const completedRead = latestEncounterReadRef.current;
+    if (!completedRead || completedRead.encounterId !== eid) return;
     if (!shouldConsumeTurnBeatResync(
       awaitingTurnBeatResyncRef.current,
-      encounterQuery.dataUpdatedAt,
-      encounterQuery.isFetching,
-      encounterQuery.isSuccess,
+      completedRead.revision,
     )) return;
     awaitingTurnBeatResyncRef.current = null;
-    const current = encounter.currentCombatantId == null
+    const readEncounter = completedRead.encounter;
+    const current = readEncounter.currentCombatantId == null
       ? undefined
-      : encounter.combatants.find((combatant) => combatant.id === encounter.currentCombatantId);
+      : readEncounter.combatants.find((combatant) => combatant.id === readEncounter.currentCombatantId);
     const isYourTurn = current?.characterId != null
       && characters.some((character) => character.id === current.characterId && character.ownerUserId === String(me?.user.id ?? ''));
     previousTurnBeatRef.current = {
       encounterId: eid,
-      combatantId: encounter.currentCombatantId,
-      round: encounter.status === 'running' ? encounter.round : null,
+      combatantId: readEncounter.currentCombatantId,
+      round: readEncounter.status === 'running' ? readEncounter.round : null,
       isYourTurn,
     };
-  }, [eid, encounter, characters, me?.user.id, encounterQuery.dataUpdatedAt, encounterQuery.isFetching, encounterQuery.isSuccess]);
+  }, [eid, encounterReadRevision, characters, me?.user.id]);
   useEffect(() => () => {
     if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
   }, []);
@@ -1827,7 +1843,7 @@ export default function RunSessionPage() {
             : null;
           const kind = detectSseTurnBeat(previous, next);
           previousTurnBeatRef.current = next;
-          // Issue #2092: disarm any pending REST catch-up resync. `dataUpdatedAt` records
+          // Issue #2092: disarm any pending REST catch-up resync. A read revision records
           // when a response LANDED, not when the server captured it, so a catch-up GET
           // issued before this frame can still land after it and overwrite this newer
           // baseline with pre-turn state — after which the next edge is compared against a
@@ -1896,7 +1912,7 @@ export default function RunSessionPage() {
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
       setResyncPending(true);
-      awaitingTurnBeatResyncRef.current = encounterQuery.dataUpdatedAt;
+      awaitingTurnBeatResyncRef.current = encounterReadRevisionRef.current;
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
@@ -1914,17 +1930,17 @@ export default function RunSessionPage() {
       // frame outright — re-arm the REST turn-beat baseline resync (see
       // `awaitingTurnBeatResyncRef`'s own comment) so the catch-up encounter read above
       // re-derives it.
-    }, [queryClient, eid, cid, encounterQuery.dataUpdatedAt, invalidateCampaignCharactersForOwnership]),
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
       setResyncPending(true);
-      awaitingTurnBeatResyncRef.current = encounterQuery.dataUpdatedAt;
+      awaitingTurnBeatResyncRef.current = encounterReadRevisionRef.current;
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharactersForOwnership();
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
       invalidateTableSafety(queryClient, cid);
-    }, [queryClient, eid, cid, encounterQuery.dataUpdatedAt, invalidateCampaignCharactersForOwnership]),
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
