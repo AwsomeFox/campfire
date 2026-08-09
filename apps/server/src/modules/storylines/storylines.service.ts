@@ -31,11 +31,23 @@ type StoryBeatUpdateInput = z.infer<typeof StoryBeatUpdate>;
 type StoryBeatStatusPatchInput = z.infer<typeof StoryBeatStatusPatch>;
 type StoryBranchCreateInput = z.infer<typeof StoryBranchCreate>;
 type StoryBranchUpdateInput = z.infer<typeof StoryBranchUpdate>;
+type StorylineTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+type StorylineReader = DrizzleDb | StorylineTx;
 type StorylineUpdateOptions = {
   expectedUpdatedAt?: string;
+  /** Rewrite-context hash captured when the proposal was generated. */
+  expectedContextHash?: string;
   /** Revision authorship may differ from the human who approves and audits a proposal. */
   revisionUser?: RequestUser;
 };
+
+/** Signals that a proposal's storyline dependencies changed before its atomic write. */
+export class StorylineRewriteContextChangedError extends Error {
+  constructor() {
+    super('Storyline rewrite context changed before the update could be applied');
+    this.name = 'StorylineRewriteContextChangedError';
+  }
+}
 
 /** Keep multi-beat arc context useful without letting 50k prose fields multiply unboundedly. */
 const ARC_BEAT_BODY_CONTEXT_CHARS = 2_000;
@@ -150,13 +162,36 @@ export class StorylinesService {
    * domain service lets generation and proposal approval hash the exact same shape,
    * including child beats, branches, and linked play-record labels.
    */
-  async getRewriteContext(campaignId: number, target: 'arc' | 'beat', entityId: number) {
+  getRewriteContext(campaignId: number, target: 'arc' | 'beat', entityId: number) {
+    return this.getRewriteContextInDb(this.db, campaignId, target, entityId);
+  }
+
+  /** Synchronous so approval can compare this hash and mutate inside one SQLite transaction. */
+  private getRewriteContextInDb(
+    db: StorylineReader,
+    campaignId: number,
+    target: 'arc' | 'beat',
+    entityId: number,
+  ) {
     if (target === 'arc') {
-      const arc = await this.getArcWithBeatsOrThrow(entityId);
+      const arcRow = db
+        .select()
+        .from(storyArcs)
+        .where(and(eq(storyArcs.id, entityId), notDeleted(storyArcs.deletedAt)))
+        .get();
+      if (!arcRow) throw new NotFoundException(`Story arc ${entityId} not found`);
+      const arc = arcToDomain(arcRow);
       if (arc.campaignId !== campaignId) {
         throw new BadRequestException(`Story arc ${entityId} does not belong to this campaign`);
       }
-      const linkedPlay = await this.loadLinkedPlayContext(arc.beats, campaignId);
+      const beatRows = db
+        .select()
+        .from(storyBeats)
+        .where(and(eq(storyBeats.arcId, entityId), notDeleted(storyBeats.deletedAt)))
+        .orderBy(asc(storyBeats.sortOrder), asc(storyBeats.id))
+        .all();
+      const beats = this.beatsWithBranchesInDb(db, beatRows);
+      const linkedPlay = this.loadLinkedPlayContextInDb(db, beats, campaignId);
       const providerContext = {
         target: 'arc' as const,
         arc: {
@@ -164,7 +199,7 @@ export class StorylinesService {
           title: arc.title,
           summary: arc.summary,
           status: arc.status,
-          beats: arc.beats.map((beat) =>
+          beats: beats.map((beat) =>
             this.storyBeatRewriteContext(beat, linkedPlay, ARC_BEAT_BODY_CONTEXT_CHARS),
           ),
         },
@@ -185,18 +220,29 @@ export class StorylinesService {
       };
     }
 
-    const beat = await this.getBeatWithBranchesOrThrow(entityId);
+    const beatRow = db
+      .select()
+      .from(storyBeats)
+      .where(and(eq(storyBeats.id, entityId), notDeleted(storyBeats.deletedAt)))
+      .get();
+    if (!beatRow) throw new NotFoundException(`Story beat ${entityId} not found`);
+    const beat = this.beatsWithBranchesInDb(db, [beatRow])[0];
     if (beat.campaignId !== campaignId) {
       throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
     }
-    const arc = await this.getArcRowOrThrow(beat.arcId);
-    if (arc.campaignId !== campaignId) {
+    const arcRow = db
+      .select()
+      .from(storyArcs)
+      .where(and(eq(storyArcs.id, beat.arcId), notDeleted(storyArcs.deletedAt)))
+      .get();
+    if (!arcRow) throw new NotFoundException(`Story arc ${beat.arcId} not found`);
+    if (arcRow.campaignId !== campaignId) {
       throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
     }
-    const linkedPlay = await this.loadLinkedPlayContext([beat], campaignId);
+    const linkedPlay = this.loadLinkedPlayContextInDb(db, [beat], campaignId);
     const providerContext = {
       target: 'beat' as const,
-      arc: { id: arc.id, title: arc.title, summary: arc.summary, status: arc.status },
+      arc: { id: arcRow.id, title: arcRow.title, summary: arcRow.summary, status: arcRow.status },
       beat: this.storyBeatRewriteContext(beat, linkedPlay),
     };
     return {
@@ -219,34 +265,73 @@ export class StorylinesService {
     };
   }
 
-  /** Resolve all linked play records in at most one query per table, regardless of beat count. */
-  private async loadLinkedPlayContext(
+  private beatsWithBranchesInDb(
+    db: StorylineReader,
+    beatRows: Array<typeof storyBeats.$inferSelect>,
+  ): StoryBeatWithBranches[] {
+    const beatIds = beatRows.map((beat) => beat.id);
+    const branchRows = beatIds.length === 0
+      ? []
+      : db
+          .select()
+          .from(storyBranches)
+          .where(inArray(storyBranches.beatId, beatIds))
+          .orderBy(asc(storyBranches.sortOrder), asc(storyBranches.id))
+          .all();
+    const branchesByBeat = new Map<number, StoryBranch[]>();
+    for (const branchRow of branchRows) {
+      const branches = branchesByBeat.get(branchRow.beatId) ?? [];
+      branches.push(branchToDomain(branchRow));
+      branchesByBeat.set(branchRow.beatId, branches);
+    }
+    return beatRows.map((beatRow) => ({
+      ...beatToDomain(beatRow),
+      branches: branchesByBeat.get(beatRow.id) ?? [],
+    }));
+  }
+
+  /** Resolve all live linked play records in at most one query per table. */
+  private loadLinkedPlayContextInDb(
+    db: StorylineReader,
     beats: StoryBeatWithBranches[],
     campaignId: number,
-  ): Promise<LinkedPlayContext> {
+  ): LinkedPlayContext {
     const sessionIds = [...new Set(beats.flatMap((beat) => beat.sessionId == null ? [] : [beat.sessionId]))];
     const questIds = [...new Set(beats.flatMap((beat) => beat.questId == null ? [] : [beat.questId]))];
     const encounterIds = [...new Set(beats.flatMap((beat) => beat.encounterId == null ? [] : [beat.encounterId]))];
-    const [sessionRows, questRows, encounterRows] = await Promise.all([
-      sessionIds.length === 0
-        ? Promise.resolve([])
-        : this.db
-            .select({ id: sessions.id, number: sessions.number, title: sessions.title })
-            .from(sessions)
-            .where(and(eq(sessions.campaignId, campaignId), inArray(sessions.id, sessionIds))),
-      questIds.length === 0
-        ? Promise.resolve([])
-        : this.db
-            .select({ id: quests.id, title: quests.title, status: quests.status })
-            .from(quests)
-            .where(and(eq(quests.campaignId, campaignId), inArray(quests.id, questIds))),
-      encounterIds.length === 0
-        ? Promise.resolve([])
-        : this.db
-            .select({ id: encounters.id, name: encounters.name, status: encounters.status })
-            .from(encounters)
-            .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, encounterIds))),
-    ]);
+    const sessionRows = sessionIds.length === 0
+      ? []
+      : db
+          .select({ id: sessions.id, number: sessions.number, title: sessions.title })
+          .from(sessions)
+          .where(and(
+            eq(sessions.campaignId, campaignId),
+            inArray(sessions.id, sessionIds),
+            notDeleted(sessions.deletedAt),
+          ))
+          .all();
+    const questRows = questIds.length === 0
+      ? []
+      : db
+          .select({ id: quests.id, title: quests.title, status: quests.status })
+          .from(quests)
+          .where(and(
+            eq(quests.campaignId, campaignId),
+            inArray(quests.id, questIds),
+            notDeleted(quests.deletedAt),
+          ))
+          .all();
+    const encounterRows = encounterIds.length === 0
+      ? []
+      : db
+          .select({ id: encounters.id, name: encounters.name, status: encounters.status })
+          .from(encounters)
+          .where(and(
+            eq(encounters.campaignId, campaignId),
+            inArray(encounters.id, encounterIds),
+            notDeleted(encounters.deletedAt),
+          ))
+          .all();
     return {
       sessions: new Map(sessionRows.map((row) => [row.id, row])),
       quests: new Map(questRows.map((row) => [row.id, row])),
@@ -320,21 +405,32 @@ export class StorylinesService {
     role: Role,
     opts?: StorylineUpdateOptions,
   ): Promise<StoryArc> {
-    const existing = await this.getArcRowOrThrow(id);
-    const updated = await this.db
-      .update(storyArcs)
-      .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
-      .where(
-        opts?.expectedUpdatedAt
-          ? and(eq(storyArcs.id, id), eq(storyArcs.updatedAt, opts.expectedUpdatedAt))
-          : eq(storyArcs.id, id),
-      )
-      .returning();
-    if (!updated[0]) {
-      const current = await this.getArcRowOrThrow(id);
-      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
-    }
-    const row = updated[0];
+    const { existing, row } = this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(storyArcs)
+        .where(and(eq(storyArcs.id, id), notDeleted(storyArcs.deletedAt)))
+        .get();
+      if (!existing) throw new NotFoundException(`Story arc ${id} not found`);
+      if (opts?.expectedContextHash) {
+        const current = this.getRewriteContextInDb(tx, existing.campaignId, 'arc', id);
+        if (current.contextHash !== opts.expectedContextHash) {
+          throw new StorylineRewriteContextChangedError();
+        }
+      }
+      const row = tx
+        .update(storyArcs)
+        .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(storyArcs.id, id), eq(storyArcs.updatedAt, opts.expectedUpdatedAt))
+            : eq(storyArcs.id, id),
+        )
+        .returning()
+        .get();
+      if (!row) throw staleWrite(opts?.expectedUpdatedAt, existing.updatedAt);
+      return { existing, row };
+    }, { behavior: 'immediate' });
     if (input.summary !== undefined && input.summary !== existing.summary) {
       await this.revisions.commitProseVersion({
         entityType: 'story_arc',
@@ -534,26 +630,38 @@ export class StorylinesService {
     role: Role,
     opts?: StorylineUpdateOptions,
   ): Promise<StoryBeat> {
-    const existing = await this.getBeatRowOrThrow(id);
+    const preflight = await this.getBeatRowOrThrow(id);
     // Validate any play-record links being SET (non-null) belong to the beat's campaign
     // (issue #264). `null` clears a link; an omitted field leaves it unchanged.
-    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, existing.campaignId);
-    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, existing.campaignId);
-    if (input.encounterId != null) await this.assertEntityInCampaign('encounter', input.encounterId, existing.campaignId);
-    const updated = await this.db
-      .update(storyBeats)
-      .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
-      .where(
-        opts?.expectedUpdatedAt
-          ? and(eq(storyBeats.id, id), eq(storyBeats.updatedAt, opts.expectedUpdatedAt))
-          : eq(storyBeats.id, id),
-      )
-      .returning();
-    if (!updated[0]) {
-      const current = await this.getBeatRowOrThrow(id);
-      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
-    }
-    const row = updated[0];
+    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, preflight.campaignId);
+    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, preflight.campaignId);
+    if (input.encounterId != null) await this.assertEntityInCampaign('encounter', input.encounterId, preflight.campaignId);
+    const { existing, row } = this.db.transaction((tx) => {
+      const currentExisting = tx
+        .select()
+        .from(storyBeats)
+        .where(and(eq(storyBeats.id, id), notDeleted(storyBeats.deletedAt)))
+        .get();
+      if (!currentExisting) throw new NotFoundException(`Story beat ${id} not found`);
+      if (opts?.expectedContextHash) {
+        const current = this.getRewriteContextInDb(tx, currentExisting.campaignId, 'beat', id);
+        if (current.contextHash !== opts.expectedContextHash) {
+          throw new StorylineRewriteContextChangedError();
+        }
+      }
+      const row = tx
+        .update(storyBeats)
+        .set({ ...input, updatedAt: nextUpdatedAt(currentExisting.updatedAt) })
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(storyBeats.id, id), eq(storyBeats.updatedAt, opts.expectedUpdatedAt))
+            : eq(storyBeats.id, id),
+        )
+        .returning()
+        .get();
+      if (!row) throw staleWrite(opts?.expectedUpdatedAt, currentExisting.updatedAt);
+      return { existing: currentExisting, row };
+    }, { behavior: 'immediate' });
     if (input.body !== undefined && input.body !== existing.body) {
       await this.revisions.commitProseVersion({
         entityType: 'story_beat',

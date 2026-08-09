@@ -2,6 +2,7 @@ import { ConflictException } from '@nestjs/common';
 import type { Role } from '@campfire/schema';
 import { ProposalsService } from '../../src/modules/proposals/proposals.service';
 import type { ProposalRecordsService } from '../../src/modules/proposals/proposal-records.service';
+import type { StorylinesService } from '../../src/modules/storylines/storylines.service';
 
 describe('ProposalsService.approve (issue #681)', () => {
   const user = { id: '1', name: 'dm', serverRole: 'user' as const };
@@ -58,7 +59,17 @@ describe('ProposalsService.approve (issue #681)', () => {
     };
 
     const audit = { log: jest.fn() };
-    const storylines = {
+    const storylines: Pick<
+      StorylinesService,
+      | 'createArc'
+      | 'updateArc'
+      | 'removeArc'
+      | 'getArcRowOrThrow'
+      | 'addBeat'
+      | 'updateBeat'
+      | 'removeBeat'
+      | 'getRewriteContext'
+    > = {
       createArc: jest.fn(),
       updateArc: jest.fn(),
       removeArc: jest.fn(),
@@ -66,6 +77,7 @@ describe('ProposalsService.approve (issue #681)', () => {
       updateBeat: jest.fn(),
       removeBeat: jest.fn(),
       getArcRowOrThrow: jest.fn(),
+      getRewriteContext: jest.fn(),
     };
 
     const service = new ProposalsService(
@@ -80,7 +92,7 @@ describe('ProposalsService.approve (issue #681)', () => {
       {} as never,
       {} as never,
       {} as never,
-      storylines as never,
+      storylines,
     );
 
     return { service, records, quests, storylines, audit, existing };
@@ -138,6 +150,7 @@ describe('ProposalsService.approve (issue #681)', () => {
   });
 
   it('passes the storyline base token through compare-and-set and credits an unamended AI rewrite', async () => {
+    const sourceContextHash = 'a'.repeat(64);
     const base = {
       id: 42,
       campaignId: 1,
@@ -156,9 +169,25 @@ describe('ProposalsService.approve (issue #681)', () => {
         proposer: 'AI DM (eval-model)',
         proposerUserId: 'ai-dm:1',
         proposerToken: null,
+        generationProvenance: JSON.stringify({
+          source: 'co_dm',
+          provider: 'mock',
+          providerType: null,
+          model: 'eval-model',
+          endpoint: { scope: 'injected', baseUrl: null },
+          sourceIds: { target: 'arc' },
+          sourceHash: null,
+          sourceContextHash,
+          promptVersion: 'test-v1',
+          promptHash: 'prompt-hash',
+          retentionNotice: 'test',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        }),
       },
       currentSnapshot: base,
     });
+
+    (storylines.getRewriteContext as jest.Mock).mockReturnValue({ contextHash: sourceContextHash });
 
     await service.approve(9, {}, user, role);
 
@@ -169,6 +198,7 @@ describe('ProposalsService.approve (issue #681)', () => {
       role,
       {
         expectedUpdatedAt: base.updatedAt,
+        expectedContextHash: sourceContextHash,
         revisionUser: expect.objectContaining({
           id: 'ai-dm:1',
           proposalAttribution: expect.objectContaining({ proposerUserId: 'ai-dm:1' }),

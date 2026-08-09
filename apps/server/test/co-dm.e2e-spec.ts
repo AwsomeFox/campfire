@@ -1,8 +1,9 @@
-import { rulePacks } from '../src/db/schema';
-import { DB } from '../src/db/db.module';
+import { rulePacks, storyBranches } from '../src/db/schema';
+import { DB, type DrizzleDb } from '../src/db/db.module';
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
+import { StorylinesService } from '../src/modules/storylines/storylines.service';
 
 /**
  * Co-DM authoring (issue #313) — the AI drafts content that lands in the approval queue as
@@ -338,7 +339,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     expect(staleApprove.body.code).toBe('STALE_PROPOSAL_TARGET');
   });
 
-  it('rejects arc rewrite approval when branch or linked-play context changed', async () => {
+  it('rejects arc rewrite approval when branch context changes or a linked session is trashed', async () => {
     const arc = await request(h.server)
       .post(`/api/v1/campaigns/${campaignId}/arcs`)
       .set(dm)
@@ -383,17 +384,66 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
       entityId: arc.body.id,
       prompt: 'Rewrite around the linked play record.',
     });
-    const sessionChanged = await request(h.server)
-      .patch(`/api/v1/sessions/${session.body.id}`)
-      .set(dm)
-      .send({ title: 'Context Session Changed', expectedUpdatedAt: session.body.updatedAt });
-    expect(sessionChanged.status).toBe(200);
+    const sessionTrashed = await request(h.server)
+      .delete(`/api/v1/sessions/${session.body.id}`)
+      .set(dm);
+    expect(sessionTrashed.status).toBe(200);
     const linkedStale = await request(h.server)
       .post(`/api/v1/proposals/${linkedProposal.body.proposalIds[0]}/approve`)
       .set(dm)
       .send({});
     expect(linkedStale.status).toBe(409);
     expect(linkedStale.body.code).toBe('STALE_PROPOSAL_TARGET');
+  });
+
+  it('checks rewrite dependencies in the same transaction as the storyline update', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Atomic Context Arc', summary: 'No branch has landed yet.' });
+    const beat = await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Atomic Context Beat', body: 'The party chooses a route.' });
+
+    h.script({ text: JSON.stringify({ title: 'Atomic Rewrite', summary: 'The route is still undecided.' }) });
+    const proposal = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      prompt: 'Rewrite around the current choices.',
+    });
+
+    const storylines = h.ctx.app.get(StorylinesService);
+    const db = h.ctx.app.get<DrizzleDb>(DB);
+    const originalGetRewriteContext = storylines.getRewriteContext.bind(storylines);
+    let interleaved = false;
+    const contextRead = jest.spyOn(storylines, 'getRewriteContext').mockImplementation((...args) => {
+      const context = originalGetRewriteContext(...args);
+      if (!interleaved && args[1] === 'arc' && args[2] === arc.body.id) {
+        interleaved = true;
+        db.insert(storyBranches)
+          .values({ beatId: beat.body.id, label: 'A branch landed during approval' })
+          .run();
+      }
+      return context;
+    });
+
+    try {
+      const approval = await request(h.server)
+        .post(`/api/v1/proposals/${proposal.body.proposalIds[0]}/approve`)
+        .set(dm)
+        .send({});
+      expect(interleaved).toBe(true);
+      expect(approval.status).toBe(409);
+      expect(approval.body.code).toBe('STALE_PROPOSAL_TARGET');
+      const unchanged = await request(h.server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+      expect(unchanged.body).toMatchObject({
+        title: 'Atomic Context Arc',
+        summary: 'No branch has landed yet.',
+      });
+    } finally {
+      contextRead.mockRestore();
+    }
   });
 
   it('rejects an oversized arc rewrite context before calling the provider', async () => {

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import type { z } from 'zod';
 import {
   QuestCreate,
@@ -39,13 +39,27 @@ import { CharactersService } from '../characters/characters.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
 import { FactionsService } from '../factions/factions.service';
-import { StorylinesService } from '../storylines/storylines.service';
+import {
+  StorylineRewriteContextChangedError,
+  StorylinesService,
+} from '../storylines/storylines.service';
 import { RulesService } from '../rules/rules.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
-import { assertProposalTargetFresh } from './proposal-snapshot';
+import { assertProposalTargetFresh, staleProposalTarget } from './proposal-snapshot';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
 type ProposalApproveInput = z.infer<typeof ProposalApprove>;
+type ProposalStorylinesService = Pick<
+  StorylinesService,
+  | 'createArc'
+  | 'updateArc'
+  | 'removeArc'
+  | 'getArcRowOrThrow'
+  | 'addBeat'
+  | 'updateBeat'
+  | 'removeBeat'
+  | 'getRewriteContext'
+>;
 
 function revisionUserForApprovedProposal(
   proposal: Pick<Proposal, 'proposer' | 'proposerUserId' | 'proposerToken'>,
@@ -124,7 +138,7 @@ export class ProposalsService {
     private readonly encounters: EncountersService,
     private readonly maps: MapsService,
     private readonly factions: FactionsService,
-    private readonly storylines: StorylinesService,
+    @Inject(StorylinesService) private readonly storylines: ProposalStorylinesService,
     private readonly rules?: RulesService,
   ) {}
 
@@ -348,6 +362,8 @@ export class ProposalsService {
       existing.snapshot == null
         ? null
         : fromJsonText<Record<string, unknown> | null>(existing.snapshot, null);
+    let expectedRewriteContextHash: string | null = null;
+    let currentSnapshotForConflict: Record<string, unknown> | null = null;
     if (action === 'update' || action === 'delete') {
       const currentSnapshot = await this.records.getCurrentAuthorizedSnapshot(
         existing.campaignId,
@@ -355,15 +371,16 @@ export class ProposalsService {
         existing.entityId!,
         role,
       );
+      currentSnapshotForConflict = currentSnapshot;
       const provenance = AiGenerationProvenance.nullable()
         .catch(null)
         .parse(fromJsonText<unknown>(existing.generationProvenance, null));
       const isStorylineRewrite =
         action === 'update' &&
         (existing.entityType === 'story_arc' || existing.entityType === 'story_beat');
-      const baseContextHash = isStorylineRewrite ? provenance?.sourceContextHash ?? null : null;
+      expectedRewriteContextHash = isStorylineRewrite ? provenance?.sourceContextHash ?? null : null;
       const currentContextHash =
-        baseContextHash !== null && currentSnapshot !== null && isStorylineRewrite
+        expectedRewriteContextHash !== null && currentSnapshot !== null && isStorylineRewrite
           ? (await this.storylines.getRewriteContext(
               existing.campaignId,
               existing.entityType === 'story_arc' ? 'arc' : 'beat',
@@ -376,7 +393,7 @@ export class ProposalsService {
         baseSnapshotHash: existing.baseSnapshotHash ?? null,
         currentSnapshot,
         proposed: action === 'delete' ? null : (validated ?? payload),
-        baseContextHash,
+        baseContextHash: expectedRewriteContextHash,
         currentContextHash,
       });
     }
@@ -422,6 +439,9 @@ export class ProposalsService {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           await (service as any).update(existing.entityId, validated, user, role, {
             expectedUpdatedAt: existing.baseUpdatedAt ?? undefined,
+            ...(expectedRewriteContextHash === null
+              ? {}
+              : { expectedContextHash: expectedRewriteContextHash }),
             revisionUser: revisionUserForApprovedProposal(existing, user, amended),
           });
         } else {
@@ -446,6 +466,13 @@ export class ProposalsService {
             detail: String(revertErr),
           })
           .catch(() => {});
+      }
+      if (err instanceof StorylineRewriteContextChangedError) {
+        throw staleProposalTarget({
+          base: baseSnapshot,
+          current: currentSnapshotForConflict,
+          proposed: action === 'delete' ? null : (validated ?? payload),
+        });
       }
       throw err;
     }
