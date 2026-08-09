@@ -55,3 +55,45 @@ test('the floating map panels never overlap at any cockpit width', async ({ page
     await restoreSeedEncounter(page);
   }
 });
+
+test.describe('encounter cockpit — setup canvas on a phone', () => {
+  test.use({ viewport: { width: 375, height: 667 } });
+
+  test('the dice tray stays closable when the canvas is showing setup', async ({ page }) => {
+    await restoreSeedEncounter(page);
+    const { campaignId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Phone setup drill', hidden: false },
+    });
+    expect(created.ok()).toBe(true);
+    const id = ((await created.json()) as { id: number }).id;
+
+    try {
+      // No map, so the canvas stacks its chrome instead of floating it — and on a phone
+      // that column is taller than the ~140px canvas. Unbounded, the tray pushed the Roll
+      // toggle past a clipped edge, leaving the tray open with no way to dismiss it.
+      await page.goto(`/c/${campaignId}/encounters/${id}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+      const roll = page.getByTestId('encounter-vtt-roll');
+      await roll.click();
+      const tray = page.getByTestId('encounter-vtt-dice-tray');
+      await expect(tray).toBeVisible();
+
+      const bounded = await page.evaluate(() => {
+        const el = document.querySelector('.cf-vtt-tray') as HTMLElement;
+        const canvas = document.querySelector('.cf-vtt-main') as HTMLElement;
+        return el.getBoundingClientRect().height <= canvas.getBoundingClientRect().height;
+      });
+      expect(bounded, 'the tray must never be taller than the canvas it sits in').toBe(true);
+
+      // Reachable again — scrolling the setup column is allowed, being clipped away is not.
+      await roll.scrollIntoViewIfNeeded();
+      await roll.click();
+      await expect(tray).not.toBeVisible();
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
+});

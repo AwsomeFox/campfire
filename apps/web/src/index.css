@@ -3090,16 +3090,22 @@ html.cf-vtt-locked body {
 /* The page cannot scroll while the cockpit owns the viewport, so Layout's campaign-wide
    chrome above it must never grow taller than the screen — a player with several pending
    check requests would otherwise have the lower cards, and the cockpit itself, pushed
-   somewhere nothing can reach. The stack that actually grows without bound gets its own
-   bounded scroller, and the shell clamps the inset it consumes as a second guarantee that
-   the cockpit keeps most of the viewport. */
+   somewhere nothing can reach.
+   
+   The caps are a shared BUDGET, not two independent limits. Earlier they were 30vh and
+   38vh, which are additive: a tall safety banner plus a deep prompt queue could push the
+   prompts past the cockpit's own 50vh clamp, and the clamp would then start the opaque
+   cockpit above them — unreachable, since nothing scrolls. Sized so the worst case still
+   fits under the clamp: 18vh + 22vh = 40vh, leaving ~10vh for Layout's sticky mobile
+   header above them (~44px, under 8vh even at 568px tall). Each keeps its own scroller,
+   so a queue longer than its share scrolls rather than growing. */
 html.cf-vtt-locked [data-testid='check-request-prompts'] {
-  max-height: 38vh;
+  max-height: 22vh;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 html.cf-vtt-locked [data-testid='safety-bar'] {
-  max-height: 30vh;
+  max-height: 18vh;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -3470,6 +3476,17 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
 .cf-vtt--stacked-map .cf-vtt-main {
   display: flex;
   flex-direction: column;
+  /* Setup is a form, not a board: nothing here is absolutely positioned, so let the whole
+     column scroll instead of clipping. On a short phone the canvas is ~140px and the
+     stack (upload panel, turn bar, dice tray, Roll button) is taller than that — clipped,
+     the Roll button ended up unreachable and an opened tray could not be closed. */
+  overflow-y: auto;
+}
+/* The map column keeps its OWN scroller. Letting it overflow instead made the setup
+   panel paint past its box and under the turn bar, which is painted later — the exact
+   click interception the stacked layout exists to avoid. */
+.cf-vtt--stacked-map .cf-vtt-map {
+  overflow-y: auto;
 }
 .cf-vtt--stacked-map .cf-vtt-map {
   position: relative;
@@ -3500,7 +3517,11 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
   position: static;
   flex: none;
   width: auto;
-  max-height: 320px;
+  /* Bounded by the CANVAS it sits in, not by a fixed height: a 320px tray in a 139px
+     phone canvas pushed the Roll toggle past the clipped edge, so the tray could not be
+     closed again. The percentage resolves against `.cf-vtt-main`, and the tray's own
+     `overflow-y: auto` takes the rest. */
+  max-height: min(320px, 55%);
   margin: 0 var(--space-4) var(--space-2);
 }
 
