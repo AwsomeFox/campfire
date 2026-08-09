@@ -3654,11 +3654,17 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
   flex-direction: column;
   gap: var(--space-2);
   z-index: 8;
+  /* The box floats OVER the playable board, so its empty space must not steal input:
+     the gaps between rows, and the whole column when it holds one short control, would
+     otherwise swallow drags on tokens underneath. Only the controls themselves take
+     pointer input; the board keeps the rest. */
+  pointer-events: none;
 }
 .cf-vtt-map .cf-vtt-map-aside { left: calc(var(--cf-vtt-rail-width) + var(--space-3)); }
 .cf-vtt-map .cf-vtt-map-tray { right: var(--space-3); }
 .cf-vtt-map .cf-vtt-map-aside > *,
 .cf-vtt-map .cf-vtt-map-tray > * {
+  pointer-events: auto;
   margin: 0 !important;
   padding: var(--space-2) var(--space-3) !important;
   border: 1px solid var(--color-divider);

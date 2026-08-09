@@ -160,12 +160,16 @@ test('40-token map smoke keeps token drag feedback available (#1905)', async ({ 
     // is the expensive part of this smoke test.
     const tokens = page.locator('[data-testid^="map-token-"][role="button"]');
     await expect(tokens).toHaveCount(combatants.length);
-    const token = tokens.first();
+    // NOT `.first()`: token 0 sits at 5%/10% of the board, under the cockpit's floating
+    // map chrome (the DM token-detail selector lives there permanently, as it does in any
+    // VTT). A drag started beneath a real control is delivered to that control. Take a
+    // token further down the board, which is what this smoke test is actually about.
+    const token = tokens.last();
     const beforeLeft = await token.evaluate((element) => (element as HTMLElement).style.left);
     // Playwright's drag gesture uses the same mouse/pointer path as the table. The
     // opacity preview is intentionally transient and returns to 1 after mouseup, so
     // assert the durable server-backed position rather than sampling that animation.
-    await token.dragTo(tokens.nth(1));
+    await token.dragTo(tokens.nth(Math.max(0, combatants.length - 2)));
     await expect.poll(() => token.evaluate((element) => (element as HTMLElement).style.left)).not.toBe(beforeLeft);
   } finally {
     await restoreSeedEncounter();

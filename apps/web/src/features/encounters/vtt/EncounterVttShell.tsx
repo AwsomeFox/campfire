@@ -146,13 +146,24 @@ function useDeepLinkedPanel(
       // with a `hidden` ancestor, where `focus()` is refused and `scrollIntoView()` has
       // nothing to scroll. Nothing retries it, so the notification target was left
       // unfocused and often below the panel viewport.
-      frame = requestAnimationFrame(() => {
+      // Across several frames, not one. The reveal is a React state change and the panel
+      // it uncovers may still be laying out — on a cold first load `focus()` one frame
+      // later can land while the element is still inside a `hidden` ancestor, where it is
+      // silently refused. Keep trying until it takes, then stop.
+      let attemptsLeft = 30;
+      const settle = () => {
+        frame = 0;
         if (cancelled) return;
         const target = document.getElementById(hash);
         if (!target) return;
         target.focus({ preventScroll: true });
-        target.scrollIntoView({ block: 'center', inline: 'nearest' });
-      });
+        if (document.activeElement === target) {
+          target.scrollIntoView({ block: 'center', inline: 'nearest' });
+          return;
+        }
+        if (attemptsLeft-- > 0) frame = requestAnimationFrame(settle);
+      };
+      frame = requestAnimationFrame(settle);
       return true;
     };
 
@@ -323,7 +334,7 @@ export function EncounterVttShell({
       className={`cf-vtt${mapStacked ? ' cf-vtt--stacked-map' : ''}${className ? ` ${className}` : ''}`}
       {...rootProps}
     >
-      <header className="cf-vtt-header">
+      <header className="cf-vtt-header" data-testid="encounter-vtt-header">
         {backSlot}
         <div className="cf-vtt-title">
           <h1 className="cf-vtt-title-text">{title}</h1>

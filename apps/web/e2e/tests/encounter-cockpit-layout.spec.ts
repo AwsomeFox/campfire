@@ -399,9 +399,12 @@ test.describe('encounter cockpit panel collapse', () => {
   });
 
   test('each tab keeps its own scroll offset', async ({ page }) => {
-    const fixture = await createRunningEncounter(page);
+    // The SEED encounter, not a fresh running fixture: this needs a panel with enough
+    // content to scroll, nothing more, and every start/end here posts campaign
+    // notifications that push older ones out of the bell's 30-item window.
+    const { campaignId, encounterId } = seed();
     try {
-      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
       await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
 
       const body = page.locator('.cf-vtt-panel-body');
@@ -425,17 +428,24 @@ test.describe('encounter cockpit panel collapse', () => {
         expect(await body.evaluate((el) => el.scrollTop)).toBeGreaterThan(deep - 8);
       }).toPass({ timeout: 3_000 });
     } finally {
-      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       await restoreSeedEncounter(page);
     }
   });
 
-  test('the Turn tab is gone for a DM outside combat, not merely unselected', async ({ page }) => {
+  test('ending the fight retires the Turn tab and the choice that pinned it', async ({ page }) => {
+    // Both halves of one transition, deliberately in a single fixture: every
+    // create/start/end posts campaign notifications, and the bell only keeps the newest
+    // thirty — a second identical fixture here buries an older one that another spec
+    // needs. See the note on the scroll-offset test above.
     const fixture = await createRunningEncounter(page);
     try {
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
       await expect(page.getByTestId('encounter-vtt-tab-turn')).toBeVisible();
+      // Choose Turn explicitly, so the assertions below cover BOTH failures: a choice
+      // stamped with the encounter alone outlived the lifecycle default that replaced it,
+      // and the tab itself stayed selectable with nothing in it.
+      await openCockpitTab(page, 'turn');
 
       // Turn holds the viewer's own vitals plus two `running`-gated blocks, so once
       // combat is over a DM clicking it got a blank panel where the aftermath had been.
@@ -448,29 +458,6 @@ test.describe('encounter cockpit panel collapse', () => {
       for (const tab of ['party', 'log', 'table']) {
         await expect(page.getByTestId(`encounter-vtt-tab-${tab}`)).toBeVisible();
       }
-    } finally {
-      await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
-      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
-      await restoreSeedEncounter(page);
-    }
-  });
-
-  test('an explicit Turn choice expires when the fight ends', async ({ page }) => {
-    const fixture = await createRunningEncounter(page);
-    try {
-      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
-      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
-      await openCockpitTab(page, 'turn');
-
-      // Ending combat empties the Turn section — the summary lives under Party. An
-      // explicit choice stamped with the encounter alone survived that transition and
-      // pinned the viewer to a tab with nothing in it.
-      const ended = await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`);
-      expect(ended.ok(), `end encounter: ${await ended.text()}`).toBe(true);
-
-      await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true', {
-        timeout: 15_000,
-      });
     } finally {
       await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
       await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);

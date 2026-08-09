@@ -1,5 +1,5 @@
 import AxeBuilder from '@axe-core/playwright';
-import { test, expect } from '@playwright/test';
+import { test, expect, request } from '@playwright/test';
 import { seed, stateFor } from './seed';
 
 function paths() {
@@ -240,11 +240,32 @@ test.describe('Unicode markdown mentions (issue #627)', () => {
 test.describe('notification deep links', () => {
   test.use({ storageState: stateFor('player') });
 
-  test('a recap notification opens and focuses the selected session', async ({ page }) => {
-    const { campaignId, navigation } = seed();
-    await page.goto(`/c/${campaignId}`);
-    await page.getByRole('button', { name: /Notifications/ }).click();
-    await page.getByRole('button', { name: /Recap posted for Session 1/ }).click();
-    await expectFocused(page, `entity-session-${navigation.sessionId}`);
+  test('a recap notification opens and focuses the selected session', async ({ page, baseURL }) => {
+    const { campaignId } = seed();
+    // Post a recap of our own rather than reaching for the fixture's. The bell fetches
+    // the newest thirty notifications with no pagination, and every spec anywhere that
+    // starts or ends an encounter adds to that one global list — so a fixture-time recap
+    // is reachable only while nothing else has been noisy, which is not a property this
+    // spec can hold. `recap_posted` fires on the empty -> non-empty transition, so a
+    // session created with its recap already set publishes it immediately, newest first.
+    const dm = await request.newContext({ baseURL, storageState: stateFor('dm') });
+    let sessionId: number | null = null;
+    try {
+      const created = await dm.post(`/api/v1/campaigns/${campaignId}/sessions`, {
+        data: { title: 'Deep-link recap drill', recap: 'The party finally slept.' },
+      });
+      expect(created.ok(), `create session: ${await created.text()}`).toBe(true);
+      sessionId = ((await created.json()) as { id: number }).id;
+
+      await page.goto(`/c/${campaignId}`);
+      await page.getByRole('button', { name: /Notifications/ }).click();
+      // The notification title carries the session LABEL — "Session 2: Deep-link recap
+      // drill" — not the bare title.
+      await page.getByRole('button', { name: /Recap posted for .*Deep-link recap drill/ }).click();
+      await expectFocused(page, `entity-session-${sessionId}`);
+    } finally {
+      if (sessionId != null) await dm.delete(`/api/v1/sessions/${sessionId}`).catch(() => undefined);
+      await dm.dispose();
+    }
   });
 });
