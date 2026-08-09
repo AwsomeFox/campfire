@@ -3888,6 +3888,11 @@ export const RulePackInstallSection = z.enum([
   'classes',
   'races',
   'feats',
+  // Open5e mundane gear (issue #2096). `items` maps to Open5e's /magicitems/ path and so
+  // never contained a Longsword or Chain Mail; these two carry the SRD's ordinary weapons
+  // and armour, which is what a character sheet actually equips.
+  'weapons',
+  'armor',
   // Starfinder
   'equipment',
   'starships',
@@ -3954,6 +3959,15 @@ export interface RulePackSourceMeta {
    * candidate is dead/unusable. For an api system: the base the importer actually pulls from.
    */
   candidateSourceUrl: string | null;
+  /**
+   * The `rule_packs.slug` (or slugs — 'osr' installs several retroclone variants) this
+   * source's importer writes to `campaign.ruleSystem` when installed (issue #2081). Attached
+   * after `RULE_PACK_SOURCE_META` below, once the per-system `*_PACK_SLUG` constants exist —
+   * see the assignment block right before {@link isImporterOnlyRuleSystemSlug}. Left
+   * `undefined` here, not a hardcoded slug, so there is exactly one place each source's slug
+   * is declared.
+   */
+  packSlug?: string | readonly string[];
 }
 
 /**
@@ -6128,6 +6142,48 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) {
 }
 
 /**
+ * Attach each source's installed pack slug(s) to `RULE_PACK_SOURCE_META` (issue #2081), now
+ * that the per-system `*_PACK_SLUG` constants exist — `RULE_PACK_SOURCE_META` itself is
+ * declared much earlier in this file (the install-validation code above needs it), before
+ * most of these constants are. Mutating the already-exported object in place, rather than
+ * redeclaring it here, keeps a single object identity: every import of
+ * `RULE_PACK_SOURCE_META` resolves only after this module finishes evaluating, so callers
+ * always see the complete entries.
+ *
+ * 'archmage' and 'cepheus' have no schema-side `*_PACK_SLUG` export — their importers live
+ * in apps/server (ARCHMAGE_PACK_SLUG in archmage-importer.ts, CEPHEUS_PACK_SLUG in
+ * cepheus-importer.ts), which this package cannot import from — so those two are literals,
+ * pinned to the importers' actual constants by
+ * apps/server/test/unit/importer-only-rule-system.spec.ts. 'other' has no pack slug of its
+ * own: RulesService routes it to the Open5e importer (see enqueueInstall/installFromSource),
+ * so it installs under DND5E_PACK_SLUG too.
+ */
+RULE_PACK_SOURCE_META.open5e.packSlug = DND5E_PACK_SLUG;
+RULE_PACK_SOURCE_META.pf2e.packSlug = PF2E_PACK_SLUG;
+RULE_PACK_SOURCE_META.sf2e.packSlug = SF2E_PACK_SLUG;
+RULE_PACK_SOURCE_META['open-legend'].packSlug = OPEN_LEGEND_PACK_SLUG;
+RULE_PACK_SOURCE_META.pf1e.packSlug = PF1E_PACK_SLUG;
+RULE_PACK_SOURCE_META.starfinder.packSlug = STARFINDER_ADAPTER_ID;
+RULE_PACK_SOURCE_META.archmage.packSlug = 'archmage-srd';
+RULE_PACK_SOURCE_META.osr.packSlug = OSR_RULE_SYSTEM_SLUGS;
+RULE_PACK_SOURCE_META.cepheus.packSlug = 'cepheus-srd';
+RULE_PACK_SOURCE_META.datasworn.packSlug = STARFORGED_PACK_SLUG;
+RULE_PACK_SOURCE_META.other.packSlug = DND5E_PACK_SLUG;
+
+/**
+ * Every pack slug a REGISTERED rule-system source (the table above) actually installs
+ * under (issue #2081). Deliberately NOT "every installed `rule_packs` row" — that set is
+ * unbounded (uploads and homebrew installs carry arbitrary slugs) and is exactly what made
+ * the original guard here reject every homebrew/uploaded pack, not just importer-only ones.
+ * This set is bounded to the handful of slugs the registry above actually declares.
+ */
+const IMPORTER_INSTALLED_PACK_SLUGS: ReadonlySet<string> = new Set(
+  Object.values(RULE_PACK_SOURCE_META).flatMap((meta) =>
+    Array.isArray(meta.packSlug) ? meta.packSlug : meta.packSlug ? [meta.packSlug] : [],
+  ),
+);
+
+/**
  * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
  * (or ''); it is matched against the adapter registry and falls back to the 5e adapter
  * for anything unrecognized — so every existing campaign keeps 5e behavior. The default
@@ -6163,6 +6219,63 @@ export function ruleSystemAdapter(
  */
 export function isRegisteredRuleSystemSlug(ruleSystem: string): boolean {
   return Object.prototype.hasOwnProperty.call(ADAPTERS, ruleSystem);
+}
+
+/**
+ * Whether `ruleSystem` names an "importer-only" rule pack (issue #2081): a pack that a
+ * REGISTERED rule-system source installed (`ruleSystem` is a member of
+ * {@link IMPORTER_INSTALLED_PACK_SLUGS}, derived from `RULE_PACK_SOURCE_META` above) but
+ * which has no entry in {@link ADAPTERS}. Cepheus Engine (2D6 sci-fi) is the current
+ * example — it ships a full importer (`cepheus` install source, `cepheus-srd` pack slug)
+ * but no combat adapter, so without this guard a campaign that selects it silently
+ * inherits the unknown-slug 5e fallback (d20 initiative, 5e ability modifiers on 2D6 UPP
+ * scores, 5e conditions/action economy/death saves, `maxLevel: 20`, a 5e XP band) instead
+ * of failing loudly.
+ *
+ * `isInstalledPack` (the caller's own `rule_packs.slug` lookup; this module has no DB
+ * access, so it cannot determine that fact itself) still gates the check — a slug that
+ * merely COINCIDES with a known importer's pack slug but names no actual installed row is
+ * not flagged.
+ *
+ * A first version of this guard (issue #2081's original PR) was
+ * `isInstalledPack && !isRegisteredRuleSystemSlug(ruleSystem)` — "installed, and no
+ * adapter" — with no reference to which installer put the pack there. That is a materially
+ * larger set than "importer-only": every user-uploaded and homebrew pack is also installed
+ * and also has no `ADAPTERS` entry (arbitrary slugs like `dnd-homebrew-srd` were never
+ * going to be in a fixed adapter registry), so that version rejected uploaded/homebrew
+ * packs identically to Cepheus — breaking `apps/web/e2e/global-setup.ts`'s
+ * `e2e-open5e-actions` fixture and `ai-dm-stuck.e2e-spec.ts`'s uploaded `dnd-homebrew-srd`
+ * campaign in CI before it could reach `main`. `isRegisteredRuleSystemSlug` alone answers
+ * "does this slug have an adapter", not "did an importer install this slug" — the two
+ * questions were conflated.
+ *
+ * The `IMPORTER_INSTALLED_PACK_SLUGS` membership check closes that gap: it is bounded to
+ * the small set of slugs `RULE_PACK_SOURCE_META` actually declares, so an arbitrary
+ * upload/homebrew/test-fixture slug is never a member and is therefore never flagged,
+ * regardless of `isInstalledPack`. The predicate is still NOT `ruleSystem === 'cepheus-srd'`
+ * or any other string literal naming Cepheus — it stays derived from the registry, so a
+ * future importer that (a) is added to `RULE_PACK_SOURCE_META` with a `packSlug` and
+ * (b) ships without a matching `ADAPTERS` entry is caught the same way, by definition, not
+ * by editing this function. The trade-off is explicit and deliberately fails closed: an
+ * importer that forgets to declare its `packSlug` in step (a) is simply not blocked here
+ * (same as any other unrecognized slug), rather than the reverse failure mode of blocking
+ * real user content.
+ *
+ * An arbitrary/unknown/homebrew slug that names NO installed pack is unaffected
+ * (`isInstalledPack` is false) — that is the long-standing, deliberate "every existing
+ * campaign keeps 5e behavior" default {@link ruleSystemAdapter} documents, not a bug this
+ * issue is about. A homebrew slug backed by its own `customMechanicsProfile` never reaches
+ * this predicate at all — the server's `validateRuleSystem` short-circuits on a
+ * `customMechanicsProfile` before ever doing the installed-pack lookup this predicate needs.
+ *
+ * Empty `ruleSystem` (the "no rule system picked" sentinel, `''`) always returns false
+ * regardless of `isInstalledPack` — no `rule_packs` row can have an empty slug, so a true
+ * `isInstalledPack` paired with `''` cannot occur from a real lookup, and the function stays
+ * safe to call without first checking `ruleSystem` for truthiness.
+ */
+export function isImporterOnlyRuleSystemSlug(ruleSystem: string, isInstalledPack: boolean): boolean {
+  if (!ruleSystem) return false;
+  return isInstalledPack && IMPORTER_INSTALLED_PACK_SLUGS.has(ruleSystem) && !isRegisteredRuleSystemSlug(ruleSystem);
 }
 
 /**
@@ -10740,17 +10853,42 @@ export const Combatant = z.object({
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
-  // DM manual-reorder override (issue #1923 review finding 1). Set on EVERY combatant in
-  // the roster (not just the moved one) whenever `reorderCombatant` runs against a
-  // running encounter, to the combatant's index in the newly computed order. Null until
-  // the first manual reorder on a running encounter (and for legacy rows). This exists
-  // because a running encounter's `sortCombatants` orders by initiative, and an adapter's
-  // `initiativeTiebreak` (e.g. 5e's `initModDescThenSortOrderAsc`) compares `initMod`
-  // BEFORE `sortOrder` — a pure `sortOrder` rewrite is silently discarded by the adapter
-  // tiebreak whenever the tied combatants have different `initMod` (different DEX).
-  // `sortCombatants` consults this ahead of the adapter tiebreak, but only when BOTH
-  // combatants in the comparison have a non-null value, so an unrelated tie (one or both
-  // never manually reordered) still falls through to the adapter's own rule untouched.
+  // DM manual-reorder override (issue #1923 review finding 1; narrowed by #2084 finding
+  // 1; corrected to whole-tie-group scope by #2095 review — Devin, Codex, and Copilot
+  // independently). This exists because a running encounter's `sortCombatants` orders by
+  // initiative, and an adapter's `initiativeTiebreak` (e.g. 5e's
+  // `initModDescThenSortOrderAsc`) compares `initMod` BEFORE `sortOrder` — a pure
+  // `sortOrder` rewrite is silently discarded by the adapter tiebreak whenever the tied
+  // combatants have different `initMod` (different DEX).
+  //
+  // Set by `reorderCombatant` on EVERY row that shares the moved combatant's landing
+  // (possibly just-reassigned) initiative value — its full tie group as it exists in the
+  // newly computed order, all in one consistent `orderedIds` index space from that same
+  // pass — never the whole roster, and NOT merely the rows the drag's own start/end
+  // positions happened to cross. An earlier version stamped every combatant on every
+  // drag, which meant one reorder disabled `adapter.initiativeTiebreak` for the entire
+  // encounter, including ties the DM never touched; while `preparing` (before most rows
+  // have a rolled initiative) that also meant the stamp encoded add order rather than DM
+  // intent. A narrower revision then stamped only the moved combatant plus whichever
+  // OTHER tie-group members the drag physically crossed — but `sortCombatants` puts ANY
+  // stamped row ahead of ANY unstamped one within a tie (see below), with no regard for
+  // whether that specific row was crossed, so a partial stamp did not merely fail to help
+  // the untouched members — it actively sank them below the touched ones, an order the DM
+  // never asked for. Stamping the WHOLE landing group closes that: a tie group nobody
+  // dragged into stays entirely null so it keeps falling through to the adapter. Never
+  // stamped for a null-initiative row — an unrolled tie is decided by `sortOrder` alone
+  // (see `sortCombatants`'s own null/null branch and the `preparing` sort), so a stamp
+  // there would outlive the roll and could wrongly decide a REAL tie later by insertion
+  // order instead of the adapter.
+  //
+  // Cleared back to null whenever a combatant's OWN `initiative` value changes outside
+  // this same reorder (a DM PATCH, or an overwrite re-roll) — the tie it was placed in no
+  // longer exists once its number moves.
+  //
+  // `sortCombatants` consults this ahead of the adapter tiebreak whenever EITHER side has
+  // a value: a stamped row always precedes an unstamped one, which keeps the comparator a
+  // total order when a tie mixes stamped and unstamped rows (see that function's own
+  // comment for the non-transitive cycle this prevents).
   manualOrder: z.number().int().nullable().default(null),
   // Battle-map token position (issue #39): 0–100 percent overlay on the encounter's
   // map image, mirroring location.mapX/mapY. null = not yet placed on the map.

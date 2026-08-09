@@ -35,6 +35,49 @@ const diceFixture = '<div><span>1d8+4</span><span>d20</span></div>';
 const diceNodes = extractJsxTextNodes(diceFixture);
 assert.strictEqual(diceNodes.length, 0);
 
+// --- extractJsxTextNodes: concise arrow + generic call (issue #2106) ---
+//
+// The regex has no real JSX awareness: it matches any `>...<` on one line, anywhere in the
+// file. A concise arrow whose body (or return-type annotation) is immediately followed by a
+// generic type argument bookends this exact shape — the `>` closing `=>` and the `<` opening
+// the generic — with a bare identifier/member-access chain in between that then passes the
+// node's own letter-count filter.
+
+// The exact reported shape, `=> fn<T>(` -> MUST NOT flag
+assert.deepStrictEqual(extractJsxTextNodes('foo: (x) => api.post<Foo>(url, x),'), []);
+
+// A genuine JSX text node elsewhere in the same source -> MUST still flag, proving the fix does
+// not suppress real hardcoded text, only the arrow+generic shape.
+assert.deepStrictEqual(
+  extractJsxTextNodes('foo: (x) => api.post<Foo>(url, x),\n<button>Save Changes</button>'),
+  ['Save Changes'],
+);
+
+// The exact #2105/#2106 regression case: `api.post<EncounterWithCombatants>` inside a concise
+// arrow mutationFn -> MUST NOT flag ("api.post" must not appear as a hardcoded JSX text node).
+const encounterMutationFnFixture =
+  '}) => api.patch<EncounterWithCombatants>(`${API}/encounters/${encounterId}`, { ...patch, expectedUpdatedAt }),';
+assert.deepStrictEqual(extractJsxTextNodes(encounterMutationFnFixture), []);
+
+// A bare (non-dotted) identifier immediately after `=>` and before a generic `<` -> MUST NOT
+// flag, covering the issue title's general `=> fn<T>(` shape, not just dotted member calls.
+assert.deepStrictEqual(extractJsxTextNodes('onSave: (patch) => save<Payload>(patch),'), []);
+
+// A `=>` return-type annotation using a generic, e.g. `(): => Promise<void>` -> MUST NOT flag.
+assert.deepStrictEqual(
+  extractJsxTextNodes('onSave: (patch: Record<string, number | null>) => Promise<void>;'),
+  [],
+);
+
+// A real JSX text node that merely CONTAINS an identifier-like word is unaffected: nothing here
+// is preceded by a literal `=`, so the exclusion must not fire on ordinary JSX.
+assert.deepStrictEqual(extractJsxTextNodes('<div>api.post</div>'), ['api.post']);
+
+// A `<` used as a real less-than comparison right after `=>`, with a two-letter-or-more bare
+// identifier on the left, is not real JSX text either and is correctly excluded by the same
+// narrow rule (it is still not a hardcoded UI string worth flagging).
+assert.deepStrictEqual(extractJsxTextNodes('(row) => row < limit'), []);
+
 // --- looksUntranslated (issue #2059) ---
 
 // English word copied verbatim into the ar slot, no Arabic script -> MUST flag

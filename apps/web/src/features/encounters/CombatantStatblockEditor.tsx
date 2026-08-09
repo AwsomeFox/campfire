@@ -25,12 +25,15 @@ export function CombatantStatblockEditor({
   value,
   onChange,
   disabled = false,
+  showTemplateHp = true,
   ruleSystem,
   customMechanicsProfile,
 }: {
   value: CombatantStatblock | null;
   onChange: (next: CombatantStatblock) => void;
   disabled?: boolean;
+  /** Hide the template HP when a live combatant already exposes its real hpMax. */
+  showTemplateHp?: boolean;
   ruleSystem?: string | null;
   customMechanicsProfile?: CustomMechanicsProfile | null;
 }) {
@@ -111,39 +114,41 @@ export function CombatantStatblockEditor({
           </span>
         </label>
 
-        <label className="flex flex-col gap-1 text-sm flex-1" style={{ minWidth: 100 }}>
-          <span title={COMBATANT_STATBLOCK_HELP.hp}>{t('encounters.statblock.maxHp', { defaultValue: 'Max HP' })}</span>
-          <input
-            type="number"
-            className="input"
-            min={1}
-            disabled={disabled}
-            placeholder={t('encounters.statblock.hpUnknown', { defaultValue: 'Unknown' })}
-            value={hpDraft}
-            onChange={(e) => {
-              const raw = e.target.value;
-              setHpDraft(raw);
-              if (raw.trim() === '') {
-                // Issue #2080: an explicitly-cleared field commits `hp: null` (genuinely
-                // unknown), not a reverted-to-previous no-op — the field's whole point is
-                // to let "unknown" be typed, not just tolerated as a leftover default.
-                patch({ hp: null });
-                return;
-              }
-              const parsed = parseLocalizedInteger(raw);
-              if (parsed.ok && parsed.value >= 1) patch({ hp: parsed.value });
-            }}
-            onBlur={() => {
-              if (hpDraft.trim() === '') return;
-              const parsed = parseLocalizedInteger(hpDraft);
-              if (!parsed.ok || parsed.value < 1) setHpDraft(statblock.hp == null ? '' : String(statblock.hp));
-            }}
-            aria-describedby="statblock-hp-help"
-          />
-          <span id="statblock-hp-help" className="text-[11px] text-muted m-0">
-            {COMBATANT_STATBLOCK_HELP.hp}
-          </span>
-        </label>
+        {showTemplateHp && (
+          <label className="flex flex-col gap-1 text-sm flex-1" style={{ minWidth: 100 }}>
+            <span title={COMBATANT_STATBLOCK_HELP.hp}>{t('encounters.statblock.maxHp', { defaultValue: 'Max HP' })}</span>
+            <input
+              type="number"
+              className="input"
+              min={1}
+              disabled={disabled}
+              placeholder={t('encounters.statblock.hpUnknown', { defaultValue: 'Unknown' })}
+              value={hpDraft}
+              onChange={(e) => {
+                const raw = e.target.value;
+                setHpDraft(raw);
+                if (raw.trim() === '') {
+                  // Issue #2080: an explicitly-cleared field commits `hp: null` (genuinely
+                  // unknown), not a reverted-to-previous no-op — the field's whole point is
+                  // to let "unknown" be typed, not just tolerated as a leftover default.
+                  patch({ hp: null });
+                  return;
+                }
+                const parsed = parseLocalizedInteger(raw);
+                if (parsed.ok && parsed.value >= 1) patch({ hp: parsed.value });
+              }}
+              onBlur={() => {
+                if (hpDraft.trim() === '') return;
+                const parsed = parseLocalizedInteger(hpDraft);
+                if (!parsed.ok || parsed.value < 1) setHpDraft(statblock.hp == null ? '' : String(statblock.hp));
+              }}
+              aria-describedby="statblock-hp-help"
+            />
+            <span id="statblock-hp-help" className="text-[11px] text-muted m-0">
+              {COMBATANT_STATBLOCK_HELP.hp}
+            </span>
+          </label>
+        )}
       </div>
 
       <fieldset className="border border-neutral-700 rounded-md p-2 m-0">

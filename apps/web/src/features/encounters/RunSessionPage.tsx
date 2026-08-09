@@ -999,7 +999,7 @@ export default function RunSessionPage() {
    * encounter. Comparing the stamp resolves during render, so the wrong tab never paints.
    */
   const [panelTabChoice, setPanelTabChoice] = useState<{ eid: number; tab: PanelTab } | null>(null);
-  const defaultPanelTabRef = useRef<{ eid: number; tab: PanelTab } | null>(null);
+  const defaultPanelTabRef = useRef<{ eid: number; running: boolean; tab: PanelTab } | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [diceTrayOpen, setDiceTrayOpen] = useState(false);
   const [turnBarCollapsed, setTurnBarCollapsed] = useState(false);
@@ -1219,8 +1219,22 @@ export default function RunSessionPage() {
   // were reading it. A default is for the first paint, not a rule the panel keeps enforcing.
   // Derived here rather than beside the markup: the turn-follow effect below needs to
   // know whether the roster is actually on screen, and it runs long before render.
-  if (encounter && defaultPanelTabRef.current?.eid !== eid) {
-    defaultPanelTabRef.current = { eid, tab: !isDm && encounter?.status === 'running' ? 'turn' : 'party' };
+  // Re-resolved when the encounter changes OR when combat starts or stops, and held
+  // across everything else. Both halves matter: freezing on `eid` alone stranded a player
+  // who was present through "Start" on the roster, and left someone who opened a running
+  // fight on a Turn tab that renders nothing once it ends — while re-deriving on every
+  // input is what moved the tab under a co-DM the moment they were demoted. Lifecycle is
+  // the one input that changes what the tabs are FOR; the rest are not.
+  const encounterRunning = encounter?.status === 'running';
+  if (
+    encounter
+    && (defaultPanelTabRef.current?.eid !== eid || defaultPanelTabRef.current?.running !== encounterRunning)
+  ) {
+    defaultPanelTabRef.current = {
+      eid,
+      running: encounterRunning,
+      tab: !isDm && encounterRunning ? 'turn' : 'party',
+    };
   }
   const panelTab: PanelTab =
     (panelTabChoice?.eid === eid ? panelTabChoice.tab : null) ?? defaultPanelTabRef.current?.tab ?? 'party';
@@ -3657,14 +3671,41 @@ export default function RunSessionPage() {
   const handleReorderDrop = useCallback(
     (combatantId: number, afterCombatantId: number | 'top') => {
       if (!encounter) return;
+      // The sync/in-flight gate lives HERE rather than only on each entry point's
+      // enabled-ness (#2074 review finding 3). `buildReorderControls` below already
+      // withholds the roster row's drag handle and menu on exactly these conditions, but
+      // `InitiativeStrip` was handed `canReorder={canEditEncounter}` — the DM/not-ended
+      // check alone — and funnels into this same mutation, so during an SSE outage that
+      // disabled every other conflict-prone write on the page a strip drag still went to
+      // the server, and a second drag could start before the first was confirmed.
+      // Gating the two entry points separately is what let them drift; gating the single
+      // write path they share makes them agree by construction.
+      // `reorderCombatant.isPending`, NOT `pendingCombatantIds.has(combatantId)`. A reorder is a
+      // TOPOLOGY-wide write: it renumbers the whole roster and bumps `turnVersion`. The per-row
+      // pending set is the right granularity for an HP tick, which is why `buildReorderControls`
+      // uses it — but copying that shape here meant dragging combatant B while A's reorder was
+      // still in flight sailed past the guard, and both requests carried the SAME rendered
+      // `turnVersion`, so one came back TURN_VERSION_MISMATCH instead of being prevented.
+      if (reconcileBlocks || riskyBlocked || reorderCombatant.isPending) return;
       reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion });
     },
-    [encounter, reorderCombatant],
+    // `reorderCombatant` covers `.isPending` — the mutation object is a new reference on each
+    // status change, so the closure re-forms when pending flips.
+    [encounter, reorderCombatant, reconcileBlocks, riskyBlocked],
   );
   const rosterDragReorder = useCombatantDragReorder({
     axis: 'y',
     orderedIds: rosterOrderedIds,
-    enabled: canReorderCombatants,
+    // Issue #2084 finding 4: `reconcileBlocks`/`riskyBlocked` were already folded into
+    // `buildReorderControls`' `busy` below (issue #2074 review finding 3), which
+    // withholds `dragHandleProps` on the row — but withholding props off an ELEMENT
+    // THAT STAYS MOUNTED only drops the DOM listeners; it never told this hook a
+    // gesture already in flight had gone stale, so `gestureRef` stayed populated and
+    // every later drag on every row was refused until reload. Folding the same gate
+    // into `enabled` here lets the hook's own enabled-transition effect reset (and
+    // release pointer capture on) an in-progress gesture directly, independent of
+    // whatever the caller's props end up doing with `busy`.
+    enabled: canReorderCombatants && !reconcileBlocks && !riskyBlocked,
     elementsRef: combatantRowRefs,
     onDrop: handleReorderDrop,
   });
@@ -4221,7 +4262,10 @@ export default function RunSessionPage() {
                 hpFeedbackByCombatant={hpFeedbackByCombatant}
                 colorVisionAssist={me?.user.colorVisionAssist ?? false}
                 revealTick={revealTick}
-                canReorder={canEditEncounter}
+                // Mirrors the roster row's gate (see `buildReorderControls`): a drag is a
+                // write, so an outage or a blocking reconcile must withdraw the affordance,
+                // not just have the drop silently swallowed by `handleReorderDrop`'s guard.
+                canReorder={canEditEncounter && !reconcileBlocks && !riskyBlocked}
                 onReorderDrop={handleReorderDrop}
               />
             )}

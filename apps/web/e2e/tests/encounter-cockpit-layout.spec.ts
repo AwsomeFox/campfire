@@ -418,3 +418,59 @@ test.describe('encounter cockpit tablist keyboard', () => {
     }
   });
 });
+
+test.describe('encounter cockpit default across the lifecycle', () => {
+  test.use({ storageState: stateFor('player') });
+
+  test('a player present through Start moves to Turn, and back to Party when it ends', async ({ page, browser }) => {
+    const { campaignId } = seed();
+    const dm = await browser.newContext({ storageState: stateFor('dm') });
+    const created = await dm.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Lifecycle default drill', hidden: false },
+    });
+    expect(created.ok()).toBe(true);
+    const id = ((await created.json()) as { id: number }).id;
+
+    try {
+      const added = await dm.request.post(`/api/v1/encounters/${id}/combatants`, {
+        data: { kind: 'monster', name: 'Lifecycle sentinel', hpMax: 10 },
+      });
+      expect(added.ok()).toBe(true);
+
+      // Present while it is still preparing: the roster, because Turn renders nothing yet.
+      await page.goto(`/c/${campaignId}/encounters/${id}`);
+      await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true');
+
+      // Combat starts under them. The default has to follow — freezing it on the encounter
+      // id alone strands them on the roster with the turn workspace behind a tab.
+      // The seed keeps a fight running; only one may be live at a time.
+      const live = await dm.request.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`);
+      if (live.ok()) {
+        for (const other of (await live.json()) as { id: number }[]) {
+          if (other.id !== id) await dm.request.post(`/api/v1/encounters/${other.id}/end`);
+        }
+      }
+      expect((await dm.request.post(`/api/v1/encounters/${id}/roll-initiative`)).ok()).toBe(true);
+      expect((await dm.request.post(`/api/v1/encounters/${id}/start`)).ok()).toBe(true);
+      await expect(page.getByTestId('encounter-vtt-tab-turn')).toHaveAttribute(
+        'aria-selected',
+        'true',
+        { timeout: 15_000 },
+      );
+
+      // …and back again when it ends, since Turn renders nothing once combat is over and
+      // the summary is on Party.
+      expect((await dm.request.post(`/api/v1/encounters/${id}/end`)).ok()).toBe(true);
+      await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute(
+        'aria-selected',
+        'true',
+        { timeout: 15_000 },
+      );
+    } finally {
+      await dm.request.post(`/api/v1/encounters/${id}/end`).catch(() => undefined);
+      await dm.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
+      await dm.close();
+      await restoreSeedEncounter(page);
+    }
+  });
+});
