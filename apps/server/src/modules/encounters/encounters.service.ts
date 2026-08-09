@@ -898,6 +898,30 @@ export class EncountersService {
   }
 
   /**
+   * Issue #2091 / #2111: `removeCombatant` deliberately still permits emptying a RUNNING
+   * encounter's roster, including its last combatant — the 30-second combatant-removal undo
+   * window and a death-save-replay-then-end flow both depend on that (guarding the delete
+   * itself would break both). So a running encounter with zero combatants is reachable state,
+   * and EVERY turn-movement entry point that reads the roster — next-turn and end-turn (both
+   * backed by `advanceCurrentTurn`) and undo-turn — must refuse rather than silently succeed
+   * on it. #2091 fixed only `advanceCurrentTurn`; `undoTurn` kept its own separate roster read
+   * with no equivalent check, so it still returned success (a no-op with the round floored at
+   * 1 via `retreatEncounterTurn`'s empty-sorted branch) on the exact state next-turn/end-turn
+   * now reject. A DM cannot tell "nothing to undo" apart from "your undo worked" from a 200
+   * response, and undoTurn still wrote a real audit log entry and a "turn advance undone"
+   * event for a turn that never moved — worse than silence. Sharing one definition (rather
+   * than a second copy of the check, which is how these two drifted apart the first time)
+   * keeps every future turn-movement entry point honest by construction.
+   */
+  private assertRunningRosterNonEmpty(rows: unknown[]): void {
+    if (rows.length === 0) {
+      throw new BadRequestException(
+        'This encounter has no combatants — end the encounter instead of continuing an empty fight.',
+      );
+    }
+  }
+
+  /**
    * In-memory idempotency map for the generated-encounter commit (issue #412):
    * `${campaignId}:${idempotencyKey}` -> committed encounter id. A retried commit with the
    * same key returns the SAME encounter instead of creating a duplicate. Single-instance,
@@ -7924,23 +7948,14 @@ export class EncountersService {
           });
         }
 
+        // Issue #2091 / #2111: next-turn/end-turn (this function backs both) must never
+        // silently report success and advance the round on a running encounter with nobody
+        // in it — that silent "success" is what let the campaign's one-live-fight slot
+        // (issue #744) stay wedged with no discoverable way out. undo-turn shares this same
+        // guard below for the identical reason. See assertRunningRosterNonEmpty's doc for why
+        // this state is reachable and why the check lives here rather than at the delete.
         const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
-        if (rows.length === 0) {
-          // Issue #2091: removeCombatant deliberately still permits emptying a RUNNING
-          // encounter's roster (including its last combatant) — two pre-existing flows
-          // depend on that: the 30-second combatant-removal undo window, and a death-save
-          // replay that removes its subject and only later calls /end. Guarding the delete
-          // itself would break both. Instead, the invariant is enforced HERE, at the only
-          // place emptying the roster actually harmed the DM: next-turn/end-turn (this
-          // function backs both) must never silently report success and advance the round
-          // on a fight with nobody in it — that silent "success" is what let the campaign's
-          // one-live-fight slot (issue #744) stay wedged with no discoverable way out. The
-          // message names the actual recovery so the DM's very next action tells them what
-          // to do, rather than leaving them to rediscover it via a 409 on a different fight.
-          throw new BadRequestException(
-            'This encounter has no combatants — end the encounter instead of advancing an empty fight.',
-          );
-        }
+        this.assertRunningRosterNonEmpty(rows);
         const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
         const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
         const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
@@ -8361,7 +8376,17 @@ export class EncountersService {
       }
       newTurnVersion = fresh.turnVersion + 1;
 
+      // Issue #2111: undo-turn is a separate code path from advanceCurrentTurn (next-turn/
+      // end-turn) with its own roster read, and had no equivalent guard — so it still
+      // returned success on a running encounter emptied out from under it (see
+      // assertRunningRosterNonEmpty's doc for why that state is reachable). Without this,
+      // retreatEncounterTurn's empty-sorted branch below no-ops the round at >= 1, and this
+      // function still writes a real audit log entry and a "turn advance undone" event for
+      // a turn that never moved. Checked here, before the "cannot undo past the start of the
+      // encounter" check below, so an empty roster always gets the same recovery message
+      // next-turn/end-turn give, regardless of what round it is parked at.
       const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      this.assertRunningRosterNonEmpty(rows);
       const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
       const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
       const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
