@@ -8,6 +8,10 @@ import {
 import type { AiProviderConfig } from '../../src/modules/ai-dm/providers';
 import type { FetchLike, FetchResponse } from '../../src/modules/ai-dm/providers/http';
 import type { RequestUser } from '../../src/common/user.types';
+import type { AttachmentsService } from '../../src/modules/attachments/attachments.service';
+import type { CharactersService } from '../../src/modules/characters/characters.service';
+import type { NpcsService } from '../../src/modules/npcs/npcs.service';
+import type { AuditService } from '../../src/modules/audit/audit.service';
 
 /**
  * AI portrait generation routing (issue #1321). Exercises the whole service offline with fake
@@ -46,52 +50,53 @@ function failingFetch(): FetchLike {
   });
 }
 
-/** Build a service with a stubbed provider config + recording attachment/character/npc/audit fakes. */
+/**
+ * Build a service with a stubbed provider config + recording attachment/character/npc/audit fakes.
+ * Each fake is typed against `Pick<RealService, 'methodsActuallyUsed'>` (AGENTS.md L96-L98) so a
+ * renamed/added dependency method fails to compile rather than silently passing an incomplete fake.
+ * The unavoidable concrete-service cast happens only at the constructor boundary.
+ */
 function makeService(config: AiProviderConfig | null) {
   const created: Array<{ campaignId: number; kind: string; mime: string; auditDetail?: string }> = [];
   const removed: number[] = [];
+  const hiddenSet: Array<{ id: number; hidden: boolean }> = [];
   const characterUpdates: Array<{ id: number; portraitUrl: string }> = [];
   const npcUpdates: Array<{ id: number; portraitUrl: string }> = [];
-  const attachments = {
-    createGenerated: async (
-      campaignId: number,
-      kind: string,
-      file: { filename: string; mime: string; bytes: Buffer },
-      _user: unknown,
-      _role: unknown,
-      auditDetail?: string,
-    ) => {
+
+  const attachments: Pick<AttachmentsService, 'createGenerated' | 'versionToken' | 'remove' | 'setHidden'> = {
+    createGenerated: async (campaignId, kind, file, _user, _role, auditDetail?) => {
       created.push({ campaignId, kind, mime: file.mime, auditDetail });
       return { id: 7171, campaignId, kind, filename: file.filename, mime: file.mime, hidden: false, updatedAt: '2024-01-01T00:00:00Z' } as never;
     },
     versionToken: () => 'abc123',
     remove: async (id: number) => { removed.push(id); return {} as never; },
+    setHidden: async (id: number, hidden: boolean) => { hiddenSet.push({ id, hidden }); return {} as never; },
   };
-  const characters = {
-    getRowOrThrow: async (id: number) => ({ id, campaignId: 1, ownerUserId: 'u1' }),
+  const characters: Pick<CharactersService, 'getRowOrThrow' | 'assertCanWrite' | 'update'> = {
+    getRowOrThrow: async (id: number) => ({ id, campaignId: 1, ownerUserId: 'u1' }) as never,
     assertCanWrite: () => undefined,
     update: async (id: number, input: { portraitUrl?: string }) => {
       characterUpdates.push({ id, portraitUrl: input.portraitUrl ?? '' });
       return {} as never;
     },
   };
-  const npcs = {
-    getRowOrThrow: async (id: number) => ({ id, campaignId: 1 }),
+  const npcs: Pick<NpcsService, 'getRowOrThrow' | 'update'> = {
+    getRowOrThrow: async (id: number) => ({ id, campaignId: 1, hidden: 0 }) as never,
     update: async (id: number, input: { portraitUrl?: string }) => {
       npcUpdates.push({ id, portraitUrl: input.portraitUrl ?? '' });
       return {} as never;
     },
   };
-  const audit = { log: async () => undefined };
+  const audit: Pick<AuditService, 'log'> = { log: async () => undefined };
   const providerConfig = { resolveEffectiveConfig: async () => config };
   const service = new AiPortraitService(
     providerConfig as never,
-    attachments as never,
-    characters as never,
-    npcs as never,
-    audit as never,
+    attachments as unknown as AttachmentsService,
+    characters as unknown as CharactersService,
+    npcs as unknown as NpcsService,
+    audit as unknown as AuditService,
   );
-  return { service, created, removed, characterUpdates, npcUpdates };
+  return { service, created, removed, hiddenSet, characterUpdates, npcUpdates };
 }
 
 const openAiImageConfig = (fetchImpl: FetchLike): AiProviderConfig => ({
@@ -229,6 +234,46 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
     expect(npcUpdates[0].portraitUrl).toMatch(/\/attachments\/7171\/file\?v=/);
   });
 
+  it('hides the generated portrait when the target NPC is hidden (secrecy preservation)', async () => {
+    // A service whose npcs.getRowOrThrow returns hidden=1 — the generated portrait must be hidden
+    // so a non-DM member cannot enumerate it through the attachment list (review feedback).
+    const created: Array<{ kind: string }> = [];
+    const hiddenSet: Array<{ id: number; hidden: boolean }> = [];
+    const attachments: Pick<AttachmentsService, 'createGenerated' | 'versionToken' | 'remove' | 'setHidden'> = {
+      createGenerated: async (_campaignId: number, kind: string) => {
+        created.push({ kind });
+        return { id: 7171, kind, hidden: false, updatedAt: '2024-01-01T00:00:00Z' } as never;
+      },
+      versionToken: () => 'abc123',
+      remove: async () => ({} as never),
+      setHidden: async (id: number, hidden: boolean) => { hiddenSet.push({ id, hidden }); return {} as never; },
+    };
+    const characters: Pick<CharactersService, 'getRowOrThrow' | 'assertCanWrite' | 'update'> = {
+      getRowOrThrow: async () => ({} as never),
+      assertCanWrite: () => undefined,
+      update: async () => ({} as never),
+    };
+    const npcs: Pick<NpcsService, 'getRowOrThrow' | 'update'> = {
+      getRowOrThrow: async (id: number) => ({ id, campaignId: 1, hidden: 1 }) as never,
+      update: async () => ({} as never),
+    };
+    const audit: Pick<AuditService, 'log'> = { log: async () => undefined };
+    const providerConfig = { resolveEffectiveConfig: async () => openAiImageConfig(imageFetch()) };
+    const service = new AiPortraitService(
+      providerConfig as never,
+      attachments as unknown as AttachmentsService,
+      characters as unknown as CharactersService,
+      npcs as unknown as NpcsService,
+      audit as unknown as AuditService,
+    );
+    const job = await service.createJob(1, { prompt: 'a hidden villain', count: 1 } as never, USER, 'dm');
+    await service.attach(1, job.id, { previewId: job.previews[0].id, entityType: 'npc', entityId: 88 } as never, USER, 'dm');
+    expect(created).toHaveLength(1);
+    expect(created[0].kind).toBe('portrait');
+    // The attachment was explicitly hidden to match the NPC's secrecy.
+    expect(hiddenSet).toEqual([{ id: 7171, hidden: true }]);
+  });
+
   it('refuses an NPC attach from a non-DM caller BEFORE persisting (no orphan attachment)', async () => {
     const { service, created } = makeService(openAiImageConfig(imageFetch()));
     const campaignId = 1;
@@ -265,26 +310,37 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
   });
 
   it('rolls back the attachment if the entity linkage fails', async () => {
-    // A service whose characters.update throws to simulate a concurrent-edit race.
+    // A service whose characters.update throws to simulate a concurrent-edit race. The fakes are
+    // typed against Pick<RealService, ...> per the AGENTS.md double convention.
     const created: Array<{ campaignId: number; kind: string }> = [];
     const removed: number[] = [];
-    const attachments = {
+    const attachments: Pick<AttachmentsService, 'createGenerated' | 'versionToken' | 'remove' | 'setHidden'> = {
       createGenerated: async (campaignId: number, kind: string) => {
         created.push({ campaignId, kind });
         return { id: 7171, campaignId, kind, hidden: false, updatedAt: '2024-01-01T00:00:00Z' } as never;
       },
       versionToken: () => 'abc123',
       remove: async (id: number) => { removed.push(id); return {} as never; },
+      setHidden: async () => ({} as never),
     };
-    const characters = {
-      getRowOrThrow: async (id: number) => ({ id, campaignId: 1, ownerUserId: 'u1' }),
+    const characters: Pick<CharactersService, 'getRowOrThrow' | 'assertCanWrite' | 'update'> = {
+      getRowOrThrow: async (id: number) => ({ id, campaignId: 1, ownerUserId: 'u1' }) as never,
       assertCanWrite: () => undefined,
       update: async () => { throw new Error('concurrent edit race'); },
     };
-    const npcs = { getRowOrThrow: async () => ({}), update: async () => ({} as never) };
-    const audit = { log: async () => undefined };
+    const npcs: Pick<NpcsService, 'getRowOrThrow' | 'update'> = {
+      getRowOrThrow: async () => ({} as never),
+      update: async () => ({} as never),
+    };
+    const audit: Pick<AuditService, 'log'> = { log: async () => undefined };
     const providerConfig = { resolveEffectiveConfig: async () => openAiImageConfig(imageFetch()) };
-    const service = new AiPortraitService(providerConfig as never, attachments as never, characters as never, npcs as never, audit as never);
+    const service = new AiPortraitService(
+      providerConfig as never,
+      attachments as unknown as AttachmentsService,
+      characters as unknown as CharactersService,
+      npcs as unknown as NpcsService,
+      audit as unknown as AuditService,
+    );
     const job = await service.createJob(1, { prompt: 'a hero', count: 1 } as never, USER, 'dm');
     await expect(
       service.attach(1, job.id, { previewId: job.previews[0].id, entityType: 'character', entityId: 55 } as never, USER, 'dm'),
