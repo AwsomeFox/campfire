@@ -83,6 +83,61 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(replayed.find(({ id }) => id === 2)?.hpCurrent).toBe(9);
   });
 
+  test('retains a concurrent server HP change while rebasing a pending delta', () => {
+    const base = {
+      id: 8,
+      currentCombatantId: 1,
+      turnVersion: 4,
+      combatants: [combatant],
+    } as EncounterWithCombatants;
+    // The newer snapshot includes both another client's -3 and this client's
+    // still-ledgered -5. Replaying must retain the -3 without applying -5 twice.
+    const advanced = {
+      ...base,
+      currentCombatantId: 2,
+      turnVersion: 5,
+      combatants: [{ ...combatant, hpCurrent: 12 }],
+    } as EncounterWithCombatants;
+    const operations = [{ combatantId: 1, delta: -5 }];
+
+    const rebased = rebaseOptimisticHpEncounter(base, advanced, operations);
+    const replayed = replayOptimisticHpDeltas(rebased.combatants, operations);
+
+    expect(rebased.combatants[0]?.hpCurrent).toBe(17);
+    expect(replayed[0]?.hpCurrent).toBe(12);
+    expect(replayOptimisticHpDeltas(rebased.combatants, [])[0]?.hpCurrent).toBe(17);
+  });
+
+  test('retains the concurrent lifecycle baseline when combined damage crosses zero', () => {
+    const baseCombatant = {
+      ...combatant,
+      kind: 'character' as const,
+      hpCurrent: 10,
+      deathState: 'none' as const,
+      deathSaveSuccesses: 0,
+      deathSaveFailures: 0,
+    };
+    const base = {
+      id: 8,
+      currentCombatantId: 1,
+      turnVersion: 4,
+      combatants: [baseCombatant],
+    } as EncounterWithCombatants;
+    const advanced = {
+      ...base,
+      currentCombatantId: 2,
+      turnVersion: 5,
+      combatants: [{ ...baseCombatant, hpCurrent: 0, deathState: 'dying' as const }],
+    } as EncounterWithCombatants;
+    const operations = [{ combatantId: 1, delta: -5 }];
+
+    const rebased = rebaseOptimisticHpEncounter(base, advanced, operations);
+    const replayed = replayOptimisticHpDeltas(rebased.combatants, operations);
+
+    expect(rebased.combatants[0]).toMatchObject({ hpCurrent: 5, deathState: 'none' });
+    expect(replayed[0]).toMatchObject({ hpCurrent: 0, deathState: 'dying' });
+  });
+
   test('the HP mutation replays pending deltas instead of restoring a snapshot', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
 

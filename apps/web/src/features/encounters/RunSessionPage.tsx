@@ -2500,10 +2500,16 @@ export default function RunSessionPage() {
       if (seeded && hpQueue.encounterId === eid && hpQueue.base && hpQueue.operations.size > 0) {
         // HP steppers remain enabled while Next Turn runs. Move their replay ledger onto
         // the advanced turn before another HP callback can rebuild the cache from its old
-        // base. Pending targets retain only their pre-operation HP/lifecycle fields so
-        // replay cannot double-apply a write already present in `seeded`; their new turn
-        // state, condition durations, and action uses remain authoritative.
-        hpQueue.base = rebaseOptimisticHpEncounter(hpQueue.base, seeded, hpQueue.operations.values());
+        // base. Remove this client's optimistic field changes from `seeded` so replay
+        // cannot double-apply them while concurrent authoritative HP changes remain in
+        // the new base; turn state, condition durations, and action uses stay authoritative.
+        hpQueue.base = rebaseOptimisticHpEncounter(
+          hpQueue.base,
+          seeded,
+          hpQueue.operations.values(),
+          ruleSystem,
+          campaign?.customMechanicsProfile,
+        );
         replayPendingOptimisticHpDeltas();
       }
     },

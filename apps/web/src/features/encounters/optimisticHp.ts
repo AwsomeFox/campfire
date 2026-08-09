@@ -76,36 +76,81 @@ export type OptimisticHpDelta = {
   delta: number;
 };
 
+function removeOptimisticNumberChange(before: number, optimistic: number, updated: number): number;
+function removeOptimisticNumberChange(
+  before: number | null,
+  optimistic: number | null,
+  updated: number | null,
+): number | null;
+function removeOptimisticNumberChange(
+  before: number | null,
+  optimistic: number | null,
+  updated: number | null,
+): number | null {
+  if (before == null || optimistic == null || updated == null) {
+    return updated === optimistic ? before : updated;
+  }
+  return updated - (optimistic - before);
+}
+
 /**
  * Moves an optimistic HP ledger onto a newer encounter snapshot without
- * double-applying operations that the newer response may already contain.
- * Pending targets retain only the HP/lifecycle fields replay can change; all
- * turn-owned fields and unrelated combatants advance to the newer snapshot.
+ * double-applying operations that the newer response may already contain. The
+ * optimistic field changes are removed from the newer values rather than
+ * restoring the old fields wholesale, so concurrent server-side HP changes
+ * become part of the new base. All turn-owned fields and unrelated combatants
+ * advance to the newer snapshot.
  */
 export function rebaseOptimisticHpEncounter(
   base: EncounterWithCombatants,
   updated: EncounterWithCombatants,
   operations: Iterable<OptimisticHpDelta>,
+  ruleSystem?: string | RuleSystemAdapter | HpModel | null,
+  customMechanicsProfile?: CustomMechanicsProfile | null,
 ): EncounterWithCombatants {
-  const pendingCombatantIds = new Set([...operations].map(({ combatantId }) => combatantId));
+  const pendingOperations = [...operations];
+  const pendingCombatantIds = new Set(pendingOperations.map(({ combatantId }) => combatantId));
   if (pendingCombatantIds.size === 0) return updated;
   const baseCombatants = new Map(base.combatants.map((combatant) => [combatant.id, combatant]));
+  const optimisticCombatants = new Map(
+    replayOptimisticHpDeltas(base.combatants, pendingOperations, ruleSystem, customMechanicsProfile)
+      .map((combatant) => [combatant.id, combatant]),
+  );
   return {
     ...updated,
     combatants: updated.combatants.map((combatant) => {
       if (!pendingCombatantIds.has(combatant.id)) return combatant;
       const previous = baseCombatants.get(combatant.id);
-      if (!previous) return combatant;
-      return {
+      const optimistic = optimisticCombatants.get(combatant.id);
+      if (!previous || !optimistic) return combatant;
+      const rebased = {
         ...combatant,
-        hpCurrent: previous.hpCurrent,
-        hpTemp: previous.hpTemp,
-        spCurrent: previous.spCurrent,
-        rpCurrent: previous.rpCurrent,
+        hpCurrent: removeOptimisticNumberChange(previous.hpCurrent, optimistic.hpCurrent, combatant.hpCurrent),
+        hpTemp: removeOptimisticNumberChange(previous.hpTemp, optimistic.hpTemp, combatant.hpTemp),
+        spCurrent: removeOptimisticNumberChange(previous.spCurrent, optimistic.spCurrent, combatant.spCurrent),
+        rpCurrent: removeOptimisticNumberChange(previous.rpCurrent, optimistic.rpCurrent, combatant.rpCurrent),
         deathState: previous.deathState,
-        deathSaveSuccesses: previous.deathSaveSuccesses,
-        deathSaveFailures: previous.deathSaveFailures,
+        deathSaveSuccesses: removeOptimisticNumberChange(
+          previous.deathSaveSuccesses,
+          optimistic.deathSaveSuccesses,
+          combatant.deathSaveSuccesses,
+        ),
+        deathSaveFailures: removeOptimisticNumberChange(
+          previous.deathSaveFailures,
+          optimistic.deathSaveFailures,
+          combatant.deathSaveFailures,
+        ),
       };
+      const pendingForCombatant = pendingOperations.filter(({ combatantId }) => combatantId === combatant.id);
+      const replayedWithPreviousLifecycle = replayOptimisticHpDeltas(
+        [rebased],
+        pendingForCombatant,
+        ruleSystem,
+        customMechanicsProfile,
+      )[0];
+      return replayedWithPreviousLifecycle?.deathState === combatant.deathState
+        ? rebased
+        : { ...rebased, deathState: combatant.deathState };
     }),
   };
 }
