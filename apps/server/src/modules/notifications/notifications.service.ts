@@ -126,6 +126,35 @@ const DIGEST_BATCH_SIZE = 500;
 
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
+type HiddenStatusAudience = 'permanent_dm' | 'character_owner';
+
+/** Private persistence metadata; deliberately separate from public notification `data`. */
+interface HiddenStatusContext {
+  encounterId: number;
+  characterId: number;
+  audience: HiddenStatusAudience;
+}
+
+function parseHiddenStatusContext(raw: string | null | undefined): HiddenStatusContext | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      Number.isInteger((parsed as HiddenStatusContext).encounterId) &&
+      Number.isInteger((parsed as HiddenStatusContext).characterId) &&
+      ((parsed as HiddenStatusContext).audience === 'permanent_dm' || (parsed as HiddenStatusContext).audience === 'character_owner')
+    ) {
+      return parsed as HiddenStatusContext;
+    }
+  } catch {
+    // Malformed private context must fail closed at the next read/flush.
+  }
+  return null;
+}
+
 /** Default (never-configured) quiet hours: disabled. */
 function defaultQuietHours(): QuietHoursType {
   return QuietHours.parse({});
@@ -305,10 +334,20 @@ export class NotificationsService implements OnApplicationBootstrap {
     campaignId: number,
     actor: RequestUser | null,
     event: NotificationEvent,
-    authority: { kind: 'permanent_dm' } | { kind: 'character_owner'; characterId: number },
+    authority: { kind: 'permanent_dm'; characterId: number } | { kind: 'character_owner'; characterId: number },
+    encounterId: number,
   ): Promise<boolean> {
     const recipient = numericUserId(userId);
     if (recipient === null || (actor && recipient === numericUserId(actor.id))) return true;
+    const hiddenStatusContext: HiddenStatusContext = {
+      encounterId,
+      characterId: authority.characterId,
+      audience: authority.kind,
+    };
+    if (!Number.isInteger(hiddenStatusContext.characterId) || hiddenStatusContext.characterId <= 0 || !Number.isInteger(encounterId) || encounterId <= 0) {
+      this.logger.warn(`notifyUserIfHiddenEncounterRecipient refused malformed hidden-status context for user ${recipient} in campaign ${campaignId}`);
+      return false;
+    }
     try {
       return await this.dispatch([recipient], campaignId, event, actor?.id ?? null, actor?.id ?? null, (tx) => {
         if (authority.kind === 'permanent_dm') {
@@ -325,7 +364,7 @@ export class NotificationsService implements OnApplicationBootstrap {
             .where(and(eq(characters.id, authority.characterId), eq(characters.campaignId, campaignId), eq(characters.ownerUserId, String(recipient))))
             .get(),
         );
-      });
+      }, hiddenStatusContext);
     } catch (err) {
       this.logger.warn(`notifyUserIfHiddenEncounterRecipient failed for user ${recipient} in campaign ${campaignId}: ${String(err)}`);
       return false;
@@ -375,6 +414,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     actorUserId: string | null,
     blockActorUserId: string | null = actorUserId,
     writeGuard?: (tx: SyncDb) => boolean,
+    hiddenStatusContext?: HiddenStatusContext,
   ): Promise<boolean> {
     if (recipients.length === 0) return true;
     const category = notificationCategory(event.type);
@@ -423,7 +463,7 @@ export class NotificationsService implements OnApplicationBootstrap {
           guardPassed = false;
           return;
         }
-        this.insertRowsTx(tx, allowed, campaignId, event, actorUserId);
+        this.insertRowsTx(tx, allowed, campaignId, event, actorUserId, hiddenStatusContext);
       });
       return guardPassed;
     }
@@ -450,9 +490,9 @@ export class NotificationsService implements OnApplicationBootstrap {
           guardPassed = false;
           return;
         }
-        if (immediate.length > 0) this.insertRowsTx(tx, immediate, campaignId, event, actorUserId);
-        if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest', actorUserId);
-        if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours', actorUserId);
+        if (immediate.length > 0) this.insertRowsTx(tx, immediate, campaignId, event, actorUserId, hiddenStatusContext);
+        if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest', actorUserId, hiddenStatusContext);
+        if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours', actorUserId, hiddenStatusContext);
       });
       return guardPassed;
     }
@@ -504,6 +544,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     campaignId: number,
     event: NotificationEvent,
     actorUserId: string | null,
+    hiddenStatusContext?: HiddenStatusContext,
   ): void {
     if (recipients.length === 0) return;
     const ts = nowIso();
@@ -520,6 +561,7 @@ export class NotificationsService implements OnApplicationBootstrap {
           entityId: event.entityId ?? null,
           commentId: event.commentId ?? null,
           data: dataJson,
+          hiddenStatusContext: hiddenStatusContext ? JSON.stringify(hiddenStatusContext) : null,
           actorName: event.actorName ?? '',
           // Issue #597: persist WHO, not just their display name, so a block filed
           // later can filter bell items that already exist.
@@ -539,6 +581,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     event: NotificationEvent,
     reason: 'digest' | 'quiet_hours',
     actorUserId: string | null,
+    hiddenStatusContext?: HiddenStatusContext,
   ): void {
     if (recipients.length === 0) return;
     const ts = nowIso();
@@ -555,6 +598,7 @@ export class NotificationsService implements OnApplicationBootstrap {
           entityId: event.entityId ?? null,
           commentId: event.commentId ?? null,
           data: dataJson,
+          hiddenStatusContext: hiddenStatusContext ? JSON.stringify(hiddenStatusContext) : null,
           actorName: event.actorName ?? '',
           actorUserId: actorUserId ?? null,
           reason,
@@ -572,6 +616,63 @@ export class NotificationsService implements OnApplicationBootstrap {
     actorUserId: string | null = null,
   ): Promise<void> {
     this.enqueueDeferredTx(this.db, recipients, campaignId, event, reason, actorUserId);
+  }
+
+  /**
+   * Recheck the authority encoded with a hidden-status row at the exact durable
+   * boundary. A visible encounter is readable by any current campaign member;
+   * while hidden, only a permanent DM or the current affected-character owner
+   * remains entitled. Missing or malformed context fails closed.
+   */
+  private hiddenStatusAuthorizedTx(
+    tx: SyncDb,
+    userId: number,
+    campaignId: number,
+    rawContext: string | null | undefined,
+  ): boolean {
+    const context = parseHiddenStatusContext(rawContext);
+    if (!context) return false;
+    const member = tx
+      .select({ role: campaignMembers.role })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, userId)))
+      .get();
+    if (!member) return false;
+    const encounter = tx
+      .select({ hidden: encounters.hidden })
+      .from(encounters)
+      .where(and(eq(encounters.id, context.encounterId), eq(encounters.campaignId, campaignId)))
+      .get();
+    if (!encounter) return false;
+    if (!encounter.hidden) return true;
+    if (context.audience === 'permanent_dm') return member.role === 'dm';
+    return Boolean(
+      tx.select({ id: characters.id })
+        .from(characters)
+        .where(and(
+          eq(characters.id, context.characterId),
+          eq(characters.campaignId, campaignId),
+          eq(characters.ownerUserId, String(userId)),
+        ))
+        .get(),
+    );
+  }
+
+  /** Remove private-context rows whose recipient no longer has current access. */
+  private purgeUnauthorizedHiddenStatusNotifications(userId: number): void {
+    this.db.transaction((tx) => {
+      const guarded = tx
+        .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
+        .from(notifications)
+        .where(and(eq(notifications.userId, userId), isNotNull(notifications.hiddenStatusContext)))
+        .all();
+      const unauthorizedIds = guarded
+        .filter((row) => !this.hiddenStatusAuthorizedTx(tx, userId, row.campaignId, row.hiddenStatusContext))
+        .map((row) => row.id);
+      if (unauthorizedIds.length > 0) {
+        tx.delete(notifications).where(inArray(notifications.id, unauthorizedIds)).run();
+      }
+    });
   }
 
   /**
@@ -599,39 +700,60 @@ export class NotificationsService implements OnApplicationBootstrap {
 
         const deliverRows: Array<typeof notifications.$inferInsert> = [];
         const deliveredIds: number[] = [];
+        const removedIds: number[] = [];
 
         for (const [campaignId, rows] of byCampaign) {
           const recipients = [...new Set(rows.map((r) => r.userId))];
           const quietByUser = await this.loadQuietHours(recipients, campaignId);
           for (const row of rows) {
             const quiet = quietByUser.get(row.userId);
-            if (quiet && isWithinQuietHours(quiet, nowMs)) continue;
-            deliverRows.push({
-              userId: row.userId,
-              campaignId: row.campaignId,
-              type: row.type,
-              title: row.title,
-              body: row.body,
-              entityType: row.entityType,
-              entityId: row.entityId,
-              commentId: row.commentId,
-              data: row.data,
-              actorName: row.actorName,
-              actorUserId: row.actorUserId,
-              readAt: null,
-              createdAt: row.createdAt,
-            });
-            deliveredIds.push(row.id);
+            if (!quiet || !isWithinQuietHours(quiet, nowMs)) {
+              deliverRows.push({
+                userId: row.userId,
+                campaignId: row.campaignId,
+                type: row.type,
+                title: row.title,
+                body: row.body,
+                entityType: row.entityType,
+                entityId: row.entityId,
+                commentId: row.commentId,
+                data: row.data,
+                hiddenStatusContext: row.hiddenStatusContext,
+                actorName: row.actorName,
+                actorUserId: row.actorUserId,
+                readAt: null,
+                createdAt: row.createdAt,
+              });
+              deliveredIds.push(row.id);
+            }
           }
         }
 
-        if (deliveredIds.length === 0) break;
-
+        const authorizedDeliverRows: Array<typeof notifications.$inferInsert> = [];
+        const authorizedDeliveredIds: number[] = [];
         this.db.transaction((tx) => {
-          tx.insert(notifications).values(deliverRows).run();
-          tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, deliveredIds)).run();
+          for (let index = 0; index < deliverRows.length; index += 1) {
+            const row = deliverRows[index];
+            if (row.hiddenStatusContext && !this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext)) {
+              removedIds.push(deliveredIds[index]);
+              continue;
+            }
+            authorizedDeliverRows.push(row);
+            authorizedDeliveredIds.push(deliveredIds[index]);
+          }
+          const heldRows = queued.filter((row) => !deliveredIds.includes(row.id));
+          for (const row of heldRows) {
+            if (row.hiddenStatusContext && !this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext)) {
+              removedIds.push(row.id);
+            }
+          }
+          if (authorizedDeliverRows.length > 0) tx.insert(notifications).values(authorizedDeliverRows).run();
+          const consumedIds = [...authorizedDeliveredIds, ...removedIds];
+          if (consumedIds.length > 0) tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, consumedIds)).run();
         });
-        delivered += deliveredIds.length;
+
+        if (authorizedDeliveredIds.length === 0 && removedIds.length === 0) break;
+        delivered += authorizedDeliveredIds.length;
 
         if (queued.length < DIGEST_BATCH_SIZE) break;
       }
@@ -885,6 +1007,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     if (userId === null) {
       return { items: [], nextCursor: null, total: 0, hasMore: false };
     }
+    this.purgeUnauthorizedHiddenStatusNotifications(userId);
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
     const conditions = [
@@ -958,6 +1081,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   async unreadSummary(user: RequestUser): Promise<{ count: number; membershipChanged: boolean }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { count: 0, membershipChanged: false };
+    this.purgeUnauthorizedHiddenStatusNotifications(userId);
     const blocked = await blockedTargetsOf(this.db, user.id, null);
     const conditions: SQL[] = [
       eq(notifications.userId, userId),
@@ -984,6 +1108,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   /** Recipient-only; someone else's notification 404s (not 403) so ids don't leak. */
   async markRead(id: number, user: RequestUser): Promise<Notification> {
     const userId = numericUserId(user.id);
+    if (userId !== null) this.purgeUnauthorizedHiddenStatusNotifications(userId);
     const [joined] = await this.db
       .select({ notification: notifications })
       .from(notifications)
@@ -1005,6 +1130,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 
   async markUnread(id: number, user: RequestUser): Promise<Notification> {
     const userId = numericUserId(user.id);
+    if (userId !== null) this.purgeUnauthorizedHiddenStatusNotifications(userId);
     const [joined] = await this.db
       .select({ notification: notifications })
       .from(notifications)
@@ -1030,6 +1156,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   ): Promise<{ updated: number; updatedIds: number[] }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0, updatedIds: [] };
+    this.purgeUnauthorizedHiddenStatusNotifications(userId);
 
     if (!opts.all && !opts.campaignId && (!opts.ids || opts.ids.length === 0)) {
       return { updated: 0, updatedIds: [] };
@@ -1072,6 +1199,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   ): Promise<{ updated: number; updatedIds: number[] }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0, updatedIds: [] };
+    this.purgeUnauthorizedHiddenStatusNotifications(userId);
 
     if (!opts.all && !opts.campaignId && (!opts.ids || opts.ids.length === 0)) {
       return { updated: 0, updatedIds: [] };

@@ -1417,6 +1417,9 @@ CREATE TABLE IF NOT EXISTS notifications (
   entity_id INTEGER,
   comment_id INTEGER,
   data TEXT,
+  -- Issue #2112: private authorization context for hidden encounter status rows.
+  -- This never crosses the notification API boundary.
+  hidden_status_context TEXT,
   actor_name TEXT NOT NULL DEFAULT '',
   -- Issue #597: the actor's note-identity id, so a recipient's block can filter bell
   -- items that already exist. actor_name alone is not an identity.
@@ -1466,6 +1469,8 @@ CREATE TABLE IF NOT EXISTS notification_digest_queue (
   entity_id INTEGER,
   comment_id INTEGER,
   data TEXT,
+  -- Issue #2112: carried through deferral for hidden-status authorization checks.
+  hidden_status_context TEXT,
   actor_name TEXT NOT NULL DEFAULT '',
   -- Issue #597: carried through the deferral so a flushed row keeps its actor identity.
   actor_user_id TEXT,

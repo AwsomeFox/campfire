@@ -5105,6 +5105,23 @@ function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): v
   }
 }
 
+/**
+ * Issue #2112: hidden encounter status rows must carry private authority context
+ * so bell reads and digest delivery can fail closed after a DM demotion, removal,
+ * ownership transfer, or visibility change. Existing rows predate this contract
+ * and remain null; only rows written by the guarded hidden-status path opt in.
+ */
+function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Database): void {
+  for (const table of ['notifications', 'notification_digest_queue']) {
+    const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    if (!exists) continue;
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'hidden_status_context')) {
+      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN hidden_status_context TEXT`);
+    }
+  }
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -5471,6 +5488,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0178_rule_pack_relationships_1319', run: migrateRulePackRelationships1319 },
   // #1319 claimed 0178 on main before #1941 shipped, so controller delegation uses 0179.
   { name: '0179_combatants_controller_user_id_1941', run: migrateCombatantsTableForControllerUserId },
+  { name: '0180_hidden_status_notification_authorization_2112', run: migrateHiddenStatusNotificationAuthorization2112 },
 ];
 
 /**

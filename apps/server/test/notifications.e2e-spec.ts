@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { and, eq, sql } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaignMembers, encounters } from '../src/db/schema';
+import { campaignMembers, characters, encounters, notificationDigestQueue, notifications as notificationRows } from '../src/db/schema';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
@@ -968,6 +968,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(ownerDowned[0].body).toContain('Hidden Hero was downed');
     expect(ownerDowned[0].entityType).toBeNull();
     expect(ownerDowned[0].entityId).toBeNull();
+    expect(ownerDowned[0]).not.toHaveProperty('hiddenStatusContext');
     expect(coDmDowned).toEqual([]);
     // A guest/co-DM may inspect the hidden encounter while their grant is active,
     // but no durable status row may survive a later revoke, handback, or expiry.
@@ -1129,6 +1130,88 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(raceOwner[0].entityType).toBeNull();
     expect(raceOwner[0].entityId).toBeNull();
     expect(raceCoDm[0].entityId).toBe(raceEncounter.body.id);
+  });
+
+  it('removes persisted hidden-status rows when a recipient loses DM or owner authority, including before digest delivery (#2112)', async () => {
+    const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Hidden Status Read Guard' });
+    expect(campaign.status).toBe(201);
+    const guardedCampaignId = campaign.body.id as number;
+    for (const [userId, role] of [[playerId, 'player'], [coDmId, 'dm'], [spectatorId, 'player']] as const) {
+      expect((await dm.post(`/api/v1/campaigns/${guardedCampaignId}/members`).send({ userId, role })).status).toBe(201);
+    }
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const notifications = ctx.app.get(NotificationsService);
+    const waitForStoredRow = async (userId: number, body: string, deferred = false) => {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const rows = deferred
+          ? db.select().from(notificationDigestQueue).where(and(eq(notificationDigestQueue.userId, userId), eq(notificationDigestQueue.campaignId, guardedCampaignId))).all()
+          : db.select().from(notificationRows).where(and(eq(notificationRows.userId, userId), eq(notificationRows.campaignId, guardedCampaignId))).all();
+        if (rows.some((row) => row.body.includes(body))) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error(`Timed out waiting for ${deferred ? 'deferred' : 'immediate'} hidden-status row: ${body}`);
+    };
+    const createHiddenCombatant = async (name: string) => {
+      const character = await player
+        .post(`/api/v1/campaigns/${guardedCampaignId}/characters`)
+        .send({ name, hpCurrent: 10, hpMax: 10 });
+      expect(character.status).toBe(201);
+      const encounter = await dm
+        .post(`/api/v1/campaigns/${guardedCampaignId}/encounters`)
+        .send({ name: `${name} Encounter`, hidden: true });
+      expect(encounter.status).toBe(201);
+      const roster = await dm.get(`/api/v1/encounters/${encounter.body.id}`);
+      const combatant = roster.body.combatants.find(
+        (row: { characterId: number | null }) => row.characterId === character.body.id,
+      );
+      expect(combatant).toBeDefined();
+      return { character, encounter, combatant };
+    };
+
+    const demoted = await createHiddenCombatant('Demotion Read Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${demoted.encounter.body.id}/combatants/${demoted.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Demotion Read Hero was downed');
+    db.update(campaignMembers)
+      .set({ role: 'player' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    expect((await listFor(coDm)).some((row) => row.body.includes('Demotion Read Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Demotion Read Hero was downed'))).toBe(false);
+
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
+    const removed = await createHiddenCombatant('Removal Digest Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${removed.encounter.body.id}/combatants/${removed.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Removal Digest Hero was downed', true);
+    db.delete(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    await notifications.flushDigests();
+    expect((await listFor(coDm)).some((row) => row.body.includes('Removal Digest Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationDigestQueue).where(and(eq(notificationDigestQueue.userId, coDmId), eq(notificationDigestQueue.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Removal Digest Hero was downed'))).toBe(false);
+
+    const transferred = await createHiddenCombatant('Ownership Transfer Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${transferred.encounter.body.id}/combatants/${transferred.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(playerId, 'Ownership Transfer Hero was downed');
+    db.update(characters)
+      .set({ ownerUserId: String(spectatorId) })
+      .where(and(eq(characters.id, transferred.character.body.id), eq(characters.campaignId, guardedCampaignId)))
+      .run();
+    expect((await listFor(player)).some((row) => row.body.includes('Ownership Transfer Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, playerId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Ownership Transfer Hero was downed'))).toBe(false);
   });
 
   it('sharing a note with the party notifies the party (not the author)', async () => {

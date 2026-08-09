@@ -6164,7 +6164,8 @@ export class EncountersService {
         encounterRow.campaignId,
         user,
         recipientEvent,
-        isDm ? { kind: 'permanent_dm' } : { kind: 'character_owner', characterId },
+        isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
+        encounterRow.id,
       );
       // A recipient can legitimately hold both authorities. If their DM
       // membership changed after discovery, retry only their personal-status
@@ -6176,6 +6177,7 @@ export class EncountersService {
           user,
           { ...event, entityType: null, entityId: null },
           { kind: 'character_owner', characterId },
+          encounterRow.id,
         );
       }
     }

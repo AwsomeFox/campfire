@@ -1706,6 +1706,9 @@ export const notifications = sqliteTable('notifications', {
   commentId: integer('comment_id'), // optional comment focus inside the entity thread (#446)
   // Issue #820: optional JSON blob (ScheduleNotificationData for session_scheduled).
   data: text('data'),
+  // Issue #2112: private, server-only authority context for hidden encounter
+  // status rows. Never returned in the public Notification shape.
+  hiddenStatusContext: text('hidden_status_context'),
   actorName: text('actor_name').notNull().default(''),
   // Issue #597: WHO caused this row, as a note-identity id (String(users.id) or
   // `dev:<name>`). Until now only the display NAME was kept, so a recipient who later
@@ -1777,6 +1780,8 @@ export const notificationDigestQueue = sqliteTable('notification_digest_queue', 
   entityId: integer('entity_id'),
   commentId: integer('comment_id'),
   data: text('data'),
+  // Mirrors notifications.hidden_status_context while a row is deferred.
+  hiddenStatusContext: text('hidden_status_context'),
   actorName: text('actor_name').notNull().default(''),
   // Issue #597: carried through the deferral so a flushed digest row lands in
   // `notifications` with the same actor identity an immediate row would have had.
