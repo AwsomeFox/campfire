@@ -405,7 +405,7 @@ export class StorylinesService {
     role: Role,
     opts?: StorylineUpdateOptions,
   ): Promise<StoryArc> {
-    const { existing, row } = this.db.transaction((tx) => {
+    const row = this.db.transaction((tx) => {
       const existing = tx
         .select()
         .from(storyArcs)
@@ -439,16 +439,16 @@ export class StorylinesService {
           user: opts?.revisionUser ?? user,
         });
       }
-      return { existing, row };
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'storyline.arc.update',
+        entityType: 'story_arc',
+        entityId: id,
+        campaignId: existing.campaignId,
+      });
+      return row;
     }, { behavior: 'immediate' });
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'storyline.arc.update',
-      entityType: 'story_arc',
-      entityId: id,
-      campaignId: existing.campaignId,
-    });
     return arcToDomain(row);
   }
 
@@ -636,7 +636,7 @@ export class StorylinesService {
     if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, preflight.campaignId);
     if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, preflight.campaignId);
     if (input.encounterId != null) await this.assertEntityInCampaign('encounter', input.encounterId, preflight.campaignId);
-    const { existing, row } = this.db.transaction((tx) => {
+    const row = this.db.transaction((tx) => {
       const currentExisting = tx
         .select()
         .from(storyBeats)
@@ -670,16 +670,16 @@ export class StorylinesService {
           user: opts?.revisionUser ?? user,
         });
       }
-      return { existing: currentExisting, row };
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'storyline.beat.update',
+        entityType: 'story_beat',
+        entityId: id,
+        campaignId: currentExisting.campaignId,
+      });
+      return row;
     }, { behavior: 'immediate' });
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'storyline.beat.update',
-      entityType: 'story_beat',
-      entityId: id,
-      campaignId: existing.campaignId,
-    });
     return beatToDomain(row);
   }
 

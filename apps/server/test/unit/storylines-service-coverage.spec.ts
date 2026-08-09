@@ -15,6 +15,7 @@ describe('StorylinesService unit coverage tests', () => {
   let holder: DbHolder;
   let previousDataDir: string | undefined;
   let db: DrizzleDb;
+  let audit: AuditService;
   let revisions: RevisionsService;
   let storylinesService: StorylinesService;
 
@@ -32,7 +33,7 @@ describe('StorylinesService unit coverage tests', () => {
     process.env.DATA_DIR = dataDir;
     holder = new DbHolder();
     db = holder.proxy as DrizzleDb;
-    const audit = new AuditService(db);
+    audit = new AuditService(db);
     const moderation = new ModerationService(db, audit);
     revisions = new RevisionsService(db, moderation);
 
@@ -144,5 +145,48 @@ describe('StorylinesService unit coverage tests', () => {
     const unchanged = await storylinesService.getBeatWithBranchesOrThrow(beat.id);
     expect(unchanged.body).toBe('The original body.');
     expect(unchanged.updatedAt).toBe(beat.updatedAt);
+  });
+
+  it('rolls an arc update and revision back when its audit cannot be committed', async () => {
+    const arc = await storylinesService.createArc(
+      campaignId,
+      { title: 'Audited Arc', summary: 'The original summary.' },
+      adminActor,
+      'dm',
+    );
+    jest.spyOn(audit, 'logInTx').mockImplementationOnce(() => {
+      throw new Error('audit write failed');
+    });
+
+    await expect(
+      storylinesService.updateArc(arc.id, { summary: 'An unaudited update must not land.' }, adminActor, 'dm'),
+    ).rejects.toThrow('audit write failed');
+
+    const unchanged = await storylinesService.getArcWithBeatsOrThrow(arc.id);
+    expect(unchanged.summary).toBe('The original summary.');
+    expect(unchanged.updatedAt).toBe(arc.updatedAt);
+    expect(await revisions.listForEntity('story_arc', arc.id)).toEqual([]);
+  });
+
+  it('rolls a beat update and revision back when its audit cannot be committed', async () => {
+    const arc = await storylinesService.createArc(campaignId, { title: 'Audited Beat Arc' }, adminActor, 'dm');
+    const beat = await storylinesService.addBeat(
+      arc.id,
+      { title: 'Audited Beat', body: 'The original body.' },
+      adminActor,
+      'dm',
+    );
+    jest.spyOn(audit, 'logInTx').mockImplementationOnce(() => {
+      throw new Error('audit write failed');
+    });
+
+    await expect(
+      storylinesService.updateBeat(beat.id, { body: 'An unaudited update must not land.' }, adminActor, 'dm'),
+    ).rejects.toThrow('audit write failed');
+
+    const unchanged = await storylinesService.getBeatWithBranchesOrThrow(beat.id);
+    expect(unchanged.body).toBe('The original body.');
+    expect(unchanged.updatedAt).toBe(beat.updatedAt);
+    expect(await revisions.listForEntity('story_beat', beat.id)).toEqual([]);
   });
 });
