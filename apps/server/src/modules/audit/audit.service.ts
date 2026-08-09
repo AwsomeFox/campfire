@@ -184,7 +184,15 @@ function parsePayload(raw: string | null): AuditPayload | null {
   }
 }
 
-function toAuditEntry(row: typeof auditLog.$inferSelect, includePayload = true): AuditEntry {
+/**
+ * Defensive public projection for any consumer of persisted audit rows.
+ * Campaign-scoped consumers may receive the payload and detail only when their
+ * authorization boundary has already established that disclosure is allowed.
+ */
+export function toAuditEntry(
+  row: typeof auditLog.$inferSelect,
+  { includePayload = true, includeDetail = true }: { includePayload?: boolean; includeDetail?: boolean } = {},
+): AuditEntry {
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -193,7 +201,7 @@ function toAuditEntry(row: typeof auditLog.$inferSelect, includePayload = true):
     action: row.action,
     entityType: row.entityType,
     entityId: row.entityId,
-    detail: row.detail,
+    detail: includeDetail ? row.detail : '',
     payload: includePayload ? parsePayload(row.payloadJson) : null,
     requestId: row.requestId,
     createdAt: row.createdAt,
@@ -604,7 +612,9 @@ export class AuditService implements OnApplicationBootstrap {
     // intentionally crosses campaign boundaries for operational correlation, so
     // it must not disclose a campaign row's structured (possibly DM-secret)
     // payload to an operator who has no campaign role.
-    return rows.map((row) => toAuditEntry(row, row.campaignId == null));
+    return rows.map((row) =>
+      toAuditEntry(row, { includePayload: row.campaignId == null, includeDetail: row.campaignId == null }),
+    );
   }
 
   /**

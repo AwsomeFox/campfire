@@ -93,6 +93,11 @@ describe('ModerationService unit coverage tests', () => {
     const fetchedReport = await moderationService.getReport(campaignId, report.id, adminActor, 'dm');
     expect(fetchedReport.id).toBe(report.id);
 
+    const incidentExport = await moderationService.exportIncident(campaignId, report.id, adminActor, 'dm');
+    expect(incidentExport.timeline.length).toBeGreaterThan(0);
+    expect(incidentExport.timeline[0]).toMatchObject({ payload: null });
+    expect(incidentExport.timeline[0]).not.toHaveProperty('payloadJson');
+
     const reportsPage = await moderationService.listReports(campaignId, adminActor, 'dm');
     expect(reportsPage.items.length).toBeGreaterThan(0);
 

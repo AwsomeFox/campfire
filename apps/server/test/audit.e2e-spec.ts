@@ -80,6 +80,12 @@ describe('audit log (e2e)', () => {
       const exported = (exportRes.body.audit as Array<Record<string, unknown>>).find((row) => row.action === 'timeline.event.update');
       expect(exported?.payload).toMatchObject({ version: 1, kind: 'timeline_event' });
 
+      const correlated = await ctx.app.get(AuditService).searchByRequestId('audit-810-rest');
+      const correlationEntry = correlated.find((row) => row.action === 'timeline.event.update');
+      expect(correlationEntry).toMatchObject({ detail: '', payload: null });
+      expect(JSON.stringify(correlationEntry)).not.toContain('Second omen');
+      expect(JSON.stringify(correlationEntry)).not.toContain(secret);
+
       const denied = await request(server)
         .get(`/api/v1/campaigns/${campaignId}/audit`)
         .set({ 'x-dev-role': 'player', 'x-dev-user': 'audit-reader-810' });
