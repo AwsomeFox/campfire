@@ -167,7 +167,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   }, [transcript.lastSeq]);
 
   const fetchTranscript = useCallback(
-    async (after?: number) => {
+    async (ownerKey: string, after?: number) => {
       if (campaignId === undefined) return;
       let watermark = after;
       for (let page = 0; page < 20; page += 1) {
@@ -176,6 +176,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
             `${API}/campaigns/${campaignId}/ai-dm/transcript?limit=${AI_DM_TRANSCRIPT_LIST_MAX_LIMIT}` +
               (watermark ? `&after=${watermark}` : ''),
           );
+          // The Layout provider survives viewer and campaign changes. An old request must not
+          // fold into the newly-owned reducer, even when the response happens to win a race.
+          if (transcriptOwnerRef.current !== ownerKey) return;
           if (result.items.length > 0) {
             dispatchTranscript({ type: 'serverEvents', events: result.items });
           }
@@ -209,6 +212,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     seededRef.current = false;
     setTranscriptFetched(!enabled);
     pendingHydrate.mark();
+    transcriptOwnerRef.current = key;
     if (campaignId !== undefined && viewerId !== null) {
       dispatchTranscript({
         type: 'hydrate',
@@ -218,12 +222,13 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       });
       if (enabled) {
         dispatchTranscript({ type: 'authoritative' });
-        void fetchTranscript().finally(() => setTranscriptFetched(true));
+        void fetchTranscript(key).finally(() => {
+          if (transcriptOwnerRef.current === key) setTranscriptFetched(true);
+        });
       }
     } else {
       dispatchTranscript({ type: 'reset' });
     }
-    transcriptOwnerRef.current = key;
   }, [
     key,
     campaignId,
@@ -304,7 +309,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
         } else if (event.type === 'transcript.reset') {
           lastSeqRef.current = 0;
-          void fetchTranscript();
+          void fetchTranscript(key);
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -321,13 +326,13 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       },
       onReconnect: () => {
         if (campaignId !== undefined) {
-          void fetchTranscript(lastSeqRef.current || undefined);
+          void fetchTranscript(key, lastSeqRef.current || undefined);
           invalidateAiDm(queryClient, campaignId);
         }
       },
       onStreamRecovery: () => {
         if (campaignId !== undefined) {
-          void fetchTranscript(lastSeqRef.current || undefined);
+          void fetchTranscript(key, lastSeqRef.current || undefined);
           invalidateAiDm(queryClient, campaignId);
         }
       },

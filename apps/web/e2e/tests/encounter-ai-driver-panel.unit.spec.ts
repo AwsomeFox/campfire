@@ -41,7 +41,8 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/transcriptReducer/);
     expect(hook).toMatch(/type: 'authoritative'/);
     expect(hook).toMatch(/ai-dm\/transcript\?limit=/);
-    expect(hook).toMatch(/fetchTranscript\(lastSeqRef\.current \|\| undefined\)/);
+    expect(hook).toMatch(/transcriptOwnerRef\.current !== ownerKey/);
+    expect(hook).toMatch(/fetchTranscript\(key, lastSeqRef\.current \|\| undefined\)/);
   });
 });
 
