@@ -258,6 +258,7 @@ export function CharacterStatCard({
     const advHint = def.supportsAdvantage ? ROLL_HINT : '';
     return (
       <RollContextMenu
+        allowAdvantage={def.supportsAdvantage}
         allowCrit={false}
         className={cls}
         style={{ ...PILL, cursor: 'pointer', border: 0 }}
@@ -328,6 +329,7 @@ export function CharacterStatCard({
               if (!interactive || !def) return <StatChip key={k} label={label} value={value} />;
               return (
                 <RollContextMenu
+                  allowAdvantage={def.supportsAdvantage}
                   allowCrit={false}
                   key={k}
                   disabled={roller.rolling}

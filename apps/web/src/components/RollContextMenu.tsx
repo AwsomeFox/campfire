@@ -25,9 +25,18 @@ interface RollContextMenuProps extends React.ButtonHTMLAttributes<HTMLButtonElem
    * Those call sites pass false.
    */
   allowCrit?: boolean;
+  /**
+   * Whether the menu offers Advantage / Disadvantage. Default true.
+   *
+   * A catalog check carries `supportsAdvantage`, and a system that is not roll-two-keep
+   * (PF2e) sets it false — callers then collapse either mode to `normal`, so offering the
+   * commands meant an explicit selection silently produced a flat roll. Those call sites
+   * pass the definition's own capability.
+   */
+  allowAdvantage?: boolean;
 }
 
-export function RollContextMenu({ children, onRoll, allowCrit = true, className, disabled, onClick, onContextMenu, onPointerDown, onPointerUp, onPointerCancel, ...rest }: RollContextMenuProps) {
+export function RollContextMenu({ children, onRoll, allowCrit = true, allowAdvantage = true, className, disabled, onClick, onContextMenu, onPointerDown, onPointerUp, onPointerCancel, ...rest }: RollContextMenuProps) {
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const pressTimer = useRef<NodeJS.Timeout | null>(null);
 
@@ -132,12 +141,16 @@ export function RollContextMenu({ children, onRoll, allowCrit = true, className,
           <button type="button" role="menuitem" className="cf-menu-item" onClick={() => { onRoll('normal'); closeMenu(); }}>
             🎲 Normal
           </button>
-          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-success, #10b981)' }} onClick={() => { onRoll('advantage'); closeMenu(); }}>
-            ✅ Advantage
-          </button>
-          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => { onRoll('disadvantage'); closeMenu(); }}>
-            ❌ Disadvantage
-          </button>
+          {allowAdvantage && (
+            <>
+              <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-success, #10b981)' }} onClick={() => { onRoll('advantage'); closeMenu(); }}>
+                ✅ Advantage
+              </button>
+              <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => { onRoll('disadvantage'); closeMenu(); }}>
+                ❌ Disadvantage
+              </button>
+            </>
+          )}
           {allowCrit && (
             <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--cf-crit, #fbbf24)' }} onClick={() => { onRoll('crit'); closeMenu(); }}>
               💥 Critical Hit

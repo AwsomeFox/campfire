@@ -1477,6 +1477,7 @@ function AbilityScoresCard({
           return (
             <div key={key} className="cf-inset text-center py-2.5 px-1.5">
               <RollContextMenu
+                allowAdvantage={def.supportsAdvantage}
                 allowCrit={false}
                 className="w-full h-full block"
                 onRoll={(m) => {
@@ -1721,6 +1722,7 @@ function VitalsBlock({
         {initiative && canRoll ? (
           <div className={tile}>
             <RollContextMenu
+              allowAdvantage={initiative.supportsAdvantage}
               allowCrit={false}
               className="w-full h-full block"
               onRoll={(m) => {
@@ -1952,6 +1954,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
             <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
               {canEdit ? (
                 <RollContextMenu
+                  allowAdvantage={def.supportsAdvantage}
                   allowCrit={false}
                   className="w-full h-full block"
                   onRoll={(m, e) => {
@@ -2090,6 +2093,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
               )}
               {canEdit ? (
                 <RollContextMenu
+                  allowAdvantage={def.supportsAdvantage}
                   allowCrit={false}
                   className="flex-1 flex items-center gap-1.5 min-w-0"
                   onRoll={(m) => {
