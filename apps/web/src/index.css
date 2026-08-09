@@ -3154,6 +3154,17 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+/* ...and both caps come off when the escape hatch is up. They exist only because the
+   page cannot scroll; once it can, capping these against a budget that is by definition
+   exhausted (the cap is zero there — that is what tripped the hatch) collapses the safety
+   bar and the check prompts to their own padding and clips the buttons inside them.
+   Deliberately placed AFTER the two rules above: same specificity, so source order is the
+   only thing that decides which wins. */
+html.cf-vtt-chrome-overflow [data-testid='safety-bar'],
+html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
+  max-height: none;
+  overflow: visible;
+}
 
 .cf-vtt {
   /* The chrome tone sits between the page ground and the card surface — the

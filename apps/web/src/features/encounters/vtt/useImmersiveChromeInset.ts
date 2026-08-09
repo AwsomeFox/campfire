@@ -64,13 +64,27 @@ const CHROME_BUDGET_RATIO = 0.5;
  */
 const CHROME_SELECTORS = ['[data-testid="safety-bar"]', '[data-testid="check-request-prompts"]'];
 
+/**
+ * Document-relative, not viewport-relative.
+ *
+ * While the escape hatch is up the page scrolls, and a viewer who scrolls down to the
+ * cockpit would otherwise make this chrome measure as shifted upward — or off-screen
+ * entirely, i.e. negative — so the next resize or mutation would conclude the chrome had
+ * shrunk, drop the hatch, and re-lock the page at a nonzero offset with that chrome
+ * stranded above an opaque fixed surface. While the hatch is DOWN the page is locked at
+ * the top, so `scrollY` is 0 and this is identical to the viewport-relative reading.
+ */
+function documentTopPx(rect: DOMRect): number {
+  return rect.top + window.scrollY;
+}
+
 function visibleBottomPx(element: Element): number {
   if (!(element instanceof HTMLElement)) return 0;
   const style = getComputedStyle(element);
   if (style.display === 'none' || style.visibility === 'hidden') return 0;
   const rect = element.getBoundingClientRect();
   if (rect.height === 0) return 0;
-  return rect.bottom;
+  return rect.bottom + window.scrollY;
 }
 
 /**
@@ -87,7 +101,7 @@ export function measureImmersiveChromeInsetPx(): number {
   // can sit in indefinitely — and the cockpit then started at the viewport top and covered
   // that chrome with the page scroll-locked.
   const main = document.getElementById(MAIN_CONTENT_ID);
-  let bottom = main instanceof HTMLElement ? Math.max(0, main.getBoundingClientRect().top) : 0;
+  let bottom = main instanceof HTMLElement ? Math.max(0, documentTopPx(main.getBoundingClientRect())) : 0;
   for (const selector of CHROME_SELECTORS) {
     const element = document.querySelector(selector);
     if (element) bottom = Math.max(bottom, visibleBottomPx(element));
@@ -104,13 +118,13 @@ export function measureImmersiveChromeCapPx(): number {
   const main = document.getElementById(MAIN_CONTENT_ID);
   // Same anchor as the inset: `<main>`'s top is what Layout has already used up, whether
   // or not either optional chrome element happens to be mounted right now.
-  let top = main instanceof HTMLElement ? main.getBoundingClientRect().top : Number.POSITIVE_INFINITY;
+  let top = main instanceof HTMLElement ? documentTopPx(main.getBoundingClientRect()) : Number.POSITIVE_INFINITY;
   for (const selector of CHROME_SELECTORS) {
     const element = document.querySelector(selector);
     if (!(element instanceof HTMLElement)) continue;
     const style = getComputedStyle(element);
     if (style.display === 'none' || style.visibility === 'hidden') continue;
-    top = Math.min(top, element.getBoundingClientRect().top);
+    top = Math.min(top, documentTopPx(element.getBoundingClientRect()));
   }
   const above = Number.isFinite(top) ? Math.max(0, top) : 0;
   const budget = Math.max(window.innerHeight * CHROME_BUDGET_RATIO, window.innerHeight - MIN_COCKPIT_HEIGHT_PX);

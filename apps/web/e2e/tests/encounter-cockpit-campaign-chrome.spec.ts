@@ -241,6 +241,30 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
       expect(state!.clearance).toBeGreaterThanOrEqual(0);
       // ...and the surface itself is still worth showing.
       expect(state!.height).toBeGreaterThanOrEqual(300);
+
+      // The scroll caps come off with the lock. They exist only because the page cannot
+      // scroll, and the cap they read is zero here by definition — that is what tripped
+      // the hatch — so leaving them on collapses the safety bar to its own padding.
+      const bar = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="safety-bar"]') as HTMLElement | null;
+        if (!el) return null;
+        return { height: Math.round(el.getBoundingClientRect().height), maxHeight: getComputedStyle(el).maxHeight };
+      });
+      expect(bar, 'the safety bar must be present').not.toBeNull();
+      expect(bar!.maxHeight).toBe('none');
+      expect(bar!.height, 'the safety bar keeps its content, not just its padding').toBeGreaterThan(24);
+
+      // The hatch must survive a re-measure. (The related hazard — a viewer scrolling down
+      // to the cockpit making the chrome measure as shrunk, dropping the hatch and
+      // re-locking the page under them — is handled by measuring document-relative in the
+      // hook. I could not stage it here: `window.scrollTo` does not take in this state,
+      // so this asserts only that a resize does not spuriously drop the hatch.)
+      await page.setViewportSize({ width: 301, height: 280 });
+      await expect
+        .poll(async () =>
+          page.evaluate(() => document.documentElement.classList.contains('cf-vtt-chrome-overflow')),
+        )
+        .toBe(true);
     } finally {
       await fixture.dm
         .patch(`/api/v1/campaigns/${fixture.campaignId}`, { data: { status: 'active' } })
