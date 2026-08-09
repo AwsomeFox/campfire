@@ -4579,6 +4579,11 @@ export default function RunSessionPage() {
                   safetyHoldActive={safetyHoldActive}
                 />
               )}
+          </VttPanelSection>
+          <VttPanelSection id="party" activeTabId={panelTab}>
+              {/* The outcome belongs with the roster it describes — and this is the tab an
+                  ended encounter opens on, whereas the Turn tab has no content once combat
+                  is over, so a summary parked there was effectively hidden. */}
               {encounter.status === 'ended' && (() => {
                 const visibleCombatants = isDm
                   ? encounter.combatants
@@ -4621,8 +4626,6 @@ export default function RunSessionPage() {
                   </Card>
                 );
               })()}
-          </VttPanelSection>
-          <VttPanelSection id="party" activeTabId={panelTab}>
               <Card density="compact" elev="sm" style={{ padding: '6px 0', gap: 0 }}>
                 {sheetsStatusLabel && (
                   <p

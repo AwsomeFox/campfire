@@ -307,3 +307,35 @@ test.describe('encounter cockpit across navigations', () => {
     }
   });
 });
+
+test.describe('encounter cockpit tablist keyboard', () => {
+  test('arrow keys follow the reading direction, both ways', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      const turn = page.getByTestId('encounter-vtt-tab-turn');
+      const party = page.getByTestId('encounter-vtt-tab-party');
+      await expect(party).toHaveAttribute('aria-selected', 'true');
+
+      // LTR: ArrowLeft from Party (index 1) reaches Turn (index 0).
+      await party.focus();
+      await page.keyboard.press('ArrowLeft');
+      await expect(turn).toHaveAttribute('aria-selected', 'true');
+      await page.keyboard.press('ArrowRight');
+      await expect(party).toHaveAttribute('aria-selected', 'true');
+
+      // RTL: the tabs paint right-to-left, so the SAME visual movement needs the opposite
+      // key. A fixed +1 for ArrowRight would walk focus visually leftwards in Arabic.
+      await page.evaluate(() => document.documentElement.setAttribute('dir', 'rtl'));
+      await party.focus();
+      await page.keyboard.press('ArrowRight');
+      await expect(turn).toHaveAttribute('aria-selected', 'true');
+      await page.keyboard.press('ArrowLeft');
+      await expect(party).toHaveAttribute('aria-selected', 'true');
+    } finally {
+      await page.evaluate(() => document.documentElement.removeAttribute('dir')).catch(() => undefined);
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+});

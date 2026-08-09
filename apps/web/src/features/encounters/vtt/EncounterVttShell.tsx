@@ -280,7 +280,12 @@ export function EncounterVttShell({
                     if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
                     event.preventDefault();
                     const index = tabs.findIndex((candidate) => candidate.id === activeTabId);
-                    const next = event.key === 'ArrowRight' ? index + 1 : index - 1;
+                    // Arrow keys are DIRECTIONAL, not positional: this tablist is a flex row,
+                    // so in an RTL locale (the app ships Arabic) the tabs paint right-to-left
+                    // and a fixed `+1` for ArrowRight would walk focus visually leftwards.
+                    const rtl = getComputedStyle(event.currentTarget).direction === 'rtl';
+                    const forward = event.key === (rtl ? 'ArrowLeft' : 'ArrowRight');
+                    const next = forward ? index + 1 : index - 1;
                     const target = tabs[(next + tabs.length) % tabs.length];
                     if (target) {
                       onSelectTab(target.id);
