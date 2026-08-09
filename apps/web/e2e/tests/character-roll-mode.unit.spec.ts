@@ -6,6 +6,7 @@ import {
   OSR_VARIANT_ADAPTERS,
   OpenLegendAdapter,
   StarforgedAdapter,
+  listRuleSystemAdapters,
   checkCatalogForAdapter,
   hasInitiativeRollForAdapter,
   hasNeutralD20ChecksForAdapter,
@@ -231,5 +232,30 @@ test.describe('neutral initiative declares the score it reads', () => {
 
   test('5e already published its own — unchanged', () => {
     expect(initiativeOf(Dnd5eAdapter)?.ability).toBe('DEX');
+  });
+
+  /**
+   * Registry-wide, because declaring this adapter-by-adapter is exactly how it drifted:
+   * the first pass covered 13th Age, Open Legend and the OSR variants and missed Starfinder
+   * AND Pathfinder 1e, both DEX-derived. Probing `initiativeModifier` for a reaction to a
+   * score is what the declaration is supposed to mirror, so assert they agree for EVERY
+   * neutral-catalog adapter rather than listing the ones we remembered.
+   */
+  test('every neutral-catalog adapter declares an initiative ability iff its modifier reads one', () => {
+    const probes = { DEX: 18, AGILITY: 8, AGI: 8, WIS: 18, CHA: 18, INT: 18, STR: 18 };
+    const mismatches: string[] = [];
+    for (const adapter of listRuleSystemAdapters()) {
+      // Adapters with their own catalog publish the ability directly and ignore the field.
+      if (typeof adapter.buildCheckCatalog === 'function') continue;
+      const baseline = adapter.initiativeModifier({}, 'score', 3);
+      const readsAnAbility = Object.entries(probes).some(
+        ([key, value]) => adapter.initiativeModifier({ [key]: value }, 'score', 3) !== baseline,
+      );
+      const declares = adapter.initiativeAbility != null;
+      if (readsAnAbility !== declares) {
+        mismatches.push(`${adapter.id}: reads=${readsAnAbility} declares=${adapter.initiativeAbility ?? 'none'}`);
+      }
+    }
+    expect(mismatches).toEqual([]);
   });
 });

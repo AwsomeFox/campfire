@@ -92,8 +92,13 @@ export function CharacterInventorySection({
         // Creation was the one mutation still relying entirely on the refetch: the POST
         // response was discarded, so a successful add with a failed GET left the new item
         // missing from both this list and the sheet's pack.
+        //
+        // REPLACE on a matching id rather than skipping: the compendium picker's
+        // "Increment quantity" resolution returns the EXISTING row updated
+        // (`acquireFromCompendium`), so an id already in the list means a changed item, not
+        // a duplicate to ignore — keeping the old object would show a stale qty and notes.
         const made = change.created;
-        setItems((prev) => (prev.some((i) => i.id === made.id) ? prev : [...prev, made]));
+        setItems((prev) => (prev.some((i) => i.id === made.id) ? prev.map((i) => (i.id === made.id ? made : i)) : [...prev, made]));
       } else if (change && 'deletedId' in change) {
         setItems((prev) => prev.filter((i) => i.id !== change.deletedId));
       }

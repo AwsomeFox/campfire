@@ -16,6 +16,40 @@ import { seed, stateFor } from './seed';
 test.describe('character sheet play surface', () => {
   test.use({ storageState: stateFor('dm') });
 
+  /**
+   * A campaign of this file's own, purged at the end.
+   *
+   * Everything these specs create used to land in the shared seeded campaign, and twice
+   * broke `entity-deep-links.spec.ts` in CI from a different shard: first by trashing
+   * campaigns (whose "deleted" notices pushed a seeded recap past the bell's newest-30
+   * window), then again on a seeded search result. Per-item cleanup kept missing a path —
+   * soft-deleted characters keep their pack, trashing notifies, and so on — so the file now
+   * owns its data outright and leaves the seed untouched.
+   *
+   * The few specs that deliberately exercise the SEEDED character still use `seed()`; they
+   * only read it, or restore what they change.
+   */
+  let ownCampaignId = 0;
+
+  test.beforeAll(async ({ baseURL }) => {
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const res = await ctx.post('/api/v1/campaigns', { data: { name: 'Play surface fixtures' } });
+    expect(res.ok()).toBeTruthy();
+    ownCampaignId = (await res.json()).id as number;
+    await ctx.dispose();
+  });
+
+  test.afterAll(async ({ baseURL }) => {
+    if (!ownCampaignId) return;
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    // Trash then PURGE: a trashed campaign keeps its rows and notifies its members.
+    await ctx.delete(`/api/v1/campaigns/${ownCampaignId}`);
+    await ctx.delete(`/api/v1/campaigns/${ownCampaignId}/purge`);
+    await ctx.dispose();
+  });
+
   test('the vitals rail stays put across a tab switch', async ({ page }) => {
     const { campaignId, navigation } = seed();
     await page.goto(`/c/${campaignId}/characters/${navigation.characterId}`);
@@ -35,7 +69,7 @@ test.describe('character sheet play surface', () => {
   });
 
   test('an ability score rolls a catalog check server-side', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     // Needs real scores: an ability the sheet never had is deliberately not rollable
@@ -101,7 +135,7 @@ test.describe('character sheet play surface', () => {
    * invisible outside combat — the gap the template's 🎒 chips close.
    */
   test('an equipped item\'s action appears in Actions, and is locked while stowed', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
 
@@ -358,7 +392,7 @@ test.describe('character sheet play surface', () => {
    * sheet and let the player roll a check for a score they never set.
    */
   test('an ability with no score set is shown as unknown, not rolled as a 10', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     // STR set, DEX never filled in — a partially completed sheet. DEX is also what 5e
@@ -396,7 +430,7 @@ test.describe('character sheet play surface', () => {
    * the expression hid the value entirely, where a sheet action keeps it as plain text.
    */
   test('a gear action with flat damage still shows the number', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
@@ -436,7 +470,7 @@ test.describe('character sheet play surface', () => {
    * no stylesheet able to bring them back.
    */
   test('printing carries action details that were never opened on screen', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
@@ -489,7 +523,7 @@ test.describe('character sheet play surface', () => {
    * to find the context menu. The chooser must appear exactly when a rollable chip does.
    */
   test('a gear-only attacker still gets the roll-mode chooser, and it applies', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     // No sheet actions at all — every attack this character has comes from the item.
@@ -636,7 +670,7 @@ test.describe('character sheet play surface', () => {
    * live fight. The sheet reports the state; the encounter owns the lifecycle.
    */
   test('death saves are reported on the sheet, never edited there', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
@@ -667,7 +701,7 @@ test.describe('character sheet play surface', () => {
    * GET failed left the new item missing from both the inventory list and the Play pack.
    */
   test('an added item reaches Play even when the inventory refetch fails', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
@@ -715,7 +749,7 @@ test.describe('character sheet play surface', () => {
    * offered its action as rollable.
    */
   test('an unequip still reaches Play when the inventory refetch fails', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
@@ -773,7 +807,7 @@ test.describe('character sheet play surface', () => {
    * incumbent is equipped — and offers both slot-conflicting actions at once.
    */
   test('a slot swap unequips the incumbent in Play even when the refetch fails', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
     const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
@@ -859,7 +893,7 @@ test.describe('character sheet play surface', () => {
    * could otherwise see, and roll, an item they do not carry.
    */
   test('navigating to another character does not carry the first one\'s gear over', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
 
@@ -906,7 +940,7 @@ test.describe('character sheet play surface', () => {
    * rollable in Play until a full page reload. The two views must move together.
    */
   test('unequipping in Build locks the gear action in Play without a reload', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
+    const campaignId = ownCampaignId;
     const ctx = await request.newContext({ baseURL: baseURL! });
     await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
 
