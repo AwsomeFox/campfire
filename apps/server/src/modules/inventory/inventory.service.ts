@@ -572,8 +572,16 @@ export class InventoryService {
   }
 
   async refreshCompendium(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
-    const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
+    const existing = await this.getRowOrThrow(id);
+    const authorizedOwner = await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
     if (!existing.ruleEntryId) throw new BadRequestException('This item is detached from the compendium');
+    // The wielder's `ownerUserId` as it stood when this request was authorized — but only when
+    // it was what authorized the request (issue #2097 review: chatgpt-codex-connector P1). A DM
+    // may write any item in the campaign, so reassigning the character underneath them changes
+    // nothing about their authority and must not 409 them. For a PLAYER it is the whole basis
+    // of the check: reassign the character and the former owner is no longer allowed to touch
+    // the snapshot that controls the new owner's derived action.
+    const authorizedOwnerUserId = role === 'dm' ? undefined : (authorizedOwner?.ownerUserId ?? null);
     // Read the source and write the snapshot in ONE synchronous better-sqlite3 transaction
     // (issue #2097 review: chatgpt-codex-connector P2). Reading the entry first and updating
     // afterwards leaves a window in which `RulesService.updatePack()` rewrites that entry, so
@@ -592,6 +600,16 @@ export class InventoryService {
       if (!pack) throw new NotFoundException('The linked source pack is unavailable');
       const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
       if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
+      // Re-check the WIELDER's owner inside the transaction (chatgpt-codex-connector P1). The
+      // predicate below fences the item's owner fields, but a DM reassigning the CHARACTER to
+      // another player leaves those untouched — `ownerType` and `characterId` are the same row
+      // values — while moving the authority this request was granted under.
+      if (authorizedOwnerUserId !== undefined && existing.characterId != null) {
+        const wielder = tx.select({ ownerUserId: characters.ownerUserId }).from(characters).where(eq(characters.id, existing.characterId)).get();
+        if ((wielder?.ownerUserId ?? null) !== authorizedOwnerUserId) {
+          throw new ForbiddenException('Only dm or the owning player may manage this character\'s items');
+        }
+      }
       // A derived action is computed from whatever snapshot the row holds at READ time (see
       // `resolveEquippedActions`), so accepting a revision is now only this snapshot write —
       // there is nothing cached to regenerate or authorize a second time.
@@ -614,11 +632,17 @@ export class InventoryService {
             eq(inventoryItems.id, id),
             eq(inventoryItems.ownerType, existing.ownerType),
             existing.characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, existing.characterId),
+            // ...and on the SOURCE LINK this refresh resolved (chatgpt-codex-connector P2). A
+            // concurrent `setCompendiumState('detached')` nulls `ruleEntryId`; without this the
+            // write would relink the row as `linked` while leaving that id null, so the item
+            // reported a live link whose next refresh fails as detached. Detaching is a
+            // deliberate act — losing the race means refetching, not being silently relinked.
+            eq(inventoryItems.ruleEntryId, existing.ruleEntryId!),
           ),
         )
         .returning()
         .all();
-      if (!row) throw new ConflictException('This item changed owner while the refresh was in flight; refetch and try again');
+      if (!row) throw new ConflictException('This item changed owner or source link while the refresh was in flight; refetch and try again');
       return row;
     });
 

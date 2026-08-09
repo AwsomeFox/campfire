@@ -1460,6 +1460,11 @@ export class RulesService implements OnModuleInit {
       const existing = tx.select().from(ruleEntries).where(eq(ruleEntries.campaignId, campaignId)).all();
       const bySlug = new Map(existing.map((row) => [row.slug, row])); const used = new Set(existing.map((row) => row.slug));
       const rows: typeof ruleEntries.$inferSelect[] = []; let skipped = 0; let replaced = 0;
+      // Issue #2097 review (chatgpt-codex-connector P2): a `replace` rewrites an existing
+      // entry's `dataJson` in place, so a no-snapshot equipped item derives a different action
+      // on its next read — the same change an ordinary homebrew edit makes, and it needs the
+      // same announcement. Collected here, announced after the transaction commits.
+      const replacedEntryIds: number[] = [];
       for (const entry of planned) {
         const conflict = bySlug.get(entry.slug);
         if (conflict && input.strategy === 'skip') { skipped++; continue; }
@@ -1467,14 +1472,15 @@ export class RulesService implements OnModuleInit {
           const expected = input.expectedUpdatedAt?.[entry.slug] ?? conflict.updatedAt;
           const row = tx.update(ruleEntries).set({ ...entry, updatedAt: now }).where(and(eq(ruleEntries.id, conflict.id), eq(ruleEntries.campaignId, campaignId), eq(ruleEntries.updatedAt, expected))).returning().get();
           if (!row) throw new ConflictException(`Homebrew entry ${entry.slug} has changed; reload import preview`);
-          tx.insert(ruleEntryRevisions).values({ ruleEntryId: row.id, campaignId, actor: String(user.id), beforeJson: JSON.stringify(this.homebrewPayload(conflict)), afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); rows.push(row); replaced++; continue;
+          tx.insert(ruleEntryRevisions).values({ ruleEntryId: row.id, campaignId, actor: String(user.id), beforeJson: JSON.stringify(this.homebrewPayload(conflict)), afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); rows.push(row); replacedEntryIds.push(row.id); replaced++; continue;
         }
         let slug = entry.slug; if (conflict) { slug = `${slug}-import`; let n = 2; while (used.has(slug)) slug = `${entry.slug}-import-${n++}`; }
         const row = tx.insert(ruleEntries).values({ packId, campaignId, ...entry, slug, source: '', provenance: 'campaign_homebrew_import', archivedAt: null, createdAt: now, updatedAt: now }).returning().get();
         tx.insert(ruleEntryRevisions).values({ ruleEntryId: row.id, campaignId, actor: String(user.id), beforeJson: '{}', afterJson: JSON.stringify(this.homebrewPayload(row)), createdAt: now }).run(); rows.push(row); used.add(slug); bySlug.set(slug, row);
       }
-      return { rows, skipped, replaced };
+      return { rows, skipped, replaced, replacedEntryIds };
     });
+    this.announceEntryChange(result.replacedEntryIds, String(user.id));
     const entries = result.rows.map(entryToDomain);
     await this.audit.log({ campaignId, actor: auditActor(user), actorRole: auditActorRole(user), action: 'homebrew.import', entityType: 'rule_entry', detail: `${entries.length} entries (${result.replaced} replaced, ${result.skipped} skipped)` });
     return { entries, created: entries.length - result.replaced, replaced: result.replaced, skipped: result.skipped };
@@ -2415,9 +2421,14 @@ export class RulesService implements OnModuleInit {
         return {
           pack: row,
           before,
-          // The entries this sync REWROTE. A no-snapshot equipped item derives from the live
-          // row, so its granted action changes with them — see `announceEntryChange`.
-          changedEntryIds: toChange.map(({ row: existing }) => existing.id),
+          // The entries this sync REWROTE or REMOVED. A no-snapshot equipped item derives
+          // from the live row, so its granted action changes with a rewrite and DISAPPEARS
+          // with a deletion — `inventory_items.rule_entry_id` has no cascade, so the item
+          // survives pointing at an id that is gone and simply stops granting anything.
+          // Both need announcing; see `announceEntryChange`, which resolves ids against
+          // `inventory_items` (not `rule_entries`) and so still finds the holders of a
+          // deleted id after the commit.
+          changedEntryIds: [...toChange.map(({ row: existing }) => existing.id), ...toRemove.map((row) => row.id)],
           preview: {
             added: toAdd.length,
             changed: toChange.length,

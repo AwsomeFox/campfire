@@ -3,9 +3,10 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns, inventoryItems, ruleEntries } from '../src/db/schema';
+import { campaigns, characters, inventoryItems, ruleEntries } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { InventoryService } from '../src/modules/inventory/inventory.service';
+import { charactersDerivingFromEntries } from '../src/modules/inventory/derived-action-invalidation';
 
 const dm = { 'x-dev-user': 'dm', 'x-dev-role': 'dm' };
 const player = { 'x-dev-user': 'player', 'x-dev-role': 'player' };
@@ -661,6 +662,87 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(after.body.equippedAction.damage).toContain('1d6+3');
   });
 
+  it('a homebrew IMPORT that replaces an entry announces it like an edit does', async () => {
+    const server = ctx.app.getHttpServer();
+    // Review (chatgpt-codex-connector P2): `applyHomebrewImport` with strategy `replace`
+    // rewrites an existing entry's `dataJson` in place — the same change an ordinary homebrew
+    // edit makes, reached through a different endpoint that announced nothing.
+    const entry = {
+      slug: 'e2e-imported-blade',
+      name: 'Imported Blade',
+      type: 'item',
+      summary: 'A homebrew weapon replaced by an import.',
+      data: { itemKind: 'weapon', damageDice: '1d6', damageType: 'Slashing', properties: [] },
+    };
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/homebrew`).set(dm).send(entry);
+    expect([200, 201]).toContain(created.status);
+
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: created.body.id, ownerType: 'character', characterId, duplicateMode: 'separate' });
+    const itemId = acquired.body.id as number;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'import-tick-slot' });
+
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string; characterId?: number }> = [];
+    const spy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string; characterId?: number });
+    });
+    try {
+      const imported = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/homebrew/import/apply`)
+        .set(dm)
+        .send({
+          strategy: 'replace',
+          entries: [{ ...entry, data: { itemKind: 'weapon', damageDice: '2d10', damageType: 'Slashing', properties: [] } }],
+        });
+      expect([200, 201]).toContain(imported.status);
+      expect(emitted.some((e) => e.type === 'character.updated' && e.characterId === characterId)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(after.body.equippedAction.damage).toContain('2d10+3');
+  });
+
+  it('a DELETED entry still resolves its holders, which is what lets a removal announce', async () => {
+    const server = ctx.app.getHttpServer();
+    // Review (chatgpt-codex-connector P2): a full-manifest sync DELETES entries the manifest
+    // dropped, and `inventory_items.rule_entry_id` has no cascade — the item survives pointing
+    // at an id that is gone and simply stops granting anything. The announcement resolves ids
+    // against `inventory_items`, NOT `rule_entries`, which is the non-obvious property that
+    // lets it still find the affected characters once the entries are already deleted.
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+      .set(dm)
+      .send({
+        slug: 'e2e-doomed-entry',
+        name: 'Doomed Entry',
+        type: 'item',
+        summary: 'A homebrew weapon whose entry is removed.',
+        data: { itemKind: 'weapon', damageDice: '1d6', damageType: 'Slashing', properties: [] },
+      });
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: created.body.id, ownerType: 'character', characterId, duplicateMode: 'separate' });
+    const itemId = acquired.body.id as number;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'removed-entry-slot' });
+
+    db.delete(ruleEntries).where(eq(ruleEntries.id, created.body.id)).run();
+    expect(charactersDerivingFromEntries(db, [created.body.id])).toContainEqual({ campaignId, characterId });
+
+    // ...and the item really did stop granting anything, which is why the tick is owed.
+    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(after.body.equippedAction).toBeNull();
+  });
+
   // ---- the authored half: what a human writes is stored, validated, and trusted ----
 
   it('editing the numbers rewrites the spec the resolver actually rolls', async () => {
@@ -1012,6 +1094,107 @@ describe('derived equipped-item actions (issue #2097)', () => {
       const resent = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Longsword', notes: 'a note' });
       expect(resent.status).toBe(200);
       expect(emitted.some((e) => e.type === 'character.updated')).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a player's refresh is rejected when the CHARACTER is reassigned mid-flight", async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 'player', role: 'player' });
+    const owned = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Reassigned PC', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player' });
+    const itemId = await acquireLongsword(owned.body.id);
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'reassign-slot' });
+
+    // Review (chatgpt-codex-connector P1): the item-owner fence does not cover this. Handing
+    // the CHARACTER to another player leaves `ownerType` and `characterId` untouched, so the
+    // predicate still matches — while the authority the request was granted under is gone.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const service = ctx.app.get(InventoryService) as unknown as {
+      assertCanWriteOwner: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = service.assertCanWriteOwner.bind(service);
+    const spy = jest.spyOn(service, 'assertCanWriteOwner').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args);
+      db.update(characters).set({ ownerUserId: 'dev:someone-else' }).where(eq(characters.id, owned.body.id)).run();
+      return result;
+    });
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    const before = db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s;
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(player);
+      expect(refreshed.status).toBe(403);
+      const after = db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s;
+      expect(after).toBe(before);
+    } finally {
+      spy.mockRestore();
+      restoreLongswordEntry();
+    }
+  });
+
+  it("a DM's refresh is NOT rejected by a reassignment — their authority never depended on it", async () => {
+    const server = ctx.app.getHttpServer();
+    const owned = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'DM Reassign PC', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player' });
+    const itemId = await acquireLongsword(owned.body.id);
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'dm-reassign-slot' });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const service = ctx.app.get(InventoryService) as unknown as {
+      assertCanWriteOwner: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = service.assertCanWriteOwner.bind(service);
+    const spy = jest.spyOn(service, 'assertCanWriteOwner').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args);
+      db.update(characters).set({ ownerUserId: 'dev:another-player' }).where(eq(characters.id, owned.body.id)).run();
+      return result;
+    });
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+      expect(refreshed.body.equippedAction.damage).toContain('2d6');
+    } finally {
+      spy.mockRestore();
+      restoreLongswordEntry();
+    }
+  });
+
+  it('a refresh whose item was DETACHED mid-flight refuses to relink it', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'detach-race-slot' });
+
+    // Review (chatgpt-codex-connector P2): a concurrent `setCompendiumState('detached')` nulls
+    // `ruleEntryId`. Without a fence on the source link the write relinked the row as `linked`
+    // while leaving that id null — an item reporting a live link whose next refresh fails as
+    // detached. Detaching is a deliberate act; losing the race means refetching.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const service = ctx.app.get(InventoryService) as unknown as {
+      assertCanWriteOwner: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = service.assertCanWriteOwner.bind(service);
+    const spy = jest.spyOn(service, 'assertCanWriteOwner').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args);
+      db.update(inventoryItems).set({ compendiumState: 'detached', ruleEntryId: null }).where(eq(inventoryItems.id, itemId)).run();
+      return result;
+    });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect(refreshed.status).toBe(409);
+      const row = db
+        .select({ state: inventoryItems.compendiumState, ruleEntryId: inventoryItems.ruleEntryId })
+        .from(inventoryItems)
+        .where(eq(inventoryItems.id, itemId))
+        .get();
+      // Still detached, and still consistent — never `linked` with a null source id.
+      expect(row?.state).toBe('detached');
+      expect(row?.ruleEntryId).toBeNull();
     } finally {
       spy.mockRestore();
     }
