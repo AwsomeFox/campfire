@@ -170,6 +170,16 @@ const OUTCOMES_BY_MODE: Record<string, ReadonlySet<string> | null> = {
 const ATTACK_CRIT_OUTCOMES: ReadonlySet<string> = new Set(['crit', 'critMiss']);
 
 /**
+ * The branches a DEGREE of success produces — unreachable in a binary pass/fail system.
+ *
+ * `classifySaveOutcome` returns `critSuccess` / `critFailure` only for an adapter that declares
+ * `degreeOfSuccess`; without one a save or check resolves to `success` or `failure` and nothing
+ * else. A spec may still author these branches — the schema allows it — so they are filtered by
+ * capability, exactly as {@link ATTACK_CRIT_OUTCOMES} is (#2115 review).
+ */
+const DEGREE_CRIT_OUTCOMES: ReadonlySet<string> = new Set(['critSuccess', 'critFailure']);
+
+/**
  * One typed damage component as text: "2d6 fire", "1d8+3 slashing", "5 fire".
  *
  * `DamagePart` keeps dice in `formula` and the modifier in `flat` (that split is what lets
@@ -367,14 +377,22 @@ export function actionSpecEffects(
    *
    * Only `crit` / `critMiss` are affected. `critSuccess` / `critFailure` are DEGREE branches,
    * owned by `degreeOfSuccess`, and a system can have degrees without attack crits or the
-   * reverse — so this capability has no authority over them.
+   * reverse — so this capability has no authority over them. {@link hasDegreesOfSuccess} is
+   * their gate.
    */
   hasCriticalHits = true,
   /**
-   * Whether the system reports degrees of success (`hasDegreesOfSuccessForAdapter`). Defaults
-   * to FALSE: it only ever adds a synthesized `critFailure` group, and a system without degrees
-   * never reaches that outcome, so a caller that has not thought about it gets silence rather
-   * than an invented consequence.
+   * Whether the system reports degrees of success (`hasDegreesOfSuccessForAdapter`).
+   *
+   * Governs BOTH halves of the degree question: it drops authored `critSuccess` / `critFailure`
+   * branches that `classifySaveOutcome` could never select, and it is the precondition for
+   * synthesizing the critical failure a basic save doubles.
+   *
+   * Defaults to FALSE, which reads as "binary pass/fail" — what every system that has not
+   * declared `degreeOfSuccess` actually resolves, and the majority of them. The asymmetry with
+   * {@link hasCriticalHits} (default true) is deliberate: an undeclared default here would
+   * otherwise invent a PF2e-style doubling on a system that has none, and a wrong number is
+   * worse than an omitted line.
    */
   hasDegreesOfSuccess = false,
 ): ActionEffectGroup[] {
@@ -388,6 +406,7 @@ export function actionSpecEffects(
   for (const [outcome, label] of OUTCOME_LABELS) {
     if (reachable && !reachable.has(outcome)) continue;
     if (!hasCriticalHits && ATTACK_CRIT_OUTCOMES.has(outcome)) continue;
+    if (!hasDegreesOfSuccess && DEGREE_CRIT_OUTCOMES.has(outcome)) continue;
     const authored = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
     const synthesized = authored
       ? undefined

@@ -341,16 +341,21 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
    * Degrees of success answer to `degreeOfSuccess`, not to attack crits — a system can have
    * one without the other, so this capability has no authority over those branches.
    */
-  test('degree branches are untouched by the attack-crit capability', () => {
+  test('degree branches answer to their own capability, not the attack-crit one', () => {
     const spec = ActionSpec.parse({
       mode: 'save',
       outcomes: { critSuccess: { text: 'Unharmed' }, failure: { text: 'Singed' }, critFailure: { text: 'Scorched' } },
     });
-    expect(actionSpecEffects(spec, 'double-dice', false).map((g) => g.outcome)).toEqual([
+    // Attack crits off, degrees on: the degree branches survive untouched.
+    expect(actionSpecEffects(spec, 'double-dice', false, true).map((g) => g.outcome)).toEqual([
       'critSuccess',
       'failure',
       'critFailure',
     ]);
+    // ...and the reverse. `classifySaveOutcome` returns only success/failure without
+    // `degreeOfSuccess`, so an AUTHORED degree branch is still an outcome 5e cannot reach
+    // (#2115 review) — the same filter attack crits already had.
+    expect(actionSpecEffects(spec, 'double-dice', true, false).map((g) => g.outcome)).toEqual(['failure']);
   });
 
   /**
@@ -590,7 +595,10 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
       mode: 'save',
       outcomes: { critFailure: { damage: [{ formula: '4d6', flat: 0, type: 'fire' }] } },
     });
-    expect(actionSpecEffects(spec, 'double-dice')[0].lines).toEqual(['4d6 fire damage']);
+    // Degrees ON — the precondition for the branch appearing at all. The claim under test is
+    // that its damage is printed exactly as written: an AUTHORED critFailure turns
+    // `basicSaveCriticalFailure` off, so the resolver does not double it either.
+    expect(actionSpecEffects(spec, 'double-dice', true, true)[0].lines).toEqual(['4d6 fire damage']);
   });
 
   test('with no rule supplied the damage reads plainly', () => {
