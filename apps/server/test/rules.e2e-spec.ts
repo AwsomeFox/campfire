@@ -2694,6 +2694,23 @@ describe('rules search pagination (issue #613)', () => {
     return job.pack.id as number;
   }
 
+  it('accepts one primary plus 50 supplemental pack filters and rejects a 52nd slug', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignMaximum = Array.from({ length: 51 }, (_, i) => `pack-${i}`);
+    const accepted = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ pack: campaignMaximum })
+      .set(dm);
+    expect(accepted.status).toBe(200);
+
+    const rejected = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ pack: [...campaignMaximum, 'pack-51'] })
+      .set(dm);
+    expect(rejected.status).toBe(400);
+    expect(String(rejected.body.message)).toMatch(/at most 51 pack slugs/i);
+  });
+
   it('returns totals/hasMore/nextCursor and pages stably across multi-pack ties', async () => {
     const server = ctx.app.getHttpServer();
     // Two packs with identical names — id tiebreak must keep order stable across pages.

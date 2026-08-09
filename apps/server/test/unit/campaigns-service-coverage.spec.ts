@@ -323,6 +323,59 @@ describe('CampaignsService unit coverage tests', () => {
       else delete (orm as unknown as { transaction?: unknown }).transaction;
     }
     expect((await campaignsService.getOrThrow(target.id)).enabledPackSlugs).toEqual([]);
+
+    const [otherBase] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'transaction-other-base',
+        name: 'Transaction Other Base',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'base',
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+    const [extension] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'transaction-extension',
+        name: 'Transaction Extension',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'extension',
+        extendsPackSlug: base.slug,
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+
+    const primaryRaceOriginal = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const primaryRaceTransaction = orm.transaction.bind(orm);
+    let primarySwitched = false;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      if (!primarySwitched) {
+        primarySwitched = true;
+        // Simulate a concurrent PATCH switching A -> B after this request validated E
+        // against A, but before its enabled-pack write transaction begins.
+        db.update(campaignsTable).set({ ruleSystem: otherBase.slug }).where(eq(campaignsTable.id, target.id)).run();
+      }
+      return primaryRaceTransaction(fn);
+    };
+    try {
+      await expect(
+        campaignsService.update(target.id, { enabledPackSlugs: [extension.slug] }, creatorActor),
+      ).rejects.toThrow(BadRequestException);
+    } finally {
+      if (primaryRaceOriginal) Object.defineProperty(orm, 'transaction', primaryRaceOriginal);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
+    expect(await campaignsService.getOrThrow(target.id)).toMatchObject({
+      ruleSystem: otherBase.slug,
+      enabledPackSlugs: [],
+    });
   });
 
   it('previews and executes campaign cloning', async () => {

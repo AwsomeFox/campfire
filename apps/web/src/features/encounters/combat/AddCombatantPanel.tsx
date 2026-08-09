@@ -196,9 +196,11 @@ export function AddCombatantPanel({
             installedPacks.some((pack) => pack.slug === slug && pack.extendsPackSlug === rulePack),
           ),
         ].filter(Boolean))];
-        if (compatiblePackSlugs.length === 1) baseParams.set('pack', compatiblePackSlugs[0]!);
-        else if (compatiblePackSlugs.length > 1) baseParams.set('packs', compatiblePackSlugs.join(','));
-        else baseParams.set('homebrewOnly', 'true');
+        if (compatiblePackSlugs.length > 0) {
+          for (const slug of compatiblePackSlugs) baseParams.append('pack', slug);
+        } else {
+          baseParams.set('homebrewOnly', 'true');
+        }
         if (cid) baseParams.set('campaignId', String(cid));
         // Hazards belong to the Compendium add/drag-drop flow only. The NPC tab's picker is
         // monster-focused and its UI doesn't surface entry type, so keep it to monsters.

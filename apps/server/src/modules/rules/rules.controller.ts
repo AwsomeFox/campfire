@@ -9,6 +9,13 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { RulePackInstallDto, RulePackUploadDto, RuleEntryUpdateDto, HomebrewRuleEntryDto, HomebrewRuleEntryUpdateDto, HomebrewImportPreviewDto, HomebrewImportApplyDto } from './rules.dto';
 
+function stringQueryValues(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(stringQueryValues);
+  if (value && typeof value === 'object') return Object.values(value).flatMap(stringQueryValues);
+  return [];
+}
+
 /**
  * Rule packs (Compendium backend). Reads (list packs, search, entry fetch, install-job
  * status) are open to any authenticated user — the Compendium screen is available to
@@ -194,8 +201,8 @@ export class RulesController {
   search(
     @Query('q') q: string | undefined,
     @Query('type') type: string | undefined,
-    @Query('pack') pack: string | string[] | undefined,
-    @Query('packs') packs: string | string[] | undefined,
+    @Query('pack') pack: unknown,
+    @Query('packs') packs: unknown,
     @Query('homebrewOnly') homebrewOnlyStr: string | undefined,
     @Query('limit') limit: string | undefined,
     @Query('cursor') cursor: string | undefined,
@@ -218,18 +225,17 @@ export class RulesController {
       }
       campaignId = n;
     }
-    const repeatedPacks = pack === undefined ? [] : Array.isArray(pack) ? pack : [pack];
-    const legacyPacks = packs === undefined
-      ? []
-      : (Array.isArray(packs) ? packs : [packs]).flatMap((value) => value.split(','));
+    const repeatedPacks = stringQueryValues(pack);
+    const legacyPacks = stringQueryValues(packs).flatMap((value) => value.split(','));
     const parsedPacks = pack === undefined && packs === undefined
       ? undefined
       : [...new Set([...repeatedPacks, ...legacyPacks].map((slug) => slug.trim()).filter(Boolean))];
     if (parsedPacks && parsedPacks.length === 0) {
       throw new BadRequestException('`packs` must contain at least one pack slug');
     }
-    if (parsedPacks && parsedPacks.length > 50) {
-      throw new BadRequestException('`packs` may contain at most 50 pack slugs');
+    // Campaigns may select one primary plus the schema maximum of 50 supplemental packs.
+    if (parsedPacks && parsedPacks.length > 51) {
+      throw new BadRequestException('`packs` may contain at most 51 pack slugs');
     }
     if (parsedPacks?.some((slug) => slug.length > 80)) {
       throw new BadRequestException('Each `packs` slug must be at most 80 characters');

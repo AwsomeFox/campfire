@@ -1083,8 +1083,6 @@ export class CampaignsService {
     const enabledPackSlugsToValidate =
       enabledPackSlugsInput ?? (input.ruleSystem !== undefined ? existing.enabledPackSlugs : undefined);
     const nextEnabledPackSlugs = await this.validateEnabledPackSlugs(enabledPackSlugsToValidate, effectiveRuleSystem);
-    const enabledPackSlugsPatch =
-      nextEnabledPackSlugs !== undefined ? { enabledPackSlugs: JSON.stringify(nextEnabledPackSlugs) } : {};
     // #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule pack, so
     // the rule-pack requirement has to be satisfied by the profile the campaign will actually
     // have after this write — not only by one re-sent in the same request. Without the second
@@ -1130,16 +1128,33 @@ export class CampaignsService {
     }
     const customMechanicsProfilePatch =
       nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
-    const revalidatePackSelectionTx = (tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0]) => {
-      if (nextEnabledPackSlugs === undefined) return;
-      // A primary slug is authoritative only when this PATCH writes it. Do not make an
-      // unrelated enabled-pack edit reject a legacy campaign whose old primary pack was
-      // already removed; the pre-existing behavior deliberately keeps those campaigns
-      // otherwise editable.
+    const revalidatePackSelectionTx = (
+      tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
+    ): { enabledPackSlugs?: string } => {
+      if (nextEnabledPackSlugs === undefined) return {};
+      let transactionRuleSystem = effectiveRuleSystem;
       if (input.ruleSystem !== undefined) {
         this.validateRuleSystemTx(tx, effectiveRuleSystem, profileBacksEffectiveRuleSystem);
+      } else {
+        // An enabled-pack-only PATCH must validate against the primary that is current
+        // after this transaction reserves the writer slot, not the stale preflight row.
+        // A concurrent primary switch may already have committed while this request was
+        // awaiting validation.
+        const current = tx
+          .select({ ruleSystem: campaigns.ruleSystem })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1)
+          .get();
+        if (!current) throw new NotFoundException(`Campaign ${id} not found`);
+        transactionRuleSystem = current.ruleSystem;
       }
-      this.validateEnabledPackSlugsTx(tx, nextEnabledPackSlugs, effectiveRuleSystem);
+      const transactionEnabledPackSlugs = this.normalizeEnabledPackSlugs(
+        nextEnabledPackSlugs,
+        transactionRuleSystem,
+      );
+      this.validateEnabledPackSlugsTx(tx, transactionEnabledPackSlugs, transactionRuleSystem);
+      return { enabledPackSlugs: JSON.stringify(transactionEnabledPackSlugs) };
     };
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
@@ -1243,7 +1258,7 @@ export class CampaignsService {
     if (archiving && opts?.revokeInvites) {
       const ts = nowIso();
       const { row, revoked, wasEnabled, pinsCleared } = this.db.transaction((tx) => {
-        revalidatePackSelectionTx(tx);
+        const txEnabledPackSlugsPatch = revalidatePackSelectionTx(tx);
         const before = tx
           .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
           .from(campaigns)
@@ -1264,7 +1279,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...enabledPackSlugsPatch, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1354,7 +1369,7 @@ export class CampaignsService {
     };
     if (shouldResetPins) {
       const resetResult = this.db.transaction((tx) => {
-        revalidatePackSelectionTx(tx);
+        const txEnabledPackSlugsPatch = revalidatePackSelectionTx(tx);
         sampleMechanics(tx);
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
@@ -1370,7 +1385,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...enabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1410,11 +1425,11 @@ export class CampaignsService {
       }
 
       const written = this.db.transaction((tx) => {
-        revalidatePackSelectionTx(tx);
+        const txEnabledPackSlugsPatch = revalidatePackSelectionTx(tx);
         sampleMechanics(tx);
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...enabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
