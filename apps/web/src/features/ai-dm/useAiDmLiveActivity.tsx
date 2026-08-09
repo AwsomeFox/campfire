@@ -14,8 +14,9 @@
  * each page opening its own stream — this is the "single shared subscription" the
  * issue calls for.
  *
- * Issue #427 extends the shared subscription with the running transcript so the
- * encounter-page driver dock can render narration without opening a second stream.
+ * Issue #427 extends the shared subscription with the authoritative transcript so the
+ * encounter-page driver dock has the same shared history as the Table without opening a
+ * second stream.
  *
  * `PlayerDisplayPage` lives OUTSIDE `Layout` (issue #60 mounts it with no chrome), so
  * it cannot reach this context; it may call `useAiDmLiveActivityState` directly for
@@ -29,15 +30,19 @@
  */
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { AiDmMode } from '@campfire/schema';
+import {
+  AI_DM_TRANSCRIPT_LIST_MAX_LIMIT,
+  type AiDmMode,
+  type AiDmTranscriptPage,
+} from '@campfire/schema';
 import { useAiDmSeat, useAiDmSession, invalidateAiDm, invalidateAiDmToolConfirmations } from '../../lib/query';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
+import { api, API } from '../../lib/api';
 import { usePendingHydrate } from './usePendingHydrate';
 import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChip, type ToolStreamEvent } from './toolActivity';
 import {
   transcriptReducer,
-  loadTranscript,
   saveTranscript,
   emptyTranscript,
   type TranscriptAction,
@@ -74,7 +79,7 @@ export interface AiDmLiveActivityState {
   proposalFiledCount: number;
   /** The last fully-aggregated narration line (`narration.message`) — the player-display ticker's feed. */
   lastNarration: string | null;
-  /** Client-assembled narration transcript (#427 encounter dock). */
+  /** Authoritative narration transcript (#427 encounter dock). */
   transcript: TranscriptState;
   /** Dispatch local transcript actions (echo player lines, rules answers, …). */
   dispatchTranscript: (action: TranscriptAction) => void;
@@ -135,11 +140,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   const pendingHydrate = usePendingHydrate({ ready, userId: me?.user.id ?? null });
   const viewerId = pendingHydrate.viewerId;
 
-  // 'activity' scope (#572): this provider is NON-authoritative — it folds the legacy
-  // signal frames into bubbles with random ids and no `seq`. AiTablePage is mounted inside
-  // the same Layout and writes the authoritative format. Sharing one key made the last
-  // writer before a reload win, and a legacy snapshot hydrated by the authoritative page
-  // cannot be merged by eventId, so every narration line rendered twice.
+  // Keep a separate cache namespace from AiTablePage: both surfaces now read the same
+  // authoritative server events, but the Layout provider remains mounted when moving between
+  // routes and must not overwrite the Table page's paint cache during that transition.
   const key = `${viewerId ?? ''}:${campaignId ?? ''}:${enabled}`;
 
   /**
@@ -156,6 +159,37 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
    * ACCOUNTS, which is the exact leak this issue is about.
    */
   const transcriptOwnerRef = useRef<string>('');
+  const lastSeqRef = useRef(0);
+  const [transcriptFetched, setTranscriptFetched] = useState(false);
+
+  useEffect(() => {
+    lastSeqRef.current = transcript.lastSeq ?? 0;
+  }, [transcript.lastSeq]);
+
+  const fetchTranscript = useCallback(
+    async (after?: number) => {
+      if (campaignId === undefined) return;
+      let watermark = after;
+      for (let page = 0; page < 20; page += 1) {
+        try {
+          const result = await api.get<AiDmTranscriptPage>(
+            `${API}/campaigns/${campaignId}/ai-dm/transcript?limit=${AI_DM_TRANSCRIPT_LIST_MAX_LIMIT}` +
+              (watermark ? `&after=${watermark}` : ''),
+          );
+          if (result.items.length > 0) {
+            dispatchTranscript({ type: 'serverEvents', events: result.items });
+          }
+          const last = result.items[result.items.length - 1];
+          if (watermark === undefined || !result.hasMore || !last) return;
+          watermark = last.seq;
+        } catch {
+          // A live stream remains useful when transcript history is temporarily unavailable.
+          return;
+        }
+      }
+    },
+    [campaignId],
+  );
 
   useEffect(() => {
     if (!enabled || campaignId === undefined || viewerId === null) return;
@@ -173,17 +207,32 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     prevKeyRef.current = key;
     setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
     seededRef.current = false;
+    setTranscriptFetched(!enabled);
     pendingHydrate.mark();
     if (campaignId !== undefined && viewerId !== null) {
       dispatchTranscript({
         type: 'hydrate',
-        state: enabled ? loadTranscript(viewerId, campaignId, 'activity') : emptyTranscript,
+        // Pre-#1318 activity snapshots use the thin-stream format and cannot be merged by
+        // event id with durable rows. Start clean and let the server hydrate the shared truth.
+        state: emptyTranscript,
       });
+      if (enabled) {
+        dispatchTranscript({ type: 'authoritative' });
+        void fetchTranscript().finally(() => setTranscriptFetched(true));
+      }
     } else {
       dispatchTranscript({ type: 'reset' });
     }
     transcriptOwnerRef.current = key;
-  }, [key, campaignId, enabled, viewerId, pendingHydrate, pendingHydrate.identityPending]);
+  }, [
+    key,
+    campaignId,
+    enabled,
+    viewerId,
+    fetchTranscript,
+    pendingHydrate,
+    pendingHydrate.identityPending,
+  ]);
 
   useEffect(() => {
     setState((s) => (s.mode === mode ? s : { ...s, mode }));
@@ -205,6 +254,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     // we have not established yet is the same leak in the other direction.
     if (pendingHydrate.identityPending || viewerId === null) return;
     if (!seatQuery.isFetched || !sessionQuery.isFetched) return;
+    // The server transcript, not a scene/last-narration approximation, is the shared history.
+    // Only seed if that read settled empty or failed.
+    if (!transcriptFetched) return;
     if (session?.scene || session?.lastNarration) {
       dispatchTranscript({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
     }
@@ -217,6 +269,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     sessionQuery.isFetched,
     session,
     viewerId,
+    transcriptFetched,
     pendingHydrate.identityPending,
   ]);
 
@@ -249,6 +302,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           // #1501: mirror AiTablePage — an approved mechanical commit arms the undo lever
           // server-side, so refetch the session to surface it. See AiTablePage for the full why.
           if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
+        } else if (event.type === 'transcript.reset') {
+          lastSeqRef.current = 0;
+          void fetchTranscript();
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -264,12 +320,18 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
         }
       },
       onReconnect: () => {
-        if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
+        if (campaignId !== undefined) {
+          void fetchTranscript(lastSeqRef.current || undefined);
+          invalidateAiDm(queryClient, campaignId);
+        }
       },
       onStreamRecovery: () => {
-        if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
+        if (campaignId !== undefined) {
+          void fetchTranscript(lastSeqRef.current || undefined);
+          invalidateAiDm(queryClient, campaignId);
+        }
       },
-    }
+    },
   );
 
   return {

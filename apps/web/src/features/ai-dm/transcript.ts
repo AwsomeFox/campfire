@@ -37,17 +37,12 @@ export const MAX_TRANSCRIPT_ENTRIES = 200;
 /**
  * Which surface owns a cached transcript (#572).
  *
- * Two surfaces are mounted at once on the Table route: the page itself, which reads the
- * server's AUTHORITATIVE transcript (`dm:<turnId>` bubble ids, every entry carrying a
- * `seq`), and the Layout-level live-activity provider, which is non-authoritative and folds
- * the legacy signal frames into bubbles with client-minted random ids and no `seq`. Those
- * two formats are not interchangeable: a legacy snapshot loaded by the authoritative page
- * cannot be matched by `eventId` or `dm:<turnId>`, so the same narration would render in
- * two coexisting bubbles.
+ * Two surfaces are mounted at once on the Table route: the page and the Layout-level
+ * live-activity provider. Both read the server's AUTHORITATIVE transcript (`dm:<turnId>`
+ * bubble ids, every entry carrying a `seq`), but each mounts and reconciles independently.
  *
- * They therefore get separate keys. Namespacing is preferred over having either surface
- * detect the other's writes, because it is the only option that does not require the two to
- * know about each other — whichever one is mounted, it reads back exactly what it wrote.
+ * They therefore get separate keys. Namespacing prevents either surface's route transition
+ * from overwriting the other's paint cache before its next server reconciliation.
  *
  * #573 composes a USER namespace over this one rather than replacing it: both axes are
  * real, and a key must separate them both (see {@link transcriptStorageKey}).
@@ -193,9 +188,8 @@ export interface TranscriptState {
    * OPT-IN (#572): this surface reads the server's authoritative transcript, so durable
    * events are the source of truth here. While true the reducer folds `transcript` frames
    * and IGNORES the thin signal frames that now have durable counterparts, so every line
-   * renders exactly once. Surfaces that never fetch the transcript (the dashboard activity
-   * chip, the encounter driver dock) leave it false: they keep folding the signal frames
-   * and ignore `transcript` frames entirely, behaving exactly as they did before #572.
+   * renders exactly once. A surface that deliberately never fetches the transcript leaves it
+   * false: it keeps folding thin signal frames and ignores `transcript` frames entirely.
    * Must be turned on explicitly — inferring it from the first server event would let a
    * non-authoritative surface fold both copies of that turn's narration.
    */
@@ -540,10 +534,10 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       // #598 — a withheld turn joins the stuck ladder, so the server emits `narration.withheld`
       // and then, moments later on this same channel, a `stuck` frame with reason
       // `content_withheld`. Authoritative surfaces early-return on `stuck` above and render the
-      // durable row, so the table view shows one line. These thin surfaces (dashboard activity,
-      // encounter driver dock, player display) fold both — so they printed the withheld line
-      // AND "The AI DM got stuck", and the second sentence blames the table's AI for failing
-      // when it had actually declined. That framing is the thing #598 argues against.
+      // durable row, so an authoritative transcript shows one line. A non-authoritative surface
+      // can fold both, printing the withheld line AND "The AI DM got stuck" and blaming the
+      // table's AI for failing when it had actually declined. That framing is the thing #598
+      // argues against.
       //
       // Fold it under the WITHHELD variant, and only when the retraction did not already put
       // that line up. Suppressing outright would leave a client that connected between the two

@@ -29,6 +29,9 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/onLifecycle\('start-session'\)/);
     expect(panel).toMatch(/onLifecycle\('wrap-up'\)/);
     expect(panel).toMatch(/composerLockedEnded/);
+    expect(panel).toMatch(/newClientRef/);
+    expect(panel).toMatch(/onUndoAiAction/);
+    expect(panel).toMatch(/lastUndoableCommit/);
   });
 
   test('shared live activity carries transcript for the dock', () => {
@@ -36,6 +39,9 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/transcript/);
     expect(hook).toMatch(/dispatchTranscript/);
     expect(hook).toMatch(/transcriptReducer/);
+    expect(hook).toMatch(/type: 'authoritative'/);
+    expect(hook).toMatch(/ai-dm\/transcript\?limit=/);
+    expect(hook).toMatch(/fetchTranscript\(lastSeqRef\.current \|\| undefined\)/);
   });
 });
 

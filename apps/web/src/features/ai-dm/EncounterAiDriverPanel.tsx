@@ -13,7 +13,8 @@ import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { queryKeys, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { aiDmPauseRequest } from './aiDmPause';
-import { speakerPrefix } from './transcript';
+import { newClientRef, speakerPrefix } from './transcript';
+import { resolveUndoPostError } from './aiDmUndoLever';
 import { StuckLadder } from './StuckLadder';
 import { AiPathGuide } from './AiSetupChecklist';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
@@ -72,6 +73,8 @@ export function EncounterAiDriverPanel({
   const [pauseBusy, setPauseBusy] = useState(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [undoBusy, setUndoBusy] = useState(false);
+  const [undoError, setUndoError] = useState<string | null>(null);
 
   const charactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(campaignId),
@@ -141,14 +144,16 @@ export function EncounterAiDriverPanel({
     if (!text || locked || submitting) return;
     setSubmitting(true);
     setSubmitError(null);
-    const body: { input: string; scene?: string; characterId?: number } = {
+    const clientRef = newClientRef();
+    const body: { input: string; scene?: string; characterId?: number; clientRef: string } = {
       input: `${speakerPrefix(memberName, characterName)} ${text}`,
       characterId: myMembership?.characterId ?? undefined,
+      clientRef,
     };
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
-      dispatchTranscript({ type: 'localPlayer', memberName, characterName, text });
+      dispatchTranscript({ type: 'localPlayer', memberName, characterName, text, clientRef });
       setInput('');
       setSceneField('');
     } catch (err) {
@@ -185,6 +190,24 @@ export function EncounterAiDriverPanel({
       );
     } finally {
       setLifecycleBusy(false);
+    }
+  }
+
+  async function onUndoAiAction() {
+    setUndoBusy(true);
+    setUndoError(null);
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/undo`);
+      invalidateAiDm(queryClient, campaignId);
+    } catch (err) {
+      const outcome = resolveUndoPostError(
+        err instanceof ApiError ? err.status : undefined,
+        translateApiError(err, t) || t('table.undoAiFailed'),
+      );
+      if (outcome.invalidateSession) invalidateAiDm(queryClient, campaignId);
+      if (outcome.errorMessage) setUndoError(outcome.errorMessage);
+    } finally {
+      setUndoBusy(false);
     }
   }
 
@@ -341,6 +364,17 @@ export function EncounterAiDriverPanel({
                 {t('table.wrapUp')}
               </Btn>
             )}
+            {isDm && session?.lastUndoableCommit && (
+              <Btn
+                density="xs"
+                ghost
+                onClick={() => void onUndoAiAction()}
+                disabled={undoBusy}
+                title={t('table.undoAiAction')}
+              >
+                {t('table.undoAiAction')}
+              </Btn>
+            )}
           </div>
         )}
       </div>
@@ -384,6 +418,7 @@ export function EncounterAiDriverPanel({
             </p>
           )}
           {lifecycleError && <p className="text-xs text-rose-400 m-0">{lifecycleError}</p>}
+          {undoError && <p className="text-xs text-rose-400 m-0">{undoError}</p>}
 
           {session && (
             <StuckLadder
