@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { formatDocumentTitle, setDocumentTitlePrefix } from '../../src/app/routeFocus';
 import { isCampaignEvent } from '../../src/lib/useCampaignEvents';
-import { detectSseTurnBeat, detectTurnBeat, shouldConsumeTurnBeatResync, shouldReconcileTurnBeatRead, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
+import { detectSseTurnBeat, detectTurnBeat, isStaleTurnBeatFrame, shouldConsumeTurnBeatResync, shouldReconcileTurnBeatRead, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
 
 const initial: TurnBeatSnapshot = {
   encounterId: 8,
@@ -55,6 +55,24 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(shouldReconcileTurnBeatRead(null, 22, 5, 5)).toBe(false);
     expect(shouldReconcileTurnBeatRead(null, 23, 5, 4)).toBe(false);
     expect(shouldReconcileTurnBeatRead(20, 21, 4, 4)).toBe(true);
+  });
+
+  test('rejects only stream frames older than the current server turn revision', () => {
+    expect(isStaleTurnBeatFrame(5, 4)).toBe(true);
+    expect(isStaleTurnBeatFrame(5, 5)).toBe(false);
+    expect(isStaleTurnBeatFrame(5, 6)).toBe(false);
+    expect(isStaleTurnBeatFrame(5, undefined)).toBe(false);
+    expect(isStaleTurnBeatFrame(null, 4)).toBe(false);
+  });
+
+  test('drops a stale stream frame before applying turn-owner or beat state', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const handlerStart = source.indexOf("if (event.type === 'encounter.turn_changed') {");
+    const staleGuard = source.indexOf('if (isStaleTurnBeatFrame(previous?.turnVersion ?? null, event.turnVersion)) return;', handlerStart);
+    const ownerWrite = source.indexOf('setTurnOwnerFromEvent(', handlerStart);
+    expect(handlerStart).toBeGreaterThan(-1);
+    expect(staleGuard).toBeGreaterThan(handlerStart);
+    expect(staleGuard).toBeLessThan(ownerWrite);
   });
 
   test('does not let an optimistic cache write impersonate the catch-up encounter read', () => {

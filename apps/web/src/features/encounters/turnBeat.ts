@@ -43,6 +43,16 @@ export function shouldReconcileTurnBeatRead(
     && completedTurnVersion > previousTurnVersion;
 }
 
+/** A delayed stream frame must never replace a baseline established by a newer read/frame. */
+export function isStaleTurnBeatFrame(
+  previousTurnVersion: number | null,
+  eventTurnVersion: number | undefined,
+): boolean {
+  return previousTurnVersion != null
+    && eventTurnVersion != null
+    && eventTurnVersion < previousTurnVersion;
+}
+
 export function turnBeatKey(snapshot: TurnBeatSnapshot): string | null {
   if (snapshot.combatantId == null || snapshot.round == null) return null;
   return `${snapshot.encounterId}:${snapshot.combatantId}:${snapshot.round}`;

@@ -70,6 +70,7 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(source).toContain('queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) > 0 || bulkHpApplyPendingRef.current');
     expect(source).toContain('const hpMutationCount = useIsMutating({ mutationKey: HP_MUTATION_KEY });');
     expect(source).toContain('runControl.isPending || nextTurnMut.isPending || hpMutationCount > 0 || bulkHpApplyPending');
+    expect(source).toContain('if (turnAdvancePendingRef.current || bulkHpApplyPendingRef.current) return;');
     expect(source).toMatch(/const nextTurnMut = useKeyedMutation\([\s\S]*?turnAdvancePendingRef\.current = true;[\s\S]*?onSettled: \(\) => \{[\s\S]*?turnAdvancePendingRef\.current = false;/);
     expect(source).toContain('if (!pendingApply || turnAdvancePendingRef.current) return;');
     expect(source).toContain('reconcileBlocks || turnAdvancePendingRef.current');

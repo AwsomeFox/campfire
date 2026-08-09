@@ -51,7 +51,7 @@ import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
 import { TurnElapsedChip } from './TurnElapsedChip';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
-import { detectSseTurnBeat, shouldReconcileTurnBeatRead, type TurnBeatSnapshot } from './turnBeat';
+import { detectSseTurnBeat, isStaleTurnBeatFrame, shouldReconcileTurnBeatRead, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -1823,6 +1823,13 @@ export default function RunSessionPage() {
           return;
         }
         if (event.type === 'encounter.turn_changed') {
+          const previous = previousTurnBeatRef.current?.encounterId === eid
+            ? previousTurnBeatRef.current
+            : null;
+          // A backstop poll or a later stream frame may already have established a newer
+          // server-owned revision. Ignore a delayed older frame before it can regress turn
+          // ownership, title state, ticker feedback, or the comparison baseline.
+          if (isStaleTurnBeatFrame(previous?.turnVersion ?? null, event.turnVersion)) return;
           // The SSE frame itself is the edge. It carries only viewer-safe ids;
           // the displayed name and identity colour come from this viewer's
           // already-authorized roster, never a new server payload.
@@ -1846,9 +1853,6 @@ export default function RunSessionPage() {
             isYourTurn,
           } : null);
           setTurnOwnerPendingCombatantId(ownerKnown ? null : event.currentCombatantId ?? null);
-          const previous = previousTurnBeatRef.current?.encounterId === eid
-            ? previousTurnBeatRef.current
-            : null;
           const next: TurnBeatSnapshot = {
             encounterId: eid,
             combatantId: event.currentCombatantId ?? null,
@@ -2747,7 +2751,9 @@ export default function RunSessionPage() {
       actorId?: number,
     ) => {
       if (applications.length === 0) return;
-      if (turnAdvancePendingRef.current) return;
+      // The ref changes synchronously before the first await, so a second Apply-to-all
+      // cannot overlap this batch and clear the shared turn/HP gate prematurely.
+      if (turnAdvancePendingRef.current || bulkHpApplyPendingRef.current) return;
       bulkHpApplyPendingRef.current = true;
       setBulkHpApplyPending(true);
       const targets = new Set(applications.map(({ combatantId }) => combatantId));
@@ -3883,7 +3889,7 @@ export default function RunSessionPage() {
   );
   const applyDamageBarOnApplyToAll = useCallback(
     (applications: TargetDamageApplication[], delta: number) => {
-      if (turnAdvancePendingRef.current) return;
+      if (turnAdvancePendingRef.current || bulkHpApplyPendingRef.current) return;
       const actorId = pendingApply?.actorCombatantId ?? currentCombatantId ?? undefined;
       void applyHpDeltaBulk(applications, delta, actorId)
         .then(() => setPendingApply(null))
