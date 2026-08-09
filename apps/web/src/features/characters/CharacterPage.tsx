@@ -720,6 +720,9 @@ export default function CharacterPage() {
                         </span>
                       )}
                       <span className="text-[length:var(--type-label)] text-secondary cf-print-hide">Click or drop to change</span>
+                      <div className="cf-print-hide pt-1">
+                        <AiPortraitButton campaignId={cid} target={{ type: 'character', id: character.id }} onAttached={load} />
+                      </div>
                     </>
                   ) : character.portraitUrl ? (
                     <img
@@ -732,22 +735,6 @@ export default function CharacterPage() {
                       Portrait
                     </span>
                   )}
-                  <span className="text-[length:var(--type-label)] text-secondary cf-print-hide">Click or drop to change</span>
-                  <div className="cf-print-hide pt-1">
-                    <AiPortraitButton campaignId={cid} target={{ type: 'character', id: character.id }} onAttached={load} />
-                  </div>
-                </>
-              ) : character.portraitUrl ? (
-                <img
-                  src={character.portraitUrl}
-                  alt=""
-                  className="h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
-                />
-              ) : (
-                <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
-                  Portrait
-                </span>
-              )}
                 </Card>
               </section>
               <section
