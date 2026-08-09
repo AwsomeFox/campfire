@@ -85,11 +85,15 @@ export interface AiDmLiveActivityState {
   transcript: TranscriptState;
   /** The authoritative transcript request has settled for the current viewer projection. */
   transcriptFetched: boolean;
+  /** Durable SSE rows that arrived before the current history request settled. */
+  preHydrationLiveEntryIds: ReadonlySet<string>;
+  /** Advances whenever the current owner's transcript is reset or rehydrated. */
+  transcriptGeneration: number;
   /** Dispatch local transcript actions (echo player lines, rules answers, …). */
   dispatchTranscript: (action: TranscriptAction) => void;
 }
 
-const INITIAL_STATE: Omit<AiDmLiveActivityState, 'transcript' | 'transcriptFetched' | 'dispatchTranscript'> = {
+const INITIAL_STATE: Omit<AiDmLiveActivityState, 'transcript' | 'transcriptFetched' | 'preHydrationLiveEntryIds' | 'transcriptGeneration' | 'dispatchTranscript'> = {
   mode: undefined,
   live: false,
   turnActive: false,
@@ -173,6 +177,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   const transcriptRequestGenerationRef = useRef(0);
   const lastSeqRef = useRef(0);
   const [transcriptFetched, setTranscriptFetched] = useState(false);
+  const [preHydrationLiveEntryIds, setPreHydrationLiveEntryIds] = useState<ReadonlySet<string>>(new Set());
+  const [transcriptGeneration, setTranscriptGeneration] = useState(0);
 
   useEffect(() => {
     lastSeqRef.current = transcript.lastSeq ?? 0;
@@ -226,6 +232,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
     seededRef.current = false;
     setTranscriptFetched(!enabled);
+    setPreHydrationLiveEntryIds(new Set());
+    setTranscriptGeneration((generation) => generation + 1);
     pendingHydrate.mark();
     transcriptOwnerRef.current = key;
     const requestGeneration = ++transcriptRequestGenerationRef.current;
@@ -309,6 +317,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     enabled ? campaignId : undefined,
     {
       onEvent: (event) => {
+        if (!transcriptFetched && event.type === 'transcript') {
+          setPreHydrationLiveEntryIds((ids) => new Set(ids).add(event.event.eventId));
+        }
         setState((prev) => reduce(prev, event));
         if (enabled) {
           dispatchTranscript({ type: 'stream', event: event as any });
@@ -337,6 +348,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           clearTranscript(viewerId, campaignId, 'activity');
           lastSeqRef.current = 0;
           setTranscriptFetched(false);
+          setPreHydrationLiveEntryIds(new Set());
+          setTranscriptGeneration((generation) => generation + 1);
           const requestGeneration = ++transcriptRequestGenerationRef.current;
           void fetchTranscript(key, undefined, requestGeneration).finally(() => {
             if (
@@ -386,6 +399,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     live: enabled,
     transcript: visibleTranscript,
     transcriptFetched: transcriptOwnerRef.current === key && transcriptFetched,
+    preHydrationLiveEntryIds,
+    transcriptGeneration,
     dispatchTranscript: stableDispatch,
   };
 }
@@ -430,6 +445,8 @@ const INERT_CONTEXT: AiDmLiveActivityState = {
   ...INITIAL_STATE,
   transcript: emptyTranscript,
   transcriptFetched: false,
+  preHydrationLiveEntryIds: new Set(),
+  transcriptGeneration: 0,
   dispatchTranscript: NOOP_DISPATCH,
 };
 

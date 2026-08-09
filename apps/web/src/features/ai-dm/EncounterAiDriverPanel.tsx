@@ -33,9 +33,7 @@ import {
   NARRATION_STATUS_LIVE_REGION,
   NARRATION_VISUAL_TRANSCRIPT,
   advanceNarrationLog,
-  announceableEntryIds,
   beginNarrationLogLive,
-  collectPreLiveAnnounceableIds,
   formatNarrationLogAddition,
   nextComposerStatusAnnouncement,
   resolveComposerA11ySnapshot,
@@ -93,14 +91,9 @@ export function EncounterAiDriverPanel({
   const [undoError, setUndoError] = useState<string | null>(null);
   const [narrationStatus, setNarrationStatus] = useState('');
   const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
-  const mountNarrationIdsRef = useRef<Set<string> | null>(null);
-  const pendingPreLiveNarrationIdsRef = useRef(new Set<string>());
   const narrationOwnerRef = useRef('');
   const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
   const [narrationAnnouncements, setNarrationAnnouncements] = useState<NarrationLogAddition[]>([]);
-  if (mountNarrationIdsRef.current === null) {
-    mountNarrationIdsRef.current = announceableEntryIds(transcript.entries);
-  }
   const displayNarrationAdditions = useCallback(
     (additions: NarrationLogAddition[]) => additions.map((addition) => {
       if (addition.kind !== 'tool' || !addition.name) return addition;
@@ -138,35 +131,29 @@ export function EncounterAiDriverPanel({
   useLayoutEffect(() => {
     // Clear before paint: a role-projected transcript may change between renders, and the
     // live region must never briefly expose announcements from its prior owner.
-    const owner = `${me?.user.id ?? ''}:${campaignId}:${liveActivity.mode ?? ''}:${isDm}:${myMembership?.role ?? ''}`;
+    const owner = `${me?.user.id ?? ''}:${campaignId}:${liveActivity.mode ?? ''}:${isDm}:${myMembership?.role ?? ''}:${liveActivity.transcriptGeneration}`;
     if (narrationOwnerRef.current === owner) return;
     narrationOwnerRef.current = owner;
     narrationLogCursorRef.current = null;
-    mountNarrationIdsRef.current = announceableEntryIds(transcript.entries);
-    pendingPreLiveNarrationIdsRef.current.clear();
     setNarrationAnnouncements([]);
     setNarrationStatus('');
     composerA11yRef.current = null;
-  }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role, transcript.entries]);
+  }, [campaignId, isDm, liveActivity.mode, liveActivity.transcriptGeneration, me?.user.id, myMembership?.role]);
 
   useEffect(() => {
     if (!liveActivity.transcriptFetched) {
-      for (const id of collectPreLiveAnnounceableIds(transcript.entries, mountNarrationIdsRef.current!)) {
-        pendingPreLiveNarrationIdsRef.current.add(id);
-      }
       return;
     }
     if (narrationLogCursorRef.current === null) {
-      const started = beginNarrationLogLive(transcript.entries, pendingPreLiveNarrationIdsRef.current);
+      const started = beginNarrationLogLive(transcript.entries, liveActivity.preHydrationLiveEntryIds);
       narrationLogCursorRef.current = started.cursor;
-      pendingPreLiveNarrationIdsRef.current.clear();
       if (started.additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...displayNarrationAdditions(started.additions)]);
       return;
     }
     const advanced = advanceNarrationLog(transcript.entries, narrationLogCursorRef.current);
     narrationLogCursorRef.current = advanced.cursor;
     if (advanced.additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...displayNarrationAdditions(advanced.additions)]);
-  }, [displayNarrationAdditions, liveActivity.transcriptFetched, transcript.entries]);
+  }, [displayNarrationAdditions, liveActivity.preHydrationLiveEntryIds, liveActivity.transcriptFetched, transcript.entries]);
 
   const currentCombatantName = useMemo(() => {
     if (!encounter.currentCombatantId) return undefined;

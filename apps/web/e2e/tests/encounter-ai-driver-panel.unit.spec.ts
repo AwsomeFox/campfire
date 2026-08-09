@@ -38,8 +38,9 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/role="alert"/);
     expect(panel).toMatch(/narrationOwnerRef/);
     expect(panel).toMatch(/liveActivity\.transcriptFetched/);
-    expect(panel).toMatch(/collectPreLiveAnnounceableIds/);
     expect(panel).toMatch(/beginNarrationLogLive/);
+    expect(panel).toMatch(/preHydrationLiveEntryIds/);
+    expect(panel).toMatch(/transcriptGeneration/);
     expect(panel).toMatch(/resolveToolActivity/);
     expect(panel).toMatch(/formatSystem: \(systemAddition\) => systemText/);
     expect(panel).toMatch(/setNarrationStatus\(''\)/);
