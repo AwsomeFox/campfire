@@ -123,6 +123,70 @@ async function privateFixture(baseURL: string | undefined) {
 test.describe('encounter cockpit — campaign-wide chrome', () => {
   test.use({ storageState: stateFor('player'), viewport: { width: 1280, height: 800 } });
 
+  test('the inset follows chrome that grows after the first paint', async ({ page, baseURL }) => {
+    const fixture = await privateFixture(baseURL || undefined);
+    try {
+      // Archiving mounts Layout's read-only banner ABOVE `<main>`, and its provenance line
+      // (`ArchivedProvenance`) comes from a SEPARATE request. Narrow enough that the extra
+      // text wraps to another line — which moves `<main>` down without either named chrome
+      // element changing size, so nothing the hook watched by name reported it.
+      await page.setViewportSize({ width: 360, height: 800 });
+      const archived = await fixture.dm.patch(`/api/v1/campaigns/${fixture.campaignId}`, {
+        data: { status: 'paused' },
+      });
+      expect(archived.ok(), `archive campaign: ${await archived.text()}`).toBe(true);
+
+      // Hold that request so the growth lands strictly AFTER the first measurement.
+      // Unheld it resolves first and the inset is correct by luck, which is exactly the
+      // race this test has to remove.
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route('**/status-transitions*', async (route) => {
+        await held;
+        await route.continue();
+      });
+
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+      const banner = page.getByRole('status').filter({ hasText: /paused/i }).first();
+      await expect(banner).toBeVisible();
+      const before = await banner.evaluate((el) => Math.round(el.getBoundingClientRect().height));
+
+      release();
+      await expect(banner).toContainText(/Archived by/i, { timeout: 10_000 });
+      // If it does not actually wrap at this width the test proves nothing — say so.
+      await expect
+        .poll(async () => banner.evaluate((el) => Math.round(el.getBoundingClientRect().height)), {
+          timeout: 5_000,
+        })
+        .toBeGreaterThan(before);
+
+      // The cockpit must end up below the banner's FINAL height, not the height it had
+      // when the inset was first published.
+      await expect
+        .poll(
+          async () =>
+            page.evaluate(() => {
+              const b = document.querySelector('[role="status"]');
+              const shell = document.querySelector('.cf-vtt');
+              if (!(b instanceof HTMLElement) || !(shell instanceof HTMLElement)) return null;
+              return Math.round(shell.getBoundingClientRect().top - b.getBoundingClientRect().bottom);
+            }),
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThanOrEqual(0);
+      await page.unroute('**/status-transitions*');
+    } finally {
+      await fixture.dm
+        .patch(`/api/v1/campaigns/${fixture.campaignId}`, { data: { status: 'active' } })
+        .catch(() => undefined);
+      await fixture.dispose();
+    }
+  });
+
   test('the safety hold stays visible and clickable, raised or idle', async ({ page, baseURL }) => {
     const fixture = await privateFixture(baseURL || undefined);
     try {

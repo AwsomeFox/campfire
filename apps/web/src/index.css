@@ -3744,11 +3744,11 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
     border-bottom: 0;
     border-radius: var(--radius-md) var(--radius-md) 0 0;
   }
-  /* Deliberately a plain offset, unlike the wide layout's canvas-aware clamp: here the
-     map column scrolls (`overflow-y: auto` above), so the button is never clipped by a
-     short canvas — and resolving a percentage against this scrolling container drags it
-     down over the controls beneath instead, where it intercepted their clicks. */
-  .cf-vtt-fab { bottom: 96px; }
+  /* Same canvas-aware clamp as the wide layout, at this layout's smaller clearance. The
+     scrolling map column below is only a descendant of `.cf-vtt-main`, which still clips
+     — so a short landscape canvas put the whole 46px button above its top edge, with the
+     page scroll-locked and the dice tray behind it unreachable. */
+  .cf-vtt-fab { bottom: min(96px, max(8px, calc(100% - 54px))); }
   /* Phone canvases are far too short for a fixed-height popover: pin the tray to both
      edges of the canvas instead, so its height is whatever fits and its own scroller
      handles the rest. */

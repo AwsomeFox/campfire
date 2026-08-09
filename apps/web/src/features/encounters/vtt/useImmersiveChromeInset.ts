@@ -150,10 +150,25 @@ export function useImmersiveChromeInset(): void {
         const element = document.querySelector(selector);
         if (element) observer.observe(element);
       }
+      // ...and everything Layout stacks ABOVE `<main>`, by position rather than by name.
+      // The inset is measured from `<main>`'s top, so anything up there that grows PUSHES
+      // that baseline down — and it can grow without either named element resizing. The
+      // archived banner is the live case: `ArchivedProvenance` fills its text in
+      // asynchronously, and on a narrow viewport that wraps to a second line. Nothing
+      // else reports that, so the published inset stayed at its first-paint value and the
+      // scroll-locked cockpit covered the bottom of the banner.
+      const main = document.getElementById(MAIN_CONTENT_ID);
+      let sibling = main?.previousElementSibling ?? null;
+      while (sibling) {
+        observer.observe(sibling);
+        sibling = sibling.previousElementSibling;
+      }
     };
     syncObservedTargets();
 
     const mutations = new MutationObserver(() => {
+      // Re-sync as well as re-measure: a banner that has only just mounted is a NEW
+      // element to watch, not merely a new measurement.
       syncObservedTargets();
       schedule();
     });
