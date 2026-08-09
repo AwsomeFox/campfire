@@ -991,10 +991,15 @@ export default function RunSessionPage() {
    * affects what the viewer is allowed to see or write.
    */
   type PanelTab = 'turn' | 'party' | 'log' | 'table';
-  /** `null` means "use the audience/state default" — see `panelTab` below. An explicit choice always wins and sticks. */
-  const [panelTabChoice, setPanelTabChoice] = useState<PanelTab | null>(null);
-  /** The default, resolved once and then held — see `panelTab`. */
-  const defaultPanelTabRef = useRef<PanelTab | null>(null);
+  /**
+   * The viewer's explicit tab choice, and the default it overrides — both stamped with the
+   * encounter they belong to. `RunSessionPage` is reused across encounter navigations, so
+   * an unstamped value would carry a choice made in one fight into the next: a DM who
+   * picked Turn mid-combat would land on an empty Turn panel when opening a preparing
+   * encounter. Comparing the stamp resolves during render, so the wrong tab never paints.
+   */
+  const [panelTabChoice, setPanelTabChoice] = useState<{ eid: number; tab: PanelTab } | null>(null);
+  const defaultPanelTabRef = useRef<{ eid: number; tab: PanelTab } | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [diceTrayOpen, setDiceTrayOpen] = useState(false);
   const [turnBarCollapsed, setTurnBarCollapsed] = useState(false);
@@ -3712,11 +3717,18 @@ export default function RunSessionPage() {
             `[data-testid="combatant-row-${currentCombatantId}"][data-current-turn="true"]`,
           );
         if (!el) return;
+        // The roster scrolls inside the cockpit's panel, and the page itself is locked —
+        // a `window.scrollTo` computed against the viewport moves nothing, leaving the new
+        // actor off-screen. Ask the row to bring itself into view instead, which scrolls
+        // whichever ancestor actually scrolls, and judge "already visible" against that
+        // container rather than the window.
+        const scroller = el.closest<HTMLElement>('.cf-vtt-panel-body');
         const rect = el.getBoundingClientRect();
-        const inView = rect.bottom > 0 && rect.top < window.innerHeight;
-        if (inView) return;
-        const targetTop = window.scrollY + rect.top - (window.innerHeight - rect.height) / 2;
-        window.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' });
+        const bounds = scroller?.getBoundingClientRect();
+        const top = bounds?.top ?? 0;
+        const bottom = bounds?.bottom ?? window.innerHeight;
+        if (rect.bottom > top && rect.top < bottom) return;
+        el.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
       });
     });
     return () => cancelAnimationFrame(frame);
@@ -3845,10 +3857,11 @@ export default function RunSessionPage() {
   // every render meant the tab moved under the viewer whenever an input changed — a co-DM
   // demoted to player mid-session had the roster replaced by the turn workspace while they
   // were reading it. A default is for the first paint, not a rule the panel keeps enforcing.
-  if (defaultPanelTabRef.current === null) {
-    defaultPanelTabRef.current = !isDm && encounter.status === 'running' ? 'turn' : 'party';
+  if (defaultPanelTabRef.current?.eid !== eid) {
+    defaultPanelTabRef.current = { eid, tab: !isDm && encounter.status === 'running' ? 'turn' : 'party' };
   }
-  const panelTab: PanelTab = panelTabChoice ?? defaultPanelTabRef.current;
+  const panelTab: PanelTab =
+    (panelTabChoice?.eid === eid ? panelTabChoice.tab : null) ?? defaultPanelTabRef.current.tab;
 
   // A prompt that demands a decision must not sit inside a collapsed panel. These arrive
   // unprompted — a co-DM's damage raises a concentration save, an MCP action resolves an
@@ -4245,7 +4258,7 @@ export default function RunSessionPage() {
         { id: 'table', label: t('encounters.vtt.tabTable') },
       ]}
       activeTabId={panelTab}
-      onSelectTab={(id) => setPanelTabChoice(id as PanelTab)}
+      onSelectTab={(id) => setPanelTabChoice({ eid, tab: id as PanelTab })}
       panelOpen={panelOpen}
       onPanelOpenChange={setPanelOpen}
       attentionKey={attentionKey}

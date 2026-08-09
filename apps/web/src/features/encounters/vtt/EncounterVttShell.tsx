@@ -14,6 +14,7 @@
  */
 import { useEffect, useRef, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useLocation } from 'react-router-dom';
 import { useImmersiveChromeInset } from './useImmersiveChromeInset';
 
 export type VttTab = {
@@ -86,6 +87,11 @@ function useDeepLinkedPanel(
   activeTabId: string,
   onSelectTab: (id: string) => void,
 ): void {
+  // Keyed on the router location, not just the tab list: this shell is reused across
+  // encounter navigations, so following a second notification while the cockpit is
+  // already mounted changes the pathname and hash but nothing else — an effect that
+  // depended only on the (constant) tab ids would never run again for the new target.
+  const location = useLocation();
   const onSelectRef = useRef(onSelectTab);
   onSelectRef.current = onSelectTab;
   const activeRef = useRef(activeTabId);
@@ -121,7 +127,7 @@ function useDeepLinkedPanel(
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [tabIds]);
+  }, [tabIds, location.key, location.pathname, location.hash]);
 }
 
 export function EncounterVttShell({

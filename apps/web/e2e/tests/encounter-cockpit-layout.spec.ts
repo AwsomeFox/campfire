@@ -237,3 +237,73 @@ test.describe('encounter cockpit panel collapse', () => {
     }
   });
 });
+
+test.describe('encounter cockpit across navigations', () => {
+  test('the tab default follows the encounter you opened, not the one you left', async ({ page }) => {
+    const running = await createRunningEncounter(page);
+    const { campaignId } = seed();
+    const preparing = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Preparing drill', hidden: false },
+    });
+    expect(preparing.ok()).toBe(true);
+    const preparingId = ((await preparing.json()) as { id: number }).id;
+
+    try {
+      await page.goto(`/c/${campaignId}/encounters/${running.encounterId}`);
+      await page.getByTestId('encounter-vtt-tab-log').click();
+      await expect(page.getByTestId('encounter-vtt-tab-log')).toHaveAttribute('aria-selected', 'true');
+
+      // Straight from one encounter to another — the route is the same, so React REUSES
+      // this page and an unstamped choice follows you across, landing a DM on a Log they
+      // did not ask for (or, for a player, on a Turn panel that is empty while preparing).
+      // Going via the list would unmount the page and reset it, hiding the bug entirely.
+      await page.evaluate(
+        ([campaign, id]) => {
+          window.history.pushState({}, '', `/c/${campaign}/encounters/${id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        },
+        [campaignId, preparingId] as const,
+      );
+      await expect(page.getByRole('heading', { name: 'Preparing drill' })).toBeVisible();
+      await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true');
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${preparingId}`).catch(() => undefined);
+      await page.request.delete(`/api/v1/encounters/${running.encounterId}`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
+
+  test('a deep link resolves its panel even when the cockpit is already mounted', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {
+      data: { entityType: 'encounter', entityId: encounterId, body: 'Second-navigation probe' },
+    });
+    expect(created.ok(), `create comment: ${await created.text()}`).toBe(true);
+    const commentId = ((await created.json()) as { id: number }).id;
+
+    try {
+      // Arrive first WITHOUT the hash, so the cockpit is already mounted — the case where a
+      // resolver keyed only on its tab list never runs again.
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await expect(page.getByTestId('encounter-vtt-tab-table')).toHaveAttribute('aria-selected', 'false');
+
+      await page.evaluate(
+        ([c, e, id]) => {
+          window.history.pushState({}, '', `/c/${c}/encounters/${e}?comment=${id}#entity-comment-${id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        },
+        [campaignId, encounterId, commentId] as const,
+      );
+
+      await expect(page.getByTestId('encounter-vtt-tab-table')).toHaveAttribute(
+        'aria-selected',
+        'true',
+        { timeout: 15_000 },
+      );
+      await expect(page.locator(`#entity-comment-${commentId}`)).toBeVisible();
+    } finally {
+      await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
+    }
+  });
+});
