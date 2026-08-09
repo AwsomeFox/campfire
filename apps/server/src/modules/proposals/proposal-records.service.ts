@@ -3,7 +3,7 @@ import { and, desc, eq, isNull } from 'drizzle-orm';
 import { AiGenerationProvenance } from '@campfire/schema';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { proposals, quests, npcs, locations, sessions, characters, factions, storyBeats, auditLog, ruleEntries } from '../../db/schema';
+import { proposals, quests, npcs, locations, sessions, characters, factions, storyArcs, storyBeats, auditLog, ruleEntries } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { notDeleted } from '../../common/soft-delete';
@@ -32,7 +32,7 @@ import { hashProposalSnapshot } from './proposal-snapshot';
 // standalone rather than derived from EntityType. Factions (issue #1056) are also
 // proposable for Co-DM drafting and are create-only in v1 (direct faction writes remain
 // DM-gated; the proposal queue is the co-DM intermediary).
-export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map' | 'story_beat' | 'rule_entry';
+export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map' | 'story_arc' | 'story_beat' | 'rule_entry';
 type ProposalTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 type ProposalDb = DrizzleDb | ProposalTx;
 type ProposalAttribution = {
@@ -42,7 +42,7 @@ type ProposalAttribution = {
   generationProvenance?: AiGenerationProvenance | null;
 };
 
-const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction', 'story_beat', 'rule_entry'];
+const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction', 'story_arc', 'story_beat', 'rule_entry'];
 
 export function isProposableEntityType(value: string): value is ProposableEntityType {
   return (PROPOSABLE_ENTITY_TYPES as string[]).includes(value);
@@ -52,7 +52,7 @@ export function toDomain(row: typeof proposals.$inferSelect): Proposal {
   return {
     id: row.id,
     campaignId: row.campaignId,
-    entityType: row.entityType as EntityType,
+    entityType: row.entityType as Proposal['entityType'],
     entityId: row.entityId,
     action: row.action as ProposalAction,
     payload: fromJsonText<Record<string, unknown>>(row.payload, {}),
@@ -108,6 +108,11 @@ export class ProposalRecordsService {
       proposerToken?: string | null;
       generationProvenance?: AiGenerationProvenance | null;
     },
+    // Long-running AI rewrites may need to pin the proposal to the exact authoritative
+    // row that was sent to the model. Without this override, a human edit that lands
+    // during generation would become the proposal's base even though the model never
+    // saw it, allowing approval to overwrite that edit without a stale conflict (#1311).
+    baseSnapshot?: Record<string, unknown>,
   ): Promise<Proposal> {
     // AI provenance (issue #383): the driver seat carries its AI attribution on the principal
     // (`user.proposalAttribution`) rather than passing it explicitly at every mcp tool call site.
@@ -126,7 +131,7 @@ export class ProposalRecordsService {
     // non-DM callers (see projectProposal).
     const snapshot =
       action !== 'create' && entityId !== null
-        ? await this.captureAuthorizedSnapshot(campaignId, entityType, entityId, role)
+        ? baseSnapshot ?? await this.captureAuthorizedSnapshot(campaignId, entityType, entityId, role)
         : null;
     const baseUpdatedAt =
       snapshot !== null && typeof snapshot.updatedAt === 'string' ? snapshot.updatedAt : null;
@@ -397,6 +402,24 @@ export class ProposalRecordsService {
         if (role !== 'dm' && row.hidden) throw new NotFoundException(`Faction ${entityId} not found`);
         return { ...row };
       }
+      case 'story_arc': {
+        const [row] = await this.db
+          .select()
+          .from(storyArcs)
+          .where(and(eq(storyArcs.id, entityId), eq(storyArcs.campaignId, campaignId), notDeleted(storyArcs.deletedAt)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`Story arc ${entityId} not found`);
+        return {
+          id: row.id,
+          campaignId: row.campaignId,
+          title: row.title,
+          summary: row.summary,
+          status: row.status,
+          sortOrder: row.sortOrder,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        };
+      }
       case 'story_beat': {
         const [row] = await this.db
           .select()
@@ -505,6 +528,25 @@ export class ProposalRecordsService {
         if (!row) throw new NotFoundException(`Faction ${entityId} not found`);
         if (role !== 'dm' && row.hidden) throw new NotFoundException(`Faction ${entityId} not found`);
         return { ...row };
+      }
+      case 'story_arc': {
+        const row = db
+          .select()
+          .from(storyArcs)
+          .where(and(eq(storyArcs.id, entityId), eq(storyArcs.campaignId, campaignId), notDeleted(storyArcs.deletedAt)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Story arc ${entityId} not found`);
+        return {
+          id: row.id,
+          campaignId: row.campaignId,
+          title: row.title,
+          summary: row.summary,
+          status: row.status,
+          sortOrder: row.sortOrder,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        };
       }
       case 'story_beat': {
         const row = db

@@ -54,14 +54,13 @@ export function operatorDeclaredLocalAiEndpoint(): boolean {
 }
 
 /**
- * Decide whether a generation actually leaves the server, given only whether a provider
- * config resolved at all (issue #501, extracted for #1993).
+ * Decide whether a generation actually leaves the server, given whether the effective
+ * provider can transmit content outside Campfire (issue #501, extracted for #1993).
  *
- * No configured provider ⇒ `'local'` — the run falls through to the injected/no-op seam,
- * which never transmits anywhere. A resolved config is `'external'` UNLESS the operator has
- * explicitly declared the endpoint local via `AI_PROVIDER_ENDPOINT_IS_LOCAL` — a genuinely
- * ambiguous `baseUrl` (it could be a localhost Ollama or a public API) stays external by
- * default (fail-closed).
+ * A provider that cannot transmit ⇒ `'local'`. Any configured provider or non-noop injected
+ * provider is `'external'` UNLESS the operator has explicitly declared the endpoint local via
+ * `AI_PROVIDER_ENDPOINT_IS_LOCAL` — a genuinely ambiguous endpoint (it could be a localhost
+ * Ollama or a public API) stays external by default (fail-closed).
  *
  * THE SHARED DECISION for every call site that populates
  * `AiGenerationProvenance.consent.externalSend` — `ScribeService`, `InboxSweepService`, and
@@ -71,7 +70,7 @@ export function operatorDeclaredLocalAiEndpoint(): boolean {
  * half and ignored `AI_PROVIDER_ENDPOINT_IS_LOCAL` entirely, which misreported an on-box
  * Ollama deployment as external).
  */
-export function resolveAiProvenanceEgress(configured: boolean): AiProvenanceEgress {
-  if (!configured) return 'local';
+export function resolveAiProvenanceEgress(providerCanTransmit: boolean): AiProvenanceEgress {
+  if (!providerCanTransmit) return 'local';
   return operatorDeclaredLocalAiEndpoint() ? 'local' : 'external';
 }

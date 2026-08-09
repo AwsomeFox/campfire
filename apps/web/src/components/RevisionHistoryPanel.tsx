@@ -16,6 +16,7 @@ const FIELD_LABELS: Partial<Record<RevisionEntityType, Record<string, string>>> 
   npc: { body: 'NPC description' },
   location: { body: 'Location description' },
   faction: { body: 'Faction description' },
+  story_arc: { summary: 'Story arc summary' },
   story_beat: { body: 'Story beat body' },
   note: { body: 'Note' },
   timeline_calendar: { note: 'Calendar note' },
@@ -98,6 +99,8 @@ function restorableField(entityType: RevisionEntityType): string {
       return 'notes';
     case 'session_zero':
       return 'lines';
+    case 'story_arc':
+      return 'summary';
     default:
       return 'body';
   }

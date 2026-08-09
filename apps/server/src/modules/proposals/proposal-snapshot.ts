@@ -45,7 +45,7 @@ export function staleProposalTarget(input: {
   return new ConflictException({
     code: 'STALE_PROPOSAL_TARGET',
     message:
-      'The target entity changed after this proposal was filed. Reload the proposal queue, ' +
+      'The target entity or its source context changed after this proposal was filed. Reload the proposal queue, ' +
       'review the three-way diff, and approve again (or reject and re-propose).',
     baseUpdatedAt,
     currentUpdatedAt,
@@ -64,6 +64,8 @@ export function assertProposalTargetFresh(input: {
   baseSnapshotHash: string | null;
   currentSnapshot: Record<string, unknown> | null;
   proposed: Record<string, unknown> | null;
+  baseContextHash?: string | null;
+  currentContextHash?: string | null;
 }): void {
   if (input.action === 'create') return;
 
@@ -79,7 +81,9 @@ export function assertProposalTargetFresh(input: {
   if (expectedHash === null) return;
 
   const currentHash = hashProposalSnapshot(input.currentSnapshot);
-  if (currentHash !== expectedHash) {
+  const contextChanged =
+    input.baseContextHash != null && input.currentContextHash !== input.baseContextHash;
+  if (currentHash !== expectedHash || contextChanged) {
     throw staleProposalTarget({
       base: input.baseSnapshot,
       current: input.currentSnapshot,

@@ -21,7 +21,7 @@ import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
-import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, hasCriticalHitsForAdapter, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
+import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, hasCriticalHitsForAdapter, hasInitiativeRollForAdapter, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { rulesetCapabilitiesForSelection } from '../../lib/rules';
 import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -94,7 +94,7 @@ import { resolveGridCalibration } from './mapRenderedBounds';
 import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMotion';
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, gateForWrite, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
-import { ENCOUNTER_LIFECYCLE_STEPS, activeLifecycleStepId, playerGuidance, preparingGuidance } from './postCreateGuidance';
+import { activeLifecycleStepId, encounterLifecycleSteps, playerGuidance, preparingGuidance } from './postCreateGuidance';
 import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH, pingIdentityColor } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
@@ -3237,6 +3237,13 @@ export default function RunSessionPage() {
     ? encounter.combatants.filter((c) => c.initiative === null || c.initiative === undefined).length
     : 0;
 
+  // Issue #2123: whether this campaign's rule system has an initiative roll at all. False
+  // (Ironsworn: Starforged) means the count above is not a setup step the DM owes — an
+  // unrolled roster IS the turn order there, read positionally — so the roll controls are
+  // not rendered and Start does not wait on them. `EncountersService` enforces the same
+  // rule: both roll endpoints 400, and `start` drops the initiative precondition.
+  const initiativeRollSupported = hasInitiativeRollForAdapter(activeAdapter);
+
   // Issue #469: the server rejects Start on an empty roster (it would otherwise flip
   // to 'running' with nobody in the turn order). Mirror that here so the DM sees a
   // disabled control with an explanation instead of a round-trip 400.
@@ -3251,8 +3258,9 @@ export default function RunSessionPage() {
       hasMap: encounter.mapAttachmentId != null,
       campaignHasActiveParty: characters.some((c) => c.status === 'active'),
       campaignHasCompendium,
+      initiativeRollSupported,
     });
-  }, [encounter, characters, campaignHasCompendium]);
+  }, [encounter, characters, campaignHasCompendium, initiativeRollSupported]);
 
   // Issue #420: drop confirm dialogs that the current status no longer allows
   // (e.g. End left open after a peer/SSE transition out of running).
@@ -4377,6 +4385,7 @@ export default function RunSessionPage() {
             riskyBlocked={riskyBlocked}
             safetyHoldActive={safetyHoldActive}
             needsInitiativeCount={needsInitiativeCount}
+            initiativeRollSupported={initiativeRollSupported}
             hasNoCombatants={hasNoCombatants}
             undoTurnDisabled={
               encounter.round <= 1
@@ -5238,7 +5247,7 @@ export default function RunSessionPage() {
                       alignItems: 'center',
                     }}
                   >
-                    {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => {
+                    {encounterLifecycleSteps(initiativeRollSupported).map((step, i) => {
                       const isActive = step.id === activeStepId;
                       return (
                         <li

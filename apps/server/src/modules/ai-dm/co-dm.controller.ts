@@ -32,11 +32,13 @@ export class CoDmController {
       'budget. Asks the configured provider to draft the requested content (NPC / location / story beat / recap / ' +
       'encounter / map) and files it as PENDING PROPOSAL(S) — nothing is written to canon directly. Encounters/maps ' +
       'reuse the deterministic generators (#304/#306). Returns the created proposal ids; the DM approves/rejects them ' +
-      'via the normal proposal endpoints. Metered against the seat budget; the proposer is the AI seat + model.',
+      'via the normal proposal endpoints. Passing entityId with target arc/beat loads the current storyline context and ' +
+      'files an UPDATE proposal against that same entity (#1311). When the effective provider is external, that DM-only ' +
+      'context requires includeCampaignSecrets=true on each rewrite request. Metered against the seat budget; the proposer is the AI seat + model.',
   })
   @ApiResponse({ status: 201, description: 'The pending proposal(s) drafted by the co-DM.' })
   @ApiResponse({ status: 403, description: 'Not a dm, feature disabled, seat not enabled, or token budget exhausted.' })
-  @ApiResponse({ status: 422, description: 'The provider did not return a usable structured draft.' })
+  @ApiResponse({ status: 422, description: 'External storyline context was not opted in, or the provider did not return a usable structured draft.' })
   async draft(@Param('id', ParseIntPipe) id: number, @Body() body: CoDmDraftRequestDto, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, id, 'dm');
     return this.coDm.draft(id, body, user, role);

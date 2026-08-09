@@ -27,7 +27,7 @@ import { timeAgo, useTimeTick } from '../../lib/format';
 
 type EntityType = Proposal['entityType'];
 
-const entityIcon: Record<EntityType, string> = {
+const entityIcon: Partial<Record<EntityType, string>> = {
   quest: ENTITY_ICON.quest,
   npc: ENTITY_ICON.npc,
   faction: ENTITY_ICON.faction,
@@ -40,7 +40,9 @@ const entityIcon: Record<EntityType, string> = {
 
 /** `entityIcon` slug lookup with a fallback for entity types outside the shared enum
  *  (e.g. a co-DM 'map' draft, #313/#306) — see the `targetHref` comment above. */
-function iconFor(entityType: EntityType): string {
+function iconFor(entityType: Proposal['entityType']): string {
+  if (entityType === 'story_arc') return 'open-book';
+  if (entityType === 'story_beat') return 'bookmarklet';
   return entityIcon[entityType] ?? ENTITY_ICON.location;
 }
 
@@ -328,12 +330,17 @@ const actionVerb: Record<Proposal['action'], string> = {
   delete: 'Delete',
 };
 
+function entityTypeLabel(entityType: string): string {
+  return entityType.replaceAll('_', ' ');
+}
+
 function proposalTitle(p: Proposal): string {
   const verb = actionVerb[p.action];
+  const entityLabel = entityTypeLabel(p.entityType);
   const source = p.action === 'delete' ? (p.snapshot ?? {}) : p.payload;
   const name = typeof source.name === 'string' ? source.name : typeof source.title === 'string' ? source.title : null;
-  if (name) return `${verb} ${p.entityType} "${name}"`;
-  return `${verb} ${p.entityType}${p.entityId ? ` #${p.entityId}` : ''}`;
+  if (name) return `${verb} ${entityLabel} "${name}"`;
+  return `${verb} ${entityLabel}${p.entityId ? ` #${p.entityId}` : ''}`;
 }
 
 /** Bulk approve/reject bar for the pending queue (#98) — select many, resolve in one call. */
@@ -419,7 +426,7 @@ function BatchConfirmationDialog({
               <li key={item.action}>
                 <strong className="capitalize">{item.action}</strong>: {item.count}{' '}
                 {item.count === 1 ? 'proposal' : 'proposals'} ({item.entityCounts.map(({ entityType, count }) =>
-                  `${count} ${entityType}`,
+                  `${count} ${entityTypeLabel(entityType)}`,
                 ).join(', ')})
               </li>
             ))}
@@ -513,7 +520,7 @@ function ProposalCard({
             <Chip variant="proposal">{proposal.proposer}</Chip>
           </div>
           <p className="text-muted text-xs m-0 mt-0.5">
-            {actionVerb[proposal.action]} {proposal.entityType}
+            {actionVerb[proposal.action]} {entityTypeLabel(proposal.entityType)}
             {href ? (
               <>
                 {' '}
@@ -527,7 +534,7 @@ function ProposalCard({
               AI-drafted — review closely before approving.{' '}
               {isGenerated
                 ? 'Approving re-runs the generator with the pinned seed shown below.'
-                : `Approving creates the ${proposal.entityType} through the normal write path.`}
+                : `Approving ${proposal.action === 'update' ? 'updates the existing' : 'creates the'} ${entityTypeLabel(proposal.entityType)} through the normal write path.`}
             </p>
           )}
           {proposal.generationProvenance && <GenerationProvenanceView proposal={proposal} />}
@@ -844,7 +851,7 @@ function MyProposalCard({
         <Chip variant="proposal">pending</Chip>
       </div>
       <p className="text-muted text-xs m-0">
-        {actionVerb[proposal.action]} {proposal.entityType}
+        {actionVerb[proposal.action]} {entityTypeLabel(proposal.entityType)}
         {href ? (
           <>
             {' '}
@@ -915,5 +922,3 @@ function HistoryRow({ proposal }: { proposal: Proposal }) {
     </Card>
   );
 }
-
-

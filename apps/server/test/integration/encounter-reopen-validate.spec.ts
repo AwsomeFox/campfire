@@ -50,11 +50,17 @@ describe('encounter reopen turn-pointer validation (issue #489, service layer)',
     combatants: Array<{ name: string; initiative: number | null; sortOrder: number }>;
     currentCombatantId?: number | 'first' | 'second' | null;
     turnIndex?: number;
+    /** Campaign rule system; omitted means the 5e default (issue #2123). */
+    ruleSystem?: string;
   }) {
     dataDir = makeTempDataDir();
     const { orm, encountersService } = build();
     const ts = new Date().toISOString();
-    const [campaign] = orm.insert(campaigns).values({ name: 'Reopen Validate', createdAt: ts, updatedAt: ts }).returning().all();
+    const [campaign] = orm
+      .insert(campaigns)
+      .values({ name: 'Reopen Validate', createdAt: ts, updatedAt: ts, ...(opts.ruleSystem ? { ruleSystem: opts.ruleSystem } : {}) })
+      .returning()
+      .all();
     const [encounter] = orm
       .insert(encounters)
       .values({
@@ -171,6 +177,70 @@ describe('encounter reopen turn-pointer validation (issue #489, service layer)',
       .all()
       .filter((e) => e.type === 'note');
     expect(notes.some((n) => /no initiative/i.test(n.detail))).toBe(true);
+  });
+
+  /**
+   * Issue #2123 (Devin review on #2128): the null-initiative half of the pointer-validity
+   * test only makes sense for a system that HAS an initiative roll. Ironsworn: Starforged
+   * runs an entire fight with every combatant at `initiative === null` — turn order is the
+   * roster order — so treating that as a dangling pointer would snap EVERY reopen back to
+   * the top of the roster mid-round and log a notice blaming a missing initiative the game
+   * never has. The 5e case above (same shape, default rule system) is the contrast: there a
+   * null really does mean the pointer is broken.
+   */
+  it('preserves an unrolled current combatant when the rule system has no initiative roll', async () => {
+    const ctx = seedEndedEncounter({
+      ruleSystem: 'starforged',
+      combatants: [
+        { name: 'Vanguard', initiative: null, sortOrder: 0 },
+        { name: 'Sentinel', initiative: null, sortOrder: 1 },
+        { name: 'Harrier', initiative: null, sortOrder: 2 },
+      ],
+      currentCombatantId: 'second',
+      turnIndex: 1,
+    });
+
+    const reopened = await ctx.encountersService.reopen(ctx.encounterId, dmUser, 'dm');
+    expect(reopened.status).toBe('running');
+    expect(reopened.currentCombatantId).toBe(ctx.combatants[1].id);
+    expect(reopened.turnIndex).toBe(1);
+    // Roster order is preserved too — an all-null roster sorts by sortOrder.
+    expect(reopened.combatants.map((c) => c.id)).toEqual(ctx.combatants.map((c) => c.id));
+
+    const notes = ctx.orm
+      .select()
+      .from(encounterEvents)
+      .where(eq(encounterEvents.encounterId, ctx.encounterId))
+      .all()
+      .filter((e) => e.type === 'note');
+    expect(notes.some((n) => /Turn pointer reset/i.test(n.detail ?? ''))).toBe(false);
+  });
+
+  it('still snaps a genuinely missing pointer for that same no-initiative system', async () => {
+    const ctx = seedEndedEncounter({
+      ruleSystem: 'starforged',
+      combatants: [
+        { name: 'Vanguard', initiative: null, sortOrder: 0 },
+        { name: 'Sentinel', initiative: null, sortOrder: 1 },
+      ],
+      currentCombatantId: 'second',
+      turnIndex: 1,
+    });
+    // FK ON DELETE SET NULL clears currentCombatantId, leaving a truly dangling pointer —
+    // that half of the predicate is unconditional under every rule system.
+    ctx.orm.delete(combatants).where(eq(combatants.id, ctx.combatants[1].id)).run();
+
+    const reopened = await ctx.encountersService.reopen(ctx.encounterId, dmUser, 'dm');
+    expect(reopened.currentCombatantId).toBe(ctx.combatants[0].id);
+    expect(reopened.turnIndex).toBe(0);
+
+    const notes = ctx.orm
+      .select()
+      .from(encounterEvents)
+      .where(eq(encounterEvents.encounterId, ctx.encounterId))
+      .all()
+      .filter((e) => e.type === 'note');
+    expect(notes.some((n) => /missing/i.test(n.detail ?? ''))).toBe(true);
   });
 
   it('preserves a still-valid current combatant and re-derives turnIndex', async () => {

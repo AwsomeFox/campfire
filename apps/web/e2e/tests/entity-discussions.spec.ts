@@ -51,9 +51,12 @@ test.describe('entity discussions (issue #439)', () => {
   for (const label of SURFACE_KEYS) {
     test(`mounts Discussion on ${label}`, async ({ page }) => {
       await page.goto(surfacePath(label));
-      // The encounter run page is the VTT cockpit: its long-form, table-wide
-      // sections (discussion included) live in the side panel's Table tab.
+      // Two surfaces now keep their discussion behind a tab, each from its own design template.
+      // The encounter run page is the VTT cockpit: its long-form, table-wide sections
+      // (discussion included) live in the side panel's Table tab. The campaign's lives in the
+      // dashboard's table rail. Every other surface still mounts it inline.
       if (label === 'encounter') await openCockpitTab(page, 'table');
+      if (label === 'campaign') await page.getByRole('tab', { name: 'Talk' }).click();
       const discussion = page.getByRole('region', { name: 'Discussion' });
       await expect(discussion).toBeVisible();
       await expect(discussionCompose(discussion)).toBeVisible();

@@ -74,6 +74,15 @@ export type Props = {
    *  visible via SafetyHoldBar) as a reason on the controls it actually blocks. */
   safetyHoldActive: boolean;
   needsInitiativeCount: number;
+  /**
+   * Whether this campaign's rule system rolls initiative at all (issue #2123,
+   * `hasInitiativeRollForAdapter`). False hides both Roll-initiative buttons outright — the
+   * server 400s that write, and turn order comes from the roster instead — and drops the
+   * "roll initiative first" precondition from Start, which the server no longer applies
+   * either. Not a `disabled`: a control for a roll the game does not have has nothing to
+   * explain, the same reasoning that hides the per-combatant button under group initiative.
+   */
+  initiativeRollSupported: boolean;
   hasNoCombatants: boolean;
   undoTurnDisabled: boolean;
   nextTurnAriaKeyshortcuts: string | undefined;
@@ -104,6 +113,7 @@ export function DmLifecycleHeader({
   riskyBlocked,
   safetyHoldActive,
   needsInitiativeCount,
+  initiativeRollSupported,
   hasNoCombatants,
   undoTurnDisabled,
   nextTurnAriaKeyshortcuts,
@@ -143,26 +153,32 @@ export function DmLifecycleHeader({
               write, no audit), so the button must reflect that — disabled when
               nobody needs initiative, and labeled "Roll remaining (N)" when the
               roster is partial (e.g. a manually-set combatant alongside unrolled
-              ones). Hidden entirely rather than dead weight once Start is live. */}
-          <GatedControl
-            reason={gateReasonText(rollInitiativeGateReason({ riskyBlocked, needsInitiativeCount }), t, headerBusy)}
-          >
-            <Btn
-              ghost
-              disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
-              onClick={onRollInitiative}
+              ones). Hidden entirely rather than dead weight once Start is live.
+              Absent altogether for a system with no initiative roll (issue #2123) —
+              `EncountersService.rollInitiative` 400s there, and the DM arranges the
+              turn order by dragging the roster instead. */}
+          {initiativeRollSupported && (
+            <GatedControl
+              reason={gateReasonText(rollInitiativeGateReason({ riskyBlocked, needsInitiativeCount }), t, headerBusy)}
             >
-              {needsInitiativeCount > 0
-                ? t('encounters.run.rollRemaining', { count: needsInitiativeCount })
-                : t('encounters.run.rollInitiative')}
-            </Btn>
-          </GatedControl>
+              <Btn
+                ghost
+                disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
+                onClick={onRollInitiative}
+              >
+                {needsInitiativeCount > 0
+                  ? t('encounters.run.rollRemaining', { count: needsInitiativeCount })
+                  : t('encounters.run.rollInitiative')}
+              </Btn>
+            </GatedControl>
+          )}
           {(() => {
             const startReasonKey = startGateReason({
               safetyHoldActive,
               riskyBlocked,
               hasNoCombatants,
               needsInitiativeCount,
+              initiativeRollSupported,
             });
             const startReason = gateReasonText(startReasonKey, t, headerBusy);
             // Issue #1933 review finding: the roster-state reasons (no combatants yet /
@@ -181,7 +197,7 @@ export function DmLifecycleHeader({
             // roster condition is unchanged by either transient gate, so it is resolved
             // independently and rendered alongside whichever transient reason the tooltip
             // is showing.
-            const standingHintKey = startRosterHintReason({ hasNoCombatants, needsInitiativeCount });
+            const standingHintKey = startRosterHintReason({ hasNoCombatants, needsInitiativeCount, initiativeRollSupported });
             const standingHint = gateReasonText(standingHintKey, t);
             // When the winning gate reason IS the roster reason, the paragraph below is
             // already saying it — and `GatedControl` would emit a second, visually-hidden
@@ -204,7 +220,12 @@ export function DmLifecycleHeader({
                       only half a fix (issue #1933 review, second round on this line). */}
                   <Btn
                     className="w-full"
-                    disabled={headerBusy || riskyBlocked || hasNoCombatants || needsInitiativeCount > 0}
+                    // `initiativeRollSupported &&` on the initiative term only (issue #2123):
+                    // an empty roster still blocks Start for every system, but an unrolled one
+                    // is the normal, expected state where there is no roll to make — and
+                    // `EncountersService.start` skips the same precondition, so keeping it here
+                    // would disable a button the server would have accepted.
+                    disabled={headerBusy || riskyBlocked || hasNoCombatants || (initiativeRollSupported && needsInitiativeCount > 0)}
                     onClick={onStart}
                     aria-describedby={standingHint ? START_ROSTER_HINT_ID : undefined}
                   >
@@ -241,20 +262,24 @@ export function DmLifecycleHeader({
               keep Roll initiative reachable so the DM can fill them (issue #54).
               Already-set initiatives are left untouched server-side. Once every
               combatant has a value, disable the control rather than firing a no-op
-              roll (issue #702), and surface how many still need rolling. */}
-          <GatedControl
-            reason={gateReasonText(rollInitiativeGateReason({ riskyBlocked, needsInitiativeCount }), t, headerBusy)}
-          >
-            <Btn
-              ghost
-              disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
-              onClick={onRollInitiative}
+              roll (issue #702), and surface how many still need rolling. Absent for a
+              system with no initiative roll (issue #2123): a mid-fight arrival there is
+              placed by dragging it, and "sort last" is already where the roster puts it. */}
+          {initiativeRollSupported && (
+            <GatedControl
+              reason={gateReasonText(rollInitiativeGateReason({ riskyBlocked, needsInitiativeCount }), t, headerBusy)}
             >
-              {needsInitiativeCount > 0
-                ? t('encounters.run.rollRemaining', { count: needsInitiativeCount })
-                : t('encounters.run.rollInitiative')}
-            </Btn>
-          </GatedControl>
+              <Btn
+                ghost
+                disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
+                onClick={onRollInitiative}
+              >
+                {needsInitiativeCount > 0
+                  ? t('encounters.run.rollRemaining', { count: needsInitiativeCount })
+                  : t('encounters.run.rollInitiative')}
+              </Btn>
+            </GatedControl>
+          )}
           <GatedControl reason={gateReasonText(nextTurnGateReason({ safetyHoldActive, riskyBlocked }), t, headerBusy)}>
             <Btn
               data-testid="encounter-header-next-turn"

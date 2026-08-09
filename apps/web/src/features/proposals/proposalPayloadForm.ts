@@ -39,6 +39,10 @@ import {
   QuestUpdate,
   SessionCreate,
   SessionUpdate,
+  StoryArcCreate,
+  StoryArcUpdate,
+  StoryBeatProposalCreate,
+  StoryBeatUpdate,
   type Proposal,
 } from '@campfire/schema';
 
@@ -52,6 +56,8 @@ const PROPOSAL_SCHEMAS: Partial<Record<ProposalEntityType, { create: z.AnyZodObj
   location: { create: LocationCreate, update: LocationUpdate },
   character: { create: CharacterCreate, update: CharacterUpdate },
   session: { create: SessionCreate, update: SessionUpdate },
+  story_arc: { create: StoryArcCreate, update: StoryArcUpdate },
+  story_beat: { create: StoryBeatProposalCreate, update: StoryBeatUpdate },
   // An encounter proposal's payload is the seeded GENERATOR request, not a persisted
   // encounter row — approving re-runs `generate_encounter` (issue #313). The server
   // validates it with `EncounterGenerate.strict()` for BOTH create and update

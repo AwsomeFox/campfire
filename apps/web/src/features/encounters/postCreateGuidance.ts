@@ -22,6 +22,24 @@ export const ENCOUNTER_LIFECYCLE_STEPS = [
   { id: 'ended', label: 'Ended', detail: 'Write HP back to sheets' },
 ] as const;
 
+/** Same four steps with the wording a system that has no initiative roll actually uses. */
+const NO_INITIATIVE_ROLL_LIFECYCLE_STEPS = ENCOUNTER_LIFECYCLE_STEPS.map((step) =>
+  step.id === 'initiative' ? { ...step, label: 'Turn order', detail: 'Drag the roster into order' } : step,
+) as ReadonlyArray<{ id: LifecycleStepId; label: string; detail: string }>;
+
+/**
+ * The lifecycle checklist for a campaign whose rule system may or may not roll initiative
+ * (issue #2123). The step ids are identical either way — it is the same lifecycle, and
+ * `activeLifecycleStepId` still names the middle step 'initiative' — only its user-facing
+ * label and detail change, because "Initiative — roll or set order" describes a mechanic
+ * Ironsworn: Starforged does not have and points at a control the cockpit no longer renders.
+ */
+export function encounterLifecycleSteps(
+  initiativeRollSupported = true,
+): ReadonlyArray<{ id: LifecycleStepId; label: string; detail: string }> {
+  return initiativeRollSupported ? ENCOUNTER_LIFECYCLE_STEPS : NO_INITIATIVE_ROLL_LIFECYCLE_STEPS;
+}
+
 export type PreparingGuidanceInput = {
   /** Character combatants already on the roster (usually the auto-added party). */
   partyCombatantCount: number;
@@ -33,6 +51,14 @@ export type PreparingGuidanceInput = {
   campaignHasActiveParty: boolean;
   /** Campaign has searchable monster compendium content. */
   campaignHasCompendium: boolean;
+  /**
+   * Whether this campaign's rule system rolls initiative at all (issue #2123,
+   * `hasInitiativeRollForAdapter`). Optional and defaulting to true, mirroring the adapter
+   * capability. When false, "then roll initiative" instructs the DM to press a control the
+   * cockpit does not render, for a write the server refuses — so the same steps name what
+   * actually establishes turn order on that table: the roster order itself.
+   */
+  initiativeRollSupported?: boolean;
 };
 
 export type PreparingGuidance = {
@@ -47,8 +73,14 @@ export type PreparingGuidance = {
  * say so explicitly and point at enemies/reinforcements — never "add the party".
  */
 export function preparingGuidance(input: PreparingGuidanceInput): PreparingGuidance {
-  const { partyCombatantCount, enemyCombatantCount, hasMap, campaignHasActiveParty, campaignHasCompendium } =
-    input;
+  const {
+    partyCombatantCount,
+    enemyCombatantCount,
+    hasMap,
+    campaignHasActiveParty,
+    campaignHasCompendium,
+    initiativeRollSupported = true,
+  } = input;
 
   let lead: string;
   if (partyCombatantCount > 0) {
@@ -56,7 +88,9 @@ export function preparingGuidance(input: PreparingGuidanceInput): PreparingGuida
   } else if (campaignHasActiveParty) {
     lead = 'No party members are in this fight yet — add them below, then enemies.';
   } else {
-    lead = 'No active party to auto-add. Add combatants below, then roll initiative and Start.';
+    lead = initiativeRollSupported
+      ? 'No active party to auto-add. Add combatants below, then roll initiative and Start.'
+      : 'No active party to auto-add. Add combatants below, put them in turn order, then Start.';
   }
 
   const nextSteps: string[] = [];
@@ -67,7 +101,11 @@ export function preparingGuidance(input: PreparingGuidanceInput): PreparingGuida
         : 'Add enemies with the Manual or NPC tabs (no compendium monsters loaded yet).',
     );
   } else {
-    nextSteps.push('Adjust the roster, then roll initiative.');
+    nextSteps.push(
+      initiativeRollSupported
+        ? 'Adjust the roster, then roll initiative.'
+        : 'Adjust the roster — this system has no initiative roll, so turn order is the roster order. Drag a combatant to move it.',
+    );
   }
 
   if (!hasMap) {
@@ -76,7 +114,11 @@ export function preparingGuidance(input: PreparingGuidanceInput): PreparingGuida
     nextSteps.push('Place tokens on the map, then Start when ready.');
   }
 
-  nextSteps.push('Lifecycle: Preparing → Initiative → Running → Ended.');
+  nextSteps.push(
+    initiativeRollSupported
+      ? 'Lifecycle: Preparing → Initiative → Running → Ended.'
+      : 'Lifecycle: Preparing → Turn order → Running → Ended.',
+  );
 
   return { lead, nextSteps };
 }

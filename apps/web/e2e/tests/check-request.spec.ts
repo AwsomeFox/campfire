@@ -146,6 +146,9 @@ test.describe('DM check request loop (#415)', () => {
 
       // --- DM sends request from campaign dashboard -------------------------------------
       await page.goto(`/c/${campaignId}`);
+      // The dashboard's table rail is tabbed (design template's campaign dashboard) and the
+      // check panel is the DM-only Checks tab, so open it before reading the panel.
+      await page.getByRole('tab', { name: 'Checks' }).click();
       const panel = page.getByTestId('request-check-panel');
       await expect(panel).toBeVisible();
 
@@ -291,6 +294,9 @@ test.describe('DM check request loop (#415)', () => {
       }
 
       await page.goto(`/c/${campaignId}`);
+      // The dashboard's table rail is tabbed (design template's campaign dashboard) and the
+      // check panel is the DM-only Checks tab, so open it before reading the panel.
+      await page.getByRole('tab', { name: 'Checks' }).click();
       const panel = page.getByTestId('request-check-panel');
       await expect(panel).toBeVisible();
 
@@ -358,6 +364,9 @@ test.describe('DM check request loop (#415)', () => {
       });
 
       await page.goto(`/c/${campaignId}`);
+      // The dashboard's table rail is tabbed (design template's campaign dashboard) and the
+      // check panel is the DM-only Checks tab, so open it before reading the panel.
+      await page.getByRole('tab', { name: 'Checks' }).click();
       const panel = page.getByTestId('request-check-panel');
       await expect(panel).toBeVisible();
 
