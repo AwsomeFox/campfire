@@ -371,10 +371,15 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     },
   );
 
+  // The owner-changing hydrate runs after render. Never hand a new role, campaign, or
+  // viewer the prior owner's projection for that one render in between; the provider
+  // deliberately paints empty until its key effect has established the new owner.
+  const visibleTranscript = transcriptOwnerRef.current === key ? transcript : emptyTranscript;
+
   return {
     ...state,
     live: enabled,
-    transcript,
+    transcript: visibleTranscript,
     dispatchTranscript: stableDispatch,
   };
 }
