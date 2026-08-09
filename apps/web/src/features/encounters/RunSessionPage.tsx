@@ -2505,26 +2505,51 @@ export default function RunSessionPage() {
 
   /**
    * Issue #2116 — see `isAwaitingReorderResync`'s doc comment in `combatantReorder.ts` for
-   * the full defect and why this is gated on `encounterReadRevisionRef`/`encounterReadRevision`
-   * specifically, not `encounterQuery.dataUpdatedAt` (which a local optimistic write — an HP
-   * delta, a map/fog patch — can advance without any real GET completing, letting the gate
-   * clear while the roster is still stale) and not `encounterQuery.isFetching` (true for any
-   * refetch, which would silently swallow a completed drag).
+   * the full defect this gate closes, and why it is not gated on `encounterQuery.isFetching`
+   * (true for any refetch, so it would silently swallow a completed drag) or on
+   * `encounterQuery.dataUpdatedAt` (a local optimistic write — an HP delta, a map/fog patch —
+   * advances it without any real GET completing, so the gate would clear while the roster on
+   * screen was still stale).
    *
-   * `reorderResyncArmedAt` is REACT STATE, not a ref (review round 2 on #2116, catching the
-   * same class of mistake `previousTurnBeatRef`/`useCombatantDragReorder`'s `enabled` guard
-   * against elsewhere on this page): a ref mutation alone does not cause a re-render, so
-   * `buildReorderControls`'s `busy` and `InitiativeStrip`'s `canReorder` would keep evaluating
-   * their LAST-rendered value and stay visually enabled while `handleReorderDrop` silently
-   * refused the write underneath — a click or completed drag that looks accepted but does
-   * nothing, exactly the "recoverable, visible 409 traded for a silent no-op" issue #2116
-   * explicitly rejects for `encounterQuery.isFetching`. `isAwaitingReorderResyncNow`, computed
-   * fresh every render from `reorderResyncArmedAt` and `encounterReadRevision` (both state),
-   * is the one boolean every reorder entry point below consults, so a re-render always shows
-   * the true state before an action can be attempted.
+   * `reorderResyncArmedAt` is REACT STATE, not a ref (review round 2), so `isAwaitingReorderResyncNow`
+   * below is reactive: `buildReorderControls`'s `busy` and `InitiativeStrip`'s `canReorder`
+   * (both consult it) get a fresh value every render instead of silently swallowing an action
+   * on a control that still LOOKED enabled.
+   *
+   * `isAwaitingReorderResyncNow` reads `reorderResyncArmedAt` DIRECTLY (`!== null`) rather than
+   * recomputing "is `encounterReadRevisionRef` still behind `armedAt`" on every render (review
+   * round 3's fix, superseded here) — review round 4/5: `encounterReadRevisionRef` (and its
+   * companion state `encounterReadRevision`) is bumped SYNCHRONOUSLY inside `encounterQuery`'s
+   * `queryFn`, BEFORE that function returns and BEFORE TanStack Query's own separate
+   * cache-update-and-notify step publishes the new `encounter` object components actually
+   * render. A component CAN render with the bumped `encounterReadRevision` but the STILL-STALE
+   * `encounter` (pre-reorder `combatants` order) — releasing the gate for a render or more
+   * while the roster shown is still the one the drag must not be authored against. Comparing
+   * against `encounterReadRevision` at read time cannot avoid this: the comparison itself is a
+   * proxy that can tick ahead of the data it's meant to certify.
+   *
+   * The effect below instead clears `reorderResyncArmedAt` from a dependency on `encounter`
+   * ITSELF — the exact value the component renders and `handleReorderDrop` reads when building
+   * its request — so the clear can only ever run AFTER a render has already shown the update.
+   * `encounterReadRevisionRef.current` is still what distinguishes "that update was a real GET"
+   * from "that update was a local optimistic write" (an HP delta/map/fog patch ALSO changes
+   * `encounter`'s reference and fires this effect, but never advances that ref, so the
+   * comparison inside stays false and the gate stays armed) — same distinction round 3
+   * established, just checked at the right time now instead of the wrong one.
    */
   const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);
-  const isAwaitingReorderResyncNow = isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevision);
+  const isAwaitingReorderResyncNow = reorderResyncArmedAt !== null;
+  useEffect(() => {
+    if (reorderResyncArmedAt !== null && !isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevisionRef.current)) {
+      setReorderResyncArmedAt(null);
+    }
+    // `encounter` (not `encounterReadRevision`) is the load-bearing dependency — see the doc
+    // comment above for why keying this on the revision counter directly reintroduces the
+    // exact race this effect exists to close. `reorderResyncArmedAt` is also read above, so
+    // it belongs here too (re-running the instant a reorder arms it is harmless: `encounter`
+    // is still the pre-reorder snapshot at that exact render, so the check inside still
+    // evaluates "still awaiting").
+  }, [encounter, reorderResyncArmedAt]);
 
   /**
    * Manual initiative reorder (issue #1923) — drag (InitiativeStrip + roster) and the

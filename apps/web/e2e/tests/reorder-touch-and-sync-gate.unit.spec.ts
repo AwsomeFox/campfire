@@ -130,7 +130,7 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
   });
 });
 
-test.describe('reorder resync latch is REACTIVE state, and every reorder entry point consults it (issue #2116 review round 2)', () => {
+test.describe('reorder resync latch is REACTIVE state, correctly ordered against the rendered encounter (issue #2116 review rounds 2-5)', () => {
   /**
    * Review round 2 on #2116: the round-1 fix gated on a plain `useRef`. A ref mutation does
    * NOT cause a re-render, so `buildReorderControls`'s `busy` and `InitiativeStrip`'s
@@ -141,31 +141,66 @@ test.describe('reorder resync latch is REACTIVE state, and every reorder entry p
    * visible 409 traded for a silent no-op" trade issue #2116 explicitly rejects for
    * `encounterQuery.isFetching`, just rarer and therefore harder to diagnose.
    *
-   * `reorderResyncArmedAt` is now `useState`, and `isAwaitingReorderResyncNow` is computed
-   * fresh every render from it plus `encounterReadRevision` (also state) — both reactive,
-   * so a re-render always reflects the true value before any entry point acts on it.
+   * `reorderResyncArmedAt` is now `useState`, so a re-render always reflects the true value
+   * before any entry point acts on it — not `encounterQuery.dataUpdatedAt` (advances on ANY
+   * `setQueryData` for the query key, including this page's own local optimistic writes that
+   * never round-trip to the server) and, per review round 5, not a live comparison against
+   * `encounterReadRevision` on every render either (that state can tick before the `encounter`
+   * object a component actually renders catches up — see the clearing-effect test below).
    * `RunSessionPage.tsx` is too heavily wired to mount — see this file's top comment — so
    * the call sites are pinned by source rather than by rendering; the underlying decision
    * function itself is behaviorally unit-tested against real values in
    * `combatant-reorder.unit.spec.ts`.
-   *
-   * Gated on `encounterReadRevisionRef`/`encounterReadRevision` — NOT
-   * `encounterQuery.dataUpdatedAt` — deliberately: `dataUpdatedAt` advances on ANY
-   * `setQueryData` for this query key, including this page's own local optimistic writes
-   * (an HP delta, a map/fog patch) that never round-trip to the server. Gating on it would
-   * let one of those land inside the window and clear the gate while the roster was still
-   * pre-reorder, reopening the exact silent-wrong-order hazard this mechanism exists to
-   * close. `encounterReadRevisionRef` only advances inside `encounterQuery`'s own `queryFn`,
-   * after a real fetch it started has actually resolved (guarded by
-   * `signal.throwIfAborted()`) — see that ref's own doc comment a few hundred lines above.
    */
-  test('reorderResyncArmedAt is useState, and isAwaitingReorderResyncNow is derived from it plus encounterReadRevision', () => {
+  test('reorderResyncArmedAt is useState, and isAwaitingReorderResyncNow reads it directly (not a live revision comparison)', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     expect(source).toContain('const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);');
-    expect(source).toContain('const isAwaitingReorderResyncNow = isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevision);');
+    // Review round 5: computing `isAwaitingReorderResyncNow` as a LIVE call to
+    // `isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevision)` on every render
+    // reintroduces the race — `encounterReadRevision` (state) is bumped inside `queryFn`
+    // BEFORE TanStack Query's cache-update-and-notify step publishes the new `encounter` a
+    // component actually renders, so a render could see the bumped revision but the still-stale
+    // `encounter`. The exposed gate must instead just read whether `reorderResyncArmedAt` has
+    // been cleared yet — see the clearing-effect test below for where that decision now lives.
+    expect(source).toContain('const isAwaitingReorderResyncNow = reorderResyncArmedAt !== null;');
+    expect(source).not.toContain('isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevision)');
     // Regression guard: this must NOT be a ref. A ref read here would silently reintroduce
     // the exact defect this describe block exists to close (no re-render on change).
     expect(source).not.toContain('const awaitingReorderResyncRef = useRef');
+  });
+
+  /**
+   * Review round 5 (Codex, confirmed): `encounterReadRevisionRef`/`encounterReadRevision` are
+   * bumped SYNCHRONOUSLY inside `encounterQuery`'s `queryFn`, before that async function
+   * returns — strictly BEFORE TanStack Query's own separate cache-update-and-notify step
+   * publishes the new `encounter` object a component actually renders. A component could
+   * therefore render with the NEW `encounterReadRevision` but the OLD `encounter` (pre-reorder
+   * `combatants` order), releasing the gate for a render or more while the roster shown is
+   * still the one a drag must not be authored against — the exact silent-wrong-order hazard
+   * this whole mechanism exists to close, reopened by a fifth distinct proxy signal.
+   *
+   * The fix: the clearing decision moves into an effect keyed on `encounter` ITSELF — the
+   * value the component renders and `handleReorderDrop` actually reads — so the clear can only
+   * run AFTER a render has already shown the update. `encounterReadRevisionRef.current`, read
+   * INSIDE that now-correctly-ordered effect, is still what distinguishes a real completed GET
+   * from a local optimistic write (both change `encounter`'s reference and fire the effect,
+   * but only a real GET advances that ref).
+   */
+  test("the clearing effect is keyed on `encounter` (not `encounterReadRevision`), and checks encounterReadRevisionRef.current inside", () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const stateStart = source.indexOf('const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);');
+    expect(stateStart).toBeGreaterThan(-1);
+    const effectEnd = source.indexOf('\n  }, [encounter, reorderResyncArmedAt]);', stateStart);
+    expect(effectEnd).toBeGreaterThan(stateStart);
+    const block = source.slice(stateStart, effectEnd);
+
+    // The load-bearing dependency is `encounter`, not the revision state — regression guard
+    // for the exact defect found in review round 5.
+    expect(block).not.toContain('[encounterReadRevision]');
+    expect(block).toMatch(
+      /if \(reorderResyncArmedAt !== null && !isAwaitingReorderResync\(reorderResyncArmedAt, encounterReadRevisionRef\.current\)\) \{/,
+    );
+    expect(block).toContain('setReorderResyncArmedAt(null);');
   });
 
   test('reorderCombatant.onSettled arms the state with the read-revision baseline, before invalidateEncounter', () => {
