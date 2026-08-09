@@ -146,6 +146,30 @@ describe('encounters (e2e)', () => {
     const publicRoll = shared.body.find((entry: { id: number }) => entry.id === rolled.body.roll.id);
     expect(publicRoll).toMatchObject({ expr: '1d20', total: publicRoll.rolls[0], label: 'Test Goblin · Stealth' });
     expect(publicRoll.terms).toBeUndefined();
+
+    expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' })).status).toBe(200);
+    try {
+      expect((await request(server).get(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks`).set(dm)).status).toBe(200);
+      expect(
+        (
+          await request(server)
+            .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
+            .set(dm)
+            .send({ checkId: 'skill:stealth' })
+        ).status,
+      ).toBe(403);
+    } finally {
+      expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' })).status).toBe(200);
+    }
+    expect((await request(server).post(`/api/v1/encounters/${created.body.id}/end`).set(dm)).status).toBe(201);
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
+          .set(dm)
+          .send({ checkId: 'skill:stealth' })
+      ).status,
+    ).toBe(409);
   });
 
   // Issue #491: PF2e initiative is Perception = WIS mod + trained proficiency (level+2),

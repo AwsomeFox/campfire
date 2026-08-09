@@ -1064,7 +1064,7 @@ export class EncountersController {
   @ApiResponse({ status: 403, description: 'DM role required; creature mechanics are never returned to players/viewers.' })
   async creatureChecks(@Param('id', ParseIntPipe) id: number, @Param('cid', ParseIntPipe) cid: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    const role = await this.access.requireRole(user, row.campaignId, 'dm', { allowArchived: true });
     return this.encounters.listCreatureChecks(id, cid, user, role);
   }
 

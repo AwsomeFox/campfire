@@ -2099,6 +2099,7 @@ export class EncountersService {
   ): Promise<CheckRollResponse> {
     if (role !== 'dm') throw new ForbiddenException('Only the DM may roll creature mechanics.');
     const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
     const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
     if (combatant.kind === 'character') throw new BadRequestException('Creature checks require a monster or NPC combatant.');
     const data = await this.creatureCheckData(combatant, encounter.campaignId);

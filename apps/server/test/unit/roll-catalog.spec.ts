@@ -1,6 +1,7 @@
 import {
   Dnd5eAdapter,
   Pf2eAdapter,
+  Pathfinder1eAdapter,
   Sf2eAdapter,
   listRuleSystemAdapters,
   ruleSystemAdapter,
@@ -34,12 +35,21 @@ describe('creature roll catalog — adapter-derived statblocks (issue #1314)', (
 
   it('uses PF2e creature modifiers directly and does not offer advantage', () => {
     const catalog = creatureCheckCatalogForAdapter(Pf2eAdapter, {
-      data: { abilityMods: { strength: 4, dexterity: 2 }, saves: { fortitude: 11 }, skills: { athletics: 12 } },
+      data: { abilityMods: { strength: 4, dexterity: 2 }, perception: 11, saves: { fortitude: 11 }, skills: { athletics: 12 } },
     });
     expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(4);
     expect(catalog.find((check) => check.id === 'save:fortitude')?.modifier).toBe(11);
     expect(catalog.find((check) => check.id === 'skill:athletics')?.supportsDegrees).toBe(true);
+    expect(catalog.some((check) => check.id === 'ability:PERCEPTION')).toBe(false);
     expect(catalog.every((check) => !check.supportsAdvantage)).toBe(true);
+  });
+
+  it('does not turn native Pathfinder initiative metadata into an ability check', () => {
+    const catalog = creatureCheckCatalogForAdapter(Pathfinder1eAdapter, {
+      data: { abilityScores: { strength: 14 }, initiative: 7 },
+    });
+    expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(2);
+    expect(catalog.some((check) => check.id === 'ability:INITIATIVE')).toBe(false);
   });
 
   it('keeps inline statblock ability scores as scores and reads flat Open5e save fields', () => {

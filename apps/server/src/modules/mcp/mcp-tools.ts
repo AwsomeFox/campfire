@@ -4473,7 +4473,7 @@ export class McpToolsService {
       },
       async ({ encounterId, combatantId }) => {
         const encounter = await this.encounters.getRowOrThrow(encounterId as number);
-        const role = await this.access.requireRole(user, encounter.campaignId, 'dm');
+        const role = await this.access.requireRole(user, encounter.campaignId, 'dm', { allowArchived: true });
         return this.encounters.listCreatureChecks(encounterId as number, combatantId as number, user, role);
       },
     );

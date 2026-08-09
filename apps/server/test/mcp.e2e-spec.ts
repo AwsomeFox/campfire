@@ -908,6 +908,18 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ability:DEX', modifier: 2 })]));
     const rolled = parseResult(await dmClient.callTool({ name: 'roll_creature_check', arguments: { encounterId: encounter.id, combatantId: combatant.id, checkId: 'ability:DEX' } })) as { roll: { actor: string; label: string } };
     expect(rolled.roll).toMatchObject({ actor: 'Goblin', label: 'Goblin · DEX check' });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ status: 'paused' }).where(eq(campaigns.id, campaignId));
+    try {
+      const archivedChecks = parseResult(await dmClient.callTool({ name: 'list_creature_checks', arguments: { encounterId: encounter.id, combatantId: combatant.id } })) as Array<{ id: string }>;
+      expect(archivedChecks).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ability:DEX' })]));
+      const archivedRoll = await dmClient.callTool({ name: 'roll_creature_check', arguments: { encounterId: encounter.id, combatantId: combatant.id, checkId: 'ability:DEX' } });
+      expect(archivedRoll.isError).toBe(true);
+      expect((archivedRoll.content as TextContent[])[0].text).toContain('403');
+    } finally {
+      await db.update(campaigns).set({ status: 'active' }).where(eq(campaigns.id, campaignId));
+    }
   });
 
   it('check requests (issue #415): dm request_check → list_check_requests → resolve_check_request; viewer cannot resolve', async () => {

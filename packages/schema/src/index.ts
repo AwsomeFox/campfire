@@ -6105,6 +6105,10 @@ export function creatureCheckCatalogForAdapter(
   for (const [rawKey, rawValue] of Object.entries(mapped.abilityScores ?? {})) {
     if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) continue;
     const ability = creatureAbilityLabel(rawKey);
+    // `mapStatblock` may fold a native initiative/Perception bonus into this map for the
+    // encounter initiative seam. Only the adapter's declared character abilities are
+    // creature ability checks; exposing that metadata would invent a bogus check.
+    if (!(adapter.characterSheet?.abilityFields ?? []).some((field) => field.key.toUpperCase() === ability)) continue;
     const modifier = resolveAbilityModifier(adapter, rawValue, abilityRepresentation);
     add({
       id: `ability:${ability}`,
