@@ -1317,6 +1317,59 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(after.src).toBe('derived');
   });
 
+  it('undoing an archive still works after a system switch disarmed the tombstone', async () => {
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Archive Undo After Switch' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Archive Undoer', level: 5, stats: { STR: 16 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'archive-undo-slot' });
+
+    const archived = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'archive', targets: [{ entityType: 'inventory_item', entityId: item.body.id }] });
+    expect(archived.status).toBe(201);
+
+    const profile = {
+      slug: 'e2e-archive-undo-hack',
+      label: 'E2E Archive Undo Hack',
+      mechanicsSummary: 'A homebrew hack for the archive-undo-after-switch case, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+
+    // Disarming the tombstone must not advance the version `undoBulk` fences on — otherwise
+    // the switch silently makes the archive un-undoable.
+    const undone = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk/${archived.body.operationId}/undo`)
+      .set(dm);
+    expect(undone.status).toBe(201);
+
+    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
+    expect(after.body.deletedAt).toBeNull();
+    // …and the restore brings back no old-system mechanics.
+    expect(after.body.equippedAction).toBeNull();
+    expect(after.body.equippedActionSource).toBeNull();
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

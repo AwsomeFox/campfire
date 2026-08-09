@@ -694,7 +694,20 @@ export class InventoryService {
           role === 'dm'
             ? undefined
             : sql`(${inventoryItems.characterId} is null or (select owner_user_id from characters where id = ${inventoryItems.characterId}) = ${user.id})`,
-          // When an action is being written too, every input that derivation read must still
+          // When NOT regenerating, the row must still have the action state this request read.
+          // Review (chatgpt-codex-connector P2): reading an unequipped, action-less item left
+          // this write unfenced, so another request could equip it and derive from the OLD
+          // snapshot in the meantime — and the refresh would then swap in the new snapshot
+          // while preserving that old-revision action, which is the mismatch this endpoint
+          // exists to prevent. A change here means someone else's write should win.
+          ...(regeneration
+            ? []
+            : [
+                existing.equippedActionSource === null
+                  ? isNull(inventoryItems.equippedActionSource)
+                  : eq(inventoryItems.equippedActionSource, existing.equippedActionSource),
+              ]),
+          // When an action IS being written, every input that derivation read must still
           // hold — owner, provenance, equip state, name, the wielder's stats, the campaign's
           // mechanics. Any of them moving means someone else's write should win.
           ...(regeneration

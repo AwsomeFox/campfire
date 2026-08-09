@@ -1432,9 +1432,22 @@ export class CampaignsService {
     // exactly the dangerous one: a bulk move clears the live action while its journal keeps
     // the copy, so an early return here would skip the only cleanup that matters.
     if (affected.length > 0) {
+      const derivedInCampaign = and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived'));
+      // LIVE rows advance `updatedAt`: their granted action genuinely changed, and readers
+      // key cache freshness off it.
       tx.update(inventoryItems)
         .set({ equippedAction: null, equippedActionSource: null, updatedAt: nowIso() })
-        .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')))
+        .where(and(derivedInCampaign, isNull(inventoryItems.deletedAt)))
+        .run();
+      // TOMBSTONES deliberately do NOT. Review (chatgpt-codex-connector P2):
+      // `CampaignLibraryService.undoBulk()` fences on the tombstone's `updatedAt` still
+      // matching the version its journal recorded, so bumping it here made undoing an archive
+      // fail with a conflict — even though this same transaction scrubs the journal's action
+      // and the restore would have been perfectly safe. Nothing user-visible reads a trashed
+      // row's `updatedAt`, so leaving it alone costs nothing and keeps undo working.
+      tx.update(inventoryItems)
+        .set({ equippedAction: null, equippedActionSource: null })
+        .where(and(derivedInCampaign, isNotNull(inventoryItems.deletedAt)))
         .run();
     }
 
