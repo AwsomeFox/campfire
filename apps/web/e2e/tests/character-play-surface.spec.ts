@@ -230,7 +230,11 @@ test.describe('character sheet play surface', () => {
       await expect(attackMenu.getByRole('menuitem', { name: /Critical/ })).toHaveCount(0);
       await page.keyboard.press('Escape');
       await actionsSection.getByRole('button', { name: /2d6\+4/ }).click({ button: 'right' });
-      await expect(page.getByRole('menu').getByRole('menuitem', { name: /Critical/ })).toBeVisible();
+      const damageMenu = page.getByRole('menu');
+      await expect(damageMenu.getByRole('menuitem', { name: /Critical/ })).toBeVisible();
+      // ...but NOT advantage: the damage handler treats it exactly like a normal roll and
+      // only labels the log entry, so the command would roll unchanged damage.
+      await expect(damageMenu.getByRole('menuitem', { name: /Advantage/ })).toHaveCount(0);
       await page.keyboard.press('Escape');
 
       const archived = await ctx.patch(`/api/v1/campaigns/${campaign.id}`, { data: { status: 'paused' } });

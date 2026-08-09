@@ -1381,12 +1381,20 @@ function RollChip({
   onClick,
   disabled,
   allowCrit = true,
+  allowAdvantage = true,
 }: {
   label: string;
   title: string;
   /** `event` is forwarded verbatim: its presence is what marks a plain click. */
   onClick: (mode: RollMode, event?: MouseEvent) => void;
   disabled: boolean;
+  /**
+   * Damage chips pass false: this handler treats advantage and disadvantage exactly like a
+   * normal roll and only labels the log entry, so offering them rolled unchanged damage
+   * under a name that claimed otherwise. An attack chip keeps them — a to-hit really is
+   * roll-two-keep.
+   */
+  allowAdvantage?: boolean;
   /**
    * Only a DAMAGE chip doubles dice on a crit. A TO-HIT chip has no critical variant here —
    * its handler maps advantage/disadvantage and lets anything else fall through to the flat
@@ -1395,7 +1403,7 @@ function RollChip({
   allowCrit?: boolean;
 }) {
   return (
-    <RollContextMenu type="button" className="btn btn-ghost btn-xs text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title} allowCrit={allowCrit}>
+    <RollContextMenu type="button" className="btn btn-ghost btn-xs text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title} allowCrit={allowCrit} allowAdvantage={allowAdvantage}>
       <GameIcon slug="rolling-dices" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{label}
     </RollContextMenu>
   );
@@ -1544,7 +1552,11 @@ function CharacterVitalsRail({
     // stat to 10, so a draft sheet would show a plausible initiative and let it be rolled
     // from a DEX (5e) / WIS (PF2e) the character never had. An adapter whose initiative
     // depends on no ability at all (`ability: null`) is untouched by this.
-    if (def.ability && abilityScore(character, def.ability) === null) return null;
+    // Drop it only when the declared source is missing AND nothing else contributed. PF1e
+    // may carry a native `initiative`/`init` bonus with no DEX at all (`pf1eInitiativeBreakdown`
+    // prefers it), and hiding a real, rollable initiative is a worse error than showing a
+    // fabricated +0 — so a non-zero modifier keeps the tile whatever its declared ability.
+    if (def.ability && def.modifier === 0 && abilityScore(character, def.ability) === null) return null;
     return def;
   }, [adapter, character]);
   // Only a system that actually models death saves gets the tracker; PF2e (dying/wounded)
@@ -2437,6 +2449,8 @@ function ActionsCard({
                         label={action.damage}
                         title={`Roll ${action.name} damage (${dmgExpr})`}
                         disabled={roller.rolling}
+                        allowAdvantage={false}
+                        allowCrit={criticalDamage === 'double-dice'}
                         onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${action.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
                       />
                     ) : (
@@ -2584,6 +2598,8 @@ function ActionsCard({
                               label={granted.damage}
                               title={`Roll ${granted.name} damage (${dmgExpr})`}
                               disabled={roller.rolling}
+                              allowAdvantage={false}
+                              allowCrit={criticalDamage === 'double-dice'}
                               onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${granted.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
                             />
                           ) : (
