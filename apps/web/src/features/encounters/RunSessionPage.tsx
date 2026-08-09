@@ -34,7 +34,13 @@ import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampa
 import { inlineCharacterSheetsInteractive, inlineCharacterSheetsStatusLabel, shouldInvalidateInlineCharacters } from './inlineCharacterCards';
 import { endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
-import { applyOptimisticHpDelta, rebaseOptimisticHpEncounter, replayOptimisticHpDeltas, type OptimisticHpDelta } from './optimisticHp';
+import {
+  applyOptimisticHpDelta,
+  rebaseOptimisticHpEncounter,
+  replayOptimisticHpDeltas,
+  rollbackOptimisticHpTargets,
+  type OptimisticHpDelta,
+} from './optimisticHp';
 import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
 import { FloatingNumbers } from './FloatingNumbers';
 import { diffHpFeedback, hpFeedbackSnapshot, sameHpFeedbackSnapshot, withOptimisticHpFeedbackTargets, type HpFeedbackEvent, type HpFeedbackSnapshot } from './hpFeedback';
@@ -2855,9 +2861,15 @@ export default function RunSessionPage() {
       } catch (err) {
         bulkHpFeedbackOperationsRef.current.delete(bulkOperationId);
         if (previous) {
-          queryClient.setQueryData(queryKeys.encounter(eid), previous);
-          seedHpFeedbackSnapshot(previous);
+          const restored = queryClient.setQueryData<EncounterWithCombatants>(
+            queryKeys.encounter(eid),
+            (current) => current
+              ? rollbackOptimisticHpTargets(current, previous, targets)
+              : previous,
+          );
+          seedHpFeedbackSnapshot(restored);
         }
+        void invalidateEncounter(queryClient, eid);
         // Same rule as the single-target stepper: an unknown outcome is not a failure.
         if (isAmbiguousOutcome(err)) enterReconciling();
         else reportError(err);

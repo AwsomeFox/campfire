@@ -182,6 +182,35 @@ export function rebaseOptimisticHpEncounter(
   };
 }
 
+/** Restores optimistic HP fields without rolling back newer turn-owned state. */
+export function rollbackOptimisticHpTargets(
+  current: EncounterWithCombatants,
+  previous: EncounterWithCombatants,
+  targetIds: Iterable<number>,
+): EncounterWithCombatants {
+  const targets = new Set(targetIds);
+  if (targets.size === 0) return current;
+  const previousCombatants = new Map(previous.combatants.map((combatant) => [combatant.id, combatant]));
+  return {
+    ...current,
+    combatants: current.combatants.map((combatant) => {
+      if (!targets.has(combatant.id)) return combatant;
+      const before = previousCombatants.get(combatant.id);
+      if (!before) return combatant;
+      return {
+        ...combatant,
+        hpCurrent: before.hpCurrent,
+        hpTemp: before.hpTemp,
+        spCurrent: before.spCurrent,
+        rpCurrent: before.rpCurrent,
+        deathState: before.deathState,
+        deathSaveSuccesses: before.deathSaveSuccesses,
+        deathSaveFailures: before.deathSaveFailures,
+      };
+    }),
+  };
+}
+
 /** Rebuilds the optimistic encounter cache from a committed base plus pending writes. */
 export function replayOptimisticHpDeltas(
   encounter: Combatant[],

@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import {
   rebaseOptimisticHpEncounter,
   replayOptimisticHpDeltas,
+  rollbackOptimisticHpTargets,
 } from '../../src/features/encounters/optimisticHp';
 
 const combatant = { id: 1, hpCurrent: 20, hpMax: 20 } as Combatant;
@@ -160,6 +161,32 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(replayed[0]).toMatchObject({ hpCurrent: 0, deathState: 'dying' });
   });
 
+  test('bulk HP rollback preserves a newer seeded turn', () => {
+    const beforeTarget = { ...combatant, hpCurrent: 20 };
+    const previous = {
+      id: 8,
+      currentCombatantId: 1,
+      turnVersion: 4,
+      combatants: [beforeTarget, { id: 2, hpCurrent: 12, hpMax: 20 } as Combatant],
+    } as EncounterWithCombatants;
+    const current = {
+      ...previous,
+      currentCombatantId: 2,
+      turnVersion: 5,
+      combatants: [
+        { ...beforeTarget, hpCurrent: 15, turnState: { used: {}, movementUsedFt: 0 } },
+        { id: 2, hpCurrent: 9, hpMax: 20 } as Combatant,
+      ],
+    } as EncounterWithCombatants;
+
+    const restored = rollbackOptimisticHpTargets(current, previous, [1]);
+
+    expect(restored.currentCombatantId).toBe(2);
+    expect(restored.turnVersion).toBe(5);
+    expect(restored.combatants[0]).toMatchObject({ hpCurrent: 20, turnState: current.combatants[0]?.turnState });
+    expect(restored.combatants[1]?.hpCurrent).toBe(9);
+  });
+
   test('the HP mutation replays pending deltas instead of restoring a snapshot', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
 
@@ -169,6 +196,8 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(source).toContain('successful operations stay in');
     expect(source).toContain('reflected: false');
     expect(source).toContain('operation.reflected = true');
+    expect(source).toContain('rollbackOptimisticHpTargets(current, previous, targets)');
+    expect(source).toContain('void invalidateEncounter(queryClient, eid);');
     expect(source).toContain('hpQueue.base = rebaseOptimisticHpEncounter');
     expect(source).toMatch(/hpQueue\.base = rebaseOptimisticHpEncounter\([\s\S]*?replayPendingOptimisticHpDeltas\(\);/);
     expect(source).not.toContain('rollbackOptimisticHpDelta');
