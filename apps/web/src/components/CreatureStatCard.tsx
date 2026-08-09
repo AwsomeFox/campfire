@@ -12,11 +12,14 @@ export function CreatureStatCard({
   encounterId,
   combatantId,
   creatureName,
+  canRoll,
   onError,
 }: {
   encounterId: number;
   combatantId: number;
   creatureName: string;
+  /** The catalog stays readable when a campaign or encounter is read-only; only rolling is disabled. */
+  canRoll: boolean;
   onError: (message: string | null) => void;
 }) {
   const { open, buttonProps, regionProps } = useDisclosure({ initialOpen: false, focusManagement: false, regionLabel: `${creatureName} creature mechanics` });
@@ -39,6 +42,7 @@ export function CreatureStatCard({
     onError: (error) => onError(error instanceof ApiError ? error.message : "Couldn't roll the creature check."),
   });
   const rollCheck = (check: RollCheckDefinition, mode: RollMode) => {
+    if (!canRoll) return;
     onError(null);
     roll.mutate({ checkId: check.id, mode: check.supportsAdvantage ? mode : 'normal' });
   };
@@ -50,8 +54,8 @@ export function CreatureStatCard({
       style={{ minHeight: 36, border: 0, cursor: 'pointer' }}
       allowAdvantage={check.supportsAdvantage}
       allowCrit={false}
-      disabled={roll.isPending}
-      title={`Roll ${check.label} — ${formatCheckBreakdown(check)}`}
+      disabled={roll.isPending || !canRoll}
+      title={canRoll ? `Roll ${check.label} — ${formatCheckBreakdown(check)}` : 'Creature rolls are unavailable while this encounter is read-only.'}
       aria-label={`Roll ${check.label}: ${formatCheckBreakdown(check)}`}
       data-testid={`creature-check-roll-${check.id}`}
       onRoll={(mode) => rollCheck(check, mode)}

@@ -15,11 +15,26 @@
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, test, expect, vi, afterEach, beforeAll } from 'vitest';
-import { Character, defaultCombatantStatblock } from '@campfire/schema';
+import { Character, defaultCombatantStatblock, type RollCheckDefinition } from '@campfire/schema';
 import type { Combatant } from '@campfire/schema';
 import { MemoryRouter } from 'react-router-dom';
 import '../../src/i18n';
 import { CombatantRow, type CombatantRowProps } from '../../src/features/encounters/combat/CombatantRow';
+
+const { getMock } = vi.hoisted(() => ({
+  getMock: vi.fn(async (_path: string) => [] as unknown),
+}));
+
+vi.mock('../../src/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/api')>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      get: getMock,
+    },
+  };
+});
 
 // jsdom has no ResizeObserver; RulesHintPopover (issue #1939) only uses it to re-run its
 // viewport-clamped positioning math, which these tests do not assert on.
@@ -31,7 +46,11 @@ beforeAll(() => {
   };
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  getMock.mockReset();
+  getMock.mockResolvedValue([]);
+});
 
 function baseCombatant(overrides: Partial<Combatant> = {}): Combatant {
   return {
@@ -197,6 +216,38 @@ describe('CombatantRow statblock template HP visibility (issue #2093)', () => {
     const editor = within(screen.getByTestId('combatant-statblock-editor'));
     expect(editor.queryByText('Max HP')).toBeNull();
     expect(editor.queryByDisplayValue('37')).toBeNull();
+  });
+});
+
+describe('CombatantRow creature mechanics read/roll gates (issue #1314)', () => {
+  test('keeps the DM catalog mounted from the route campaign id while read-only and disables its rolls', async () => {
+    const strength: RollCheckDefinition = {
+      id: 'str',
+      label: 'Strength',
+      category: 'ability',
+      ability: 'STR',
+      proficiency: null,
+      favorite: false,
+      modifier: 2,
+      breakdown: [{ label: 'STR', value: 2 }],
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    };
+    getMock.mockResolvedValue([strength]);
+
+    renderRow({
+      campaignId: undefined,
+      routeCampaignId: 1,
+      canViewCreatureChecks: true,
+      canRollCreatureChecks: false,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: "Expand Goblin's creature mechanics" }));
+    const roll = await screen.findByTestId('creature-check-roll-str');
+    expect(roll).toBeInstanceOf(HTMLButtonElement);
+    expect((roll as HTMLButtonElement).disabled).toBe(true);
+    expect((roll as HTMLButtonElement).title).toContain('read-only');
   });
 });
 
