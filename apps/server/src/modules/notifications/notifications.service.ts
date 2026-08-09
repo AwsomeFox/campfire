@@ -17,6 +17,7 @@ import {
   type NotificationPreferencesUpdate,
   type NotificationType,
   type QuietHours as QuietHoursType,
+  type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -30,7 +31,7 @@ import {
   notifications,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import type { RequestUser } from '../../common/user.types';
+import { minRole, type RequestUser } from '../../common/user.types';
 import { blockedTargetsOf, suppressedRecipients } from '../../common/safety-controls';
 import { decideDelivery, isWithinQuietHours } from './notification-preferences.util';
 
@@ -629,9 +630,14 @@ export class NotificationsService implements OnApplicationBootstrap {
     userId: number,
     campaignId: number,
     rawContext: string | null | undefined,
+    user?: RequestUser,
   ): boolean {
     const context = parseHiddenStatusContext(rawContext);
     if (!context) return false;
+    // Digest flushing runs without a request principal. Recipient-facing reads
+    // must additionally honour the authenticating PAT's campaign and role cap.
+    const tokenContext = user?.tokenContext;
+    if (tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== campaignId) return false;
     const member = tx
       .select({ role: campaignMembers.role })
       .from(campaignMembers)
@@ -645,7 +651,10 @@ export class NotificationsService implements OnApplicationBootstrap {
       .get();
     if (!encounter) return false;
     if (!encounter.hidden) return true;
-    if (context.audience === 'permanent_dm') return member.role === 'dm';
+    if (context.audience === 'permanent_dm') {
+      const effectiveRole = user?.devRole ?? (tokenContext ? minRole(tokenContext.scope, member.role as Role) : member.role);
+      return effectiveRole === 'dm';
+    }
     return Boolean(
       tx.select({ id: characters.id })
         .from(characters)
@@ -658,21 +667,24 @@ export class NotificationsService implements OnApplicationBootstrap {
     );
   }
 
-  /** Remove private-context rows whose recipient no longer has current access. */
-  private purgeUnauthorizedHiddenStatusNotifications(userId: number): void {
-    this.db.transaction((tx) => {
-      const guarded = tx
-        .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
-        .from(notifications)
-        .where(and(eq(notifications.userId, userId), isNotNull(notifications.hiddenStatusContext)))
-        .all();
-      const unauthorizedIds = guarded
-        .filter((row) => !this.hiddenStatusAuthorizedTx(tx, userId, row.campaignId, row.hiddenStatusContext))
-        .map((row) => row.id);
-      if (unauthorizedIds.length > 0) {
-        tx.delete(notifications).where(inArray(notifications.id, unauthorizedIds)).run();
-      }
-    });
+  /**
+   * Remove private-context rows whose recipient no longer has current access.
+   * Callers keep their exposing SELECT or UPDATE in this same transaction: a
+   * membership demotion or ownership transfer cannot land between cleanup and
+   * the row returned from the bell endpoint.
+   */
+  private purgeUnauthorizedHiddenStatusNotificationsTx(tx: SyncDb, user: RequestUser, userId: number): void {
+    const guarded = tx
+      .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
+      .from(notifications)
+      .where(and(eq(notifications.userId, userId), isNotNull(notifications.hiddenStatusContext)))
+      .all();
+    const unauthorizedIds = guarded
+      .filter((row) => !this.hiddenStatusAuthorizedTx(tx, userId, row.campaignId, row.hiddenStatusContext, user))
+      .map((row) => row.id);
+    if (unauthorizedIds.length > 0) {
+      tx.delete(notifications).where(inArray(notifications.id, unauthorizedIds)).run();
+    }
   }
 
   /**
@@ -1007,7 +1019,6 @@ export class NotificationsService implements OnApplicationBootstrap {
     if (userId === null) {
       return { items: [], nextCursor: null, total: 0, hasMore: false };
     }
-    this.purgeUnauthorizedHiddenStatusNotifications(userId);
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
 
     const conditions = [
@@ -1030,24 +1041,30 @@ export class NotificationsService implements OnApplicationBootstrap {
       conditions.push(lte(notifications.createdAt, endIso));
     }
 
-    const [countRow] = await this.db
-      .select({ value: count() })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(...conditions));
-    const total = countRow?.value ?? 0;
+    const { total, rows } = this.db.transaction((tx) => {
+      this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const [countRow] = tx
+        .select({ value: count() })
+        .from(notifications)
+        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+        .where(and(...conditions))
+        .all();
+      const total = countRow?.value ?? 0;
 
-    if (opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0) {
-      conditions.push(lt(notifications.id, opts.cursor));
-    }
+      if (opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0) {
+        conditions.push(lt(notifications.id, opts.cursor));
+      }
 
-    const rows = await this.db
-      .select({ notification: notifications })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(...conditions))
-      .orderBy(desc(notifications.id))
-      .limit(limit + 1);
+      const rows = tx
+        .select({ notification: notifications })
+        .from(notifications)
+        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+        .where(and(...conditions))
+        .orderBy(desc(notifications.id))
+        .limit(limit + 1)
+        .all();
+      return { total, rows };
+    });
 
     const hasMore = rows.length > limit;
     const pagedRows = hasMore ? rows.slice(0, limit) : rows;
@@ -1081,7 +1098,6 @@ export class NotificationsService implements OnApplicationBootstrap {
   async unreadSummary(user: RequestUser): Promise<{ count: number; membershipChanged: boolean }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { count: 0, membershipChanged: false };
-    this.purgeUnauthorizedHiddenStatusNotifications(userId);
     const blocked = await blockedTargetsOf(this.db, user.id, null);
     const conditions: SQL[] = [
       eq(notifications.userId, userId),
@@ -1094,60 +1110,68 @@ export class NotificationsService implements OnApplicationBootstrap {
       MEMBERSHIP_NOTIFICATION_TYPES.map((type) => sql`${notifications.type} = ${type}`),
       sql` OR `,
     );
-    const [row] = await this.db
-      .select({
-        value: count(),
-        membershipSignal: sql<number>`max(case when ${membershipTypeMatch} then 1 else 0 end)`,
-      })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(...conditions));
+    const row = this.db.transaction((tx) => {
+      this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      return tx
+        .select({
+          value: count(),
+          membershipSignal: sql<number>`max(case when ${membershipTypeMatch} then 1 else 0 end)`,
+        })
+        .from(notifications)
+        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+        .where(and(...conditions))
+        .get();
+    });
     return { count: row?.value ?? 0, membershipChanged: (row?.membershipSignal ?? 0) === 1 };
   }
 
   /** Recipient-only; someone else's notification 404s (not 403) so ids don't leak. */
   async markRead(id: number, user: RequestUser): Promise<Notification> {
     const userId = numericUserId(user.id);
-    if (userId !== null) this.purgeUnauthorizedHiddenStatusNotifications(userId);
-    const [joined] = await this.db
-      .select({ notification: notifications })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
-      .limit(1);
-    const row = joined?.notification;
-    if (!row || userId === null || row.userId !== userId) {
-      throw new NotFoundException(`Notification ${id} not found`);
-    }
-    if (row.readAt) return toDomain(row);
-    const [updated] = await this.db
-      .update(notifications)
-      .set({ readAt: nowIso() })
-      .where(eq(notifications.id, id))
-      .returning();
-    return toDomain(updated);
+    if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
+    return this.db.transaction((tx) => {
+      this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const joined = tx
+        .select({ notification: notifications })
+        .from(notifications)
+        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+        .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
+        .get();
+      const row = joined?.notification;
+      if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
+      if (row.readAt) return toDomain(row);
+      const updated = tx
+        .update(notifications)
+        .set({ readAt: nowIso() })
+        .where(eq(notifications.id, id))
+        .returning()
+        .get();
+      return toDomain(updated);
+    });
   }
 
   async markUnread(id: number, user: RequestUser): Promise<Notification> {
     const userId = numericUserId(user.id);
-    if (userId !== null) this.purgeUnauthorizedHiddenStatusNotifications(userId);
-    const [joined] = await this.db
-      .select({ notification: notifications })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
-      .limit(1);
-    const row = joined?.notification;
-    if (!row || userId === null || row.userId !== userId) {
-      throw new NotFoundException(`Notification ${id} not found`);
-    }
-    if (!row.readAt) return toDomain(row);
-    const [updated] = await this.db
-      .update(notifications)
-      .set({ readAt: null })
-      .where(eq(notifications.id, id))
-      .returning();
-    return toDomain(updated);
+    if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
+    return this.db.transaction((tx) => {
+      this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const joined = tx
+        .select({ notification: notifications })
+        .from(notifications)
+        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+        .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
+        .get();
+      const row = joined?.notification;
+      if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
+      if (!row.readAt) return toDomain(row);
+      const updated = tx
+        .update(notifications)
+        .set({ readAt: null })
+        .where(eq(notifications.id, id))
+        .returning()
+        .get();
+      return toDomain(updated);
+    });
   }
 
   async markReadBulk(
@@ -1156,7 +1180,6 @@ export class NotificationsService implements OnApplicationBootstrap {
   ): Promise<{ updated: number; updatedIds: number[] }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0, updatedIds: [] };
-    this.purgeUnauthorizedHiddenStatusNotifications(userId);
 
     if (!opts.all && !opts.campaignId && (!opts.ids || opts.ids.length === 0)) {
       return { updated: 0, updatedIds: [] };
@@ -1183,11 +1206,15 @@ export class NotificationsService implements OnApplicationBootstrap {
       conditions.push(eq(notifications.campaignId, opts.campaignId));
     }
 
-    const updated = await this.db
-      .update(notifications)
-      .set({ readAt: nowIso() })
-      .where(and(...conditions))
-      .returning({ id: notifications.id });
+    const updated = this.db.transaction((tx) => {
+      this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      return tx
+        .update(notifications)
+        .set({ readAt: nowIso() })
+        .where(and(...conditions))
+        .returning({ id: notifications.id })
+        .all();
+    });
 
     const updatedIds = updated.map((r) => r.id);
     return { updated: updatedIds.length, updatedIds };
@@ -1199,7 +1226,6 @@ export class NotificationsService implements OnApplicationBootstrap {
   ): Promise<{ updated: number; updatedIds: number[] }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0, updatedIds: [] };
-    this.purgeUnauthorizedHiddenStatusNotifications(userId);
 
     if (!opts.all && !opts.campaignId && (!opts.ids || opts.ids.length === 0)) {
       return { updated: 0, updatedIds: [] };
@@ -1226,11 +1252,15 @@ export class NotificationsService implements OnApplicationBootstrap {
       conditions.push(eq(notifications.campaignId, opts.campaignId));
     }
 
-    const updated = await this.db
-      .update(notifications)
-      .set({ readAt: null })
-      .where(and(...conditions))
-      .returning({ id: notifications.id });
+    const updated = this.db.transaction((tx) => {
+      this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      return tx
+        .update(notifications)
+        .set({ readAt: null })
+        .where(and(...conditions))
+        .returning({ id: notifications.id })
+        .all();
+    });
 
     const updatedIds = updated.map((r) => r.id);
     return { updated: updatedIds.length, updatedIds };

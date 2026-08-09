@@ -1139,6 +1139,9 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     for (const [userId, role] of [[playerId, 'player'], [coDmId, 'dm'], [spectatorId, 'player']] as const) {
       expect((await dm.post(`/api/v1/campaigns/${guardedCampaignId}/members`).send({ userId, role })).status).toBe(201);
     }
+    // A second campaign gives the PAT regression a real campaign binding to
+    // enforce; the co-DM must not read this campaign's private rows through it.
+    expect((await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: coDmId, role: 'dm' })).status).toBe(201);
 
     const db = ctx.app.get<DrizzleDb>(DB);
     const notifications = ctx.app.get(NotificationsService);
@@ -1174,10 +1177,19 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .patch(`/api/v1/encounters/${demoted.encounter.body.id}/combatants/${demoted.combatant.id}`)
       .send({ hpSet: 0 })).status).toBe(200);
     await waitForStoredRow(coDmId, 'Demotion Read Hero was downed');
+    const demotionRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Demotion Read Hero was downed%'}`,
+    )).get();
+    expect(demotionRow).toBeDefined();
     db.update(campaignMembers)
       .set({ role: 'player' })
       .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
       .run();
+    // The same transaction that authorizes the row also performs the mark, so
+    // a demotion cannot slip between a prior cleanup pass and this mutation.
+    expect((await coDm.post(`/api/v1/notifications/${demotionRow!.id}/read`).send()).status).toBe(404);
     expect((await listFor(coDm)).some((row) => row.body.includes('Demotion Read Hero was downed'))).toBe(false);
     expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
       .some((row) => row.body.includes('Demotion Read Hero was downed'))).toBe(false);
@@ -1186,6 +1198,48 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .set({ role: 'dm' })
       .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
       .run();
+
+    const server = ctx.app.getHttpServer();
+    const viewerToken = await coDm.post('/api/v1/tokens').send({
+      name: 'hidden-status-viewer-read',
+      scope: 'viewer',
+      writeScope: 'none',
+      campaignId: guardedCampaignId,
+    });
+    expect(viewerToken.status).toBe(201);
+    const viewerScoped = await createHiddenCombatant('Viewer PAT Read Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${viewerScoped.encounter.body.id}/combatants/${viewerScoped.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Viewer PAT Read Hero was downed');
+    const viewerRead = await request(server)
+      .get('/api/v1/notifications')
+      .set('Authorization', `Bearer ${viewerToken.body.token}`);
+    expect(viewerRead.status).toBe(200);
+    expect((viewerRead.body.items ?? viewerRead.body).some((row: Notification) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(false);
+
+    const boundToken = await coDm.post('/api/v1/tokens').send({
+      name: 'hidden-status-bound-read',
+      scope: 'dm',
+      writeScope: 'none',
+      campaignId,
+    });
+    expect(boundToken.status).toBe(201);
+    const boundScoped = await createHiddenCombatant('Bound PAT Read Hero');
+    expect((await dm
+      .patch(`/api/v1/encounters/${boundScoped.encounter.body.id}/combatants/${boundScoped.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Bound PAT Read Hero was downed');
+    const boundRead = await request(server)
+      .get('/api/v1/notifications')
+      .set('Authorization', `Bearer ${boundToken.body.token}`);
+    expect(boundRead.status).toBe(200);
+    expect((boundRead.body.items ?? boundRead.body).some((row: Notification) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(false);
+
     expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
     const removed = await createHiddenCombatant('Removal Digest Hero');
     expect((await dm
@@ -1205,10 +1259,19 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .patch(`/api/v1/encounters/${transferred.encounter.body.id}/combatants/${transferred.combatant.id}`)
       .send({ hpSet: 0 })).status).toBe(200);
     await waitForStoredRow(playerId, 'Ownership Transfer Hero was downed');
+    const transferRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, playerId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Ownership Transfer Hero was downed%'}`,
+    )).get();
+    expect(transferRow).toBeDefined();
     db.update(characters)
       .set({ ownerUserId: String(spectatorId) })
       .where(and(eq(characters.id, transferred.character.body.id), eq(characters.campaignId, guardedCampaignId)))
       .run();
+    // Ownership transfer is guarded at the same mark/read boundary as a
+    // membership demotion; the old owner cannot mutate or observe the row.
+    expect((await player.post(`/api/v1/notifications/${transferRow!.id}/read`).send()).status).toBe(404);
     expect((await listFor(player)).some((row) => row.body.includes('Ownership Transfer Hero was downed'))).toBe(false);
     expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, playerId), eq(notificationRows.campaignId, guardedCampaignId))).all()
       .some((row) => row.body.includes('Ownership Transfer Hero was downed'))).toBe(false);
