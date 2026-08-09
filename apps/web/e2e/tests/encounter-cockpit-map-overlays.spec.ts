@@ -172,6 +172,50 @@ test.describe('encounter cockpit — gated tool hints', () => {
       await restoreSeedEncounter(page);
     }
   });
+
+  test('a hint on a header control stays on screen instead of escaping off the top', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    // Stub the campaign event stream with a body that never delivers a sync event: that
+    // is what the encounter's write gate treats as a degraded connection, which is how a
+    // real safety hold or outage disables these lifecycle actions.
+    await page.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: ': keepalive\n\n' });
+    });
+
+    try {
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-header')).toBeVisible();
+
+      const gated = page.getByTestId('encounter-vtt-header').locator('.cf-gated-disabled').first();
+      await expect(gated).toBeVisible({ timeout: 15_000 });
+      await gated.focus();
+
+      const hint = page.getByTestId('gated-control-hint').first();
+      await expect(hint).toBeVisible();
+
+      // The header is itself a clipping ancestor AND starts at the top of the viewport,
+      // so a hint anchored above its trigger went off-screen — during exactly the outage
+      // that made it worth reading. Every edge must be inside the viewport.
+      const placement = await hint.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          top: Math.round(r.top),
+          left: Math.round(r.left),
+          right: Math.round(r.right),
+          bottom: Math.round(r.bottom),
+          vw: window.innerWidth,
+          vh: window.innerHeight,
+        };
+      });
+      expect(placement.top, 'hint must not run off the top').toBeGreaterThanOrEqual(0);
+      expect(placement.left, 'hint must not run off the left').toBeGreaterThanOrEqual(0);
+      expect(placement.right).toBeLessThanOrEqual(placement.vw);
+      expect(placement.bottom).toBeLessThanOrEqual(placement.vh);
+    } finally {
+      await page.unroute(`**/api/v1/campaigns/${campaignId}/events`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
 });
 
 test.describe('encounter cockpit — short narrow canvas', () => {

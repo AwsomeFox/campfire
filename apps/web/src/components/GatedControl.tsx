@@ -141,6 +141,13 @@ export type GatedControlProps = {
 };
 
 /** Shared gating-reason affordance — see the module doc comment above. */
+/** Matches `.cf-gated-hint`'s own `max-width`; the clamp has to know how wide it can get. */
+const GATED_HINT_MAX_WIDTH_PX = 220;
+/** Three lines at the hint's line-height plus its padding — the tallest it realistically gets. */
+const GATED_HINT_ESTIMATED_HEIGHT_PX = 72;
+/** Breathing room from the viewport edges, so a clamped bubble never sits flush against one. */
+const GATED_HINT_VIEWPORT_MARGIN_PX = 8;
+
 export function GatedControl({ reason, className, children }: GatedControlProps): ReactElement {
   const wrapperClass = className ? `cf-gated-control ${className}` : 'cf-gated-control';
   // React's useId() returns colon-delimited values (e.g. ":r1:"), which are invalid inside a
@@ -163,7 +170,7 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
    * detect a clipping ancestor and, only then, portal the same element to `<body>` with
    * viewport coordinates measured from the trigger.
    */
-  const [escapeAt, setEscapeAt] = useState<{ left: number; bottom: number } | null>(null);
+  const [escapeAt, setEscapeAt] = useState<{ left: number; top: number | null; bottom: number | null } | null>(null);
 
   const clearTapTimer = () => {
     if (tapTimerRef.current != null) {
@@ -196,7 +203,21 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
       return;
     }
     const rect = wrapper.getBoundingClientRect();
-    setEscapeAt({ left: Math.round(rect.left), bottom: Math.round(window.innerHeight - rect.top) });
+    // Above the trigger only when the bubble actually fits there. The cockpit header is
+    // itself a clipping ancestor (`overflow-y: auto`) AND sits at the top of the viewport
+    // with 8px of padding, so anchoring a gated lifecycle action's hint to `rect.top`
+    // pushed it off the top of the screen — during exactly the safety hold or sync outage
+    // that made it worth reading. Both axes are clamped for the same reason: a trigger
+    // near the right edge would otherwise put a 220px bubble past it.
+    const left = Math.round(
+      Math.min(Math.max(GATED_HINT_VIEWPORT_MARGIN_PX, rect.left), Math.max(GATED_HINT_VIEWPORT_MARGIN_PX, window.innerWidth - GATED_HINT_MAX_WIDTH_PX - GATED_HINT_VIEWPORT_MARGIN_PX)),
+    );
+    const fitsAbove = rect.top >= GATED_HINT_ESTIMATED_HEIGHT_PX + GATED_HINT_VIEWPORT_MARGIN_PX;
+    setEscapeAt(
+      fitsAbove
+        ? { left, top: null, bottom: Math.round(window.innerHeight - rect.top) }
+        : { left, top: Math.round(rect.bottom), bottom: null },
+    );
   }, [tooltipVisible, reason]);
 
   // The moment the reason clears (e.g. sync recovers), drop any lingering hover/focus/tap
@@ -285,7 +306,9 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
       data-testid="gated-control-hint"
       style={
         escapeAt
-          ? { position: 'fixed', left: escapeAt.left, bottom: escapeAt.bottom, marginBottom: 6 }
+          ? escapeAt.bottom != null
+            ? { position: 'fixed', left: escapeAt.left, top: 'auto', bottom: escapeAt.bottom, marginBottom: 6, marginTop: 0 }
+            : { position: 'fixed', left: escapeAt.left, top: escapeAt.top ?? 0, bottom: 'auto', marginTop: 6, marginBottom: 0 }
           : undefined
       }
     >
