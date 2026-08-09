@@ -541,6 +541,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
 
   type Notification = {
     id: number;
+    campaignId: number;
     type: string;
     title: string;
     body: string;
@@ -875,7 +876,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(after[0].title).toContain('Secret pact');
   });
 
-  it('keeps hidden-encounter downed and died notifications to effective DMs and the affected owner, while visible encounters still notify the party (#2112)', async () => {
+  it('keeps hidden-encounter downed and died notifications to permanent DMs and the affected owner, while visible encounters still notify the party (#2112)', async () => {
     const hiddenCampaign = await dm.post('/api/v1/campaigns').send({ name: 'Hidden Notification Keep' });
     expect(hiddenCampaign.status).toBe(201);
     const hiddenCampaignId = hiddenCampaign.body.id as number;
@@ -914,10 +915,24 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
             notification.campaignId === hiddenCampaignId &&
             notification.title === title,
         );
-        if (matching.length === expected) return matching;
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (matching.length === expected) {
+          // Notification dispatch is intentionally best-effort and starts after
+          // the encounter PATCH. Keep an absence assertion alive long enough to
+          // catch a delayed forbidden fan-out, while positive assertions return
+          // as soon as their expected row is durable.
+          if (expected > 0) return matching;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          matching = (await listFor(agent)).filter(
+            (notification) =>
+              notification.type === 'character_downed' &&
+              notification.campaignId === hiddenCampaignId &&
+              notification.title === title,
+          );
+          if (matching.length === 0) return matching;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      return matching;
+      throw new Error(`Timed out waiting for ${expected} ${title} notifications; found ${matching.length}`);
     };
 
     const downed = await dm
@@ -927,15 +942,22 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
 
     const ownerDowned = await statusNotifications(player, 'Character downed!', 1);
     const coDmDowned = await statusNotifications(coDm, 'Character downed!', 1);
-    const guestDmDowned = await statusNotifications(guestDm, 'Character downed!', 1);
+    const guestDmDowned = await statusNotifications(guestDm, 'Character downed!', 0);
     const spectatorDowned = await statusNotifications(spectator, 'Character downed!', 0);
     expect(ownerDowned[0].title).toBe('Character downed!');
     expect(ownerDowned[0].body).toContain('Hidden Hero was downed');
     expect(ownerDowned[0].entityType).toBeNull();
     expect(ownerDowned[0].entityId).toBeNull();
     expect(coDmDowned[0].entityId).toBe(hiddenEncounter.body.id);
-    expect(guestDmDowned[0].entityId).toBe(hiddenEncounter.body.id);
+    // A guest/co-DM may inspect the hidden encounter while their grant is active,
+    // but no durable status row may survive a later revoke, handback, or expiry.
+    expect(guestDmDowned).toEqual([]);
     expect(spectatorDowned).toEqual([]);
+
+    const handBack = await guestDm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/members/grants/${guestGrant.body.id}/handback`)
+      .send();
+    expect(handBack.status).toBe(201);
 
     const died = await dm
       .patch(`/api/v1/encounters/${hiddenEncounter.body.id}/combatants/${hiddenCombatant.id}`)
@@ -944,14 +966,14 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
 
     const ownerDied = await statusNotifications(player, 'Character died!', 1);
     const coDmDied = await statusNotifications(coDm, 'Character died!', 1);
-    const guestDmDied = await statusNotifications(guestDm, 'Character died!', 1);
+    const guestDmDied = await statusNotifications(guestDm, 'Character died!', 0);
     const spectatorDied = await statusNotifications(spectator, 'Character died!', 0);
     const ownerDeathNotice = ownerDied[0];
     expect(ownerDeathNotice?.body).toContain('Hidden Hero has died');
     expect(ownerDeathNotice?.entityType).toBeNull();
     expect(ownerDeathNotice?.entityId).toBeNull();
     expect(coDmDied.some((notification) => notification.title === 'Character died!' && notification.entityId === hiddenEncounter.body.id)).toBe(true);
-    expect(guestDmDied.some((notification) => notification.title === 'Character died!' && notification.entityId === hiddenEncounter.body.id)).toBe(true);
+    expect(guestDmDied).toEqual([]);
     expect(spectatorDied).toEqual([]);
 
     const visibleCharacter = await player

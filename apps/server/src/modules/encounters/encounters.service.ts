@@ -35,7 +35,6 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { NotificationsService, type NotificationEvent } from '../notifications/notifications.service';
-import { RoleResolver } from '../membership/role-resolver.service';
 import { ActionResolverService } from './action-resolver.service';
 import {
   actionEconomySlotMax,
@@ -887,13 +886,6 @@ export class EncountersService {
      * character branch below falls back to its pre-#1901 sheet-only behavior.
      */
     @Optional() private readonly actionResolver?: ActionResolverService,
-    /**
-     * Notification recipients use effective role, not only the durable member
-     * row: an active guest/co-DM grant may make a player a DM for the current
-     * encounter notification. Optional and last to preserve positional test
-     * constructions that do not exercise notification delivery.
-     */
-    @Optional() @Inject(RoleResolver) private readonly roleResolver?: Pick<RoleResolver, 'effectiveRole'>,
   ) {}
 
   private async assertControllerIsCampaignMember(campaignId: number, controllerUserId: number): Promise<void> {
@@ -6135,8 +6127,11 @@ export class EncountersService {
    * Hidden encounters are wholesale DM-only to non-DMs, so a notification with
    * their id or a character's status is itself secret. The character owner is
    * the sole non-DM recipient entitled to that personal status, but receives no
-   * encounter deep-link or id; DM-role members retain their normal
-   * campaign-management payload, including an active guest/co-DM grant.
+   * encounter deep-link or id; permanent DM members retain their normal
+   * campaign-management payload. A temporary guest/co-DM grant deliberately
+   * does not receive a durable hidden-status row: notifications and digests
+   * can outlive a grant's revocation, handback, or expiry, while the guest can
+   * inspect the hidden encounter directly for the grant's active lifetime.
    * Visibility is re-read at send time so a concurrent hide cannot turn a
    * once-visible encounter notification into an id leak. Visible encounters
    * keep the established whole-campaign fan-out.
@@ -6162,17 +6157,11 @@ export class EncountersService {
     const [character] = await this.db
       .select({ ownerUserId: characters.ownerUserId })
       .from(characters)
-      .where(eq(characters.id, characterId))
+      .where(and(eq(characters.id, characterId), eq(characters.campaignId, encounterRow.campaignId)))
       .limit(1);
     const roles = await this.notifications.memberRoles(encounterRow.campaignId);
     for (const [memberId, memberRole] of roles) {
-      const grantedDm =
-        memberRole !== 'dm' &&
-        (await this.roleResolver?.effectiveRole(
-          { id: String(memberId), name: '', serverRole: 'user' },
-          encounterRow.campaignId,
-        )) === 'dm';
-      const isDm = memberRole === 'dm' || grantedDm;
+      const isDm = memberRole === 'dm';
       const isOwner = String(memberId) === character?.ownerUserId;
       if (!isDm && !isOwner) continue;
       // The player may learn their character's state, but a hidden encounter
