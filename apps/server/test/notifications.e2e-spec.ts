@@ -943,6 +943,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       title: string,
       expected: number,
       encounterId?: number,
+      bodyIncludes?: string,
     ) => {
       let matching: Notification[] = [];
       for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -951,7 +952,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
             notification.type === 'character_downed' &&
             notification.campaignId === hiddenCampaignId &&
             notification.title === title &&
-            (encounterId === undefined || notification.entityId === encounterId),
+            (encounterId === undefined || notification.entityId === encounterId) &&
+            (bodyIncludes === undefined || notification.body.includes(bodyIncludes)),
         );
         if (matching.length === expected) {
           // Notification dispatch is intentionally best-effort and starts after
@@ -965,7 +967,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
               notification.type === 'character_downed' &&
               notification.campaignId === hiddenCampaignId &&
               notification.title === title &&
-              (encounterId === undefined || notification.entityId === encounterId),
+              (encounterId === undefined || notification.entityId === encounterId) &&
+              (bodyIncludes === undefined || notification.body.includes(bodyIncludes)),
           );
           if (matching.length === 0) return matching;
         }
@@ -1123,7 +1126,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       spectator,
       'Character downed!',
       1,
-      transferredOwnerEncounter.body.id,
+      undefined,
+      'Transferred Owner Hero was downed',
     ))[0];
     expect(transferredOwnerNotice).toMatchObject({ entityType: null, entityId: null });
 
@@ -1724,8 +1728,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect((await coDm.delete(`/api/v1/campaigns/${guardedCampaignId}/safety/controls/${mute.body.id}`)).status).toBe(200);
 
     // Bell polling must not re-run membership, encounter, and ownership
-    // lookups for every retained hidden-status row. Several rows now exercise
-    // the guard, yet each authorization table is prepared exactly once.
+    // lookups for every retained hidden-status row. Reconciliation and the
+    // atomic scoped exposure scan each preload their authorization facts once.
     const retainedHiddenRows = db.select().from(notificationRows).where(and(
       eq(notificationRows.userId, coDmId),
       eq(notificationRows.campaignId, guardedCampaignId),
@@ -1751,7 +1755,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       queryProbe.restore();
     }
     for (const table of ['campaign_members', 'encounters', 'characters']) {
-      expect(queryProbe.executed.filter((source) => new RegExp(`from\\s+["\`]${table}["\`]`, 'i').test(source))).toHaveLength(1);
+      expect(queryProbe.executed.filter((source) => new RegExp(`from\\s+["\`]${table}["\`]`, 'i').test(source))).toHaveLength(2);
     }
     expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
 
