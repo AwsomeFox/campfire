@@ -75,8 +75,7 @@ export function buildSearchUrlParams(query: string, ruleSystem?: string | null, 
   const trimmed = query.trim();
   if (trimmed) params.set('q', trimmed);
   const packSlugs = [...new Set([ruleSystem ?? '', ...enabledPackSlugs].filter(Boolean))].sort();
-  if (packSlugs.length === 1) params.set('pack', packSlugs[0]!);
-  else if (packSlugs.length > 1) params.set('packs', packSlugs.join(','));
+  for (const slug of packSlugs) params.append('pack', slug);
   params.set('limit', String(limit));
   return params;
 }
@@ -92,10 +91,15 @@ export function resolvePackName(packId: number | undefined, packMap: Map<number,
   return packMap.get(packId) ?? null;
 }
 
-/** Resolve pack slug by packId when providing ruleSystem for statblock rendering. */
-export function resolvePackSlug(packId: number | undefined, packSlugMap: Map<number, string>): string | null {
-  if (!packId) return null;
-  return packSlugMap.get(packId) ?? null;
+/** Supplemental content uses the campaign adapter; without one, fall back to its declared base or owning base pack. */
+export function resolveStatblockSystem(
+  ruleSystem: string | null | undefined,
+  packId: number | undefined,
+  packMap: ReadonlyMap<number, Pick<RulePack, 'slug' | 'extendsPackSlug'>>,
+): string | null | undefined {
+  if (ruleSystem || !packId) return ruleSystem;
+  const pack = packMap.get(packId);
+  return pack?.extendsPackSlug || pack?.slug || ruleSystem;
 }
 
 export function RulesLookupPanel({ campaignId, ruleSystem, enabledPackSlugs = [], customMechanicsProfile }: RulesLookupPanelProps) {
@@ -147,16 +151,16 @@ export function RulesLookupPanel({ campaignId, ruleSystem, enabledPackSlugs = []
     return map;
   }, [installedPacks]);
 
-  const packSlugMap = useMemo(() => {
-    const map = new Map<number, string>();
+  const packMap = useMemo(() => {
+    const map = new Map<number, RulePack>();
     for (const p of installedPacks) {
-      map.set(p.id, p.slug);
+      map.set(p.id, p);
     }
     return map;
   }, [installedPacks]);
 
   const effectivePack = ruleSystem || '';
-  const effectivePacksKey = [...new Set([effectivePack, ...enabledPackSlugs].filter(Boolean))].sort().join(',');
+  const effectivePacksKey = JSON.stringify([...new Set([effectivePack, ...enabledPackSlugs].filter(Boolean))].sort());
   const searchParams = buildSearchUrlParams(debouncedQuery, effectivePack, 8, enabledPackSlugs);
   const isQueryActive = Boolean(debouncedQuery.trim());
 
@@ -265,7 +269,9 @@ export function RulesLookupPanel({ campaignId, ruleSystem, enabledPackSlugs = []
               {displayedResults.map((entry) => {
                 const isExpanded = expandedEntryId === entry.id;
                 const packName = !entry.isHomebrew && entry.packId ? resolvePackName(entry.packId, packNameMap) : null;
-                const statblockSystem = !entry.isHomebrew && entry.packId ? (resolvePackSlug(entry.packId, packSlugMap) || ruleSystem) : ruleSystem;
+                const statblockSystem = entry.isHomebrew
+                  ? ruleSystem
+                  : resolveStatblockSystem(ruleSystem, entry.packId, packMap);
                 return (
                   <li key={entry.id} className="border border-subtle rounded p-2 text-xs space-y-2 min-w-0">
                     <div

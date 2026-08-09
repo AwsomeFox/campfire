@@ -2276,6 +2276,31 @@ describe('rules / rule packs — a campaign that already stores an importer-only
     expect(importRes.status).toBe(201);
     expect(importRes.body.ruleSystem).toBe('');
   });
+
+  it('JSON import rejects more enabled packs than the shared campaign schema permits', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const slugs = Array.from({ length: 51 }, (_, index) => `import-pack-${index}`);
+    await db.insert(rulePacks).values(
+      slugs.map((slug) => ({
+        slug,
+        name: slug,
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'supplement' as const,
+        installedAt: new Date().toISOString(),
+        entryCount: 0,
+      })),
+    );
+
+    const importRes = await request(server)
+      .post('/api/v1/campaigns/import')
+      .set(preexistingDm)
+      .send({ campaign: { name: 'Too Many Packs', enabledPackSlugs: slugs } });
+
+    expect(importRes.status).toBe(400);
+    expect(importRes.body.message).toMatch(/enabledPackSlugs.*campaign schema/i);
+  });
 });
 
 /**
@@ -2674,7 +2699,7 @@ describe('rules search pagination (issue #613)', () => {
     // Two packs with identical names — id tiebreak must keep order stable across pages.
     const packA = await uploadMany(
       Array.from({ length: 30 }, (_, i) => `Alpha Twin ${String(i).padStart(2, '0')}`),
-      'page-pack-a',
+      'page,pack-a',
     );
     const packB = await uploadMany(
       Array.from({ length: 30 }, (_, i) => `Alpha Twin ${String(i).padStart(2, '0')}`),
@@ -2683,6 +2708,16 @@ describe('rules search pagination (issue #613)', () => {
     const packC = await uploadMany(
       Array.from({ length: 25 }, (_, i) => `Browse Node ${String(i).padStart(2, '0')}`),
       'page-pack-c',
+    );
+
+    const commaSafeUnion = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'Alpha Twin 00', pack: ['page,pack-a', 'page-pack-b'] })
+      .set(dm);
+    expect(commaSafeUnion.status).toBe(200);
+    expect(commaSafeUnion.body.total).toBe(2);
+    expect(new Set(commaSafeUnion.body.items.map((entry: { packId: number }) => entry.packId))).toEqual(
+      new Set([packA, packB]),
     );
 
     const page1 = await request(server).get('/api/v1/rules/search').query({ limit: 20 }).set(dm);

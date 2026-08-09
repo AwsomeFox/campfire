@@ -8,6 +8,7 @@ import type { z } from 'zod';
 import {
   CAMPAIGN_PURGE_CONFIRM_TOKEN,
   canonicalJson,
+  Campaign as CampaignSchema,
   CampaignClone,
   CampaignCloneMode,
   CampaignCreate,
@@ -710,19 +711,25 @@ export class CampaignsService {
     if (slugs === undefined) return undefined;
     const normalized = [...new Set(slugs.map((slug) => slug.trim()).filter(Boolean))]
       .filter((slug) => slug !== primaryRuleSystem);
-    if (normalized.length === 0) return [];
+    const schemaResult = CampaignSchema.shape.enabledPackSlugs.safeParse(normalized);
+    if (!schemaResult.success) {
+      throw new BadRequestException(
+        `enabledPackSlugs violates the campaign schema: ${schemaResult.error.issues[0]?.message ?? 'invalid pack selection'}`,
+      );
+    }
+    if (schemaResult.data.length === 0) return [];
 
     const rows = await this.db
       .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
       .from(rulePacks)
-      .where(inArray(rulePacks.slug, normalized));
+      .where(inArray(rulePacks.slug, schemaResult.data));
     const bySlug = new Map(rows.map((row) => [row.slug, row]));
-    const missing = normalized.filter((slug) => !bySlug.has(slug));
+    const missing = schemaResult.data.filter((slug) => !bySlug.has(slug));
     if (missing.length > 0) {
       throw new BadRequestException(`enabledPackSlugs contains pack(s) that are not installed: ${missing.join(', ')}`);
     }
-    const enabled = new Set([primaryRuleSystem, ...normalized].filter(Boolean));
-    for (const slug of normalized) {
+    const enabled = new Set([primaryRuleSystem, ...schemaResult.data].filter(Boolean));
+    for (const slug of schemaResult.data) {
       const pack = bySlug.get(slug)!;
       if (pack.kind === 'extension' && (!pack.extendsPackSlug || !enabled.has(pack.extendsPackSlug))) {
         throw new BadRequestException(
@@ -730,7 +737,7 @@ export class CampaignsService {
         );
       }
     }
-    return normalized;
+    return schemaResult.data;
   }
 
   /**

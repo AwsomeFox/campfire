@@ -74,8 +74,11 @@ export default function CompendiumPage() {
   const { isDm, canDmWrite } = useCampaignAccess();
   const { loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const campaignPack = campaign?.ruleSystem || '';
-  const contentPackSlugs = [...new Set([campaignPack, ...(campaign?.enabledPackSlugs ?? [])].filter(Boolean))];
-  const contentPackParam = contentPackSlugs.join(',');
+  const contentPackSlugs = useMemo(
+    () => [...new Set([campaignPack, ...(campaign?.enabledPackSlugs ?? [])].filter(Boolean))],
+    [campaignPack, campaign?.enabledPackSlugs],
+  );
+  const hasContentPacks = contentPackSlugs.length > 0;
   // The campaign record comes from the shared campaigns list; if that list failed
   // to load we'd otherwise sit blank forever (the search effect waits for the
   // campaign to resolve). Distinguish "still loading" from "couldn't load".
@@ -193,10 +196,10 @@ export default function CompendiumPage() {
         const params = new URLSearchParams();
         if (searchQuery.trim()) params.set('q', searchQuery.trim());
         if (type !== 'all') params.set('type', type);
-        if (contentPackParam) params.set('packs', contentPackParam);
+        for (const slug of contentPackSlugs) params.append('pack', slug);
         if (urlCursor) params.set('cursor', urlCursor);
         const [page, homebrew, libMonsters] = await Promise.all([
-          contentPackParam ? api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`) : Promise.resolve<RuleSearchPage>({ items: [], total: 0, hasMore: false, limit: 50, facets: [] }),
+          hasContentPacks ? api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`) : Promise.resolve<RuleSearchPage>({ items: [], total: 0, hasMore: false, limit: 50, facets: [] }),
           api.get<RuleEntry[]>(`${API}/campaigns/${id}/homebrew`).catch(() => []),
           api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${id}/library/monsters`).catch(() => []),
         ]);
@@ -236,7 +239,8 @@ export default function CompendiumPage() {
     noPacksInstalled,
     noRuleSystemChosen,
     campaignPack,
-    contentPackParam,
+    contentPackSlugs,
+    hasContentPacks,
     campaign,
     id,
     urlCursor,
@@ -253,7 +257,7 @@ export default function CompendiumPage() {
       const params = new URLSearchParams();
       if (searchQuery.trim()) params.set('q', searchQuery.trim());
       if (type !== 'all') params.set('type', type);
-      if (contentPackParam) params.set('packs', contentPackParam);
+      for (const slug of contentPackSlugs) params.append('pack', slug);
       params.set('cursor', nextCursor);
       const page = await api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`);
       // A filter change started a fresh primary fetch — discard this stale page.
@@ -509,7 +513,7 @@ export default function CompendiumPage() {
           <Card>
             <Skeleton lines={4} />
           </Card>
-        ) : !shouldRenderCompendiumResults({ campaignResolved: campaign !== undefined, homebrewCount, hasGlobalPack: Boolean(contentPackParam && !noPacksInstalled) }) ? (
+        ) : !shouldRenderCompendiumResults({ campaignResolved: campaign !== undefined, homebrewCount, hasGlobalPack: hasContentPacks && !noPacksInstalled }) ? (
           <Card density="compact" className="items-center text-center" style={{ padding: 24 }}>
             <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>No rule system or campaign homebrew yet.</p>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>Create homebrew above, or select an installed rule system in Campaign settings.</p>
