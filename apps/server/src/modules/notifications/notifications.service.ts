@@ -22,6 +22,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaignMembers,
   campaigns,
+  characters,
   encounters,
   notificationDigestQueue,
   notificationPreferences,
@@ -293,6 +294,40 @@ export class NotificationsService implements OnApplicationBootstrap {
       );
     } catch (err) {
       this.logger.warn(`notifyCampaignIfEncounterVisible failed for encounter ${encounterId} in campaign ${campaignId}: ${String(err)}`);
+      return false;
+    }
+  }
+
+  /** Persist a hidden-status row only while its recipient retains the authority
+   * that made the row safe to disclose. */
+  async notifyUserIfHiddenEncounterRecipient(
+    userId: number | string,
+    campaignId: number,
+    actor: RequestUser | null,
+    event: NotificationEvent,
+    authority: { kind: 'permanent_dm' } | { kind: 'character_owner'; characterId: number },
+  ): Promise<boolean> {
+    const recipient = numericUserId(userId);
+    if (recipient === null || (actor && recipient === numericUserId(actor.id))) return true;
+    try {
+      return await this.dispatch([recipient], campaignId, event, actor?.id ?? null, actor?.id ?? null, (tx) => {
+        if (authority.kind === 'permanent_dm') {
+          return Boolean(
+            tx.select({ userId: campaignMembers.userId })
+              .from(campaignMembers)
+              .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, recipient), eq(campaignMembers.role, 'dm')))
+              .get(),
+          );
+        }
+        return Boolean(
+          tx.select({ id: characters.id })
+            .from(characters)
+            .where(and(eq(characters.id, authority.characterId), eq(characters.campaignId, campaignId), eq(characters.ownerUserId, String(recipient))))
+            .get(),
+        );
+      });
+    } catch (err) {
+      this.logger.warn(`notifyUserIfHiddenEncounterRecipient failed for user ${recipient} in campaign ${campaignId}: ${String(err)}`);
       return false;
     }
   }

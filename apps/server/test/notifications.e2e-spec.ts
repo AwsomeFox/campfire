@@ -1,7 +1,7 @@
 import request from 'supertest';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { encounters } from '../src/db/schema';
+import { campaignMembers, encounters } from '../src/db/schema';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
@@ -937,24 +937,47 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       throw new Error(`Timed out waiting for ${expected} ${title} notifications; found ${matching.length}`);
     };
 
-    const downed = await dm
-      .patch(`/api/v1/encounters/${hiddenEncounter.body.id}/combatants/${hiddenCombatant.id}`)
-      .send({ hpSet: 0 });
-    expect(downed.status).toBe(200);
+    // #2112: a co-DM demoted after recipient discovery cannot retain the
+    // hidden encounter id through the awaited durable notification write.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const notifications = ctx.app.get(NotificationsService);
+    const guardedNotify = notifications.notifyUserIfHiddenEncounterRecipient.bind(notifications);
+    const demoteAtWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[0] === coDmId && args[4].kind === 'permanent_dm') {
+        db.update(campaignMembers)
+          .set({ role: 'player' })
+          .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
+          .run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      const downed = await dm
+        .patch(`/api/v1/encounters/${hiddenEncounter.body.id}/combatants/${hiddenCombatant.id}`)
+        .send({ hpSet: 0 });
+      expect(downed.status).toBe(200);
+    } finally {
+      demoteAtWrite.mockRestore();
+    }
 
     const ownerDowned = await statusNotifications(player, 'Character downed!', 1);
-    const coDmDowned = await statusNotifications(coDm, 'Character downed!', 1);
+    const coDmDowned = await statusNotifications(coDm, 'Character downed!', 0);
     const guestDmDowned = await statusNotifications(guestDm, 'Character downed!', 0);
     const spectatorDowned = await statusNotifications(spectator, 'Character downed!', 0);
     expect(ownerDowned[0].title).toBe('Character downed!');
     expect(ownerDowned[0].body).toContain('Hidden Hero was downed');
     expect(ownerDowned[0].entityType).toBeNull();
     expect(ownerDowned[0].entityId).toBeNull();
-    expect(coDmDowned[0].entityId).toBe(hiddenEncounter.body.id);
+    expect(coDmDowned).toEqual([]);
     // A guest/co-DM may inspect the hidden encounter while their grant is active,
     // but no durable status row may survive a later revoke, handback, or expiry.
     expect(guestDmDowned).toEqual([]);
     expect(spectatorDowned).toEqual([]);
+
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
 
     const handBack = await guestDm
       .post(`/api/v1/campaigns/${hiddenCampaignId}/members/grants/${guestGrant.body.id}/handback`)
@@ -1019,8 +1042,6 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     );
     expect(raceCombatant).toBeDefined();
 
-    const db = ctx.app.get<DrizzleDb>(DB);
-    const notifications = ctx.app.get(NotificationsService);
     const notifyWhenVisible = notifications.notifyCampaignIfEncounterVisible.bind(notifications);
     const hideAtFanout = jest.spyOn(notifications, 'notifyCampaignIfEncounterVisible').mockImplementation(async (...args) => {
       if (args[1] === raceEncounter.body.id) {

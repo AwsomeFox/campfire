@@ -6159,7 +6159,13 @@ export class EncountersService {
       // The player may learn their character's state, but a hidden encounter
       // remains a DM-only entity and must not become a notification deep-link.
       const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
-      await this.notifications.notifyUser(memberId, encounterRow.campaignId, user, recipientEvent);
+      await this.notifications.notifyUserIfHiddenEncounterRecipient(
+        memberId,
+        encounterRow.campaignId,
+        user,
+        recipientEvent,
+        isDm ? { kind: 'permanent_dm' } : { kind: 'character_owner', characterId },
+      );
     }
   }
 
