@@ -45,6 +45,7 @@ import {
   transcriptReducer,
   saveTranscript,
   loadTranscript,
+  clearTranscript,
   emptyTranscript,
   type TranscriptAction,
   type TranscriptState,
@@ -164,6 +165,10 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
    * ACCOUNTS, which is the exact leak this issue is about.
    */
   const transcriptOwnerRef = useRef<string>('');
+  // A transcript reset keeps the same owner key but invalidates every earlier history
+  // request. Incrementing this independently prevents a slow pre-reset response from
+  // restoring rows the DM just erased.
+  const transcriptRequestGenerationRef = useRef(0);
   const lastSeqRef = useRef(0);
   const [transcriptFetched, setTranscriptFetched] = useState(false);
 
@@ -172,7 +177,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   }, [transcript.lastSeq]);
 
   const fetchTranscript = useCallback(
-    async (ownerKey: string, after?: number) => {
+    async (ownerKey: string, after?: number, requestGeneration = transcriptRequestGenerationRef.current) => {
       if (campaignId === undefined) return;
       let watermark = after;
       for (let page = 0; page < 20; page += 1) {
@@ -183,7 +188,10 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           );
           // The Layout provider survives viewer and campaign changes. An old request must not
           // fold into the newly-owned reducer, even when the response happens to win a race.
-          if (transcriptOwnerRef.current !== ownerKey) return;
+          if (
+            transcriptOwnerRef.current !== ownerKey
+            || transcriptRequestGenerationRef.current !== requestGeneration
+          ) return;
           if (result.items.length > 0) {
             dispatchTranscript({ type: 'serverEvents', events: result.items });
           }
@@ -218,6 +226,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     setTranscriptFetched(!enabled);
     pendingHydrate.mark();
     transcriptOwnerRef.current = key;
+    const requestGeneration = ++transcriptRequestGenerationRef.current;
     if (campaignId !== undefined && viewerId !== null) {
       dispatchTranscript({
         type: 'hydrate',
@@ -230,8 +239,11 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       });
       if (enabled) {
         dispatchTranscript({ type: 'authoritative' });
-        void fetchTranscript(key).finally(() => {
-          if (transcriptOwnerRef.current === key) setTranscriptFetched(true);
+        void fetchTranscript(key, undefined, requestGeneration).finally(() => {
+          if (
+            transcriptOwnerRef.current === key
+            && transcriptRequestGenerationRef.current === requestGeneration
+          ) setTranscriptFetched(true);
         });
       }
     } else {
@@ -317,8 +329,19 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           // server-side, so refetch the session to surface it. See AiTablePage for the full why.
           if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
         } else if (event.type === 'transcript.reset') {
+          // The stream reducer has cleared the live projection. Remove its paint cache as
+          // well — empty state is intentionally never persisted — and invalidate every
+          // pre-reset request before fetching the now-empty server history.
+          clearTranscript(viewerId, campaignId, 'activity');
           lastSeqRef.current = 0;
-          void fetchTranscript(key);
+          setTranscriptFetched(false);
+          const requestGeneration = ++transcriptRequestGenerationRef.current;
+          void fetchTranscript(key, undefined, requestGeneration).finally(() => {
+            if (
+              transcriptOwnerRef.current === key
+              && transcriptRequestGenerationRef.current === requestGeneration
+            ) setTranscriptFetched(true);
+          });
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||

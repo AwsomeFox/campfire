@@ -145,10 +145,19 @@ export function EncounterAiDriverPanel({
     setSubmitting(true);
     setSubmitError(null);
     const clientRef = newClientRef();
-    const body: { input: string; scene?: string; characterId?: number; clientRef: string } = {
+    const body: {
+      input: string;
+      scene?: string;
+      characterId?: number;
+      clientRef: string;
+      characterName?: string;
+      displayText: string;
+    } = {
       input: `${speakerPrefix(memberName, characterName)} ${text}`,
       characterId: myMembership?.characterId ?? undefined,
       clientRef,
+      characterName,
+      displayText: text,
     };
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
@@ -379,6 +388,13 @@ export function EncounterAiDriverPanel({
         )}
       </div>
 
+      {(lifecycleError || undoError) && (
+        <div className="px-3 pb-2" role="alert">
+          {lifecycleError && <p className="text-xs text-rose-400 m-0">{lifecycleError}</p>}
+          {undoError && <p className="text-xs text-rose-400 m-0">{undoError}</p>}
+        </div>
+      )}
+
       {open && (
         <div {...regionProps} className="flex flex-col gap-3 px-3 pb-3 min-h-0 border-t border-[var(--color-divider)] pt-3">
           {/*
@@ -417,9 +433,6 @@ export function EncounterAiDriverPanel({
               {t(`table.phaseNote.${phase}`)}
             </p>
           )}
-          {lifecycleError && <p className="text-xs text-rose-400 m-0">{lifecycleError}</p>}
-          {undoError && <p className="text-xs text-rose-400 m-0">{undoError}</p>}
-
           {session && (
             <StuckLadder
               campaignId={campaignId}

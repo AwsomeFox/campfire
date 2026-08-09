@@ -33,6 +33,9 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/newClientRef/);
     expect(panel).toMatch(/onUndoAiAction/);
     expect(panel).toMatch(/lastUndoableCommit/);
+    expect(panel).toMatch(/characterName,/);
+    expect(panel).toMatch(/displayText: text/);
+    expect(panel).toMatch(/role="alert"/);
   });
 
   test('shared live activity carries transcript for the dock', () => {
@@ -46,6 +49,8 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/fetchTranscript\(key, lastSeqRef\.current \|\| undefined\)/);
     expect(hook).toMatch(/const effectiveRole = campaignId === undefined \? null : roleIn\(campaignId\)/);
     expect(hook).toMatch(/loadTranscript\(viewerId, campaignId, 'activity', effectiveRole\)/);
+    expect(hook).toMatch(/clearTranscript\(viewerId, campaignId, 'activity'\)/);
+    expect(hook).toMatch(/transcriptRequestGenerationRef/);
   });
 
   test('the empty encounter list retains a Driver session entry', () => {
