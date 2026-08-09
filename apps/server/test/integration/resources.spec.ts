@@ -2020,6 +2020,16 @@ describe('inline spell slots & character resources (issue #422)', () => {
       expect(readEntry('spellSlot', '2')!.used).toBe(0);
     });
 
+    it('a spell-slot entry with a null `max` 400s as malformed instead of being coerced into the no-slots error', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ spellSlots: { '2': { max: null, used: 0 } } });
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 2, delta: 1 }, user, 'dm'),
+      ).rejects.toThrow('Spell slot entry for level 2 is malformed (used/max must be integers)');
+
+      expect(readEntry('spellSlot', '2')!.used).toBe(0);
+    });
+
     it('spending past max 400s and nothing is written', async () => {
       const { user, enc, comb, readEntry } = await seedPaired({ resources: { pool: { max: 2, used: 2 } } });
 
