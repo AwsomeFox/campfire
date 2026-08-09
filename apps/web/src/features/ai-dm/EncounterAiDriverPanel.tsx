@@ -140,6 +140,10 @@ export function EncounterAiDriverPanel({
     setNarrationAnnouncements([]);
     setNarrationStatus('');
     composerA11yRef.current = null;
+    setInput('');
+    setSceneField('');
+    setSubmitting(false);
+    setSubmitError(null);
     // A successful message POST can settle after this dock unmounts. Clearing this
     // owner marker makes that old continuation discard its local echo instead of
     // dispatching it into the Layout provider for the next campaign/viewer.

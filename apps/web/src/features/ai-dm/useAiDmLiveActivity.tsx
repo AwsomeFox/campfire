@@ -368,8 +368,10 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
         } else if (event.type === 'transcript.reset') {
           // The stream reducer has cleared the live projection. Remove its paint cache as
-          // well — empty state is intentionally never persisted — and invalidate every
-          // pre-reset request before fetching the now-empty server history.
+          // well (for both the shared activity dock and the sibling Table route) — empty
+          // state is intentionally never persisted — and invalidate every pre-reset request
+          // before fetching the now-empty server history.
+          clearTranscript(viewerId, campaignId);
           clearTranscript(viewerId, campaignId, 'activity');
           lastSeqRef.current = 0;
           setTranscriptFetched(false);

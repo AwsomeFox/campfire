@@ -40,6 +40,7 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/return \(\) => \{ narrationOwnerRef\.current = ''; \}/);
     expect(panel).toMatch(/const submissionOwner = narrationOwnerRef\.current/);
     expect(panel).toMatch(/narrationOwnerRef\.current !== submissionOwner/);
+    expect(panel).toMatch(/setInput\(''\);[\s\S]{0,120}setSceneField\(''\);[\s\S]{0,120}setSubmitting\(false\);[\s\S]{0,120}setSubmitError\(null\);/);
     expect(panel).toMatch(/liveActivity\.transcriptFetched/);
     expect(panel).toMatch(/beginNarrationLogLive/);
     expect(panel).toMatch(/preHydrationLiveEntryIds/);
@@ -73,6 +74,7 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/clearTranscript\(viewerId, campaignId\);/);
     expect(hook).toMatch(/clearTranscript\(viewerId, campaignId, 'activity'\);/);
     expect(hook).toMatch(/\+\+transcriptRequestGenerationRef\.current/);
+    expect(hook).toMatch(/event\.type === 'transcript\.reset'[\s\S]{0,700}clearTranscript\(viewerId, campaignId\);[\s\S]{0,200}clearTranscript\(viewerId, campaignId, 'activity'\);/);
     expect(hook).toMatch(/\},\s*effectiveRole,/);
   });
 
