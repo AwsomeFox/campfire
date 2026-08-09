@@ -96,9 +96,19 @@ export interface Dice3dHandle {
 
 /* ------------------------------------------------------------------ geometry */
 
+/**
+ * A d100 is thrown on the ten-face percentile solid, the way a real table rolls
+ * percentiles — not on a hundred-face die nobody owns. Its landing face carries
+ * the whole 1..100 result rather than a tens digit, so one die still reads as
+ * one result.
+ */
+function usesPercentileSolid(sides: number): boolean {
+  return sides === 10 || sides === 100;
+}
+
 function geometryFor(sides: number): THREE.BufferGeometry {
   if (sides === 4) return new THREE.TetrahedronGeometry(1.15);
-  if (sides === 10) return d10Geometry(1.12);
+  if (usesPercentileSolid(sides)) return d10Geometry(1.12);
   if (sides === 8) return new THREE.OctahedronGeometry(1.2);
   if (sides === 12) return new THREE.DodecahedronGeometry(1.15);
   return new THREE.IcosahedronGeometry(1.15);
@@ -185,7 +195,7 @@ function d10Faces(geo: THREE.BufferGeometry): Face[] {
 }
 
 function facesFor(sides: number, geo: THREE.BufferGeometry): Face[] {
-  return sides === 10 ? d10Faces(geo) : facesOf(geo);
+  return usesPercentileSolid(sides) ? d10Faces(geo) : facesOf(geo);
 }
 
 const BOX_NORMALS = [
@@ -197,9 +207,17 @@ const BOX_NORMALS = [
   [0, 0, -1],
 ];
 
-function faceNormals(sides: number, geo: THREE.BufferGeometry): THREE.Vector3[] {
+/**
+ * Local-space normals of a die's numbered faces, indexed the same way as the
+ * numbers `faceValues`/`d6Values` hand out. Builds and disposes its own geometry,
+ * so a caller only has to know the side count.
+ */
+export function dieFaceNormals(sides: number): THREE.Vector3[] {
   if (sides === 6) return BOX_NORMALS.map((a) => new THREE.Vector3().fromArray(a));
-  return facesFor(sides, geo).map((f) => f.normal.clone());
+  const geo = geometryFor(sides);
+  const normals = facesFor(sides, geo).map((f) => f.normal.clone());
+  geo.dispose();
+  return normals;
 }
 
 /* ------------------------------------------------------------------ textures */
@@ -219,7 +237,10 @@ class TextureCache {
       if (!g) return null;
       g.clearRect(0, 0, 128, 128);
       g.fillStyle = color;
-      g.font = `bold ${text.length > 1 ? 62 : 76}px ui-monospace, Menlo, monospace`;
+      // Three digits only happens on a d100's "100"; it needs the extra step down
+      // to stay inside the 128px face texture.
+      const px = text.length > 2 ? 46 : text.length > 1 ? 62 : 76;
+      g.font = `bold ${px}px ui-monospace, Menlo, monospace`;
       g.textAlign = 'center';
       g.textBaseline = 'middle';
       g.fillText(text, 64, 66);
@@ -384,7 +405,7 @@ function buildDie(sides: number, theme: DiceTheme, upIdx: number, tex: TextureCa
   group.add(new THREE.LineSegments(edges, lineMat));
 
   const planeMats: THREE.MeshBasicMaterial[] = [];
-  const size = sides === 10 ? 0.6 : 0.78;
+  const size = usesPercentileSolid(sides) ? 0.6 : 0.78;
   for (const [i, face] of faces.entries()) {
     const n = vals[i];
     const planeMat = new THREE.MeshBasicMaterial({
@@ -482,6 +503,43 @@ export function simulate(init: ThrowInit, rest: number): Frame[] {
   return out;
 }
 
+export interface RestingThrow {
+  traj: Frame[];
+  rest: number;
+}
+
+/**
+ * Shift `traj` sideways so its resting place does not overlap one already taken.
+ *
+ * The nudge is clamped back inside the tray walls: an unclamped push (what a
+ * template mockup rolling one or two dice never hits) walks a crowded 8d6 damage
+ * roll straight off the edge of the canvas.
+ *
+ * Clamped TWICE, because the offset shifts every recorded frame, not just the
+ * resting one. The resting frame is held to `WALL - rest` so the settled die sits
+ * fully inside the tray; each earlier frame is then held to the wall the
+ * integrator itself bounces off, so a throw that already grazed a wall mid-flight
+ * cannot be shifted through it.
+ */
+export function nudgeApart(traj: Frame[], placed: readonly RestingThrow[], rest: number): void {
+  for (const other of placed) {
+    const ol = other.traj[other.traj.length - 1].p;
+    const ml = traj[traj.length - 1].p;
+    const gap = (other.rest + rest) * 1.15;
+    const dx = ml.x - ol.x;
+    const dz = ml.z - ol.z;
+    const dist = Math.hypot(dx, dz) || 0.001;
+    if (dist >= gap) continue;
+    const push = (gap - dist) / dist;
+    const offX = clamp(ml.x + dx * push, rest - WALL_X, WALL_X - rest) - ml.x;
+    const offZ = clamp(ml.z + dz * push, rest - WALL_Z, WALL_Z - rest) - ml.z;
+    for (const fr of traj) {
+      fr.p.x = clamp(fr.p.x + offX, -WALL_X, WALL_X);
+      fr.p.z = clamp(fr.p.z + offZ, -WALL_Z, WALL_Z);
+    }
+  }
+}
+
 /** Index of the face pointing most nearly straight up under rotation `q`. */
 export function upFaceIndex(normals: THREE.Vector3[], q: THREE.Quaternion): number {
   let best = 0;
@@ -577,39 +635,12 @@ export function startDiceRoll(
       ),
     };
     const traj = simulate(init, rest);
-    // Nudge resting places apart so two dice never come to rest inside each other.
-    // The nudge is clamped back inside the tray walls: an unclamped push (what a
-    // template mockup rolling one or two dice never hits) walks a crowded 8d6
-    // damage roll straight off the edge of the canvas, and the physics itself
-    // never allows a die outside those walls.
-    for (const other of dice) {
-      const ol = other.traj[other.traj.length - 1].p;
-      const ml = traj[traj.length - 1].p;
-      const gap = (other.rest + rest) * 1.15;
-      const dx = ml.x - ol.x;
-      const dz = ml.z - ol.z;
-      const dist = Math.hypot(dx, dz) || 0.001;
-      if (dist < gap) {
-        const push = (gap - dist) / dist;
-        const limitX = WALL_X - rest;
-        const limitZ = WALL_Z - rest;
-        const offX = clamp(ml.x + dx * push, -limitX, limitX) - ml.x;
-        const offZ = clamp(ml.z + dz * push, -limitZ, limitZ) - ml.z;
-        for (const fr of traj) {
-          fr.p.x += offX;
-          fr.p.z += offZ;
-        }
-      }
-    }
+    // Keep resting places apart so two dice never come to rest inside each other.
+    nudgeApart(traj, dice, rest);
 
-    const landing = traj[traj.length - 1];
-    // Which face lands up is fixed by the recorded throw. Probe it against a
-    // throwaway geometry of the same shape so the rig can be built with its
-    // numbering already keyed to that face. (A d6's normals are the fixed box
-    // order, so it needs no probe geometry.)
-    const probe = dieSides === 6 ? null : geometryFor(dieSides);
-    const upIdx = upFaceIndex(faceNormals(dieSides, probe ?? new THREE.BufferGeometry()), landing.q);
-    probe?.dispose();
+    // Which face lands up is fixed by the recorded throw, so the rig can be built
+    // with its numbering already keyed to that face.
+    const upIdx = upFaceIndex(dieFaceNormals(dieSides), traj[traj.length - 1].q);
 
     const rig = buildDie(dieSides, theme, upIdx, tex);
     rig.group.scale.setScalar(scale);

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import * as THREE from 'three';
-import { simulate, upFaceIndex } from '../../src/features/dice/dice3d';
+import { dieFaceNormals, nudgeApart, simulate, upFaceIndex } from '../../src/features/dice/dice3d';
 import { faceValues } from '../../src/features/dice/dice3dFaces';
 
 /**
@@ -20,6 +20,9 @@ const REST = 0.96;
 const WALL_X = 3.3;
 const WALL_Z = 1.5;
 
+/** Every side count the server's dice grammar accepts. */
+const SERVER_SIDES = [2, 4, 6, 8, 10, 12, 20, 100];
+
 /** Deterministic stand-ins for the roller's randomized throws. */
 function throwN(i: number) {
   const f = (k: number) => ((Math.sin(i * 12.9898 + k * 78.233) * 43758.5453) % 1 + 1) % 1;
@@ -31,26 +34,6 @@ function throwN(i: number) {
     vel: new THREE.Vector3((f(7) - 0.5) * 3.4, -1.4 - f(8), 2.2 + f(9) * 1.4),
     spin: new THREE.Vector3((f(10) - 0.5) * 22, (f(11) - 0.5) * 22, (f(12) - 0.5) * 22),
   };
-}
-
-/** Face normals of an icosahedral d20, clustered exactly as the roller does. */
-function d20Normals(): THREE.Vector3[] {
-  const geo = new THREE.IcosahedronGeometry(1.15);
-  const pos = geo.getAttribute('position');
-  const out: THREE.Vector3[] = [];
-  for (let i = 0; i < pos.count; i += 3) {
-    const a = new THREE.Vector3().fromBufferAttribute(pos, i);
-    const b = new THREE.Vector3().fromBufferAttribute(pos, i + 1);
-    const c = new THREE.Vector3().fromBufferAttribute(pos, i + 2);
-    out.push(
-      new THREE.Vector3()
-        .subVectors(b, a)
-        .cross(new THREE.Vector3().subVectors(c, a))
-        .normalize(),
-    );
-  }
-  geo.dispose();
-  return out;
 }
 
 test.describe('recorded throw', () => {
@@ -68,22 +51,93 @@ test.describe('recorded throw', () => {
     }
   });
 
-  test('the rolled value ends on the face that lands up', () => {
-    const normals = d20Normals();
-    expect(normals).toHaveLength(20);
-    for (let i = 0; i < 200; i++) {
-      const frames = simulate(throwN(i), REST);
-      const landed = frames[frames.length - 1].q;
-      const upIdx = upFaceIndex(normals, landed);
-      const value = (i % 20) + 1;
-      const painted = faceValues(20, value, upIdx, normals.length);
+  test('the rolled value ends on the face that lands up, for every die the server allows', () => {
+    for (const sides of SERVER_SIDES) {
+      const normals = dieFaceNormals(sides);
+      expect(normals.length, `d${sides} has no faces`).toBeGreaterThan(0);
+      for (let i = 0; i < 60; i++) {
+        const frames = simulate(throwN(i), REST);
+        const landed = frames[frames.length - 1].q;
+        const upIdx = upFaceIndex(normals, landed);
+        const value = (i % sides) + 1;
+        const painted = faceValues(sides, value, upIdx, normals.length);
 
-      expect(painted[upIdx], `throw ${i} rolling ${value}`).toBe(value);
-      // upFaceIndex must genuinely pick the highest face, not merely a valid one:
-      // the alignment step rotates THIS face flat, so picking a side face would
-      // tip the die onto a number nobody rolled.
-      const ys = normals.map((n) => n.clone().applyQuaternion(landed).y);
-      expect(ys[upIdx]).toBe(Math.max(...ys));
+        expect(painted[upIdx], `d${sides} throw ${i} rolling ${value}`).toBe(value);
+        // upFaceIndex must genuinely pick the highest face, not merely a valid one:
+        // the alignment step rotates THIS face flat, so picking a side face would
+        // tip the die onto a number nobody rolled.
+        const ys = normals.map((n) => n.clone().applyQuaternion(landed).y);
+        expect(ys[upIdx]).toBe(Math.max(...ys));
+      }
     }
+  });
+
+  test('a d100 is thrown on the ten-face percentile solid', () => {
+    expect(dieFaceNormals(100)).toHaveLength(10);
+    expect(dieFaceNormals(10)).toHaveLength(10);
+    expect(dieFaceNormals(20)).toHaveLength(20);
+    expect(dieFaceNormals(12)).toHaveLength(12);
+    expect(dieFaceNormals(8)).toHaveLength(8);
+    expect(dieFaceNormals(6)).toHaveLength(6);
+    expect(dieFaceNormals(4)).toHaveLength(4);
+  });
+});
+
+test.describe('separation nudge', () => {
+  /** A throw whose recorded frames already graze both walls. */
+  function grazingThrow() {
+    return {
+      traj: [
+        { p: new THREE.Vector3(WALL_X, 2.4, WALL_Z), q: new THREE.Quaternion() },
+        { p: new THREE.Vector3(-WALL_X, 1.6, -WALL_Z), q: new THREE.Quaternion() },
+        { p: new THREE.Vector3(3.0, REST, 1.2), q: new THREE.Quaternion() },
+      ],
+      rest: REST,
+    };
+  }
+
+  test('keeps every frame inside the walls, not just the resting one', () => {
+    const subject = grazingThrow();
+    // A die resting almost on top of the subject's, so the push is at full strength.
+    const placed = [
+      { traj: [{ p: new THREE.Vector3(3.05, REST, 1.25), q: new THREE.Quaternion() }], rest: REST },
+    ];
+
+    nudgeApart(subject.traj, placed, REST);
+
+    for (const [i, fr] of subject.traj.entries()) {
+      expect(Math.abs(fr.p.x), `frame ${i} shifted past the side wall`).toBeLessThanOrEqual(WALL_X);
+      expect(Math.abs(fr.p.z), `frame ${i} shifted past the end wall`).toBeLessThanOrEqual(WALL_Z);
+    }
+    const landed = subject.traj[subject.traj.length - 1].p;
+    // The resting die must sit FULLY inside, not merely have its centre in bounds.
+    expect(Math.abs(landed.x)).toBeLessThanOrEqual(WALL_X - REST + 1e-9);
+    expect(Math.abs(landed.z)).toBeLessThanOrEqual(WALL_Z - REST + 1e-9);
+  });
+
+  test('leaves a throw alone when nothing is resting near it', () => {
+    const subject = grazingThrow();
+    const before = subject.traj.map((f) => f.p.clone());
+    nudgeApart(subject.traj, [
+      { traj: [{ p: new THREE.Vector3(-3.0, REST, -1.2), q: new THREE.Quaternion() }], rest: REST },
+    ], REST);
+    subject.traj.forEach((f, i) => {
+      expect(f.p.x).toBeCloseTo(before[i].x, 10);
+      expect(f.p.z).toBeCloseTo(before[i].z, 10);
+    });
+  });
+
+  test('separates dice that would otherwise rest inside each other', () => {
+    const a = {
+      traj: [{ p: new THREE.Vector3(0, REST, 0), q: new THREE.Quaternion() }],
+      rest: REST,
+    };
+    const b = {
+      traj: [{ p: new THREE.Vector3(0.2, REST, 0), q: new THREE.Quaternion() }],
+      rest: REST,
+    };
+    nudgeApart(b.traj, [a], REST);
+    const gap = Math.hypot(b.traj[0].p.x - a.traj[0].p.x, b.traj[0].p.z - a.traj[0].p.z);
+    expect(gap).toBeGreaterThan(0.2);
   });
 });

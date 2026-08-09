@@ -13,6 +13,14 @@
  * face the recorded throw comes to rest on. The number that was already there
  * swaps into the slot `value` vacated, so each face still carries a distinct
  * number.
+ *
+ * When the die has more sides than the solid has faces, that swap is impossible:
+ * a d100 is drawn on a ten-face percentile solid, so 90 of its 100 results are
+ * not in the base numbering at all. The rolled value is then simply WRITTEN onto
+ * the landing face, displacing whatever was there. The landing face is the only
+ * one the player reads, and it must always be the number the server rolled —
+ * that guarantee is the point of this function, and it outranks keeping the
+ * other nine faces a tidy 1..10.
  */
 export function faceValues(
   sides: number,
@@ -23,11 +31,10 @@ export function faceValues(
   const count = faceCount || sides;
   const out: number[] = [];
   for (let i = 0; i < count; i++) out.push((i % sides) + 1);
+  if (upIdx < 0 || upIdx >= count) return out;
   const at = out.indexOf(value);
-  if (upIdx >= 0 && upIdx < count && at >= 0) {
-    out[at] = out[upIdx];
-    out[upIdx] = value;
-  }
+  if (at >= 0) out[at] = out[upIdx];
+  out[upIdx] = value;
   return out;
 }
 

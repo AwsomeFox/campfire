@@ -47,6 +47,28 @@ test.describe('faceValues', () => {
     expect(faceValues(20, 7, 20, 20)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
     expect(faceValues(20, 7, -1, 20)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
   });
+
+  test('a d100 shows its result even though the solid has only ten faces', () => {
+    // The server accepts d100 and the dice tray offers it, but no solid carries a
+    // hundred faces — it is thrown on the ten-face percentile die. 90 of the 100
+    // results are therefore absent from the base 1..10 numbering, and writing the
+    // result onto the landing face is the only thing that keeps the die honest.
+    for (let value = 1; value <= 100; value++) {
+      for (let upIdx = 0; upIdx < 10; upIdx++) {
+        expect(faceValues(100, value, upIdx, 10)[upIdx], `d100 ${value}@${upIdx}`).toBe(value);
+      }
+    }
+  });
+
+  test('a d2 shows its result on whatever solid it is thrown on', () => {
+    // d2 is typeable (the server allows it) but absent from the tray, so it falls
+    // through to the twenty-face solid numbered 1,2,1,2,…
+    for (let value = 1; value <= 2; value++) {
+      for (let upIdx = 0; upIdx < 20; upIdx++) {
+        expect(faceValues(2, value, upIdx, 20)[upIdx], `d2 ${value}@${upIdx}`).toBe(value);
+      }
+    }
+  });
 });
 
 test.describe('d6Values', () => {
