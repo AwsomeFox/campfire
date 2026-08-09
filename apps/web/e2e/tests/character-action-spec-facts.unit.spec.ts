@@ -453,6 +453,55 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     ]);
   });
 
+  /**
+   * #2115 review: `pickOutcomeBranch` falls back `crit → hit`, so a crit against the hit-only
+   * shape `inferActionSpecFromText` produces still deals multiplied damage. Details showed only
+   * the base "On a hit" and left the multiplication out.
+   */
+  test('a crit is disclosed even when only a hit branch was authored', () => {
+    const hitOnly = ActionSpec.parse({
+      mode: 'attack',
+      attack: { bonus: '+5' },
+      outcomes: { hit: { damage: [{ formula: '1d8', flat: 3, type: 'slashing' }] } },
+    });
+    expect(actionSpecEffects(hitOnly, 'double-dice')).toEqual([
+      { outcome: 'crit', label: 'On a critical hit', lines: ['1d8+3 slashing damage, dice doubled on a critical'] },
+      { outcome: 'hit', label: 'On a hit', lines: ['1d8+3 slashing damage'] },
+    ]);
+    // PF2e multiplies differently, and the synthesized line says so.
+    expect(actionSpecEffects(hitOnly, 'double-total')[0].lines).toEqual([
+      '1d8+3 slashing damage, total doubled on a critical',
+    ]);
+  });
+
+  test('nothing is synthesized where a crit changes nothing, or cannot happen', () => {
+    // A system with no critical hits.
+    const hitOnly = ActionSpec.parse({
+      mode: 'attack',
+      attack: { bonus: '+5' },
+      outcomes: { hit: { damage: [{ formula: '1d8', flat: 3, type: 'slashing' }] } },
+    });
+    expect(actionSpecEffects(hitOnly, 'double-dice', false).map((g) => g.outcome)).toEqual(['hit']);
+
+    // No rule supplied — nothing is known about the multiplication, so nothing is claimed.
+    expect(actionSpecEffects(hitOnly).map((g) => g.outcome)).toEqual(['hit']);
+
+    // A hit branch with no damage: the crit group would repeat "On a hit" verbatim.
+    const proseOnly = ActionSpec.parse({
+      mode: 'attack',
+      attack: { bonus: '+5' },
+      outcomes: { hit: { effects: [{ condition: 'Prone' }] } },
+    });
+    expect(actionSpecEffects(proseOnly, 'double-dice').map((g) => g.outcome)).toEqual(['hit']);
+
+    // Save mode never reaches an attack crit at all.
+    const save = ActionSpec.parse({
+      mode: 'save',
+      outcomes: { failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }] } },
+    });
+    expect(actionSpecEffects(save, 'double-dice').map((g) => g.outcome)).toEqual(['failure']);
+  });
+
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });

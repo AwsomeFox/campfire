@@ -221,14 +221,17 @@ function criticalDamageNote(rule: CriticalDamageRule | undefined): string {
   return '';
 }
 
-function branchLines(branch: {
+/** The shape `branchLines` reads — a structural view of `ActionSpec`'s outcome branches. */
+type OutcomeBranchLike = {
   text: string;
   damage: ReadonlyArray<{ formula: string; flat: number; type: string }>;
   halfDamage: boolean;
   healing: string;
   tempHp: string;
   effects: ReadonlyArray<{ text: string; condition: string; rounds: number | null; saveEnds: boolean; ongoingDamage: number }>;
-}, criticalNote = '', fallbackHasDamage = false): string[] {
+};
+
+function branchLines(branch: OutcomeBranchLike, criticalNote = '', fallbackHasDamage = false): string[] {
   const lines: string[] = [];
   if (branch.text) lines.push(branch.text);
 
@@ -287,6 +290,30 @@ function partCanDealDamage(part: { formula: string; flat: number }): boolean {
 }
 
 /**
+ * The consequence a critical hit has when the spec never authored a `crit` branch.
+ *
+ * `pickOutcomeBranch` falls back `crit → hit`, and `resolveOneTarget` then rolls that branch
+ * under the system's critical rule — so a crit really does deal multiplied damage even for the
+ * hit-only shape `inferActionSpecFromText` produces from a sheet's to-hit/damage text. Details
+ * showed only the base "On a hit" and omitted it (#2115 review).
+ *
+ * Returns the hit branch (the caller prints it under the crit heading with the rule's note)
+ * only when the crit would visibly change something: `attack` mode, a system that HAS crits,
+ * a known multiplication rule, and real damage for it to multiply. Without all four the group
+ * would repeat "On a hit" verbatim under a second heading, which is noise, not disclosure.
+ */
+function syntheticCritBranch(
+  spec: ActionSpec,
+  critNote: string,
+  hasCriticalHits: boolean,
+): OutcomeBranchLike | undefined {
+  if (spec.mode !== 'attack' || !hasCriticalHits || critNote === '') return undefined;
+  const hit = spec.outcomes?.hit;
+  if (!hit || !(hit.damage ?? []).some(partCanDealDamage)) return undefined;
+  return hit;
+}
+
+/**
  * Player-safe effect lines from the spec's outcome branches — the template's "Effects"
  * list. Branch prose, mechanical consequences, and applied conditions; never hidden
  * monster numbers.
@@ -319,17 +346,16 @@ export function actionSpecEffects(
   const reachable = OUTCOMES_BY_MODE[spec.mode] ?? null;
   // What a save-for-half branch would actually halve — see `branchLines`.
   const fallbackHasDamage = (outcomes.failure?.damage ?? []).some(partCanDealDamage);
+  const critNote = criticalDamageNote(criticalDamage);
   const groups: ActionEffectGroup[] = [];
   for (const [outcome, label] of OUTCOME_LABELS) {
     if (reachable && !reachable.has(outcome)) continue;
     if (!hasCriticalHits && ATTACK_CRIT_OUTCOMES.has(outcome)) continue;
-    const branch = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
+    const branch =
+      (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome]
+      ?? (outcome === 'crit' ? syntheticCritBranch(spec, critNote, hasCriticalHits) : undefined);
     if (!branch) continue;
-    const unique = [
-      ...new Set(
-        branchLines(branch, outcome === 'crit' ? criticalDamageNote(criticalDamage) : '', fallbackHasDamage),
-      ),
-    ];
+    const unique = [...new Set(branchLines(branch, outcome === 'crit' ? critNote : '', fallbackHasDamage))];
     if (unique.length > 0) groups.push({ outcome, label, lines: unique });
   }
   return groups;
