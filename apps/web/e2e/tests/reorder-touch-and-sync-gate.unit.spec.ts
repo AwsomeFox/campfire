@@ -61,12 +61,17 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
     expect(busyLineMatch).not.toBeNull();
     const busyExpression = busyLineMatch![1];
     expect(busyExpression).toContain('riskyBlocked');
+    // Issue #2116 review round 2: without this, the drag handle and ReorderMenu stay
+    // visibly enabled while a reorder's resync is outstanding, silently swallowing a
+    // click/drop with no feedback. See the dedicated describe block below.
+    expect(busyExpression).toContain('isAwaitingReorderResyncNow');
 
     // The useCallback dependency array must also carry riskyBlocked, or the closure
     // would go stale and keep evaluating an old value.
     const depsMatch = fn.match(/\[canReorderCombatants,[^\]]*\],\s*\);/);
     expect(depsMatch).not.toBeNull();
     expect(depsMatch![0]).toContain('riskyBlocked');
+    expect(depsMatch![0]).toContain('isAwaitingReorderResyncNow');
   });
 
   /**
@@ -91,10 +96,10 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
     const fn = source.slice(fnStart, fnEnd);
 
     // An early return on all four, ahead of the mutate call — not merely a mention.
-    // Issue #2116 added the fourth condition (`awaitingReorderResyncRef`, see the
+    // Issue #2116 added the fourth condition (`isAwaitingReorderResyncNow`, see the
     // describe block below); the other three predate it (issue #2074).
     const guardIndex = fn.search(
-      /if \(reconcileBlocks \|\| riskyBlocked \|\| reorderCombatant\.isPending \|\| awaitingReorderResyncRef\.current !== null\) return;/,
+      /if \(reconcileBlocks \|\| riskyBlocked \|\| reorderCombatant\.isPending \|\| isAwaitingReorderResyncNow\) return;/,
     );
     expect(guardIndex).toBeGreaterThan(-1);
     expect(guardIndex).toBeLessThan(fn.indexOf('reorderCombatant.mutate('));
@@ -102,7 +107,7 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
     // Stale-closure guard: each gate must appear in the dependency array too.
     const depsMatch = fn.match(/\[encounter,[^\]]*\],\s*\);/);
     expect(depsMatch).not.toBeNull();
-    for (const dep of ['reconcileBlocks', 'riskyBlocked', 'reorderCombatant']) {
+    for (const dep of ['reconcileBlocks', 'riskyBlocked', 'reorderCombatant', 'isAwaitingReorderResyncNow']) {
       expect(depsMatch![0]).toContain(dep);
     }
   });
@@ -120,18 +125,29 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
     expect(expression).toContain('canEditEncounter');
     expect(expression).toContain('!reconcileBlocks');
     expect(expression).toContain('!riskyBlocked');
+    // Issue #2116 review round 2.
+    expect(expression).toContain('!isAwaitingReorderResyncNow');
   });
 });
 
-test.describe('awaitingReorderResyncRef wiring in RunSessionPage.tsx (issue #2116)', () => {
+test.describe('reorder resync latch is REACTIVE state, and every reorder entry point consults it (issue #2116 review round 2)', () => {
   /**
-   * Source-scan coverage that `isAwaitingReorderResync` (behaviorally unit-tested against
-   * real values in `combatant-reorder.unit.spec.ts`, alongside this module's other pure
-   * reorder helpers) is actually wired into the mutation lifecycle here: armed at settle
-   * time, consulted (and cleared) as `encounterReadRevision` changes, and consulted by the
-   * guard (pinned in the describe block above). `RunSessionPage.tsx` is too heavily wired to
-   * mount — see this file's top comment — so the call sites are pinned by source rather than
-   * by rendering.
+   * Review round 2 on #2116: the round-1 fix gated on a plain `useRef`. A ref mutation does
+   * NOT cause a re-render, so `buildReorderControls`'s `busy` and `InitiativeStrip`'s
+   * `canReorder` (both pinned above to now include `isAwaitingReorderResyncNow`) kept
+   * evaluating their LAST-rendered value — the controls stayed visibly enabled while
+   * `handleReorderDrop` silently refused the write underneath. A click, drag, or
+   * keyboard move-up/down looked accepted and did nothing: exactly the "recoverable,
+   * visible 409 traded for a silent no-op" trade issue #2116 explicitly rejects for
+   * `encounterQuery.isFetching`, just rarer and therefore harder to diagnose.
+   *
+   * `reorderResyncArmedAt` is now `useState`, and `isAwaitingReorderResyncNow` is computed
+   * fresh every render from it plus `encounterReadRevision` (also state) — both reactive,
+   * so a re-render always reflects the true value before any entry point acts on it.
+   * `RunSessionPage.tsx` is too heavily wired to mount — see this file's top comment — so
+   * the call sites are pinned by source rather than by rendering; the underlying decision
+   * function itself is behaviorally unit-tested against real values in
+   * `combatant-reorder.unit.spec.ts`.
    *
    * Gated on `encounterReadRevisionRef`/`encounterReadRevision` — NOT
    * `encounterQuery.dataUpdatedAt` — deliberately: `dataUpdatedAt` advances on ANY
@@ -143,7 +159,16 @@ test.describe('awaitingReorderResyncRef wiring in RunSessionPage.tsx (issue #211
    * after a real fetch it started has actually resolved (guarded by
    * `signal.throwIfAborted()`) — see that ref's own doc comment a few hundred lines above.
    */
-  test('reorderCombatant.onSettled arms the ref with the read-revision baseline, before invalidateEncounter', () => {
+  test('reorderResyncArmedAt is useState, and isAwaitingReorderResyncNow is derived from it plus encounterReadRevision', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    expect(source).toContain('const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);');
+    expect(source).toContain('const isAwaitingReorderResyncNow = isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevision);');
+    // Regression guard: this must NOT be a ref. A ref read here would silently reintroduce
+    // the exact defect this describe block exists to close (no re-render on change).
+    expect(source).not.toContain('const awaitingReorderResyncRef = useRef');
+  });
+
+  test('reorderCombatant.onSettled arms the state with the read-revision baseline, before invalidateEncounter', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     const fnStart = source.indexOf('const reorderCombatant = useMutation({');
     expect(fnStart).toBeGreaterThan(-1);
@@ -159,33 +184,30 @@ test.describe('awaitingReorderResyncRef wiring in RunSessionPage.tsx (issue #211
     const onSettledStart = fn.indexOf('onSettled:');
     expect(onSettledStart).toBeGreaterThan(-1);
     const onSettledBlock = fn.slice(onSettledStart);
-    const armIndex = onSettledBlock.indexOf('awaitingReorderResyncRef.current = encounterReadRevisionRef.current;');
+    const armIndex = onSettledBlock.indexOf('setReorderResyncArmedAt(encounterReadRevisionRef.current);');
     const invalidateIndex = onSettledBlock.indexOf('invalidateEncounter(queryClient, eid);');
     expect(armIndex).toBeGreaterThan(-1);
     expect(invalidateIndex).toBeGreaterThan(-1);
     expect(armIndex).toBeLessThan(invalidateIndex);
-    // Regression guard for the exact defect found in review: arming (or clearing) from
+    // Regression guard for the exact defect found in review: arming from
     // `encounterQuery.dataUpdatedAt` anywhere in this mutation would silently reopen the
     // wrong-order hazard.
     expect(fn).not.toContain('encounterQuery.dataUpdatedAt');
   });
 
-  test('a useEffect on encounterReadRevision clears the ref via isAwaitingReorderResync, reading the ref (not dataUpdatedAt)', () => {
+  test('the eid-change reset effect clears reorderResyncArmedAt via its state setter, not a ref write', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
-    const refStart = source.indexOf('const awaitingReorderResyncRef = useRef<number | null>(null);');
-    expect(refStart).toBeGreaterThan(-1);
-    const effectEnd = source.indexOf('\n  }, [encounterReadRevision]);', refStart);
-    expect(effectEnd).toBeGreaterThan(refStart);
-    const block = source.slice(refStart, effectEnd);
-
-    expect(block).toMatch(/if \(!isAwaitingReorderResync\(awaitingReorderResyncRef\.current, encounterReadRevisionRef\.current\)\) \{/);
-    expect(block).toContain('awaitingReorderResyncRef.current = null;');
-    expect(block).not.toContain('dataUpdatedAt');
+    const effectStart = source.indexOf("activeEncounterIdRef.current = eid;\n    setPendingCombatantUndo(null);");
+    expect(effectStart).toBeGreaterThan(-1);
+    const effectEnd = source.indexOf('\n  }, [eid]);', effectStart);
+    expect(effectEnd).toBeGreaterThan(effectStart);
+    const block = source.slice(effectStart, effectEnd);
+    expect(block).toContain('setReorderResyncArmedAt(null);');
   });
 });
 
 test.describe('a mid-gesture sync-gate flip does not strand the roster drag tracker (issue #2084 finding 4)', () => {
-  test("rosterDragReorder's `enabled` folds in reconcileBlocks and riskyBlocked, so the hook's own enabled-transition reset actually fires for the roster", () => {
+  test("rosterDragReorder's `enabled` folds in reconcileBlocks, riskyBlocked, and isAwaitingReorderResyncNow, so the hook's own enabled-transition reset actually fires for the roster", () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     // `buildReorderControls`' `busy` (pinned above) already withholds `dragHandleProps`
     // on the row when these gates trip — but withholding props off an element that
@@ -195,6 +217,10 @@ test.describe('a mid-gesture sync-gate flip does not strand the roster drag trac
     // carry the same gates. This is a REGRESSION guard, not the mechanism itself: the
     // mechanism is `useCombatantDragReorder`'s own enabled-transition effect, unit-tested
     // directly in `test/component/useCombatantDragReorder.spec.tsx`.
+    //
+    // `isAwaitingReorderResyncNow` (issue #2116 review round 2) joins the same gate: if a
+    // reorder's own resync arms mid-gesture, an in-progress drag must be reset too, not
+    // just left disabled for the NEXT gesture.
     const fnStart = source.indexOf('const rosterDragReorder = useCombatantDragReorder({');
     expect(fnStart).toBeGreaterThan(-1);
     const fnEnd = source.indexOf('});', fnStart);
@@ -206,5 +232,6 @@ test.describe('a mid-gesture sync-gate flip does not strand the roster drag trac
     const enabledExpression = enabledLineMatch![1];
     expect(enabledExpression).toContain('reconcileBlocks');
     expect(enabledExpression).toContain('riskyBlocked');
+    expect(enabledExpression).toContain('isAwaitingReorderResyncNow');
   });
 });

@@ -2505,24 +2505,26 @@ export default function RunSessionPage() {
 
   /**
    * Issue #2116 — see `isAwaitingReorderResync`'s doc comment in `combatantReorder.ts` for
-   * the full defect and why this is gated on `encounterReadRevisionRef` specifically, not
-   * `encounterQuery.dataUpdatedAt` (which a local optimistic write — an HP delta, a map/fog
-   * patch — can advance without any real GET completing, letting the gate clear while the
-   * roster is still stale) and not `encounterQuery.isFetching` (true for any refetch, which
-   * would silently swallow a completed drag). Armed (in `reorderCombatant`'s `onSettled`
-   * below) with the read-revision counter's value as of the moment a reorder settles;
-   * cleared here once that counter has STRICTLY advanced — i.e. once a real completed GET
-   * has landed, whether it is the refetch this reorder's own invalidate kicked off, or
-   * another one (SSE, the periodic poll) that happens to land first. `encounterReadRevision`
-   * (state) is the reactive trigger; `encounterReadRevisionRef` (bumped synchronously
-   * alongside it inside the same `queryFn` call) is the value actually compared.
+   * the full defect and why this is gated on `encounterReadRevisionRef`/`encounterReadRevision`
+   * specifically, not `encounterQuery.dataUpdatedAt` (which a local optimistic write — an HP
+   * delta, a map/fog patch — can advance without any real GET completing, letting the gate
+   * clear while the roster is still stale) and not `encounterQuery.isFetching` (true for any
+   * refetch, which would silently swallow a completed drag).
+   *
+   * `reorderResyncArmedAt` is REACT STATE, not a ref (review round 2 on #2116, catching the
+   * same class of mistake `previousTurnBeatRef`/`useCombatantDragReorder`'s `enabled` guard
+   * against elsewhere on this page): a ref mutation alone does not cause a re-render, so
+   * `buildReorderControls`'s `busy` and `InitiativeStrip`'s `canReorder` would keep evaluating
+   * their LAST-rendered value and stay visually enabled while `handleReorderDrop` silently
+   * refused the write underneath — a click or completed drag that looks accepted but does
+   * nothing, exactly the "recoverable, visible 409 traded for a silent no-op" issue #2116
+   * explicitly rejects for `encounterQuery.isFetching`. `isAwaitingReorderResyncNow`, computed
+   * fresh every render from `reorderResyncArmedAt` and `encounterReadRevision` (both state),
+   * is the one boolean every reorder entry point below consults, so a re-render always shows
+   * the true state before an action can be attempted.
    */
-  const awaitingReorderResyncRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (!isAwaitingReorderResync(awaitingReorderResyncRef.current, encounterReadRevisionRef.current)) {
-      awaitingReorderResyncRef.current = null;
-    }
-  }, [encounterReadRevision]);
+  const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);
+  const isAwaitingReorderResyncNow = isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevision);
 
   /**
    * Manual initiative reorder (issue #1923) — drag (InitiativeStrip + roster) and the
@@ -2547,8 +2549,8 @@ export default function RunSessionPage() {
     onError: reportError,
     onSettled: (_data, _err, { combatantId }) => {
       markCombatantPending(combatantId, false);
-      // See `awaitingReorderResyncRef`'s own doc comment above for why this is armed here.
-      awaitingReorderResyncRef.current = encounterReadRevisionRef.current;
+      // See `reorderResyncArmedAt`'s own doc comment above for why this is armed here.
+      setReorderResyncArmedAt(encounterReadRevisionRef.current);
       invalidateEncounter(queryClient, eid);
     },
   });
@@ -3344,8 +3346,8 @@ export default function RunSessionPage() {
     setPendingCombatantUndo(null);
     setPendingCombatantIds(new Set());
     // A stale baseline from the PREVIOUS encounter must not gate a drag on this one — see
-    // `awaitingReorderResyncRef`'s own doc comment.
-    awaitingReorderResyncRef.current = null;
+    // `reorderResyncArmedAt`'s own doc comment.
+    setReorderResyncArmedAt(null);
   }, [eid]);
 
   // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
@@ -3920,19 +3922,18 @@ export default function RunSessionPage() {
       // past the guard, and both requests carried the SAME rendered `turnVersion`, so one came
       // back TURN_VERSION_MISMATCH instead of being prevented.
       //
-      // `awaitingReorderResyncRef.current !== null` (issue #2116, see that ref's own doc
-      // comment): `reorderCombatant.isPending` alone still leaves a window open between this
+      // `isAwaitingReorderResyncNow` (issue #2116, see that value's own doc comment):
+      // `reorderCombatant.isPending` alone still leaves a window open between this
       // mutation's `onSettled` and its triggered refetch actually landing, during which a drag
       // would be authored against the pre-reorder roster.
-      if (reconcileBlocks || riskyBlocked || reorderCombatant.isPending || awaitingReorderResyncRef.current !== null) return;
+      if (reconcileBlocks || riskyBlocked || reorderCombatant.isPending || isAwaitingReorderResyncNow) return;
       reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion });
     },
     // `reorderCombatant` covers `.isPending` — the mutation object is a new reference on each
-    // status change, so the closure re-forms when pending flips. `awaitingReorderResyncRef`
-    // is a ref (stable identity, read at call time) and deliberately omitted — including it
-    // would not change when the closure re-forms and ESLint's exhaustive-deps does not flag
-    // ref reads.
-    [encounter, reorderCombatant, reconcileBlocks, riskyBlocked],
+    // status change, so the closure re-forms when pending flips. `isAwaitingReorderResyncNow`
+    // is plain state (not a ref), so it MUST be listed here too, or a stale closure would keep
+    // authoring drags against it after it flips.
+    [encounter, reorderCombatant, reconcileBlocks, riskyBlocked, isAwaitingReorderResyncNow],
   );
   const rosterDragReorder = useCombatantDragReorder({
     axis: 'y',
@@ -3945,8 +3946,11 @@ export default function RunSessionPage() {
     // every later drag on every row was refused until reload. Folding the same gate
     // into `enabled` here lets the hook's own enabled-transition effect reset (and
     // release pointer capture on) an in-progress gesture directly, independent of
-    // whatever the caller's props end up doing with `busy`.
-    enabled: canReorderCombatants && !reconcileBlocks && !riskyBlocked,
+    // whatever the caller's props end up doing with `busy`. `isAwaitingReorderResyncNow`
+    // (issue #2116) joins the same gate for the same reason: if the roster's resync arms
+    // mid-gesture, an in-progress drag must be reset rather than left to complete and
+    // author itself against the pre-reorder topology.
+    enabled: canReorderCombatants && !reconcileBlocks && !riskyBlocked && !isAwaitingReorderResyncNow,
     elementsRef: combatantRowRefs,
     onDrop: handleReorderDrop,
   });
@@ -3972,10 +3976,18 @@ export default function RunSessionPage() {
         // ("EVERY control that performs a write must consult both"). Omitting it left the
         // drag handle and ReorderMenu draggable/clickable during an SSE outage that blocks
         // every other conflict-prone write on the row.
-        busy: pendingCombatantIds.has(combatant.id) || reconcileBlocks || riskyBlocked,
+        //
+        // Issue #2116 review round 2: `isAwaitingReorderResyncNow` must ALSO be here, not
+        // just in `handleReorderDrop`'s guard — otherwise the drag handle and ReorderMenu
+        // (move up/down, move after) stay visibly enabled while `reorderCombatant.isPending`
+        // has cleared but the resync is still outstanding, so a click or completed drag is
+        // silently swallowed by that guard with no feedback at all: exactly the "recoverable,
+        // visible 409 traded for a silent no-op" trade the issue rejects for
+        // `encounterQuery.isFetching`.
+        busy: pendingCombatantIds.has(combatant.id) || reconcileBlocks || riskyBlocked || isAwaitingReorderResyncNow,
       };
     },
-    [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks, riskyBlocked],
+    [canReorderCombatants, encounter, rosterOrderedIds, handleReorderDrop, rosterDragReorder, pendingCombatantIds, reconcileBlocks, riskyBlocked, isAwaitingReorderResyncNow],
   );
   // Drop the previous encounter's cached ref bindings on switch, so the cache stays bounded
   // across a long session.
@@ -4524,9 +4536,10 @@ export default function RunSessionPage() {
                 colorVisionAssist={me?.user.colorVisionAssist ?? false}
                 revealTick={revealTick}
                 // Mirrors the roster row's gate (see `buildReorderControls`): a drag is a
-                // write, so an outage or a blocking reconcile must withdraw the affordance,
-                // not just have the drop silently swallowed by `handleReorderDrop`'s guard.
-                canReorder={canEditEncounter && !reconcileBlocks && !riskyBlocked}
+                // write, so an outage, a blocking reconcile, or an outstanding reorder resync
+                // (issue #2116) must withdraw the affordance, not just have the drop silently
+                // swallowed by `handleReorderDrop`'s guard.
+                canReorder={canEditEncounter && !reconcileBlocks && !riskyBlocked && !isAwaitingReorderResyncNow}
                 onReorderDrop={handleReorderDrop}
               />
             )}
