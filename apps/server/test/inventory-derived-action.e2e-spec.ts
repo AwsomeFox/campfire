@@ -1130,6 +1130,37 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(after.body.equippedAction).not.toBeNull();
   });
 
+  it('undoing a bulk move never resurrects a journaled DERIVED action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'journal-slot' });
+
+    const other = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Journal Recipient', level: 1, stats: { STR: 10 } });
+
+    // The forward move clears the live action — so a later mechanics cleanup cannot even see
+    // this row — while the undo journal keeps the pre-move derived action indefinitely.
+    const moved = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: other.body.id, targets: [{ entityType: 'inventory_item', entityId: itemId }] });
+    expect(moved.status).toBe(201);
+
+    const undone = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/library/bulk/${moved.body.operationId}/undo`)
+      .set(dm);
+    expect(undone.status).toBe(201);
+
+    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    // The equip state round-trips; the derived action does not, because it encodes the system
+    // it was computed under and the journal is a snapshot that no cleanup can reach.
+    expect(after.body.equipped).toBe(true);
+    expect(after.body.equippedAction).toBeNull();
+    expect(after.body.equippedActionSource).toBeNull();
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

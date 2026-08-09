@@ -467,9 +467,12 @@ export class CampaignLibraryService {
             // Issue #1326 review: an unequipped-but-authored item can legitimately carry
             // an equippedAction, so the snapshot's action should round-trip with the
             // owner. Only party-stash destinations must remain action-free.
-            const restoreEquippedAction = before.ownerType === 'character' ? (before.equippedAction ?? null) : null;
+            const restorable =
+              before.ownerType === 'character'
+                ? this.restorableEquippedAction(before.equippedAction, before.equippedActionSource)
+                : { action: null, source: null };
             tx.run(
-              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${restoreEquippedAction}, equipped_action_source=${restoreEquippedAction ? (before.equippedActionSource ?? null) : null}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${restorable.action}, equipped_action_source=${restorable.source}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
             );
             // Issue #1901 review (chatgpt-codex-connector P2): the restored character gains
             // this item's action back into their merged list — invalidate their cache.
@@ -498,10 +501,15 @@ export class CampaignLibraryService {
               const owner = z
                 .object({ ownerType: z.string(), characterId: z.number().int().nullable() })
                 .parse(tx.get(sql`select owner_type as ownerType, character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`));
-              const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
-              // Issue #2097 review (devin): the provenance is written in the same
-              // statement as the action, never left behind describing a null.
-              const keepEquippedActionSource = keepEquippedAction ? (scalar.equippedActionSource ?? null) : null;
+              const keepRestorable =
+                owner.ownerType === 'character'
+                  ? this.restorableEquippedAction(scalar.equippedAction, scalar.equippedActionSource)
+                  : { action: null, source: null };
+              // The provenance is written in the same statement as the action, never left
+              // behind describing a null — and a journaled `derived` action is dropped rather
+              // than resurrected; see `restorableEquippedAction`.
+              const keepEquippedAction = keepRestorable.action;
+              const keepEquippedActionSource = keepRestorable.source;
               tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
               // Issue #1901 review (chatgpt-codex-connector P2): re-archiving may drop this
               // item's action back out of the owner's merged list — invalidate their cache
@@ -521,10 +529,15 @@ export class CampaignLibraryService {
               if (canRestoreEquip && this.inventoryEquipSlotConflict(tx, campaignId, owner.characterId!, scalar.equipSlot!, row.entityId)) {
                 throw new ConflictException('Undo would re-equip this item into a slot another item now occupies; unequip that item first.');
               }
-              const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
-              // Issue #2097 review (devin): the provenance is written in the same
-              // statement as the action, never left behind describing a null.
-              const keepEquippedActionSource = keepEquippedAction ? (scalar.equippedActionSource ?? null) : null;
+              const keepRestorable =
+                owner.ownerType === 'character'
+                  ? this.restorableEquippedAction(scalar.equippedAction, scalar.equippedActionSource)
+                  : { action: null, source: null };
+              // The provenance is written in the same statement as the action, never left
+              // behind describing a null — and a journaled `derived` action is dropped rather
+              // than resurrected; see `restorableEquippedAction`.
+              const keepEquippedAction = keepRestorable.action;
+              const keepEquippedActionSource = keepRestorable.source;
               tx.run(
                 sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
               );
@@ -990,6 +1003,35 @@ export class CampaignLibraryService {
    * invariant `InventoryService.update` enforces (409 INVENTORY_SLOT_CONFLICT), reused
    * here so undoBulk can decide whether restoring a snapshotted equip is safe.
    */
+  /**
+   * What a bulk UNDO may restore into `equipped_action` (issue #2097 review).
+   *
+   * A `manual` action round-trips verbatim — a human wrote it, and whether it still applies
+   * is their call, exactly as the mechanics-change cleanup leaves manual rows alone. So does
+   * an action with no provenance at all: those predate migration 0177, and derived actions
+   * did not exist before it.
+   *
+   * A `derived` action does NOT. It encodes the rule system it was computed under, and the
+   * journal is a snapshot: the live row can be cleaned up by a mechanics change (or, once the
+   * bulk move already nulled its action, be invisible to that cleanup entirely) while
+   * `beforeJson` keeps the pre-change action indefinitely. Restoring it verbatim therefore
+   * resurrects old-system mechanics under the campaign's current adapter, which is the one
+   * thing this feature's cleanup exists to prevent. Dropped instead — the owner's next equip
+   * regenerates it correctly, and this feature's standing rule is that an empty action is
+   * visibly unfinished while a wrong one is not.
+   */
+  private restorableEquippedAction(
+    action: string | null | undefined,
+    source: string | null | undefined,
+  ): { action: string | null; source: string | null } {
+    // A NULL provenance is not "derived" — it is a row that predates migration 0177, and
+    // derived actions did not exist before it, so such an action was necessarily authored by
+    // a human. Treated like `manual` and restored, which also keeps existing campaigns'
+    // undo behaviour exactly as it was.
+    if (!action || source === 'derived') return { action: null, source: null };
+    return { action, source: source ?? null };
+  }
+
   private inventoryEquipSlotConflict(tx: LibraryTransaction, campaignId: number, characterId: number, slot: string, excludeId: number): boolean {
     return !!tx.get(
       sql`select id from inventory_items where campaign_id=${campaignId} and character_id=${characterId} and equipped=1 and deleted_at is null and lower(equip_slot)=lower(${slot}) and id!=${excludeId}`,
