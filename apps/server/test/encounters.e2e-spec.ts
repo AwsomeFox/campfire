@@ -10723,7 +10723,7 @@ describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
    * its source rather than widening `handleReorderDrop`'s gate.
    */
   it('the reorder response echoes turnVersion observed by its own write — usable for an immediate second drag with no refetch in between', async () => {
-    const { encounterId, fighterId, rogueId, clericId, turnVersion } = await seedFight();
+    const { encounterId, rogueId, clericId, turnVersion } = await seedFight();
     const server = ctx.app.getHttpServer();
 
     // A turn advance lands concurrently with the window between a client's last read and
