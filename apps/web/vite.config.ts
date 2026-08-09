@@ -14,8 +14,10 @@ import {
   cacheWillUpdateJson,
   matchApiImageCache,
   matchApiJsonCache,
+  matchDiceRollerChunk,
   matchIconShardCache,
   matchNetworkOnlyApi,
+  DICE_ROLLER_CHUNK_GLOBS,
 } from "./src/lib/pwaCachePolicy";
 import { normalizeBasePrefix } from "./src/lib/public-base";
 
@@ -150,6 +152,9 @@ export default defineConfig({
         // CI images omit this env var so the SW ships minified.
         ...(process.env.VITE_PWA_DEV_SW === "1" ? { mode: "development" as const } : {}),
         globPatterns: ["**/*.{js,css,html,svg,png,ico,woff,woff2}"],
+        // The 3D dice roller is fetched on demand, not shipped to every table on
+        // install — see matchDiceRollerChunk, which caches it on first roll.
+        globIgnores: DICE_ROLLER_CHUNK_GLOBS,
         navigateFallback: "index.html",
         navigateFallbackDenylist: [
           denyPath("/api"),
@@ -189,6 +194,17 @@ export default defineConfig({
               },
               cacheableResponse: { statuses: [0, 200] },
               plugins: [{ cacheWillUpdate: cacheWillUpdateJson }],
+            },
+          },
+          {
+            urlPattern: matchDiceRollerChunk,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "campfire-dice-roller",
+              // Content-hashed names, so entries are immutable; keep a couple of
+              // builds' worth so an update does not lose the previous one mid-roll.
+              expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
             },
           },
           {

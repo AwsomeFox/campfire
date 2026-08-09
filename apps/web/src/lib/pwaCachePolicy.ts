@@ -271,6 +271,28 @@ export function matchIconShardCache({ url }: { url: URL }): boolean {
   return url.pathname.indexOf('/icons/shards/') >= 0;
 }
 
+/**
+ * The 3D dice roller's chunks — three.js and the roller module built on it.
+ *
+ * Kept OUT of the precache and fetched on demand instead. Precaching every
+ * emitted `*.js` would have the service worker pull ~517KB of three.js down on
+ * install for every table, including the ones that never roll — which is exactly
+ * the download the roller's dynamic import exists to avoid. Cached on first
+ * roll, so a table that has rolled once keeps its dice offline; one that has not
+ * gets the CSS overlay, which is what that fallback is for.
+ *
+ * Filenames are content-hashed, so a cached entry is immutable and CacheFirst is
+ * safe: a new build simply asks for a new name.
+ *
+ * SELF-CONTAINED for workbox `.toString()` embedding.
+ */
+export function matchDiceRollerChunk({ url }: { url: URL }): boolean {
+  return /\/assets\/(vendor-three|dice3d)-[^/]*\.js$/.test(url.pathname);
+}
+
+/** Precache glob exclusions matching `matchDiceRollerChunk`, for workbox. */
+export const DICE_ROLLER_CHUNK_GLOBS = ['**/vendor-three-*.js', '**/dice3d-*.js'];
+
 function contentLengthBytes(response: Response): number | null {
   const raw = response.headers.get('content-length');
   if (raw == null || raw === '') return null;

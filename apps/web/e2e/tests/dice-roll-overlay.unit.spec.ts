@@ -112,6 +112,16 @@ test.describe('Dice roll overlay contracts (issue #1352)', () => {
     expect(overlaySource).toMatch(/settledRef/);
   });
 
+  test('a slow chunk load does not eat the flight it is waiting for', () => {
+    // Waiting for the chunk and waiting for the dice to land are two different
+    // waits. Run off one clock started when the result arrived, a slow cold load
+    // spent the flight's budget before the dice were even thrown, and the
+    // backstop then unmounted them mid-air. The clock restarts on release.
+    expect(overlaySource).toMatch(/armBackstop\(\)/);
+    const releases = overlaySource.match(/armBackstop\(\);/g) ?? [];
+    expect(releases.length, 'armed at the result AND again on release').toBeGreaterThanOrEqual(2);
+  });
+
   test('provider gates overlay with prefersReducedMotion and wires begin/cancel/show', () => {
     expect(contextSource).toMatch(/prefersReducedMotion/);
     expect(contextSource).toMatch(/beginRollAnimation/);

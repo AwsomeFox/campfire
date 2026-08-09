@@ -128,6 +128,28 @@ export function DiceRollOverlay({
     onSettledRef.current();
   }, []);
 
+  /**
+   * (Re)start the backstop clock.
+   *
+   * Armed once when the result arrives — covering a chunk request that hangs
+   * without ever resolving or rejecting — and again the moment the dice are
+   * actually released. Those are two different waits, and running them off one
+   * clock started at the result meant a slow cold load ate the flight's budget:
+   * the handle would arrive with less than a full animation left and get
+   * unmounted before its dice landed.
+   */
+  const backstopRef = useRef<number | null>(null);
+  const armBackstop = useCallback(() => {
+    if (backstopRef.current != null) window.clearTimeout(backstopRef.current);
+    backstopRef.current = window.setTimeout(settleOnce, DICE_ROLL_MAX_SETTLE_MS);
+  }, [settleOnce]);
+  useEffect(
+    () => () => {
+      if (backstopRef.current != null) window.clearTimeout(backstopRef.current);
+    },
+    [],
+  );
+
   // Stable keys: the provider rebuilds `dice` on every render, so effects keyed
   // on the array identity alone would restart the throw continuously.
   const sidesKey = dice.map((d) => d.sides).join(',');
@@ -177,7 +199,10 @@ export function DiceRollOverlay({
         // the settle effect will not run again — its inputs did not change — so a
         // fresh handle that did not ask for the faces here would hold its dice in
         // the air until the backstop gave up on them.
-        if (phaseRef.current === 'settling') handle.settle(settleResultsRef.current);
+        if (phaseRef.current === 'settling') {
+          handle.settle(settleResultsRef.current);
+          armBackstop();
+        }
       })
       .catch(() => {
         if (!cancelled) setCssFallback(true);
@@ -188,15 +213,13 @@ export function DiceRollOverlay({
       handleRef.current = null;
       handle?.dispose();
     };
-  }, [cssFallback, sides, activeTheme, settleOnce]);
+  }, [cssFallback, sides, activeTheme, settleOnce, armBackstop]);
 
   useEffect(() => {
     if (cssFallback || phase !== 'settling') return;
     handleRef.current?.settle(settleResults);
-
-    const backstop = window.setTimeout(settleOnce, DICE_ROLL_MAX_SETTLE_MS);
-    return () => window.clearTimeout(backstop);
-  }, [cssFallback, phase, settleResults, settleOnce]);
+    armBackstop();
+  }, [cssFallback, phase, settleResults, armBackstop]);
 
   // --- CSS fallback --------------------------------------------------------
 
