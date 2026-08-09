@@ -1309,6 +1309,34 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     const dmAfterHide = (await listFor(coDm)).find((row) => row.body.includes('Visible Then Hidden Hero was downed'));
     expect(dmAfterHide).toMatchObject({ entityType: 'encounter', entityId: visibleThenHidden.encounter.body.id });
 
+    // A visible-fan-out row retains the campaign-member audience. Once the
+    // encounter is hidden, a same-campaign viewer PAT for the co-DM who owns
+    // the character receives only the transient owner-safe projection.
+    expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'immediate' } })).status).toBe(200);
+    const scopedVisibleOwner = await createHiddenCombatant('Scoped Visible Owner PAT Hero', false, coDm);
+    expect((await dm
+      .patch(`/api/v1/encounters/${scopedVisibleOwner.encounter.body.id}/combatants/${scopedVisibleOwner.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Scoped Visible Owner PAT Hero was downed');
+    db.update(encounters).set({ hidden: true }).where(eq(encounters.id, scopedVisibleOwner.encounter.body.id)).run();
+    const scopedVisibleOwnerRead = await request(server)
+      .get('/api/v1/notifications')
+      .set('Authorization', `Bearer ${viewerToken.body.token}`);
+    expect(scopedVisibleOwnerRead.status).toBe(200);
+    expect((scopedVisibleOwnerRead.body.items ?? scopedVisibleOwnerRead.body).find(
+      (row: Notification) => row.body.includes('Scoped Visible Owner PAT Hero was downed'),
+    )).toMatchObject({ entityType: null, entityId: null });
+    const scopedVisibleOwnerRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Scoped Visible Owner PAT Hero was downed%'}`,
+    )).get();
+    expect(scopedVisibleOwnerRow).toMatchObject({
+      entityType: 'encounter',
+      entityId: scopedVisibleOwner.encounter.body.id,
+    });
+    expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
+
     const removed = await createHiddenCombatant('Removal Digest Hero');
     expect((await dm
       .patch(`/api/v1/encounters/${removed.encounter.body.id}/combatants/${removed.combatant.id}`)
