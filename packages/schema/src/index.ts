@@ -6031,6 +6031,8 @@ export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: Ch
  */
 export interface CreatureCheckCatalogInput {
   readonly data: Record<string, unknown>;
+  /** Inline encounter statblocks store raw scores even in campaigns whose imported creatures use modifiers. */
+  readonly abilityRepresentation?: AbilityRepresentation;
 }
 
 function creatureCheckModifierMap(value: unknown): Record<string, number> {
@@ -6041,6 +6043,19 @@ function creatureCheckModifierMap(value: unknown): Record<string, number> {
     if (Number.isFinite(n)) out[key] = Math.trunc(n);
   }
   return out;
+}
+
+function creatureSaveModifierMap(data: Record<string, unknown>): Record<string, number> {
+  const saves = creatureCheckModifierMap(data.saves ?? data.savingThrows ?? data.saving_throws);
+  // Open5e and existing homebrew entries may instead carry final modifiers as `dexterity_save`.
+  // The nested map wins when both are present, which preserves an explicit statblock override.
+  for (const [key, value] of Object.entries(data)) {
+    if (!/_save$/i.test(key)) continue;
+    const modifier = creatureCheckModifierMap({ value }).value;
+    const normalized = key.replace(/_save$/i, '').trim().toLowerCase();
+    if (modifier !== undefined && normalized && saves[normalized] === undefined) saves[normalized] = modifier;
+  }
+  return saves;
 }
 
 function creatureAbilityLabel(key: string): string {
@@ -6075,6 +6090,7 @@ export function creatureCheckCatalogForAdapter(
 
   const mapped = adapter.mapStatblock(creature.data);
   const supportsDegrees = typeof adapter.degreeOfSuccess === 'function';
+  const abilityRepresentation = creature.abilityRepresentation ?? mapped.abilityRepresentation;
   // Advantage is a 5e mechanic; do not present it for PF2e merely because both use a d20.
   const supportsAdvantage = adapter.id === DND5E_ADAPTER_ID;
   const out: RollCheckDefinition[] = [];
@@ -6089,7 +6105,7 @@ export function creatureCheckCatalogForAdapter(
   for (const [rawKey, rawValue] of Object.entries(mapped.abilityScores ?? {})) {
     if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) continue;
     const ability = creatureAbilityLabel(rawKey);
-    const modifier = resolveAbilityModifier(adapter, rawValue, mapped.abilityRepresentation);
+    const modifier = resolveAbilityModifier(adapter, rawValue, abilityRepresentation);
     add({
       id: `ability:${ability}`,
       label: `${ability} check`,
@@ -6105,7 +6121,7 @@ export function creatureCheckCatalogForAdapter(
     });
   }
 
-  const saves = creatureCheckModifierMap(creature.data.saves ?? creature.data.savingThrows ?? creature.data.saving_throws);
+  const saves = creatureSaveModifierMap(creature.data);
   for (const [rawKey, modifier] of Object.entries(saves)) {
     const label = creatureCheckLabel(rawKey);
     add({

@@ -41,6 +41,15 @@ describe('creature roll catalog — adapter-derived statblocks (issue #1314)', (
     expect(catalog.find((check) => check.id === 'skill:athletics')?.supportsDegrees).toBe(true);
     expect(catalog.every((check) => !check.supportsAdvantage)).toBe(true);
   });
+
+  it('keeps inline statblock ability scores as scores and reads flat Open5e save fields', () => {
+    const catalog = creatureCheckCatalogForAdapter(Pf2eAdapter, {
+      data: { abilityScores: { strength: 10 }, dexterity_save: 4 },
+      abilityRepresentation: 'score',
+    });
+    expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(0);
+    expect(catalog.find((check) => check.id === 'save:dexterity')?.modifier).toBe(4);
+  });
 });
 
 /**

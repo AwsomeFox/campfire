@@ -85,6 +85,8 @@ export type CombatantRowProps = {
    * shows no affordance regardless of this flag.
    */
   canAwardSpecialResource?: boolean;
+  /** DM-only mount gate for the creature-mechanics roll catalog (issue #1314). */
+  canRollCreatureChecks?: boolean;
   canSetInitiative: boolean;
   /** Encounter is running — clearing initiative re-sorts the live turn order (issue #715). */
   running: boolean;
@@ -246,6 +248,7 @@ export const CombatantRow = memo(function CombatantRow({
   statblock,
   canRemove,
   canAwardSpecialResource = false,
+  canRollCreatureChecks = false,
   canSetInitiative,
   running,
   character,
@@ -1648,7 +1651,7 @@ export const CombatantRow = memo(function CombatantRow({
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
         {statblock && <div data-combatant-statblock>{statblock}</div>}
-        {combatant.kind !== 'character' && campaignId != null && (
+        {combatant.kind !== 'character' && campaignId != null && canRollCreatureChecks && (
           <CreatureStatCard
             encounterId={encounterId}
             combatantId={combatant.id}

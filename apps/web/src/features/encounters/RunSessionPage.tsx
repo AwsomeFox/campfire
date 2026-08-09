@@ -5151,6 +5151,7 @@ export default function RunSessionPage() {
                       // CombatantRow additionally requires a resolvable character and an
                       // adapter that declares one of SPECIAL_RESOURCE_KEYS before it mounts.
                       canAwardSpecialResource={canDmWrite}
+                      canRollCreatureChecks={isDm}
                       onDuplicate={canDmWrite && encounter.status !== 'ended' && (c.kind === 'monster' || c.kind === 'npc')
                         ? () => requestDuplicateCombatant(c, encounter.combatants.map((combatant) => combatant.name))
                         : undefined}

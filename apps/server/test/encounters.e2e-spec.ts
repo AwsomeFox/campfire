@@ -132,7 +132,12 @@ describe('encounters (e2e)', () => {
     expect(rolled.status).toBe(201);
     expect(rolled.body.check.modifier).toBe(6);
     expect(rolled.body.roll).toMatchObject({ actor: 'Test Goblin', encounterId: created.body.id, label: 'Test Goblin · Stealth' });
+    expect(rolled.body.roll.expr).toBe('1d20+6');
     expect(rolled.body.roll.label).not.toContain('+6');
+    const shared = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=10`).set(player);
+    const publicRoll = shared.body.find((entry: { id: number }) => entry.id === rolled.body.roll.id);
+    expect(publicRoll).toMatchObject({ expr: '1d20', total: publicRoll.rolls[0], label: 'Test Goblin · Stealth' });
+    expect(publicRoll.terms).toBeUndefined();
   });
 
   // Issue #491: PF2e initiative is Perception = WIS mod + trained proficiency (level+2),
