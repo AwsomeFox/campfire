@@ -206,6 +206,23 @@ test.describe('encounter Driver live session (#1318)', () => {
                 { type: 'narration.delta', campaignId, text: 'The portcullis groans open.', at },
                 { type: 'narration.message', campaignId, text: 'The portcullis groans open.', at },
                 { type: 'tool', campaignId, name: 'next_turn', isError: false, proposed: false, encounterId, at },
+                {
+                  type: 'transcript',
+                  campaignId,
+                  at,
+                  event: {
+                    eventId: 'next-turn-tool',
+                    seq: 1,
+                    campaignId,
+                    kind: 'tool',
+                    actorUserId: null,
+                    actorName: null,
+                    clientRef: null,
+                    turnId: 'turn-1',
+                    payload: { name: 'next_turn', isError: false, proposed: false, encounterId },
+                    at,
+                  },
+                },
                 { type: 'turn.end', campaignId, stopReason: 'complete', steps: 1, tokensUsed: 1, budgetRemaining: 9_999, at },
               ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
             }).then(resolve);

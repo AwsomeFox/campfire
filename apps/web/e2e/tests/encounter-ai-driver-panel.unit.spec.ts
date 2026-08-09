@@ -36,11 +36,16 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/characterName,/);
     expect(panel).toMatch(/displayText: text/);
     expect(panel).toMatch(/role="alert"/);
+    expect(panel).toMatch(/narrationOwnerRef/);
+    expect(panel).toMatch(/liveActivity\.transcriptFetched/);
+    expect(panel).toMatch(/charactersQuery\.isError/);
+    expect(panel).toMatch(/disabled=\{locked \|\| submitting \|\| playerAttributionPending\}/);
   });
 
   test('shared live activity carries transcript for the dock', () => {
     const hook = readFileSync(LIVE_ACTIVITY, 'utf8');
     expect(hook).toMatch(/transcript/);
+    expect(hook).toMatch(/transcriptFetched/);
     expect(hook).toMatch(/dispatchTranscript/);
     expect(hook).toMatch(/transcriptReducer/);
     expect(hook).toMatch(/type: 'authoritative'/);

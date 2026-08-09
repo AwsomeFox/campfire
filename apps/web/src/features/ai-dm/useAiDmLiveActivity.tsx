@@ -83,11 +83,13 @@ export interface AiDmLiveActivityState {
   lastNarration: string | null;
   /** Authoritative narration transcript (#427 encounter dock). */
   transcript: TranscriptState;
+  /** The authoritative transcript request has settled for the current viewer projection. */
+  transcriptFetched: boolean;
   /** Dispatch local transcript actions (echo player lines, rules answers, …). */
   dispatchTranscript: (action: TranscriptAction) => void;
 }
 
-const INITIAL_STATE: Omit<AiDmLiveActivityState, 'transcript' | 'dispatchTranscript'> = {
+const INITIAL_STATE: Omit<AiDmLiveActivityState, 'transcript' | 'transcriptFetched' | 'dispatchTranscript'> = {
   mode: undefined,
   live: false,
   turnActive: false,
@@ -383,6 +385,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     ...state,
     live: enabled,
     transcript: visibleTranscript,
+    transcriptFetched: transcriptOwnerRef.current === key && transcriptFetched,
     dispatchTranscript: stableDispatch,
   };
 }
@@ -426,6 +429,7 @@ const AiDmLiveActivityContext = createContext<AiDmLiveActivityState | null>(null
 const INERT_CONTEXT: AiDmLiveActivityState = {
   ...INITIAL_STATE,
   transcript: emptyTranscript,
+  transcriptFetched: false,
   dispatchTranscript: NOOP_DISPATCH,
 };
 

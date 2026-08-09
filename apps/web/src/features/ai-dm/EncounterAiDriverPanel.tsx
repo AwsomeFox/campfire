@@ -79,19 +79,9 @@ export function EncounterAiDriverPanel({
   const [narrationStatus, setNarrationStatus] = useState('');
   const announcedIdsRef = useRef(new Set<string>());
   const narrationBaselineRef = useRef(false);
+  const narrationOwnerRef = useRef('');
   const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
   const [narrationAnnouncements, setNarrationAnnouncements] = useState<string[]>([]);
-  useEffect(() => {
-    const finished = transcript.entries.filter((entry) => entry.kind !== 'dm' || entry.status === 'done');
-    if (!narrationBaselineRef.current) {
-      finished.forEach((entry) => announcedIdsRef.current.add(entry.id));
-      narrationBaselineRef.current = true;
-      return;
-    }
-    const additions = finished.filter((entry) => !announcedIdsRef.current.has(entry.id));
-    additions.forEach((entry) => announcedIdsRef.current.add(entry.id));
-    if (additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...additions.map((entry) => formatNarrationLogAddition(entry.kind === 'dm' ? { id: entry.id, kind: 'dm', text: entry.committed.join('\n\n') } : entry.kind === 'player' ? { id: entry.id, kind: 'player', memberName: entry.memberName, characterName: entry.characterName, text: entry.text } : entry.kind === 'tool' ? { id: entry.id, kind: 'tool', text: entry.name } : { id: entry.id, kind: 'system', variant: entry.variant, text: entry.text, data: entry.data }))]);
-  }, [transcript.entries]);
 
   const charactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(campaignId),
@@ -103,7 +93,34 @@ export function EncounterAiDriverPanel({
   const myCharacter = charactersQuery.data?.find((c) => c.id === myMembership?.characterId);
   const memberName = me?.user.displayName || me?.user.username || t('table.you');
   const characterName = myCharacter?.name;
-  const playerAttributionPending = !isDm && myMembership?.characterId !== undefined && !charactersQuery.isFetched;
+  const playerAttributionPending = !isDm && myMembership?.characterId !== undefined && (!charactersQuery.isFetched || charactersQuery.isError || !myCharacter);
+
+  useLayoutEffect(() => {
+    // Clear before paint: a role-projected transcript may change between renders, and the
+    // live region must never briefly expose announcements from its prior owner.
+    const owner = `${me?.user.id ?? ''}:${campaignId}:${liveActivity.mode ?? ''}:${isDm}:${myMembership?.role ?? ''}`;
+    if (narrationOwnerRef.current === owner) return;
+    narrationOwnerRef.current = owner;
+    announcedIdsRef.current.clear();
+    narrationBaselineRef.current = false;
+    setNarrationAnnouncements([]);
+  }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role]);
+
+  useEffect(() => {
+    // The first visible entries are persisted/cache history. Do not announce them while the
+    // authoritative request is still racing the initial empty reducer state.
+    if (!narrationBaselineRef.current) {
+      if (!liveActivity.transcriptFetched) return;
+      const finished = transcript.entries.filter((entry) => entry.kind !== 'dm' || entry.status === 'done');
+      finished.forEach((entry) => announcedIdsRef.current.add(entry.id));
+      narrationBaselineRef.current = true;
+      return;
+    }
+    const finished = transcript.entries.filter((entry) => entry.kind !== 'dm' || entry.status === 'done');
+    const additions = finished.filter((entry) => !announcedIdsRef.current.has(entry.id));
+    additions.forEach((entry) => announcedIdsRef.current.add(entry.id));
+    if (additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...additions.map((entry) => formatNarrationLogAddition(entry.kind === 'dm' ? { id: entry.id, kind: 'dm', text: entry.committed.join('\n\n') } : entry.kind === 'player' ? { id: entry.id, kind: 'player', memberName: entry.memberName, characterName: entry.characterName, text: entry.text } : entry.kind === 'tool' ? { id: entry.id, kind: 'tool', text: entry.name } : { id: entry.id, kind: 'system', variant: entry.variant, text: entry.text, data: entry.data }))]);
+  }, [liveActivity.transcriptFetched, transcript.entries]);
 
   const currentCombatantName = useMemo(() => {
     if (!encounter.currentCombatantId) return undefined;
@@ -542,13 +559,13 @@ export function EncounterAiDriverPanel({
                   }}
                   help={locked && lockReason ? lockReason : t('table.composerHelp')}
                   placeholder={locked && lockReason ? lockReason : placeholder}
-                  disabled={locked || submitting}
+                  disabled={locked || submitting || playerAttributionPending}
                   rows={2}
                   minHeight={48}
                   error={submitError}
                   style={{ resize: 'none' }}
                 />
-                <Btn type="submit" disabled={locked || submitting || !input.trim()} className="w-full sm:w-auto">
+                <Btn type="submit" disabled={locked || submitting || playerAttributionPending || !input.trim()} className="w-full sm:w-auto">
                   {submitting ? t('table.sending') : t('table.send')}
                 </Btn>
               </div>

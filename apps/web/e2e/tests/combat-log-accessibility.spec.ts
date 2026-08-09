@@ -442,7 +442,10 @@ test('mobile encounter view announces AI loot/treasury tool activity and keeps t
   expect(bounds).not.toBeNull();
   expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(320);
 
-  const polite = page.locator('.sr-only[aria-live="polite"]').first();
+  // The Driver dock has its own focused narration live regions. This assertion is about the
+  // app-wide combat announcement, so select that canonical region rather than relying on DOM
+  // order among polite regions.
+  const polite = page.getByTestId('app-announcer-polite');
   await expect
     .poll(async () => ((await polite.textContent()) ?? '').toLowerCase().includes('the ai dm adjust treasury'))
     .toBe(true);
