@@ -184,6 +184,20 @@ test.describe('character sheet play surface', () => {
       await expect(page.getByRole('button', { name: /^Roll initiative/ })).toBeVisible();
       await expect(page.getByRole('button', { name: /to hit \+9/ })).toBeVisible();
 
+      // Neither a check NOR a to-hit has a critical variant: the check path treats `crit` as
+      // an ordinary die, and the attack chip's handler maps only advantage/disadvantage and
+      // would let `crit` fall through to the flat expression while labelling it "(crit)".
+      // Only the damage chip, which actually doubles dice, still offers it.
+      const actionsSection = page.locator('#character-section-actions');
+      await actionsSection.getByRole('button', { name: /to hit \+9/ }).click({ button: 'right' });
+      const attackMenu = page.getByRole('menu');
+      await expect(attackMenu.getByRole('menuitem', { name: /Advantage/ })).toBeVisible();
+      await expect(attackMenu.getByRole('menuitem', { name: /Critical/ })).toHaveCount(0);
+      await page.keyboard.press('Escape');
+      await actionsSection.getByRole('button', { name: /2d6\+4/ }).click({ button: 'right' });
+      await expect(page.getByRole('menu').getByRole('menuitem', { name: /Critical/ })).toBeVisible();
+      await page.keyboard.press('Escape');
+
       const archived = await ctx.patch(`/api/v1/campaigns/${campaign.id}`, { data: { status: 'paused' } });
       expect(archived.ok()).toBeTruthy();
 
@@ -194,7 +208,10 @@ test.describe('character sheet play surface', () => {
       await expect(page.getByRole('button', { name: /^Roll initiative/ })).toHaveCount(0);
       await expect(page.getByRole('button', { name: /^Roll .* save/ })).toHaveCount(0);
       // `POST /campaigns/:id/roll` needs a writable campaign too, so the action chips go
-      // static as well — the values still read, the rolls are simply not offered.
+      // static as well — the values still read, the rolls are simply not offered. Note this
+      // gate is campaign MEMBERSHIP + writability, not character-edit rights: the endpoint
+      // is `requireMemberOnWritableCampaign`, so an archived campaign is what removes these,
+      // not ownership.
       await expect(page.locator('#character-section-actions').getByText('to hit +9')).toBeVisible();
       await expect(page.getByRole('button', { name: /to hit \+9/ })).toHaveCount(0);
       await expect(page.getByRole('button', { name: /2d6\+4/ })).toHaveCount(0);

@@ -182,7 +182,7 @@ export default function CharacterPage() {
   const id = Number(characterId);
   const navigate = useNavigate();
   const { me } = useAuth();
-  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  const { isDm, canDmWrite, canPlayerWrite, canMemberWrite } = useCampaignAccess();
   const activeCampaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   // Rule-system adapter resolved from the active campaign (issue #234, #2003): drives ability
   // modifiers and the condition vocabulary instead of a call-site 5e default.
@@ -534,6 +534,7 @@ export default function CharacterPage() {
                 onError={setActionError}
                 roller={roller}
                 adapter={adapter}
+                canRoll={canMemberWrite}
                 packItems={packItems}
                 onShowInventory={() => setTab('build', { focus: 'inventory' })}
               />
@@ -1378,15 +1379,22 @@ function RollChip({
   title,
   onClick,
   disabled,
+  allowCrit = true,
 }: {
   label: string;
   title: string;
   /** `event` is forwarded verbatim: its presence is what marks a plain click. */
   onClick: (mode: RollMode, event?: MouseEvent) => void;
   disabled: boolean;
+  /**
+   * Only a DAMAGE chip doubles dice on a crit. A TO-HIT chip has no critical variant here —
+   * its handler maps advantage/disadvantage and lets anything else fall through to the flat
+   * expression, so offering the command produced an ordinary attack roll labelled "(crit)".
+   */
+  allowCrit?: boolean;
 }) {
   return (
-    <RollContextMenu type="button" className="btn btn-ghost btn-xs text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title}>
+    <RollContextMenu type="button" className="btn btn-ghost btn-xs text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title} allowCrit={allowCrit}>
       <GameIcon slug="rolling-dices" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{label}
     </RollContextMenu>
   );
@@ -2121,15 +2129,26 @@ function ActionsCard({
   onError,
   roller,
   adapter,
+  canRoll,
   packItems,
   onShowInventory,
-}: SheetCardProps & { roller: Roller; adapter: RuleSystemAdapter; packItems: InventoryItem[]; onShowInventory: () => void }) {
+}: SheetCardProps & {
+  roller: Roller;
+  adapter: RuleSystemAdapter;
+  /** Campaign membership + writability — the authority `POST /campaigns/:id/roll` requires. */
+  canRoll: boolean;
+  packItems: InventoryItem[];
+  onShowInventory: () => void;
+}) {
   const { t } = useTranslation();
   const [adding, setAdding] = useState(false);
   // Two reasons a printed to-hit must NOT become a roll chip:
   //
-  //  - `POST /campaigns/:id/roll` needs a writable campaign, so on an archived one the chip
-  //    could only ever 403 — the same authority the rest of this sheet gates on.
+  //  - `POST /campaigns/:id/roll` needs a writable campaign and campaign MEMBERSHIP — not
+  //    character-edit rights (`CampaignRollController.roll` calls
+  //    `requireMemberOnWritableCampaign`). Gating on `canEdit` would have taken these chips
+  //    away from a member who may legitimately roll them, e.g. a viewer-role member who
+  //    still owns this sheet; `canRoll` is the endpoint's own authority.
   //  - `toHitExpr` builds `1d20 + bonus`. That matches what the resolver would do only while
   //    the adapter has no attack maths of its own; once it declares `resolveAttack` (Open
   //    Legend rolls an exploding attribute pool), the SAME action rolled here and rolled in
@@ -2137,8 +2156,8 @@ function ActionsCard({
   //
   // Either way the value still reads as text — the number is real, the roll is not offered.
   const adapterOwnsAttack = hasAdapterOwnedAttackRoll(adapter);
-  const canRollAttack = canEdit && !adapterOwnsAttack;
-  const canRollDamage = canEdit;
+  const canRollAttack = canRoll && !adapterOwnsAttack;
+  const canRollDamage = canRoll;
 
   // Which row's details disclosure is open (design template's "Details ▾ / Hide ▴").
   // A sheet action is keyed by index, an equipped-gear action by `item:<id>`.
@@ -2381,6 +2400,7 @@ function ActionsCard({
                         label={`to hit ${action.toHit}`}
                         title={`Roll ${action.name} attack (${attackExpr}) · ${rollModeSummary(mode)}`}
                         disabled={roller.rolling}
+                        allowCrit={false}
                         onClick={(m, e) => {
                           const resolvedMode = rollModeForClick(m, mode, e);
                           void roller.roll(toHitExpr(action.toHit, resolvedMode === 'advantage' ? 'adv' : resolvedMode === 'disadvantage' ? 'dis' : 'flat')! , `${character.name} · ${action.name} to hit${resolvedMode !== 'normal' ? ` (${resolvedMode})` : ''}`);
@@ -2392,7 +2412,7 @@ function ActionsCard({
                         title={
                           adapterOwnsAttack
                             ? "This system rolls its own attack — use the action in an encounter so the rules engine resolves it"
-                            : !canEdit
+                            : !canRoll
                               ? 'Read-only campaign'
                               : 'Not a rollable to-hit value — edit the action and use +5, -1, or 1d20+5'
                         }
@@ -2523,6 +2543,7 @@ function ActionsCard({
                               label={`to hit ${granted.toHit}`}
                               title={`Roll ${granted.name} attack (${attackExpr})`}
                               disabled={roller.rolling}
+                              allowCrit={false}
                               onClick={(m, e) => {
                                 const resolved = rollModeForClick(m, mode, e);
                                 void roller.roll(
@@ -2537,7 +2558,7 @@ function ActionsCard({
                               title={
                                 adapterOwnsAttack
                                   ? "This system rolls its own attack — use the item in an encounter so the rules engine resolves it"
-                                  : !canEdit
+                                  : !canRoll
                                     ? 'Read-only campaign'
                                     : "Not a rollable to-hit value — edit the item's action and use +5, -1, or 1d20+5"
                               }
