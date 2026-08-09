@@ -1,6 +1,10 @@
 /**
  * Campaign dashboard — the home screen for a campaign.
- * Mirrors design/02-dashboard.html structure/classes; see README-less DoD notes in PR.
+ *
+ * Laid out as the design template's three-pane command deck
+ * (`templates/campaign-dashboard/CampaignDashboard.dc.html`): a session/party rail, the world
+ * column, and the table rail. See the deck comment below for how the template's fixed-viewport
+ * shell maps onto this app's document flow.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -21,9 +25,8 @@ import { QuestsCard } from './QuestsCard';
 import { NpcGrid } from './NpcGrid';
 import { PartyCard } from './PartyCard';
 import { SessionLog } from './SessionLog';
-import { NotesQuickRail } from './NotesQuickRail';
-import { DiceWidget } from './DiceWidget';
 import { HandoutsCard } from './HandoutsCard';
+import { TableRail } from './TableRail';
 import { CampaignOnboardingCard } from './CampaignOnboardingCard';
 import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
@@ -34,8 +37,6 @@ import {
   shouldShowSkeletonRetry,
 } from './dashboardLoadPolicy';
 import { GameIcon } from '../../components/GameIcon';
-import { EntityDiscussion } from '../comments/EntityDiscussion';
-import { CheckRequestPanel } from '../encounters/CheckRequests';
 
 // Slow fallback poll for summary entities that do not have campaign events yet.
 // Scheduling is event-driven (#790) and does not add a second polling path.
@@ -325,12 +326,26 @@ export default function DashboardPage() {
 
       <CatchUpPanel key={id} campaignId={id} />
 
-      {/* Design: two-column grid (~7/5 split), left = map/quests/sessions, right = party/npcs/notes.
-          See Campfire.dc.html ~L435-536 (dashCols). Single column below lg per design's mobile spec. */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-        <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-          <RegionMap campaignId={id} campaign={summary.campaign} locations={summary.locations} onChange={load} />
-          <QuestsCard campaignId={id} quests={summary.quests} onChange={load} />
+      {/*
+        Three-pane command deck from the design template
+        `templates/campaign-dashboard/CampaignDashboard.dc.html`: table rail | world | table talk.
+
+        The template is a `position:fixed` full-viewport shell with its own scroll panes. Here it
+        becomes a sticky-rail grid inside the app's normal document flow, the same mapping the
+        character sheet's play surface uses — the app has a header, a sidebar and a print path
+        that a fixed shell would fight.
+
+        The panes appear as the width to hold them does: the left rail at xl, the talk rail at
+        2xl. Below that everything stacks, left rail first — next session, party and handouts are
+        what a table checks before anything else, and that is also the print order.
+      */}
+      <div className="cf-dashboard-deck grid gap-4 min-w-0 items-start xl:grid-cols-[17rem_minmax(0,1fr)] 2xl:grid-cols-[17rem_minmax(0,1fr)_20rem]">
+        <aside
+          className="cf-dashboard-rail min-w-0 space-y-4 xl:sticky xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)] xl:overflow-y-auto xl:overscroll-contain"
+          style={{ top: 'calc(var(--app-header-h, 0px) + 1rem)' }}
+          aria-label="Session and party"
+          data-testid="dashboard-session-rail"
+        >
           <SessionLog
             campaignId={id}
             sessions={summary.sessions}
@@ -339,17 +354,39 @@ export default function DashboardPage() {
             scheduleSync={scheduleSync}
             role={role}
           />
+          <PartyCard campaignId={id} characters={summary.party} accessibleCharacterIds={new Set(summary.characters.map((character) => character.id))} />
+          <HandoutsCard campaignId={id} />
+        </aside>
+
+        {/* The world column. `auto-fit` rather than a fixed split: the map holds its shape at any
+            width, so quests ride beside it when there is room and beneath it when there is not,
+            without a second breakpoint to keep in step with the outer grid.
+
+            `min(20rem,100%)` rather than a bare `20rem`: a 320px phone minus the page's own
+            padding leaves less than 20rem, and a bare track floor cannot shrink below it — the
+            column then pushes the document wider than the viewport and the whole page scrolls
+            sideways. The `min()` lets the track give way at exactly the point it stops fitting. */}
+        <div className="min-w-0 grid gap-4 items-start [grid-template-columns:repeat(auto-fit,minmax(min(20rem,100%),1fr))]">
+          <RegionMap campaignId={id} campaign={summary.campaign} locations={summary.locations} onChange={load} />
+          <div className="min-w-0 flex flex-col gap-4">
+            <QuestsCard campaignId={id} quests={summary.quests} onChange={load} />
+            <NpcGrid campaignId={id} npcs={summary.npcs} />
+          </div>
         </div>
 
-        <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-          {role === 'dm' && <CheckRequestPanel campaignId={id} characters={summary.characters} />}
-          <PartyCard campaignId={id} characters={summary.party} accessibleCharacterIds={new Set(summary.characters.map((character) => character.id))} />
-          <NpcGrid campaignId={id} npcs={summary.npcs} />
-          <HandoutsCard campaignId={id} />
-          <DiceWidget campaignId={id} />
-          <NotesQuickRail campaignId={id} openInboxCount={summary.openInboxCount} />
-          <EntityDiscussion campaignId={id} entityType="campaign" entityId={id} />
-        </div>
+        <aside
+          className="cf-dashboard-rail min-w-0 xl:col-span-2 2xl:col-span-1 2xl:sticky 2xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)] 2xl:overflow-y-auto 2xl:overscroll-contain"
+          style={{ top: 'calc(var(--app-header-h, 0px) + 1rem)' }}
+          aria-label="Table rail"
+          data-testid="dashboard-table-rail"
+        >
+          <TableRail
+            campaignId={id}
+            openInboxCount={summary.openInboxCount}
+            characters={summary.characters}
+            isDm={role === 'dm'}
+          />
+        </aside>
       </div>
 
       <p className="reading-supporting text-secondary pb-4">

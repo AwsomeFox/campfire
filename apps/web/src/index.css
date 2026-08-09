@@ -142,6 +142,19 @@
     overflow: visible !important;
   }
 
+  /* The dashboard's command deck gets the same treatment, and for the same reason: its rails
+     pin to a viewport paper does not have. Printed, it is one column in reading order —
+     session and party first, then the world, then the table rail. */
+  .cf-dashboard-deck {
+    display: block !important;
+  }
+
+  .cf-dashboard-rail {
+    position: static !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
   .cf-authed-shell,
   .reading-surface,
   .cf-card,

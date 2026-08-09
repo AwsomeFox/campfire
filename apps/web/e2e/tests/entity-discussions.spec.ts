@@ -50,6 +50,10 @@ test.describe('entity discussions (issue #439)', () => {
   for (const label of SURFACE_KEYS) {
     test(`mounts Discussion on ${label}`, async ({ page }) => {
       await page.goto(surfacePath(label));
+      // The campaign's discussion lives in the dashboard's tabbed table rail (design template's
+      // campaign dashboard), so it is one click away rather than always on screen. Every other
+      // surface still mounts it inline.
+      if (label === 'campaign') await page.getByRole('tab', { name: 'Talk' }).click();
       const discussion = page.getByRole('region', { name: 'Discussion' });
       await expect(discussion).toBeVisible();
       await expect(discussionCompose(discussion)).toBeVisible();
