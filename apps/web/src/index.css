@@ -3130,15 +3130,31 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
      them to wrap on top of each other. */
   --cf-vtt-panel-width: clamp(356px, 28vw, 460px);
   --cf-vtt-scrim: color-mix(in srgb, var(--color-bg) 90%, transparent);
+  /* Device safe areas, indirected through variables ON PURPOSE: `env()` cannot be set
+     from a test, and a full-screen layer that gets this wrong is the kind of thing that
+     only shows up on someone's installed PWA. Overriding these on `.cf-vtt` lets a spec
+     assert the clearance without a notched device. */
+  --cf-vtt-safe-top: env(safe-area-inset-top, 0px);
+  --cf-vtt-safe-right: env(safe-area-inset-right, 0px);
+  --cf-vtt-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --cf-vtt-safe-left: env(safe-area-inset-left, 0px);
 
   position: fixed;
   inset: 0;
+  /* This layer covers the safe-area-aware mobile tab bar, so it inherits that duty: on an
+     installed display the Party/Table scroller ended its last controls inside the
+     home-indicator strip, and the tool rail sat under a landscape cutout. The background
+     still bleeds to the physical edges — only the content is inset. */
+  padding: 0 var(--cf-vtt-safe-right) var(--cf-vtt-safe-bottom) var(--cf-vtt-safe-left);
+  box-sizing: border-box;
   /* Published by `useImmersiveChromeInset` while this shell is mounted: Layout's
      campaign-wide interrupts (the safety hold bar, a player's check-request prompts)
      sit above the routed page in normal flow, and an opaque full-viewport overlay
      would make them invisible AND unclickable. Starting below them keeps them on
      screen with their single mount and their own hit-testing. */
-  top: min(var(--cf-immersive-chrome-inset, 0px), 50vh);
+  /* Whichever clears more. A nonzero chrome inset is measured from the viewport top and
+     therefore already past the notch; with no chrome at all the notch is all there is. */
+  top: min(max(var(--cf-immersive-chrome-inset, 0px), var(--cf-vtt-safe-top)), 50vh);
   z-index: var(--cf-layer-immersive);
   display: grid;
   /* The body keeps a floor. The header wraps hard (the whole DM control set) and the

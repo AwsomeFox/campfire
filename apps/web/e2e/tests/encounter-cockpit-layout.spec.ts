@@ -602,6 +602,45 @@ test.describe('encounter cockpit across navigations', () => {
   });
 });
 
+test.describe('encounter cockpit safe areas', () => {
+  test('content clears the home indicator and a landscape cutout', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+    // `env(safe-area-inset-*)` cannot be set from a test, so the cockpit reads it through
+    // variables it also lets us override — see the `--cf-vtt-safe-*` block. These are the
+    // iPhone home-indicator and landscape-cutout figures.
+    // Set and measure in ONE evaluate: these are inline custom properties on a live React
+    // node, and any re-render between the two calls rewrites the style attribute and
+    // silently drops them.
+    const box = await page.evaluate(() => {
+      const shell = document.querySelector('.cf-vtt') as HTMLElement | null;
+      const body = document.querySelector('.cf-vtt-panel-body') as HTMLElement | null;
+      const rail = document.querySelector('[data-testid="map-viewport-toolbar"]') as HTMLElement | null;
+      if (!shell || !body) return null;
+      shell.style.setProperty('--cf-vtt-safe-bottom', '34px');
+      shell.style.setProperty('--cf-vtt-safe-left', '44px');
+      shell.style.setProperty('--cf-vtt-safe-right', '44px');
+      void shell.offsetHeight;
+      const s = shell.getBoundingClientRect();
+      const b = body.getBoundingClientRect();
+      const r = rail?.getBoundingClientRect();
+      return {
+        bottomGap: Math.round(s.bottom - b.bottom),
+        rightGap: Math.round(s.right - b.right),
+        leftGap: r ? Math.round(r.left - s.left) : null,
+      };
+    });
+    expect(box, 'cockpit and panel body must exist').not.toBeNull();
+    // The scroller's last controls must not end inside the home-indicator strip...
+    expect(box!.bottomGap).toBeGreaterThanOrEqual(34);
+    // ...and nothing may sit under a landscape cutout on either side.
+    expect(box!.rightGap).toBeGreaterThanOrEqual(44);
+    if (box!.leftGap != null) expect(box!.leftGap).toBeGreaterThanOrEqual(44);
+  });
+});
+
 test.describe('encounter cockpit tablist keyboard', () => {
   test('arrow keys follow the reading direction, both ways', async ({ page }) => {
     const fixture = await createRunningEncounter(page);
