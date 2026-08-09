@@ -236,7 +236,7 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
     );
     const approved = await h.sendMessage(campaignId, { input: 'use the approved creature check' });
     expect(approved.status).toBe(201);
-    expect(approved.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: false, proposed: false }]);
+    expect(approved.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: false, proposed: false, encounterId }]);
     const approvedResult = toolResultFor(h, 'roll-with-grant') ?? '';
     expect(approvedResult).toContain('"modifier":6');
     expect(approvedResult).toContain('DM-ONLY');
