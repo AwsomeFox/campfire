@@ -465,9 +465,21 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
     }
   });
 
-  it('rebuilds when a fixed-bonus spec is left beside a CLEARED damage field', () => {
+  it('rebuilds whenever a damage-dealing spec is left beside a CLEARED damage field', () => {
+    // Review (chatgpt-codex-connector P1): a cleared field is unambiguous whatever the spec's
+    // attack bonus looks like — it asserts there is nothing to show while combat goes on
+    // rolling. The prose carve-out below does NOT extend to it.
     const out = rebuildEditedActionSpec(CharacterAction.parse({ ...derived, damage: '' }), 'dnd5e', DND5E_DAMAGE_TYPES);
     expect(out.spec).toBeUndefined();
+
+    // ...including an ability-derived spec, which states no fixed bonus to compare.
+    const abilityDerived = CharacterAction.parse({
+      ...derived,
+      toHit: '',
+      damage: '   ',
+      spec: { ...derived.spec, attack: { bonus: '', ability: 'STR', proficient: true, vs: 'ac' } },
+    });
+    expect(rebuildEditedActionSpec(abilityDerived, 'dnd5e', DND5E_DAMAGE_TYPES).spec).toBeUndefined();
   });
 
   it('still trusts a single-part spec with no fixed bonus beside an unreadable line', () => {

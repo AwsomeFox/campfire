@@ -446,15 +446,19 @@ function specAgreesWithFields(edited: CharacterAction): boolean {
       if (part.formula.toLowerCase() !== fieldPart.formula.toLowerCase()) return false;
       if (part.flat !== fieldPart.flat) return false;
       if (part.type.toLowerCase() !== fieldPart.type) return false;
-    } else if (specBonus !== null) {
-      // A fixed attack bonus makes this the weapon shape: its one damage part IS what the
-      // `damage` line describes, so a line that cannot be read as that part — cleared, or
-      // prose — contradicts it. Rebuilding yields a text-only action, honest about being
+    } else if (edited.damage.trim() === '' || specBonus !== null) {
+      // A spec that rolls damage beside a display line that does not say so is the same lie
+      // as a mismatched bonus, so the action is rebuilt — text-only, honest about being
       // unfinished, rather than rolling numbers the line disowns.
       //
-      // Not applied to a spec with NO fixed bonus: a save-based action ("DC 15 DEX, 2d6
-      // fire") legitimately carries one damage part beside a line no attack parser can read,
-      // and rebuilding would throw its structure away.
+      // CLEARED is unambiguous whatever the spec's bonus looks like (chatgpt-codex-connector
+      // P1): an empty field asserts there is nothing to show, and no authoring intent is
+      // expressed by leaving the damage line blank on an action that deals damage.
+      //
+      // PROSE is only a contradiction for the weapon shape — a spec stating a fixed attack
+      // bonus, whose one damage part IS what the line describes. A save-based action
+      // ("DC 15 DEX, 2d6 fire") legitimately carries one damage part beside a line no attack
+      // parser can read, and rebuilding would throw its structure away.
       return false;
     }
   }

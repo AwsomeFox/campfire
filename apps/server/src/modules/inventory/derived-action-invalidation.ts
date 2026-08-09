@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { inventoryItems } from '../../db/schema';
 import type { DrizzleDb } from '../../db/db.module';
 
@@ -38,4 +38,49 @@ export function charactersWithDerivedActions(db: Pick<DrizzleDb, 'select'>, camp
     )
     .all();
   return [...new Set(rows.map((row) => row.characterId).filter((id): id is number => id != null))];
+}
+
+/**
+ * Campaign/character pairs whose derived actions a change to these LIVE rule entries would
+ * alter (issue #2097 review: chatgpt-codex-connector P2).
+ *
+ * Narrower than the campaign-wide sweep above, and for a different writer: `RulesService`
+ * rewrites `dataJson` in place (homebrew edits, pack re-syncs), which only reaches items that
+ * derive from the live entry — i.e. legacy items holding a `ruleEntryId` with no accepted
+ * compendium snapshot. An item WITH a snapshot is unaffected until someone explicitly accepts
+ * a refresh, which is the whole point of the snapshot and is announced on its own path.
+ *
+ * Cross-campaign by nature: a shared pack's entry is referenced from every campaign that
+ * acquired from it, so the result carries the campaign id with each character rather than
+ * assuming one.
+ */
+export function charactersDerivingFromEntries(
+  db: Pick<DrizzleDb, 'select'>,
+  ruleEntryIds: readonly number[],
+): Array<{ campaignId: number; characterId: number }> {
+  if (ruleEntryIds.length === 0) return [];
+  const rows = db
+    .select({ campaignId: inventoryItems.campaignId, characterId: inventoryItems.characterId })
+    .from(inventoryItems)
+    .where(
+      and(
+        inArray(inventoryItems.ruleEntryId, [...new Set(ruleEntryIds)]),
+        isNull(inventoryItems.compendiumSnapshot),
+        eq(inventoryItems.ownerType, 'character'),
+        eq(inventoryItems.equipped, true),
+        isNull(inventoryItems.equippedAction),
+        isNull(inventoryItems.deletedAt),
+      ),
+    )
+    .all();
+  const seen = new Set<string>();
+  const out: Array<{ campaignId: number; characterId: number }> = [];
+  for (const row of rows) {
+    if (row.characterId == null) continue;
+    const key = `${row.campaignId}:${row.characterId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ campaignId: row.campaignId, characterId: row.characterId });
+  }
+  return out;
 }

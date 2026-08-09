@@ -572,6 +572,95 @@ describe('derived equipped-item actions (issue #2097)', () => {
     }
   });
 
+  it('editing a homebrew entry announces the change to items deriving from it live', async () => {
+    const server = ctx.app.getHttpServer();
+    // Review (chatgpt-codex-connector P2): an item with a `ruleEntryId` and NO accepted
+    // snapshot derives from the live row, so a homebrew edit changes its action on the very
+    // next read — and `RulesService` had no events channel at all, so open encounter cards
+    // kept the previous version until a reload.
+    const homebrew = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+      .set(dm)
+      .send({
+        slug: 'e2e-live-blade',
+        name: 'Live Blade',
+        type: 'item',
+        summary: 'A homebrew weapon edited in place.',
+        data: { itemKind: 'weapon', damageDice: '1d6', damageType: 'Slashing', properties: [] },
+      });
+    expect([200, 201]).toContain(homebrew.status);
+
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: homebrew.body.id, ownerType: 'character', characterId, duplicateMode: 'separate' });
+    expect(acquired.status).toBe(201);
+    const itemId = acquired.body.id as number;
+    // Strip the accepted snapshot so this item takes the LIVE-entry fallback, which is the
+    // only shape a rule-entry rewrite can reach.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'live-tick-slot' });
+
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string; characterId?: number }> = [];
+    const spy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string; characterId?: number });
+    });
+    try {
+      const edited = await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}/homebrew/${homebrew.body.id}`)
+        .set(dm)
+        .send({ data: { itemKind: 'weapon', damageDice: '2d8', damageType: 'Slashing', properties: [] } });
+      expect(edited.status).toBe(200);
+      expect(emitted.some((e) => e.type === 'character.updated' && e.characterId === characterId)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // ...and the action really did follow the entry, which is why the tick was owed.
+    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(after.body.equippedAction.damage).toContain('2d8+3');
+  });
+
+  it('an item holding an ACCEPTED snapshot is not announced when the live entry changes', async () => {
+    const server = ctx.app.getHttpServer();
+    // The snapshot is the whole point: an unaccepted upstream edit changes nothing for this
+    // item, so announcing would invalidate every open card for a change it cannot see.
+    const homebrew = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/homebrew`)
+      .set(dm)
+      .send({
+        slug: 'e2e-snapshotted-blade',
+        name: 'Snapshotted Blade',
+        type: 'item',
+        summary: 'A homebrew weapon whose snapshot was accepted.',
+        data: { itemKind: 'weapon', damageDice: '1d6', damageType: 'Slashing', properties: [] },
+      });
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: homebrew.body.id, ownerType: 'character', characterId, duplicateMode: 'separate' });
+    await request(server).patch(`/api/v1/inventory/${acquired.body.id}`).set(dm).send({ equipped: true, equipSlot: 'snapshot-tick-slot' });
+
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string; characterId?: number }> = [];
+    const spy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string; characterId?: number });
+    });
+    try {
+      await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}/homebrew/${homebrew.body.id}`)
+        .set(dm)
+        .send({ data: { itemKind: 'weapon', damageDice: '4d12', damageType: 'Force', properties: [] } });
+      expect(emitted.some((e) => e.type === 'character.updated' && e.characterId === characterId)).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = await request(server).get(`/api/v1/inventory/${acquired.body.id}`).set(dm);
+    expect(after.body.equippedAction.damage).toContain('1d6+3');
+  });
+
   // ---- the authored half: what a human writes is stored, validated, and trusted ----
 
   it('editing the numbers rewrites the spec the resolver actually rolls', async () => {
