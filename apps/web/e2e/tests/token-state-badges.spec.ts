@@ -40,8 +40,11 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await restoreSeedEncounter();
     await placeTokenStateFixture(dm.request);
     await Promise.all([dmPage.goto(encounterUrl()), playerPage.goto(encounterUrl())]);
-    // Roster rows (and their condition chips) are the cockpit's Party tab.
-    await Promise.all([openCockpitTab(dmPage, 'party'), openCockpitTab(playerPage, 'party')]);
+    // Deliberately NOT opening the Party tab here. The roster rows this drill focuses live
+    // in it, but activating a map token's condition badge is supposed to reveal that panel
+    // by itself — opening it up front would hide exactly that regression, which is how it
+    // slipped through the first time. The player also lands on Turn by default, so this is
+    // the real starting state for the badge shortcut.
 
     const dmBoss = dmPage.getByTestId(`map-token-${bossId}`);
     const playerBoss = playerPage.getByTestId(`map-token-${bossId}`);
@@ -66,6 +69,10 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await expect(playerBoss).toBeVisible();
     await overflowCondition.click();
     await expect(playerPage.locator(`#combatant-${bossId}-conditions`)).toBeFocused();
+
+    // The badge revealed the Party panel on its own; the DM client has not been asked to,
+    // so bring it forward before reading that client's roster.
+    await openCockpitTab(dmPage, 'party');
 
     // Map-surface tools own their gestures, even when one begins over a badge.
     await dmPage.getByTestId('map-tool-reveal').click();

@@ -16,6 +16,7 @@ import { useEffect, useRef, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 import { useImmersiveChromeInset } from './useImmersiveChromeInset';
+import { REVEAL_COCKPIT_PANEL_EVENT, type RevealCockpitPanelDetail } from './revealCockpitPanel';
 
 export type VttTab = {
   id: string;
@@ -82,21 +83,42 @@ type Props = {
  * resolves. A hash pointing at something outside the panel (or at nothing) is left
  * alone, as is a tab the viewer has since chosen for themselves.
  */
-function useDeepLinkedPanel(
+/**
+ * Reveal the panel owning an element: select its tab AND open the panel, since either
+ * one alone still leaves the target invisible.
+ */
+function usePanelRevealer(
   tabs: readonly VttTab[],
   activeTabId: string,
   onSelectTab: (id: string) => void,
+  panelOpen: boolean,
+  onPanelOpenChange: (open: boolean) => void,
+) {
+  const state = useRef({ tabs, activeTabId, onSelectTab, panelOpen, onPanelOpenChange });
+  state.current = { tabs, activeTabId, onSelectTab, panelOpen, onPanelOpenChange };
+
+  return useRef((elementId: string): boolean => {
+    const target = document.getElementById(elementId);
+    const section = target?.closest<HTMLElement>('.cf-vtt-panel-section');
+    const owner = section?.id?.replace('cf-vtt-tabpanel-', '');
+    const current = state.current;
+    if (!owner || !current.tabs.some((tab) => tab.id === owner)) return false;
+    if (owner !== current.activeTabId) current.onSelectTab(owner);
+    if (!current.panelOpen) current.onPanelOpenChange(true);
+    return true;
+  }).current;
+}
+
+function useDeepLinkedPanel(
+  reveal: (elementId: string) => boolean,
 ): void {
   // Keyed on the router location, not just the tab list: this shell is reused across
   // encounter navigations, so following a second notification while the cockpit is
   // already mounted changes the pathname and hash but nothing else — an effect that
   // depended only on the (constant) tab ids would never run again for the new target.
   const location = useLocation();
-  const onSelectRef = useRef(onSelectTab);
-  onSelectRef.current = onSelectTab;
-  const activeRef = useRef(activeTabId);
-  activeRef.current = activeTabId;
-  const tabIds = tabs.map((tab) => tab.id).join(',');
+  const revealRef = useRef(reveal);
+  revealRef.current = reveal;
 
   useEffect(() => {
     let cancelled = false;
@@ -106,13 +128,8 @@ function useDeepLinkedPanel(
       if (cancelled) return true;
       const hash = window.location.hash.slice(1);
       if (!hash) return true;
-      const target = document.getElementById(hash);
-      if (!target) return false;
-      const section = target.closest<HTMLElement>('.cf-vtt-panel-section');
-      const owner = section?.id?.replace('cf-vtt-tabpanel-', '');
-      if (owner && owner !== activeRef.current && tabIds.split(',').includes(owner)) {
-        onSelectRef.current(owner);
-      }
+      if (!document.getElementById(hash)) return false;
+      revealRef.current(hash);
       return true;
     };
 
@@ -127,7 +144,7 @@ function useDeepLinkedPanel(
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [tabIds, location.key, location.pathname, location.hash]);
+  }, [location.key, location.pathname, location.hash]);
 }
 
 export function EncounterVttShell({
@@ -191,7 +208,19 @@ export function EncounterVttShell({
   // neither reveals a hidden ancestor, so a link into a panel that is not the selected
   // tab used to arrive with its target invisible. Resolving the hash to its owning
   // section and selecting that tab fixes every such link, not just comments.
-  useDeepLinkedPanel(tabs, activeTabId, onSelectTab);
+  const revealPanelFor = usePanelRevealer(tabs, activeTabId, onSelectTab, panelOpen, onPanelOpenChange);
+  useDeepLinkedPanel(revealPanelFor);
+
+  // Anything outside the panel that jumps to an element inside it (a map token's
+  // condition badge) asks for the reveal first — see `revealCockpitPanel`.
+  useEffect(() => {
+    const onReveal = (event: Event) => {
+      const detail = (event as CustomEvent<RevealCockpitPanelDetail>).detail;
+      if (detail?.elementId) revealPanelFor(detail.elementId);
+    };
+    window.addEventListener(REVEAL_COCKPIT_PANEL_EVENT, onReveal);
+    return () => window.removeEventListener(REVEAL_COCKPIT_PANEL_EVENT, onReveal);
+  }, [revealPanelFor]);
 
   // The shell is `position: fixed` and owns the viewport, so a scrollable body
   // behind it only produces rubber-banding on touch. Restored on unmount so

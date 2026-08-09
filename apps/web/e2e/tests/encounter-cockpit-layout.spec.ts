@@ -176,6 +176,38 @@ test.describe('encounter cockpit deep links', () => {
       await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
     }
   });
+
+  test('a deep link reopens a collapsed panel, not just its tab', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {
+      data: { entityType: 'encounter', entityId: encounterId, body: 'Collapsed-panel probe' },
+    });
+    expect(created.ok(), `create comment: ${await created.text()}`).toBe(true);
+    const commentId = ((await created.json()) as { id: number }).id;
+
+    try {
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+      // Collapsing is independent of which tab is selected, so selecting the owning tab
+      // alone still leaves the comment invisible inside a hidden aside.
+      await page.getByTestId('encounter-vtt-panel-close').click();
+      await expect(page.getByTestId('encounter-vtt-panel')).not.toBeVisible();
+
+      await page.evaluate(
+        ([c, e, id]) => {
+          window.history.pushState({}, '', `/c/${c}/encounters/${e}?comment=${id}#entity-comment-${id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        },
+        [campaignId, encounterId, commentId] as const,
+      );
+
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible({ timeout: 15_000 });
+      await expect(page.locator(`#entity-comment-${commentId}`)).toBeVisible();
+    } finally {
+      await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
+    }
+  });
 });
 
 test.describe('encounter cockpit panel collapse', () => {

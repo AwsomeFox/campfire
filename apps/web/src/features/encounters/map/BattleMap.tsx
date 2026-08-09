@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardE
 import { createPortal } from 'react-dom';
 import { UIIcon } from '../../../components/UIIcon';
 import { GatedControl } from '../../../components/GatedControl';
+import { revealCockpitPanel } from '../vtt/revealCockpitPanel';
 import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridType, TokenSize } from '@campfire/schema';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { FloatingNumbers } from '../FloatingNumbers';
@@ -1827,11 +1828,19 @@ export const BattleMap = memo(function BattleMap({
     // Let the badge's pointer/click cycle settle before looking up a roster row.
     // This also handles a roster element React replaces as the latest encounter
     // state commits, so focus always lands on the live detailed condition row.
+    const detailsId = `combatant-${combatantId}-conditions`;
     const focusDetails = () => {
-      const details = document.getElementById(`combatant-${combatantId}-conditions`);
+      const details = document.getElementById(detailsId);
       if (!details) return false;
-      details.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' });
-      details.focus({ preventScroll: true });
+      // In the cockpit the roster row lives in a panel that may be on another tab, or
+      // collapsed entirely — neither of which `scrollIntoView`/`focus` can undo. Ask for
+      // it to be shown, then land focus on the next frame once that has committed.
+      revealCockpitPanel(detailsId, () => {
+        const shown = document.getElementById(detailsId);
+        if (!shown) return;
+        shown.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' });
+        shown.focus({ preventScroll: true });
+      });
       return true;
     };
     requestAnimationFrame(() => {
