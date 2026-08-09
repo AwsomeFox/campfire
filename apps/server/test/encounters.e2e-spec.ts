@@ -125,6 +125,14 @@ describe('encounters (e2e)', () => {
       expect.objectContaining({ id: 'skill:stealth', modifier: 6 }),
     ]));
     expect((await request(server).get(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks`).set(player)).status).toBe(403);
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
+          .set(dm)
+          .send({ checkId: 'skill:stealth', consequence: 'This is not supported for creature checks.' })
+      ).status,
+    ).toBe(400);
     const rolled = await request(server)
       .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
       .set(dm)

@@ -12907,6 +12907,13 @@ export const CheckRollRequest = z.object({
 });
 export type CheckRollRequest = z.infer<typeof CheckRollRequest>;
 
+/**
+ * DM-only encounter creature-check input (issue #1314). Creature rolls do not have the
+ * character check flow's consequence record, so reject it instead of accepting and dropping it.
+ */
+export const CreatureCheckRollRequest = CheckRollRequest.omit({ consequence: true });
+export type CreatureCheckRollRequest = z.infer<typeof CreatureCheckRollRequest>;
+
 /** The resolved check + persisted roll returned by the check-roll endpoint / MCP tool (issue #415). */
 export const CheckRollResponse = z.object({
   check: z.object({

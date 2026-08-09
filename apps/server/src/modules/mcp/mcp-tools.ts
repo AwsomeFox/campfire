@@ -78,6 +78,7 @@ import {
   RollRequest,
   ActionRollRequest,
   CheckRollRequest,
+  CreatureCheckRollRequest,
   CheckRequestCreate,
   RulePackInstall,
   RuleEntryType,
@@ -4485,9 +4486,9 @@ export class McpToolsService {
       {
         encounterId: Id.describe('Encounter id — from list_encounters or get_encounter'),
         combatantId: Id.describe('Monster or NPC combatant id — from get_encounter'),
-        checkId: CheckRollRequest.shape.checkId,
-        mode: CheckRollRequest.shape.mode,
-        dc: CheckRollRequest.shape.dc,
+        checkId: CreatureCheckRollRequest.shape.checkId,
+        mode: CreatureCheckRollRequest.shape.mode,
+        dc: CreatureCheckRollRequest.shape.dc,
       },
       async ({ encounterId, combatantId, checkId, mode, dc }) => {
         const encounter = await this.encounters.getRowOrThrow(encounterId as number);
