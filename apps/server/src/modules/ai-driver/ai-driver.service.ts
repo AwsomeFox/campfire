@@ -6259,6 +6259,40 @@ export class AiDriverService {
           }
         }
       }
+      // #1314: the roll response includes the private catalog modifier/breakdown, so a
+      // guessed check id must not bypass the combatant-scoped approval required to list it.
+      if (tool?.mutating && call.name === 'roll_creature_check') {
+        const combatantId = typeof args.combatantId === 'number' ? args.combatantId : null;
+        const approval = combatantId != null ? this.findApproval(session, 'list_creature_checks', combatantId) : null;
+        if (!approval) {
+          appendUntrustedToolResult(
+            messages,
+            call,
+            JSON.stringify({
+              error: {
+                status: 403,
+                code: 'forbidden_secret_read',
+                message: 'roll_creature_check requires a DM approval for this combatant.',
+              },
+            }),
+          );
+          const secretIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+          this.emitToolEvent(campaignId, call.name, true, false, secretIdentity);
+          executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(secretIdentity) });
+          this.logger.warn(`Blocked secret-bearing roll ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
+          await this.audit.log({
+            actor,
+            actorRole: 'dm',
+            action: 'ai-dm.driver.secret.blocked',
+            entityType: 'ai-dm',
+            campaignId,
+            detail: `blocked secret-bearing roll ${call.name} (triggered by ${triggeredBy.id})`,
+          });
+          toolErrored = true;
+          continue;
+        }
+        approvedSecret = approval;
+      }
 
       // (3) Guardrail (#377): canon writes can NEVER be made directly by the seat — force EVERY
       // proposal-capable tool onto the proposal path, ignoring any model-supplied `propose` value.

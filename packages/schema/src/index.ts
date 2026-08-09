@@ -6143,7 +6143,7 @@ export function creatureCheckCatalogForAdapter(
     });
   }
 
-  const skills = creatureCheckModifierMap(creature.data.skills ?? creature.data.skillMods ?? creature.data.skill_mod);
+  const skills = creatureCheckModifierMap(creature.data.skills ?? creature.data.skillMods ?? creature.data.skill_mod ?? creature.data.skill_mods);
   for (const [rawKey, modifier] of Object.entries(skills)) {
     const label = creatureCheckLabel(rawKey);
     add({

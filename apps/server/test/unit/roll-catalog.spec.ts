@@ -33,6 +33,13 @@ describe('creature roll catalog — adapter-derived statblocks (issue #1314)', (
     expect(catalog.some((check) => check.id === 'save:str')).toBe(false);
   });
 
+  it('accepts Open5e\'s plural skill_mods alias', () => {
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { skill_mods: { stealth: 6 } },
+    });
+    expect(catalog.find((check) => check.id === 'skill:stealth')?.modifier).toBe(6);
+  });
+
   it('uses PF2e creature modifiers directly and does not offer advantage', () => {
     const catalog = creatureCheckCatalogForAdapter(Pf2eAdapter, {
       data: { abilityMods: { strength: 4, dexterity: 2 }, perception: 11, saves: { fortitude: 11 }, skills: { athletics: 12 } },
