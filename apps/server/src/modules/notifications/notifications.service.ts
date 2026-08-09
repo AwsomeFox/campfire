@@ -138,11 +138,6 @@ type HiddenStatusAudience = 'campaign_member' | 'permanent_dm' | 'character_owne
 type HiddenStatusDisposition = 'allow' | 'redact' | 'project_redact' | 'deny' | 'filter';
 type HiddenRecipientDelivery = 'delivered' | 'skipped' | 'visible';
 
-interface HiddenStatusReadGuard {
-  filteredIds: Set<number>;
-  projectedRedactIds: Set<number>;
-}
-
 /** Private persistence metadata; deliberately separate from public notification `data`. */
 interface HiddenStatusContext {
   encounterId: number;
@@ -835,31 +830,75 @@ export class NotificationsService implements OnApplicationBootstrap {
     return updated;
   }
 
+  /** Apply a PAT-scoped bulk mutation without materializing every matching id. */
+  private updateScopedNotificationReadStateTx(
+    tx: SyncDb,
+    user: RequestUser,
+    userId: number,
+    conditions: SQL[],
+    readAt: string | null,
+  ): Array<{ id: number }> {
+    let cursor: number | null = null;
+    const updated: Array<{ id: number }> = [];
+    while (true) {
+      const scanConditions: SQL[] = cursor === null ? conditions : [...conditions, lt(notifications.id, cursor)];
+      const candidates: Array<{ id: number; campaignId: number; hiddenStatusContext: string | null }> = tx
+        .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
+        .from(notifications)
+        .where(and(...scanConditions))
+        .orderBy(desc(notifications.id))
+        .limit(SQLITE_ID_BATCH_SIZE)
+        .all();
+      if (candidates.length === 0) break;
+      const dispositions = this.hiddenStatusDispositionMapTx(tx, user, userId, candidates);
+      const ids = candidates
+        .filter((candidate) => {
+          const disposition = dispositions.get(candidate.id) ?? 'allow';
+          return disposition !== 'deny' && disposition !== 'filter';
+        })
+        .map((candidate) => candidate.id);
+      updated.push(...this.updateNotificationReadStateTx(tx, ids, readAt));
+      if (candidates.length < SQLITE_ID_BATCH_SIZE) break;
+      cursor = candidates[candidates.length - 1].id;
+    }
+    return updated;
+  }
+
   /**
-   * Remove private-context rows whose recipient has durably lost access, while
-   * returning PAT-scoped rows for request-only filtering or owner-safe
-   * projection. Callers keep their exposing SELECT or UPDATE in this same
-   * transaction: a membership demotion or ownership transfer cannot land
-   * between cleanup and the row returned from the bell endpoint.
+   * Reconcile private-context rows before a recipient-facing operation without
+   * retaining every row in memory. PAT-only filter/project dispositions stay
+   * request-local and are re-evaluated by the bounded exposing scan in this
+   * same transaction.
    */
-  private purgeUnauthorizedHiddenStatusNotificationsTx(tx: SyncDb, user: RequestUser, userId: number): HiddenStatusReadGuard {
-    const guarded = tx
-      .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
-      .from(notifications)
-      .where(and(eq(notifications.userId, userId), isNotNull(notifications.hiddenStatusContext)))
-      .all();
-    const dispositions = this.hiddenStatusDispositionsTx(tx, userId, guarded, user);
-    const unauthorizedIds = dispositions.filter((row) => row.disposition === 'deny').map((row) => row.id);
-    const redactIds = dispositions.filter((row) => row.disposition === 'redact').map((row) => row.id);
-    const filteredIds = new Set(dispositions.filter((row) => row.disposition === 'filter').map((row) => row.id));
-    const projectedRedactIds = new Set(dispositions.filter((row) => row.disposition === 'project_redact').map((row) => row.id));
-    if (unauthorizedIds.length > 0) {
-      this.deleteNotificationIdsTx(tx, unauthorizedIds);
+  private reconcileUnauthorizedHiddenStatusNotificationsTx(tx: SyncDb, user: RequestUser, userId: number): void {
+    let cursor: number | null = null;
+    while (true) {
+      const conditions = [eq(notifications.userId, userId), isNotNull(notifications.hiddenStatusContext)];
+      if (cursor !== null) conditions.push(lt(notifications.id, cursor));
+      const guarded = tx
+        .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
+        .from(notifications)
+        .where(and(...conditions))
+        .orderBy(desc(notifications.id))
+        .limit(SQLITE_ID_BATCH_SIZE)
+        .all();
+      if (guarded.length === 0) return;
+      const dispositions = this.hiddenStatusDispositionsTx(tx, userId, guarded, user);
+      this.deleteNotificationIdsTx(tx, dispositions.filter((row) => row.disposition === 'deny').map((row) => row.id));
+      this.redactNotificationIdsTx(tx, dispositions.filter((row) => row.disposition === 'redact').map((row) => row.id));
+      if (guarded.length < SQLITE_ID_BATCH_SIZE) return;
+      cursor = guarded[guarded.length - 1].id;
     }
-    if (redactIds.length > 0) {
-      this.redactNotificationIdsTx(tx, redactIds);
-    }
-    return { filteredIds, projectedRedactIds };
+  }
+
+  private hiddenStatusDispositionMapTx(
+    tx: SyncDb,
+    user: RequestUser,
+    userId: number,
+    rows: Array<Pick<typeof notifications.$inferSelect, 'id' | 'campaignId' | 'hiddenStatusContext'>>,
+  ): Map<number, HiddenStatusDisposition> {
+    const guarded = rows.filter((row) => row.hiddenStatusContext !== null);
+    return new Map(this.hiddenStatusDispositionsTx(tx, userId, guarded, user).map((row) => [row.id, row.disposition]));
   }
 
   /**
@@ -1219,9 +1258,9 @@ export class NotificationsService implements OnApplicationBootstrap {
       conditions.push(lte(notifications.createdAt, endIso));
     }
 
-    const { total, rows, projectedRedactIds } = this.db.transaction((tx) => {
-      const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      if (filteredIds.size === 0) {
+    const { total, rows } = this.db.transaction((tx) => {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      if (!user.tokenContext) {
         const [countRow] = tx
           .select({ value: count() })
           .from(notifications)
@@ -1240,30 +1279,52 @@ export class NotificationsService implements OnApplicationBootstrap {
           .orderBy(desc(notifications.id))
           .limit(limit + 1)
           .all();
-        return { total, rows, projectedRedactIds };
+        return { total, rows: rows.map((row) => ({ ...row, projectedRedact: false })) };
       }
 
-      // A scope-capped PAT can filter more rows than SQLite can bind in a
-      // single NOT IN predicate. Keep the revalidation and exposure in this
-      // transaction, but apply that request-only disposition in memory.
-      const candidates = tx
-        .select({ notification: notifications })
-        .from(notifications)
-        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-        .where(and(...conditions))
-        .orderBy(desc(notifications.id))
-        .all()
-        .filter((row) => !filteredIds.has(row.notification.id));
-      const rows = opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0
-        ? candidates.filter((row) => row.notification.id < opts.cursor!).slice(0, limit + 1)
-        : candidates.slice(0, limit + 1);
-      return { total: candidates.length, rows, projectedRedactIds };
+      // A scope-capped PAT can transiently filter retained rows. Scan in
+      // fixed-size pages rather than constructing an oversized NOT IN list or
+      // materializing the account's whole notification history. The scan and
+      // its authorization decisions remain inside this transaction.
+      const pageCursor = opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0 ? opts.cursor : null;
+      let scanCursor: number | null = null;
+      let total = 0;
+      const rows: Array<{ notification: typeof notifications.$inferSelect; projectedRedact: boolean }> = [];
+      while (true) {
+        const scanConditions: SQL[] = scanCursor === null ? conditions : [...conditions, lt(notifications.id, scanCursor)];
+        const candidates: Array<{ notification: typeof notifications.$inferSelect }> = tx
+          .select({ notification: notifications })
+          .from(notifications)
+          .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+          .where(and(...scanConditions))
+          .orderBy(desc(notifications.id))
+          .limit(SQLITE_ID_BATCH_SIZE)
+          .all();
+        if (candidates.length === 0) break;
+        const dispositions = this.hiddenStatusDispositionMapTx(
+          tx,
+          user,
+          userId,
+          candidates.map((candidate) => candidate.notification),
+        );
+        for (const candidate of candidates) {
+          const disposition = dispositions.get(candidate.notification.id) ?? 'allow';
+          if (disposition === 'deny' || disposition === 'filter') continue;
+          total += 1;
+          if ((pageCursor === null || candidate.notification.id < pageCursor) && rows.length < limit + 1) {
+            rows.push({ notification: candidate.notification, projectedRedact: disposition === 'project_redact' });
+          }
+        }
+        if (candidates.length < SQLITE_ID_BATCH_SIZE) break;
+        scanCursor = candidates[candidates.length - 1].notification.id;
+      }
+      return { total, rows };
     });
 
     const hasMore = rows.length > limit;
     const pagedRows = hasMore ? rows.slice(0, limit) : rows;
     const items = pagedRows.map((row) => (
-      projectedRedactIds.has(row.notification.id) ? toOwnerSafeDomain(row.notification) : toDomain(row.notification)
+      row.projectedRedact ? toOwnerSafeDomain(row.notification) : toDomain(row.notification)
     ));
     const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].id : null;
 
@@ -1307,19 +1368,33 @@ export class NotificationsService implements OnApplicationBootstrap {
       sql` OR `,
     );
     const row = this.db.transaction((tx) => {
-      const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      if (filteredIds.size > 0) {
-        const candidates = tx
-          .select({ id: notifications.id, type: notifications.type })
-          .from(notifications)
-          .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-          .where(and(...conditions))
-          .all()
-          .filter((candidate) => !filteredIds.has(candidate.id));
-        return {
-          value: candidates.length,
-          membershipSignal: candidates.some((candidate) => MEMBERSHIP_NOTIFICATION_TYPES.includes(candidate.type as typeof MEMBERSHIP_NOTIFICATION_TYPES[number])) ? 1 : 0,
-        };
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      if (user.tokenContext) {
+        let scanCursor: number | null = null;
+        let value = 0;
+        let membershipSignal = 0;
+        while (true) {
+          const scanConditions: SQL[] = scanCursor === null ? conditions : [...conditions, lt(notifications.id, scanCursor)];
+          const candidates: Array<Pick<typeof notifications.$inferSelect, 'id' | 'campaignId' | 'type' | 'hiddenStatusContext'>> = tx
+            .select({ id: notifications.id, campaignId: notifications.campaignId, type: notifications.type, hiddenStatusContext: notifications.hiddenStatusContext })
+            .from(notifications)
+            .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+            .where(and(...scanConditions))
+            .orderBy(desc(notifications.id))
+            .limit(SQLITE_ID_BATCH_SIZE)
+            .all();
+          if (candidates.length === 0) break;
+          const dispositions = this.hiddenStatusDispositionMapTx(tx, user, userId, candidates);
+          for (const candidate of candidates) {
+            const disposition = dispositions.get(candidate.id) ?? 'allow';
+            if (disposition === 'deny' || disposition === 'filter') continue;
+            value += 1;
+            if (MEMBERSHIP_NOTIFICATION_TYPES.includes(candidate.type as typeof MEMBERSHIP_NOTIFICATION_TYPES[number])) membershipSignal = 1;
+          }
+          if (candidates.length < SQLITE_ID_BATCH_SIZE) break;
+          scanCursor = candidates[candidates.length - 1].id;
+        }
+        return { value, membershipSignal };
       }
       return tx
         .select({
@@ -1339,8 +1414,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     const userId = numericUserId(user.id);
     if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
     return this.db.transaction((tx) => {
-      const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      if (filteredIds.has(id)) throw new NotFoundException(`Notification ${id} not found`);
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
       const joined = tx
         .select({ notification: notifications })
         .from(notifications)
@@ -1349,14 +1423,16 @@ export class NotificationsService implements OnApplicationBootstrap {
         .get();
       const row = joined?.notification;
       if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
-      if (row.readAt) return projectedRedactIds.has(id) ? toOwnerSafeDomain(row) : toDomain(row);
+      const disposition = this.hiddenStatusDispositionMapTx(tx, user, userId, [row]).get(id) ?? 'allow';
+      if (disposition === 'deny' || disposition === 'filter') throw new NotFoundException(`Notification ${id} not found`);
+      if (row.readAt) return disposition === 'project_redact' ? toOwnerSafeDomain(row) : toDomain(row);
       const updated = tx
         .update(notifications)
         .set({ readAt: nowIso() })
         .where(eq(notifications.id, id))
         .returning()
         .get();
-      return projectedRedactIds.has(id) ? toOwnerSafeDomain(updated) : toDomain(updated);
+      return disposition === 'project_redact' ? toOwnerSafeDomain(updated) : toDomain(updated);
     });
   }
 
@@ -1364,8 +1440,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     const userId = numericUserId(user.id);
     if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
     return this.db.transaction((tx) => {
-      const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      if (filteredIds.has(id)) throw new NotFoundException(`Notification ${id} not found`);
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
       const joined = tx
         .select({ notification: notifications })
         .from(notifications)
@@ -1374,14 +1449,16 @@ export class NotificationsService implements OnApplicationBootstrap {
         .get();
       const row = joined?.notification;
       if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
-      if (!row.readAt) return projectedRedactIds.has(id) ? toOwnerSafeDomain(row) : toDomain(row);
+      const disposition = this.hiddenStatusDispositionMapTx(tx, user, userId, [row]).get(id) ?? 'allow';
+      if (disposition === 'deny' || disposition === 'filter') throw new NotFoundException(`Notification ${id} not found`);
+      if (!row.readAt) return disposition === 'project_redact' ? toOwnerSafeDomain(row) : toDomain(row);
       const updated = tx
         .update(notifications)
         .set({ readAt: null })
         .where(eq(notifications.id, id))
         .returning()
         .get();
-      return projectedRedactIds.has(id) ? toOwnerSafeDomain(updated) : toDomain(updated);
+      return disposition === 'project_redact' ? toOwnerSafeDomain(updated) : toDomain(updated);
     });
   }
 
@@ -1418,8 +1495,8 @@ export class NotificationsService implements OnApplicationBootstrap {
     }
 
     const updated = this.db.transaction((tx) => {
-      const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      if (filteredIds.size === 0) {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      if (!user.tokenContext) {
         return tx
           .update(notifications)
           .set({ readAt: nowIso() })
@@ -1427,14 +1504,7 @@ export class NotificationsService implements OnApplicationBootstrap {
           .returning({ id: notifications.id })
           .all();
       }
-      const ids = tx
-        .select({ id: notifications.id })
-        .from(notifications)
-        .where(and(...conditions))
-        .all()
-        .map((row) => row.id)
-        .filter((id) => !filteredIds.has(id));
-      return this.updateNotificationReadStateTx(tx, ids, nowIso());
+      return this.updateScopedNotificationReadStateTx(tx, user, userId, conditions, nowIso());
     });
 
     const updatedIds = updated.map((r) => r.id);
@@ -1474,8 +1544,8 @@ export class NotificationsService implements OnApplicationBootstrap {
     }
 
     const updated = this.db.transaction((tx) => {
-      const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      if (filteredIds.size === 0) {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      if (!user.tokenContext) {
         return tx
           .update(notifications)
           .set({ readAt: null })
@@ -1483,14 +1553,7 @@ export class NotificationsService implements OnApplicationBootstrap {
           .returning({ id: notifications.id })
           .all();
       }
-      const ids = tx
-        .select({ id: notifications.id })
-        .from(notifications)
-        .where(and(...conditions))
-        .all()
-        .map((row) => row.id)
-        .filter((id) => !filteredIds.has(id));
-      return this.updateNotificationReadStateTx(tx, ids, null);
+      return this.updateScopedNotificationReadStateTx(tx, user, userId, conditions, null);
     });
 
     const updatedIds = updated.map((r) => r.id);

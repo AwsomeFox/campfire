@@ -1416,6 +1416,40 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     // purge the same oversized set without exceeding SQLite's bind limit.
     const sqliteVariableLimitRows = 32_767;
     const sqliteGuardTitle = 'SQLite guarded notification';
+    const scopedVisibleRows = db.insert(notificationRows).values([
+      {
+        userId: coDmId,
+        campaignId: guardedCampaignId,
+        type: 'quest_updated',
+        title: 'Scoped visible notification one',
+        body: 'Visible to the scoped PAT',
+        entityType: null,
+        entityId: null,
+        commentId: null,
+        data: null,
+        hiddenStatusContext: null,
+        actorName: '',
+        actorUserId: null,
+        readAt: null,
+        createdAt: new Date().toISOString(),
+      },
+      {
+        userId: coDmId,
+        campaignId: guardedCampaignId,
+        type: 'quest_updated',
+        title: 'Scoped visible notification two',
+        body: 'Also visible to the scoped PAT',
+        entityType: null,
+        entityId: null,
+        commentId: null,
+        data: null,
+        hiddenStatusContext: null,
+        actorName: '',
+        actorUserId: null,
+        readAt: null,
+        createdAt: new Date().toISOString(),
+      },
+    ]).returning().all();
     const sqliteGuardContext = JSON.stringify({
       encounterId: demoted.encounter.body.id,
       characterId: demoted.character.body.id,
@@ -1426,7 +1460,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       const rows = Array.from({ length: Math.min(500, sqliteVariableLimitRows - start) }, () => ({
         userId: coDmId,
         campaignId: guardedCampaignId,
-        type: 'character_downed',
+        type: 'quest_updated',
         title: sqliteGuardTitle,
         body: 'SQLite guarded notification body',
         entityType: 'encounter',
@@ -1456,10 +1490,35 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     };
     const scopedGuardRead = await notifications.listForUser(scopedGuardUser, {
       campaignId: guardedCampaignId,
-      type: 'character_downed',
+      type: 'quest_updated',
       limit: 1,
     });
     expect(scopedGuardRead.items.some((row) => row.title === sqliteGuardTitle)).toBe(false);
+    expect(scopedGuardRead).toMatchObject({ total: 2, hasMore: true });
+    expect(scopedGuardRead.items).toHaveLength(1);
+    expect(scopedGuardRead.items[0].id).toBe(scopedVisibleRows[1].id);
+    const scopedGuardSecondPage = await notifications.listForUser(scopedGuardUser, {
+      campaignId: guardedCampaignId,
+      type: 'quest_updated',
+      limit: 1,
+      cursor: scopedGuardRead.nextCursor!,
+    });
+    expect(scopedGuardSecondPage).toMatchObject({ total: 2, hasMore: false });
+    expect(scopedGuardSecondPage.items.map((row) => row.id)).toEqual([scopedVisibleRows[0].id]);
+    const boundedPatPoll = instrumentSql(ctx);
+    try {
+      await notifications.unreadSummary(scopedGuardUser);
+    } finally {
+      boundedPatPoll.restore();
+    }
+    const notificationScans = boundedPatPoll.executed.filter((source) => /from\s+["`]notifications["`]/i.test(source));
+    expect(notificationScans.length).toBeGreaterThan(2);
+    expect(notificationScans.every((source) => /limit\s+\?/i.test(source))).toBe(true);
+    const scopedBulkRead = await notifications.markReadBulk(scopedGuardUser, { campaignId: guardedCampaignId, all: true });
+    expect(scopedBulkRead.updatedIds).toEqual(expect.arrayContaining(scopedVisibleRows.map((row) => row.id)));
+    expect(db.select().from(notificationRows).where(eq(notificationRows.title, sqliteGuardTitle)).all().every((row) => row.readAt === null)).toBe(true);
+    const scopedBulkUnread = await notifications.markUnreadBulk(scopedGuardUser, { ids: scopedVisibleRows.map((row) => row.id) });
+    expect(scopedBulkUnread.updatedIds).toEqual(expect.arrayContaining(scopedVisibleRows.map((row) => row.id)));
     expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(and(
       eq(notificationRows.userId, coDmId),
       eq(notificationRows.campaignId, guardedCampaignId),
