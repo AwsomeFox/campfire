@@ -6031,6 +6031,7 @@ export class EncountersService {
     let emittedTurnChange: {
       round: number;
       turnIndex: number;
+      turnVersion: number;
       currentCombatantId: number | null;
       combatantKind: Combatant['kind'] | null;
     } | null = null;
@@ -6207,6 +6208,7 @@ export class EncountersService {
           emittedTurnChange = {
             round: afterEncounter.round,
             turnIndex: afterEncounter.turnIndex,
+            turnVersion: afterTurnVersion,
             currentCombatantId: afterEncounter.currentCombatantId,
             combatantKind: startingAfterRemoval?.kind ?? null,
           };
@@ -6350,6 +6352,7 @@ export class EncountersService {
     let emittedTurnChange: {
       round: number;
       turnIndex: number;
+      turnVersion: number;
       currentCombatantId: number | null;
       combatantKind: Combatant['kind'] | null;
       turnReverted: true;
@@ -6525,6 +6528,7 @@ export class EncountersService {
             emittedTurnChange = {
               round: before.round,
               turnIndex: restoredTurnIndex,
+              turnVersion: current.turnVersion + 1,
               currentCombatantId: before.currentCombatantId,
               combatantKind: snapshot.kind as Combatant['kind'],
               turnReverted: true,
@@ -7488,6 +7492,7 @@ export class EncountersService {
     const campaignId = encounterRow.campaignId;
     const ts = nowIso();
     const escalation = this.nextEscalationState(adapter, encounterRow, 1, 'start');
+    let startedTurnVersion = encounterRow.turnVersion + 1;
     // Fresh-prep encounters (including campaign clones) deliberately have no
     // historical allegiance. Capture the linked NPC's current disposition exactly
     // when play starts, so a later NPC edit cannot rewrite the finished fight's XP.
@@ -7531,7 +7536,8 @@ export class EncountersService {
         }
       }
 
-      const currentEnc = tx.select({ updatedAt: encounters.updatedAt }).from(encounters).where(eq(encounters.id, encounterId)).get();
+      const currentEnc = tx.select({ updatedAt: encounters.updatedAt, turnVersion: encounters.turnVersion }).from(encounters).where(eq(encounters.id, encounterId)).get();
+      startedTurnVersion = (currentEnc?.turnVersion ?? encounterRow.turnVersion) + 1;
       tx.update(encounters)
         .set({
           status: 'running',
@@ -7597,6 +7603,7 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.turn_changed', campaignId, encounterId, snapshot.hidden, {
       round: 1,
       turnIndex,
+      turnVersion: startedTurnVersion,
       currentCombatantId,
       combatantKind: first?.kind ?? null,
     });
@@ -7819,6 +7826,7 @@ export class EncountersService {
 
     // Captured inside the tx for post-commit logging.
     let newRound = encounterRow.round;
+    let newTurnVersion = encounterRow.turnVersion;
     // The round the ENDING turn was in (before advanceTurn may increment it on a wrap).
     // Effect expiries happen at the end of that turn, so they must be logged under this
     // round, not the incremented `newRound` (issue #413 off-by-one).
@@ -7869,6 +7877,7 @@ export class EncountersService {
         if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
           throw new BadRequestException('Encounter is not running');
         }
+        newTurnVersion = fresh.turnVersion + 1;
         endedRound = fresh.round;
         const freshCurrentId = fresh.currentCombatantId;
         const freshPhase = (fresh.turnPhase as EncounterTurnPhase) ?? 'combatant';
@@ -8230,6 +8239,7 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
     this.emitEncounterEvent('encounter.turn_changed', encounterRow.campaignId, encounterId, encounterRow.hidden, {
       round: newRound,
+      turnVersion: newTurnVersion,
       currentCombatantId: newCurrentId,
       combatantKind: startingKind,
     });
@@ -8279,6 +8289,7 @@ export class EncountersService {
     }
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     let newRound = encounterRow.round;
+    let newTurnVersion = encounterRow.turnVersion;
     let newCurrentId: number | null = null;
     let newCurrentName: string | null = null;
     let newCurrentKind: 'character' | 'monster' | 'npc' | null = null;
@@ -8318,6 +8329,7 @@ export class EncountersService {
       if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
         throw new BadRequestException('Encounter is not running');
       }
+      newTurnVersion = fresh.turnVersion + 1;
 
       const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
@@ -8573,6 +8585,7 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
     this.emitEncounterEvent('encounter.turn_changed', encounterRow.campaignId, encounterId, encounterRow.hidden, {
       round: newRound,
+      turnVersion: newTurnVersion,
       currentCombatantId: newCurrentId,
       combatantKind: newCurrentKind,
       turnReverted: true,
