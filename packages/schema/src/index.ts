@@ -12210,6 +12210,7 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     encounterId: Id,
     round: z.number().int().min(0).optional(),
     turnIndex: z.number().int().min(0).optional(),
+    turnVersion: z.number().int().nonnegative().optional(),
     currentCombatantId: Id.nullable().optional(),
     combatantKind: CombatantKind.nullable().optional(),
     // An undo restores a historical turn for client reconciliation, but must

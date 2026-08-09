@@ -5,6 +5,7 @@ import { expect, test } from '@playwright/test';
 import {
   isAdjacentDuplicateEncounterPatch,
   observedEncounterPatchRevision,
+  preferNewerEncounterSnapshot,
   reconcileEncounterPatchResponse,
   rollbackEncounterPatchError,
   type QueuedEncounterPatch,
@@ -34,6 +35,38 @@ test.describe('encounterPatchQueue unit tests — rollbackEncounterPatchError', 
     ];
     const reconciled = reconcileEncounterPatchResponse(updated, pending, 'q1', 1);
     expect(reconciled).toEqual({ id: 1, gridScale: 5, name: 'Boss Fight' });
+  });
+
+  test('preferNewerEncounterSnapshot rejects older keyed replays without blocking a current response', () => {
+    const cached = { id: 1, turnVersion: 12, updatedAt: '2026-08-08T12:00:02.000Z', currentCombatantId: 7, hp: 20 };
+    const olderTurnReplay = { id: 1, turnVersion: 11, updatedAt: '2026-08-08T12:00:01.000Z', currentCombatantId: 6, hp: 25 };
+    const olderSameTurnReplay = { id: 1, turnVersion: 12, updatedAt: '2026-08-08T12:00:01.000Z', currentCombatantId: 7, hp: 25 };
+    const current = { id: 1, turnVersion: 12, updatedAt: '2026-08-08T12:00:03.000Z', currentCombatantId: 8, hp: 20 };
+
+    expect(preferNewerEncounterSnapshot(cached, olderTurnReplay)).toBe(cached);
+    expect(preferNewerEncounterSnapshot(cached, olderSameTurnReplay)).toBe(cached);
+    expect(preferNewerEncounterSnapshot(cached, current)).toBe(current);
+    expect(preferNewerEncounterSnapshot(undefined, olderTurnReplay)).toBe(olderTurnReplay);
+  });
+
+  test('a delayed encounter PATCH response cannot replace a newer seeded turn', () => {
+    const seededTurn = {
+      id: 1,
+      turnVersion: 13,
+      updatedAt: '2026-08-08T12:00:03.000Z',
+      currentCombatantId: 8,
+      fog: [{ x: 1, y: 1 }],
+    };
+    const delayedPatchResponse = {
+      id: 1,
+      turnVersion: 12,
+      updatedAt: '2026-08-08T12:00:02.000Z',
+      currentCombatantId: 7,
+      fog: [{ x: 1, y: 1 }],
+    };
+    const reconciled = reconcileEncounterPatchResponse(delayedPatchResponse, [], 'fog-1', 1);
+
+    expect(preferNewerEncounterSnapshot(seededTurn, reconciled)).toBe(seededTurn);
   });
 
   test('rollbackEncounterPatchError restores previous values when failed patch has no overriding pending patch', () => {
