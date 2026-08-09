@@ -60,6 +60,7 @@ import {
   type RollCheckDefinition,
   checkCatalogForAdapter,
   checkRollExpr,
+  hasAdapterOwnedAttackRoll,
   initiativeModelForAdapter,
   sortCheckCatalog,
   formatCheckBreakdown,
@@ -532,6 +533,7 @@ export default function CharacterPage() {
                 onChange={load}
                 onError={setActionError}
                 roller={roller}
+                adapter={adapter}
                 packItems={packItems}
                 onShowInventory={() => setTab('build', { focus: 'inventory' })}
               />
@@ -2118,11 +2120,26 @@ function ActionsCard({
   onChange,
   onError,
   roller,
+  adapter,
   packItems,
   onShowInventory,
-}: SheetCardProps & { roller: Roller; packItems: InventoryItem[]; onShowInventory: () => void }) {
+}: SheetCardProps & { roller: Roller; adapter: RuleSystemAdapter; packItems: InventoryItem[]; onShowInventory: () => void }) {
   const { t } = useTranslation();
   const [adding, setAdding] = useState(false);
+  // Two reasons a printed to-hit must NOT become a roll chip:
+  //
+  //  - `POST /campaigns/:id/roll` needs a writable campaign, so on an archived one the chip
+  //    could only ever 403 — the same authority the rest of this sheet gates on.
+  //  - `toHitExpr` builds `1d20 + bonus`. That matches what the resolver would do only while
+  //    the adapter has no attack maths of its own; once it declares `resolveAttack` (Open
+  //    Legend rolls an exploding attribute pool), the SAME action rolled here and rolled in
+  //    the encounter would produce materially different numbers.
+  //
+  // Either way the value still reads as text — the number is real, the roll is not offered.
+  const adapterOwnsAttack = hasAdapterOwnedAttackRoll(adapter);
+  const canRollAttack = canEdit && !adapterOwnsAttack;
+  const canRollDamage = canEdit;
+
   // Which row's details disclosure is open (design template's "Details ▾ / Hide ▴").
   // A sheet action is keyed by index, an equipped-gear action by `item:<id>`.
   const [openDetails, setOpenDetails] = useState<string | null>(null);
@@ -2359,7 +2376,7 @@ function ActionsCard({
               {(action.toHit || action.damage) && (
                 <div className="flex gap-2 flex-wrap items-center mt-1">
                   {action.toHit &&
-                    (attackExpr ? (
+                    (attackExpr && canRollAttack ? (
                       <RollChip
                         label={`to hit ${action.toHit}`}
                         title={`Roll ${action.name} attack (${attackExpr}) · ${rollModeSummary(mode)}`}
@@ -2370,12 +2387,21 @@ function ActionsCard({
                         }}
                       />
                     ) : (
-                      <span className="text-xs text-slate-400" title="Not a rollable to-hit value — edit the action and use +5, -1, or 1d20+5">
-                        to hit {action.toHit} (not rollable)
+                      <span
+                        className="text-xs text-slate-400"
+                        title={
+                          adapterOwnsAttack
+                            ? "This system rolls its own attack — use the action in an encounter so the rules engine resolves it"
+                            : !canEdit
+                              ? 'Read-only campaign'
+                              : 'Not a rollable to-hit value — edit the action and use +5, -1, or 1d20+5'
+                        }
+                      >
+                        to hit {action.toHit}
                       </span>
                     ))}
                   {action.damage &&
-                    (dmgExpr ? (
+                    (dmgExpr && canRollDamage ? (
                       <RollChip
                         label={action.damage}
                         title={`Roll ${action.name} damage (${dmgExpr})`}
@@ -2492,7 +2518,7 @@ function ActionsCard({
                       // reads as text rather than vanishing — same as a sheet action's row.
                       <div className="flex gap-2 flex-wrap items-center mt-1">
                         {granted.toHit &&
-                          (attackExpr ? (
+                          (attackExpr && canRollAttack ? (
                             <RollChip
                               label={`to hit ${granted.toHit}`}
                               title={`Roll ${granted.name} attack (${attackExpr})`}
@@ -2506,12 +2532,21 @@ function ActionsCard({
                               }}
                             />
                           ) : (
-                            <span className="text-xs text-slate-400" title="Not a rollable to-hit value — edit the item's action and use +5, -1, or 1d20+5">
-                              to hit {granted.toHit} (not rollable)
+                            <span
+                              className="text-xs text-slate-400"
+                              title={
+                                adapterOwnsAttack
+                                  ? "This system rolls its own attack — use the item in an encounter so the rules engine resolves it"
+                                  : !canEdit
+                                    ? 'Read-only campaign'
+                                    : "Not a rollable to-hit value — edit the item's action and use +5, -1, or 1d20+5"
+                              }
+                            >
+                              to hit {granted.toHit}
                             </span>
                           ))}
                         {granted.damage &&
-                          (dmgExpr ? (
+                          (dmgExpr && canRollDamage ? (
                             <RollChip
                               label={granted.damage}
                               title={`Roll ${granted.name} damage (${dmgExpr})`}

@@ -168,7 +168,13 @@ test.describe('character sheet play surface', () => {
     // A campaign of its own: archiving the shared seeded one would break every other spec.
     const campaign = await (await ctx.post('/api/v1/campaigns', { data: { name: 'Archived Sheet Campaign' } })).json();
     const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaign.id}/characters`, {
-      data: { name: 'Frozen In Amber', className: 'Fighter', level: 3, stats: { STR: 16, DEX: 14, CON: 12, INT: 10, WIS: 10, CHA: 8 } },
+      data: {
+        name: 'Frozen In Amber',
+        className: 'Fighter',
+        level: 3,
+        stats: { STR: 16, DEX: 14, CON: 12, INT: 10, WIS: 10, CHA: 8 },
+        actions: [{ name: 'Greataxe', kind: 'melee', toHit: '+9', damage: '2d6+4', targetAc: '', notes: '' }],
+      },
     })).json()).id as number;
 
     try {
@@ -176,6 +182,7 @@ test.describe('character sheet play surface', () => {
       await page.goto(`/c/${campaign.id}/characters/${characterId}?tab=play`);
       await expect(page.getByRole('button', { name: /^Roll STR check/ })).toBeVisible();
       await expect(page.getByRole('button', { name: /^Roll initiative/ })).toBeVisible();
+      await expect(page.getByRole('button', { name: /to hit \+9/ })).toBeVisible();
 
       const archived = await ctx.patch(`/api/v1/campaigns/${campaign.id}`, { data: { status: 'paused' } });
       expect(archived.ok()).toBeTruthy();
@@ -186,6 +193,11 @@ test.describe('character sheet play surface', () => {
       await expect(page.getByRole('button', { name: /^Roll STR check/ })).toHaveCount(0);
       await expect(page.getByRole('button', { name: /^Roll initiative/ })).toHaveCount(0);
       await expect(page.getByRole('button', { name: /^Roll .* save/ })).toHaveCount(0);
+      // `POST /campaigns/:id/roll` needs a writable campaign too, so the action chips go
+      // static as well — the values still read, the rolls are simply not offered.
+      await expect(page.locator('#character-section-actions').getByText('to hit +9')).toBeVisible();
+      await expect(page.getByRole('button', { name: /to hit \+9/ })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /2d6\+4/ })).toHaveCount(0);
     } finally {
       // Trashing notifies members ("A campaign you were in was deleted") and the bell only
       // fetches the newest 30, so a leftover notice here pushes an older seeded one out of
@@ -223,6 +235,42 @@ test.describe('character sheet play surface', () => {
       // Trashing notifies members ("A campaign you were in was deleted") and the bell only
       // fetches the newest 30, so a leftover notice here pushes an older seeded one out of
       // range for another spec. Purge removes the campaign's notifications with it.
+      await ctx.delete(`/api/v1/campaigns/${campaign.id}`);
+      await ctx.delete(`/api/v1/campaigns/${campaign.id}/purge`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
+   * Regression (Codex review on #2115): `toHitExpr` builds `1d20 + bonus`, which matches the
+   * resolver only while the adapter has no attack maths of its own. Open Legend declares
+   * `resolveAttack` (an exploding attribute pool), so the SAME action rolled from the sheet
+   * and rolled through the encounter would produce materially different numbers.
+   */
+  test('a system that owns its attack roll gets no d20 to-hit chip', async ({ page, baseURL }) => {
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const campaign = await (await ctx.post('/api/v1/campaigns', { data: { name: 'Open Legend Attacks', ruleSystem: 'open-legend' } })).json();
+
+    try {
+      const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaign.id}/characters`, {
+        data: {
+          name: 'Swings A Pool',
+          level: 3,
+          stats: { MIG: 5 },
+          actions: [{ name: 'Heavy Swing', kind: 'melee', toHit: '+7', damage: '1d8+3', targetAc: '', notes: '' }],
+        },
+      })).json()).id as number;
+
+      await page.goto(`/c/${campaign.id}/characters/${characterId}?tab=play`);
+      const actions = page.locator('#character-section-actions');
+      await expect(actions.getByText('Heavy Swing')).toBeVisible();
+      // The printed number still reads — it is real; the d20 roll is what would be wrong.
+      await expect(actions.getByText('to hit +7')).toBeVisible();
+      await expect(actions.getByRole('button', { name: /to hit \+7/ })).toHaveCount(0);
+      // Damage dice are system-neutral, so that chip stays.
+      await expect(actions.getByRole('button', { name: /1d8\+3/ })).toBeVisible();
+    } finally {
       await ctx.delete(`/api/v1/campaigns/${campaign.id}`);
       await ctx.delete(`/api/v1/campaigns/${campaign.id}/purge`);
       await ctx.dispose();

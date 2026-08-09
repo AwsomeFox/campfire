@@ -4321,6 +4321,19 @@ export function hasNeutralD20ChecksForAdapter(adapter?: Pick<RuleSystemAdapter, 
   return adapter?.hasNeutralD20Checks !== false;
 }
 
+/**
+ * Whether this system owns its attack roll — see {@link RuleSystemAdapter.resolveAttack}.
+ *
+ * A UI that builds a `1d20 + bonus` expression from an action's printed to-hit is only
+ * correct while the resolver would do the same. Once an adapter declares `resolveAttack`
+ * (Open Legend rolls an exploding attribute pool), the same action used through the
+ * authoritative resolver produces materially different numbers, so a hand-built d20 chip
+ * would disagree with the encounter for the very same attack.
+ */
+export function hasAdapterOwnedAttackRoll(adapter?: Pick<RuleSystemAdapter, 'resolveAttack'> | null): boolean {
+  return typeof adapter?.resolveAttack === 'function';
+}
+
 // ---------- adapter-defined grid distance rules (issue #467) ----------
 // Square grids default to Euclidean straight-line ruler distance; hex grids use
 // cube/axial hex steps. 5e optionally counts every other diagonal as 2 squares.
