@@ -2365,6 +2365,31 @@ a:hover .cf-name-reveal {
     bottom: 16px;
   }
 }
+/*
+ * Phone widths: keep the toast's height predictable.
+ *
+ * It is anchored to the bottom and grows UPWARD, and its meta row wraps — so a
+ * roll whose dice breakdown needed a second line made the toast a line taller
+ * and pushed its top edge into whatever sits above. In the encounter cockpit
+ * that is the side panel's tab strip: the tabs were then covered for the
+ * toast's full 15s life, and tapping one hit the toast instead. A 44px target
+ * that silently stops working after every roll is the bug; the wrap was only
+ * how it got there.
+ *
+ * The meta row is a one-line summary — expression, dice, crit note — and the
+ * full breakdown lives in the shared dice log, so clipping it here loses
+ * nothing that is not a tap away. Tightening the box buys the clearance back.
+ */
+@media (max-width: 420px) {
+  .cf-roll-result-toast {
+    gap: 8px;
+    padding: 8px 8px 8px 12px;
+  }
+  .cf-roll-result-toast__meta {
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+}
 
 /* --- BG-style dice roll overlay (issue #1352) --- */
 .cf-dice-roll-overlay {
