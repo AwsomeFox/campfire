@@ -900,7 +900,7 @@ export class EncountersController {
       'device advancing simultaneously gets a 409 rather than silently skipping a combatant.',
   })
   @ApiResponse({ status: 201, description: 'Encounter with advanced round/turnIndex (or the replayed original response for a retried idempotencyKey).' })
-  @ApiResponse({ status: 400, description: 'Encounter is not running, or has no combatants (issue #2091) — end the encounter instead of advancing an empty fight.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not running, or has no combatants (issue #2091) — end the encounter instead of continuing an empty fight.' })
   @ApiResponse({ status: 409, description: 'The turn already advanced (expectedCurrentCombatantId CAS), or the idempotencyKey was reused for a different action.' })
   async nextTurn(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterNextTurnDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
@@ -968,7 +968,7 @@ export class EncountersController {
       'Timed conditions and active effects ticked while advancing are restored automatically from a snapshot.',
   })
   @ApiResponse({ status: 201, description: 'Encounter turn pointer moved back.' })
-  @ApiResponse({ status: 400, description: 'Encounter is not running.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not running, or has no combatants (issue #2111) — end the encounter instead of continuing an empty fight.' })
   async undoTurn(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');

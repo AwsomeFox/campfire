@@ -33,8 +33,14 @@ import { makeTempDataDir } from './fixtures';
  * mechanism issue #2091 reported: "next-turn keeps returning 201 without advancing
  * anything... no other encounter can be started until the DM manually ends the empty
  * one."
+ *
+ * Issue #2111 — undo-turn is a SEPARATE code path from advanceCurrentTurn with its own
+ * roster read, and (before this fix) had no equivalent guard: it still returned success
+ * on the same empty-running state, silently no-opping the round at >= 1 while still
+ * writing a real audit log entry and a "turn advance undone" event for a turn that never
+ * moved. The third `it` below proves undo-turn now agrees with next-turn/end-turn.
  */
-describe('encounter next-turn/end-turn on an empty RUNNING roster (issue #2091, service layer)', () => {
+describe('encounter next-turn/end-turn/undo-turn on an empty RUNNING roster (issues #2091, #2111, service layer)', () => {
   let dataDir: string;
 
   afterEach(() => {
@@ -156,6 +162,33 @@ describe('encounter next-turn/end-turn on an empty RUNNING roster (issue #2091, 
       ctx.encountersService.endTurn(ctx.encounterId, {}, dmUser, 'dm'),
     ).rejects.toBeInstanceOf(BadRequestException);
 
+    const [after] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
+    expect(after.status).toBe('running');
+    expect(after.round).toBe(2);
+  });
+
+  it('undo-turn on an empty running encounter is also rejected, not a silent no-op success (issue #2111)', async () => {
+    const ctx = seedEmptyRunningEncounter();
+    const [before] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
+    expect(before.status).toBe('running');
+    expect(before.round).toBe(2);
+
+    // Same single-invocation pattern as the next-turn test above: capture the one thrown
+    // error and assert both its type and message from it.
+    let caught: unknown;
+    try {
+      await ctx.encountersService.undoTurn(ctx.encounterId, dmUser, 'dm');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(BadRequestException);
+    const body = (caught as BadRequestException).getResponse() as { message?: string };
+    expect(String(body.message)).toMatch(/no combatants/i);
+
+    // Without the #2111 guard, undo-turn "succeeds" here: retreatEncounterTurn's
+    // empty-sorted branch floors the round at 1 (Math.max(1, round)) and the function
+    // still writes a real audit log entry and a "turn advance undone" event for a turn
+    // that never moved. It must instead refuse, matching next-turn/end-turn above.
     const [after] = ctx.orm.select().from(encounters).where(eq(encounters.id, ctx.encounterId)).limit(1).all();
     expect(after.status).toBe('running');
     expect(after.round).toBe(2);
