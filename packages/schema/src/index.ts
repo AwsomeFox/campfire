@@ -3119,6 +3119,7 @@ export const RevisionEntityType = z.enum([
   'scheduled_session',
   'session_zero',
   'comment',
+  'story_arc',
   'story_beat',
   'campaign_library_monster',
 ]);
@@ -7820,6 +7821,9 @@ export const AiGenerationProvenance = z.object({
   }),
   sourceIds: z.record(z.string(), z.array(z.union([Id, z.string()])).or(Id).or(z.string()).or(z.null())).default({}),
   sourceHash: z.string().nullable().default(null),
+  // Hash of the authoritative domain context supplied to a rewrite model. Approval
+  // revalidates it so changes to dependent source rows cannot land stale AI prose.
+  sourceContextHash: z.string().length(64).nullable().optional(),
   promptVersion: z.string().max(80),
   promptHash: z.string(),
   ruleset: z.object({
@@ -7871,10 +7875,18 @@ export const AiGenerationProvenance = z.object({
 });
 export type AiGenerationProvenance = z.infer<typeof AiGenerationProvenance>;
 
+// Proposal targets include generated/non-note-pin surfaces and Storylines entities that
+// are intentionally not part of the general EntityType relation (#313/#1311).
+export const ProposalEntityType = z.union([
+  EntityType,
+  z.enum(['map', 'rule_entry', 'story_arc', 'story_beat']),
+]);
+export type ProposalEntityType = z.infer<typeof ProposalEntityType>;
+
 export const Proposal = z.object({
   id: Id,
   campaignId: Id,
-  entityType: EntityType,
+  entityType: ProposalEntityType,
   // For creates this is null at propose time; once an approved create-proposal has
   // been applied it is backfilled with the created row's id, so the record's
   // provenance points at the entity it produced (issue #124).
@@ -8065,7 +8077,7 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
   localByDefault:
     'By default Campfire stores your campaign on this server and does not contact any LLM vendor. Connected MCP agents read through the API; their traffic stays between your agent and your server unless you point the agent at an external model.',
   externalException:
-    'When you configure and save an external provider (OpenAI-compatible, Anthropic, or Gemini), Campfire sends prompts to that endpoint for the AI DM seat, Co-DM drafts, scheduled scribe recaps, and map generation. Only the context categories below are included — including DM steering you configure. Hidden entities, dmSecret fields, and other DM-only secrets are stripped by default unless you explicitly opt in (map generation only).',
+    'When you configure and save an external provider (OpenAI-compatible, Anthropic, or Gemini), Campfire sends prompts to that endpoint for the AI DM seat, Co-DM drafts, scheduled scribe recaps, and map generation. Only the context categories below are included — including DM steering you configure. Hidden entities, dmSecret fields, and other DM-only secrets are stripped by default unless you explicitly opt in for a map or storyline rewrite request.',
   contextCategories: [
     {
       label: 'Campaign summary',
@@ -8098,6 +8110,11 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
       copyKeyword: 'scribe',
     },
     {
+      label: 'Storyline rewrite context',
+      description: 'DM-only arc summaries, beat bodies, branches, and linked-play labels only when you explicitly opt in per rewrite request.',
+      copyKeyword: 'storyline',
+    },
+    {
       label: 'Map generation prompts',
       description: 'Your map prompt and theme; campaign secrets only if you check the explicit opt-in.',
       copyKeyword: 'map',
@@ -8112,7 +8129,7 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
     'Stored API keys (write-only; never sent to any provider)',
     'DM-only secrets by default (hidden entities, dmSecret fields, unexplored locations)',
     "Other campaigns' data",
-    'Map campaign secrets unless you explicitly opt in per request',
+    'Map and storyline-rewrite campaign secrets unless you explicitly opt in per request',
   ],
   retentionNote:
     "Campfire does not control how your chosen provider stores or retains prompts, tool results, or model replies. Review that vendor's privacy policy and data-retention terms before saving a provider. Removing a provider stops new outbound calls; it does not erase data already held by the vendor.",
@@ -9137,7 +9154,7 @@ export function aiDmReadinessProgress(
 // (#304/#306); the proposal payload carries their (seeded) params and approval
 // runs the generator. Every draft is metered against the seat budget and the
 // proposer is attributed to the AI seat + model, not a raw token name.
-export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'arc', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
 export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
 
 // POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.
@@ -9150,6 +9167,13 @@ export const CoDmDraftRequest = z.object({
   narrationLanguage: NarrationLanguage.optional(), // per-run override (#635)
   // When target is `beat`, pin the drafted beat(s) to this arc (#1307).
   arcId: Id.optional(),
+  // When target is `arc` or `beat`, rewrite this existing entity and file an UPDATE
+  // proposal against the same id (#1311). The server loads the current snapshot and
+  // related storyline context; clients never supply authoritative context themselves.
+  entityId: Id.optional(),
+  // Storyline rewrites contain DM-only prep. An actually external provider may receive
+  // that context only after this per-request opt-in; local/injected providers do not need it.
+  includeCampaignSecrets: z.boolean().default(false),
 });
 export type CoDmDraftRequest = z.infer<typeof CoDmDraftRequest>;
 

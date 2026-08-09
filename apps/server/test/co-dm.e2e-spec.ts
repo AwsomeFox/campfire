@@ -1,8 +1,9 @@
-import { rulePacks } from '../src/db/schema';
-import { DB } from '../src/db/db.module';
+import { rulePacks, storyBranches } from '../src/db/schema';
+import { DB, type DrizzleDb } from '../src/db/db.module';
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiProviderConfigService } from '../src/modules/ai-provider-config/ai-provider-config.service';
+import { StorylinesService } from '../src/modules/storylines/storylines.service';
 
 /**
  * Co-DM authoring (issue #313) — the AI drafts content that lands in the approval queue as
@@ -129,6 +130,358 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     expect(after.body.beats).toHaveLength(1);
     expect(after.body.beats[0].title).toBe('Gate confrontation');
     expect(after.body.beats[0].body).toContain('city gate');
+  });
+
+  it('rewrites an existing beat with authoritative arc, branch, and linked-play context', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Ashen Crown', summary: 'The crown is lost beneath the city.' });
+    const beat = await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Find the witness', body: 'The party questions the ferryman.' });
+    const nextBeat = await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Cross the black river' });
+    await request(h.server)
+      .post(`/api/v1/beats/${beat.body.id}/branches`)
+      .set(dm)
+      .send({ label: 'The ferryman bargains', toBeatId: nextBeat.body.id });
+    const session = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 401, title: 'The Ferryman Session' });
+    await request(h.server)
+      .patch(`/api/v1/beats/${beat.body.id}`)
+      .set(dm)
+      .send({ sessionId: session.body.id, expectedUpdatedAt: beat.body.updatedAt });
+
+    h.script({ text: JSON.stringify({ title: 'The Ferryman Knows', body: 'The witness demands a dangerous favor.' }) });
+    const rewritten = await draft({
+      target: 'beat',
+      entityId: beat.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Raise the stakes but keep the ferryman central.',
+    });
+
+    expect(rewritten.status).toBe(201);
+    expect(rewritten.body.entityType).toBe('story_beat');
+    expect(rewritten.body.proposals[0]).toMatchObject({
+      action: 'update',
+      entityId: beat.body.id,
+      payload: { title: 'The Ferryman Knows', body: 'The witness demands a dangerous favor.' },
+    });
+    const sent = JSON.parse(h.mock.received.at(-1)!.messages.at(-1)!.content ?? '');
+    expect(sent.rewriteInstructions).toContain('Raise the stakes');
+    expect(sent.currentStoryline.arc).toMatchObject({ title: 'Ashen Crown', summary: 'The crown is lost beneath the city.' });
+    expect(sent.currentStoryline.beat).toMatchObject({
+      id: beat.body.id,
+      title: 'Find the witness',
+      body: 'The party questions the ferryman.',
+    });
+    expect(sent.currentStoryline.beat.branches).toEqual([
+      expect.objectContaining({ label: 'The ferryman bargains', toBeatId: nextBeat.body.id }),
+    ]);
+    expect(sent.currentStoryline.beat.linkedPlayRecords.session).toMatchObject({
+      id: session.body.id,
+      title: 'The Ferryman Session',
+    });
+
+    const beforeApprove = await request(h.server).get(`/api/v1/beats/${beat.body.id}`).set(dm);
+    expect(beforeApprove.body.title).toBe('Find the witness');
+
+    const approved = await request(h.server)
+      .post(`/api/v1/proposals/${rewritten.body.proposalIds[0]}/approve`)
+      .set(dm)
+      .send({});
+    expect(approved.status).toBe(201);
+    expect(approved.body.entityId).toBe(beat.body.id);
+    const afterApprove = await request(h.server).get(`/api/v1/beats/${beat.body.id}`).set(dm);
+    expect(afterApprove.body).toMatchObject({
+      id: beat.body.id,
+      title: 'The Ferryman Knows',
+      body: 'The witness demands a dangerous favor.',
+    });
+  });
+
+  it('rejects incomplete storyline rewrite responses instead of erasing existing fields', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Complete Arc', summary: 'Keep this summary.' });
+    const beat = await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Complete Beat', body: 'Keep this body.' });
+
+    h.script({ text: JSON.stringify({ summary: 'A summary without its title.' }) });
+    const incompleteArc = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Rewrite the arc.',
+    });
+    expect(incompleteArc.status).toBe(422);
+    expect(incompleteArc.body.message).toContain('must include both title and summary');
+
+    h.script({ text: JSON.stringify({ title: 'A title without its body' }) });
+    const incompleteBeat = await draft({
+      target: 'beat',
+      entityId: beat.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Rewrite the beat.',
+    });
+    expect(incompleteBeat.status).toBe(422);
+    expect(incompleteBeat.body.message).toContain('must include both title and body');
+
+    const unchangedArc = await request(h.server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+    const unchangedBeat = await request(h.server).get(`/api/v1/beats/${beat.body.id}`).set(dm);
+    expect(unchangedArc.body).toMatchObject({ title: 'Complete Arc', summary: 'Keep this summary.' });
+    expect(unchangedBeat.body).toMatchObject({ title: 'Complete Beat', body: 'Keep this body.' });
+  });
+
+  it('rewrites an arc in place with revision history and rejects approval after the target goes stale', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Quiet Rebellion', summary: 'The guilds exchange coded letters.' });
+    await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'A very detailed beat', body: 'x'.repeat(3_000) });
+
+    h.script({ text: JSON.stringify({ title: 'The Ember Rebellion', summary: 'The guilds prepare to strike before dawn.' }) });
+    const rewritten = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Make the rebellion immediate and dangerous.',
+    });
+    expect(rewritten.status).toBe(201);
+    expect(rewritten.body.proposals[0]).toMatchObject({
+      action: 'update',
+      entityType: 'story_arc',
+      entityId: arc.body.id,
+    });
+    const sent = JSON.parse(h.mock.received.at(-1)!.messages.at(-1)!.content ?? '');
+    expect(sent.currentStoryline.arc.beats[0]).toMatchObject({
+      title: 'A very detailed beat',
+      bodyTruncated: true,
+    });
+    expect(sent.currentStoryline.arc.beats[0].body).toHaveLength(2_000);
+
+    const approved = await request(h.server)
+      .post(`/api/v1/proposals/${rewritten.body.proposalIds[0]}/approve`)
+      .set(dm)
+      .send({});
+    expect(approved.status).toBe(201);
+    expect(approved.body.entityId).toBe(arc.body.id);
+    const history = await request(h.server).get(`/api/v1/revisions/story_arc/${arc.body.id}`).set(dm);
+    expect(history.status).toBe(200);
+    expect(history.body).toEqual([
+      expect.objectContaining({ snapshot: { summary: 'The guilds exchange coded letters.' } }),
+    ]);
+    const audit = await h.getAudit(campaignId);
+    expect(audit.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'storyline.arc.update',
+        entityId: arc.body.id,
+        actor: 'dev:ai-eval-dm',
+      }),
+    ]));
+
+    const current = await request(h.server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+    h.script({ text: JSON.stringify({ title: 'The Ember Rebellion', summary: 'A final, sharper rewrite.' }) });
+
+    // Hold the provider after the service has loaded its authoritative context. A human
+    // edit landing in this window must not become the AI proposal's base snapshot, because
+    // the model never saw it; approval should therefore report a stale target (#1311).
+    const originalGenerate = h.mock.generate.bind(h.mock);
+    let markProviderStarted!: () => void;
+    let releaseProvider!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { markProviderStarted = resolve; });
+    const providerRelease = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    h.mock.generate = async (req, opts) => {
+      markProviderStarted();
+      await providerRelease;
+      return originalGenerate(req, opts);
+    };
+    const staleDraftPromise = draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Sharpen it again.',
+    }).then((res) => res);
+    let staleDraft!: request.Response;
+    try {
+      await providerStarted;
+      const humanEdit = await request(h.server)
+        .patch(`/api/v1/arcs/${arc.body.id}`)
+        .set(dm)
+        .send({ summary: 'A human edit landed first.', expectedUpdatedAt: current.body.updatedAt });
+      expect(humanEdit.status).toBe(200);
+      releaseProvider();
+      staleDraft = await staleDraftPromise;
+    } finally {
+      releaseProvider();
+      h.mock.generate = originalGenerate;
+    }
+    expect(staleDraft.body.proposals[0]).toMatchObject({
+      baseUpdatedAt: current.body.updatedAt,
+      snapshot: { summary: current.body.summary },
+    });
+    const revisedHistory = await request(h.server).get(`/api/v1/revisions/story_arc/${arc.body.id}`).set(dm);
+    expect(revisedHistory.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        snapshot: { summary: 'The guilds prepare to strike before dawn.' },
+        authorSource: 'ai',
+        authorUserId: `ai-dm:${campaignId}`,
+      }),
+    ]));
+    const staleApprove = await request(h.server)
+      .post(`/api/v1/proposals/${staleDraft.body.proposalIds[0]}/approve`)
+      .set(dm)
+      .send({});
+    expect(staleApprove.status).toBe(409);
+    expect(staleApprove.body.code).toBe('STALE_PROPOSAL_TARGET');
+  });
+
+  it('rejects arc rewrite approval when branch context changes or a linked session is trashed', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Context Arc', summary: 'The old plan.' });
+    const beat = await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Context Beat', body: 'The party waits.' });
+    const session = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 402, title: 'Context Session' });
+    const linkedBeat = await request(h.server)
+      .patch(`/api/v1/beats/${beat.body.id}`)
+      .set(dm)
+      .send({ sessionId: session.body.id, expectedUpdatedAt: beat.body.updatedAt });
+    expect(linkedBeat.status).toBe(200);
+
+    h.script({ text: JSON.stringify({ title: 'Context Arc Revised', summary: 'A plan based on the current branch.' }) });
+    const branchProposal = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Rewrite around the available choices.',
+    });
+    expect(branchProposal.body.proposals[0].generationProvenance.sourceContextHash).toMatch(/^[a-f0-9]{64}$/);
+
+    const branch = await request(h.server)
+      .post(`/api/v1/beats/${beat.body.id}/branches`)
+      .set(dm)
+      .send({ label: 'Take the hidden road' });
+    expect(branch.status).toBe(201);
+    const branchStale = await request(h.server)
+      .post(`/api/v1/proposals/${branchProposal.body.proposalIds[0]}/approve`)
+      .set(dm)
+      .send({});
+    expect(branchStale.status).toBe(409);
+    expect(branchStale.body.code).toBe('STALE_PROPOSAL_TARGET');
+
+    h.script({ text: JSON.stringify({ title: 'Context Arc Revised', summary: 'A plan based on the linked session.' }) });
+    const linkedProposal = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Rewrite around the linked play record.',
+    });
+    const sessionTrashed = await request(h.server)
+      .delete(`/api/v1/sessions/${session.body.id}`)
+      .set(dm);
+    expect(sessionTrashed.status).toBe(200);
+    const linkedStale = await request(h.server)
+      .post(`/api/v1/proposals/${linkedProposal.body.proposalIds[0]}/approve`)
+      .set(dm)
+      .send({});
+    expect(linkedStale.status).toBe(409);
+    expect(linkedStale.body.code).toBe('STALE_PROPOSAL_TARGET');
+  });
+
+  it('checks rewrite dependencies in the same transaction as the storyline update', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Atomic Context Arc', summary: 'No branch has landed yet.' });
+    const beat = await request(h.server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Atomic Context Beat', body: 'The party chooses a route.' });
+
+    h.script({ text: JSON.stringify({ title: 'Atomic Rewrite', summary: 'The route is still undecided.' }) });
+    const proposal = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Rewrite around the current choices.',
+    });
+
+    const storylines = h.ctx.app.get(StorylinesService);
+    const db = h.ctx.app.get<DrizzleDb>(DB);
+    const originalGetRewriteContext = storylines.getRewriteContext.bind(storylines);
+    let interleaved = false;
+    const contextRead = jest.spyOn(storylines, 'getRewriteContext').mockImplementation((...args) => {
+      const context = originalGetRewriteContext(...args);
+      if (!interleaved && args[1] === 'arc' && args[2] === arc.body.id) {
+        interleaved = true;
+        db.insert(storyBranches)
+          .values({ beatId: beat.body.id, label: 'A branch landed during approval' })
+          .run();
+      }
+      return context;
+    });
+
+    try {
+      const approval = await request(h.server)
+        .post(`/api/v1/proposals/${proposal.body.proposalIds[0]}/approve`)
+        .set(dm)
+        .send({});
+      expect(interleaved).toBe(true);
+      expect(approval.status).toBe(409);
+      expect(approval.body.code).toBe('STALE_PROPOSAL_TARGET');
+      const unchanged = await request(h.server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+      expect(unchanged.body).toMatchObject({
+        title: 'Atomic Context Arc',
+        summary: 'No branch has landed yet.',
+      });
+    } finally {
+      contextRead.mockRestore();
+    }
+  });
+
+  it('rejects an oversized arc rewrite context before calling the provider', async () => {
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Oversized arc', summary: 's'.repeat(50_000) });
+    for (let index = 0; index < 16; index += 1) {
+      const beat = await request(h.server)
+        .post(`/api/v1/arcs/${arc.body.id}/beats`)
+        .set(dm)
+        .send({ title: `Large beat ${index + 1}`, body: 'b'.repeat(3_000) });
+      expect(beat.status).toBe(201);
+    }
+    const providerCallsBefore = h.mock.received.length;
+
+    const response = await draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'p'.repeat(20_000),
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body.message).toContain('Storyline rewrite context is too large');
+    expect(h.mock.received).toHaveLength(providerCallsBefore);
   });
 
   it('rejects beat drafts that target an arc from another campaign', async () => {
@@ -506,11 +859,11 @@ describe('co-DM authoring — external-AI consent provenance is explicit, never 
     await h.close();
   });
 
-  it('records consent.externalSend=false on the injected/no-op seam (the legacy default, no provider configured)', async () => {
+  it('treats a custom injected provider as external when no provider config exists', async () => {
     const campaignId = await h.createCampaign('Consent Injected Seam');
     await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
 
-    h.script({ text: JSON.stringify({ name: 'Local Only Warden' }) });
+    h.script({ text: JSON.stringify({ name: 'Injected Warden' }) });
     const res = await request(h.server)
       .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
       .set(dm)
@@ -519,7 +872,7 @@ describe('co-DM authoring — external-AI consent provenance is explicit, never 
     expect(res.status).toBe(201);
     const consent = res.body.proposals[0].generationProvenance.consent;
     expect(consent).toBeTruthy();
-    expect(consent.externalSend).toBe(false);
+    expect(consent.externalSend).toBe(true);
     expect(consent.campaignPolicy).toBe('member_consent'); // campaign default
     // Structurally zero on every co-DM draft — this path never assembles member content.
     expect(consent.includedInboxCount).toBe(0);
@@ -548,35 +901,64 @@ describe('co-DM authoring — external-AI consent provenance is explicit, never 
     expect(consent.campaignPolicy).toBe('member_consent');
   });
 
+  it('requires per-request opt-in before an unconfigured custom provider loads DM-only storyline prep', async () => {
+    const campaignId = await h.createCampaign('Injected Storyline Privacy Boundary');
+    await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'The Hidden Knife', summary: 'The trusted regent is the traitor.' });
+    expect(arc.status).toBe(201);
+
+    const storylines = h.ctx.app.get(StorylinesService);
+    const contextRead = jest.spyOn(storylines, 'getRewriteContext');
+    try {
+      const res = await request(h.server)
+        .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
+        .set(dm)
+        .send({ target: 'arc', entityId: arc.body.id, prompt: 'Raise the tension.' });
+
+      expect(res.status).toBe(422);
+      expect(res.body.message).toContain('includeCampaignSecrets');
+      expect(contextRead).not.toHaveBeenCalled();
+    } finally {
+      contextRead.mockRestore();
+    }
+  });
+
   /**
    * Review finding (post-#2041): a first draft of this fix set `externalSend = true`
-   * whenever a provider config resolved, which ignored `AI_PROVIDER_ENDPOINT_IS_LOCAL` —
-   * the operator's explicit declaration that the configured endpoint is on-box (an Ollama
+   * whenever a provider could transmit, which ignored `AI_PROVIDER_ENDPOINT_IS_LOCAL` —
+   * the operator's explicit declaration that the effective endpoint is on-box (an Ollama
    * install, matching this project's one-Docker-image / no-required-external-services
    * premise) — and so misreported a purely local generation as external. `ScribeService`
    * and `InboxSweepService` already honored this flag via `resolveEgress`; co-DM now shares
    * the exact same `resolveAiProvenanceEgress` helper (common/ai-provenance-endpoint.ts)
    * rather than re-implementing half the rule.
    */
-  it('records consent.externalSend=false when the operator has declared the configured endpoint local (AI_PROVIDER_ENDPOINT_IS_LOCAL)', async () => {
+  it('allows an injected provider declared local to rewrite without external-send consent', async () => {
     const campaignId = await h.createCampaign('Consent Operator-Declared Local');
     await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
-    const providerRes = await h.configureProvider(campaignId);
-    expect(providerRes.status).toBe(200);
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'On-Box Arc', summary: 'Only the local model may see this.' });
+    expect(arc.status).toBe(201);
 
     const priorLocalFlag = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
     process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'true';
     try {
+      h.script({ text: JSON.stringify({ title: 'On-Box Rewrite', summary: 'The local model rewrote this.' }) });
       const res = await request(h.server)
         .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
         .set(dm)
-        .send({ target: 'npc', prompt: JSON.stringify({ name: 'On-Box Warden' }) });
+        .send({ target: 'arc', entityId: arc.body.id, prompt: 'Rewrite this locally.' });
 
       expect(res.status).toBe(201);
       const consent = res.body.proposals[0].generationProvenance.consent;
       expect(consent).toBeTruthy();
-      // A provider IS configured (genuinely serving the draft) but the operator declared
-      // the endpoint local, so nothing left the deployment — externalSend must be false.
+      // A custom provider is injected, but the operator declared its endpoint local, so
+      // nothing left the deployment and the external secret-content opt-in is not required.
       expect(consent.externalSend).toBe(false);
     } finally {
       if (priorLocalFlag === undefined) delete process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;

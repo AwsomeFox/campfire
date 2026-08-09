@@ -526,6 +526,7 @@ function ArcCard({
   const [contentError, setContentError] = useState<string | null>(null);
   const [contentSaving, setContentSaving] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  const [historyNonce, setHistoryNonce] = useState(0);
   const editTriggerRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
   // Issue #688: surface a failed status/delete inline next to the arc's controls so the
@@ -604,6 +605,7 @@ function ArcCard({
       });
       setEditingContent(false);
       setContentConflict(null);
+      setHistoryNonce((n) => n + 1);
       restoreFocusRef.current = true;
       await onChange(entityDomId('arc', arc.id));
       announce(`Saved arc ${title}.`);
@@ -781,6 +783,17 @@ function ArcCard({
             Edit
           </Btn>
         )}
+        {canDmWrite && !editingContent && (
+          <DraftWithAiButton
+            campaignId={cid}
+            target="arc"
+            entityId={arc.id}
+            currentContent={{ title: arc.title, prose: arc.summary ?? '' }}
+            label="Edit with AI"
+            density="xs"
+            disabled={busy || contentSaving}
+          />
+        )}
         {canDmWrite && (
           <button
             type="button"
@@ -844,6 +857,20 @@ function ArcCard({
           }}
           onSave={() => void saveContent()}
           onCancel={cancelContentEdit}
+        />
+      )}
+      {canDmWrite && !editingContent && (
+        <RevisionHistoryPanel
+          entityType="story_arc"
+          entityId={arc.id}
+          currentSnapshot={{ summary: arc.summary ?? '' }}
+          expectedUpdatedAt={arc.updatedAt}
+          reloadNonce={historyNonce}
+          onRestored={() => {
+            setHistoryNonce((n) => n + 1);
+            void onChange(entityDomId('arc', arc.id));
+          }}
+          label="Arc history"
         />
       )}
 
@@ -1330,6 +1357,17 @@ function BeatRow({
           >
             Edit
           </Btn>
+        )}
+        {canDmWrite && !editingContent && (
+          <DraftWithAiButton
+            campaignId={cid}
+            target="beat"
+            entityId={beat.id}
+            currentContent={{ title: beat.title, prose: beat.body ?? '' }}
+            label="Edit with AI"
+            density="xs"
+            disabled={busy || contentSaving}
+          />
         )}
         {canDmWrite && (
           <button

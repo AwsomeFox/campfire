@@ -11,6 +11,7 @@ import { OPEN_LEGEND_PACK_SLUG, PF2E_PACK_SLUG } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { auditLog, campaigns } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
+import { MockAiProvider } from '../src/modules/ai-dm/providers';
 
 interface TextContent {
   type: 'text';
@@ -4550,6 +4551,69 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(provenance.consent!.includedInboxCount).toBe(0);
       expect(provenance.consent!.excludedInboxByConsent).toBe(0);
       expect(provenance.consent!.excludedInboxPrivate).toBe(0);
+    });
+
+    it('does not send DM-only storyline context externally without per-request opt-in', async () => {
+      const arc = await dmAgent
+        .post(`/api/v1/campaigns/${consentCampaignId}/arcs`)
+        .send({ title: 'Private MCP Arc', summary: 'A secret betrayal waits below.' });
+      expect(arc.status).toBe(201);
+      const generate = jest.spyOn(MockAiProvider.prototype, 'generate');
+      try {
+        const client = await mcpClient(dmToken);
+        const result = await client.callTool({
+          name: 'draft_content',
+          arguments: {
+            campaignId: consentCampaignId,
+            target: 'arc',
+            entityId: arc.body.id,
+            prompt: 'Make this arc more urgent.',
+          },
+        });
+        expect(result.isError).toBe(true);
+        expect(generate).not.toHaveBeenCalled();
+        expect(JSON.stringify(result.content)).toContain('includeCampaignSecrets');
+      } finally {
+        generate.mockRestore();
+      }
+    });
+
+    it('files an opted-in existing story arc rewrite as an update proposal through draft_content', async () => {
+      const arc = await dmAgent
+        .post(`/api/v1/campaigns/${consentCampaignId}/arcs`)
+        .send({ title: 'MCP Rewrite Arc', summary: 'The old summary.' });
+      expect(arc.status).toBe(201);
+      const generate = jest.spyOn(MockAiProvider.prototype, 'generate').mockResolvedValueOnce({
+        text: JSON.stringify({ title: 'MCP Rewrite Arc', summary: 'The deadline closes in.' }),
+        toolCalls: [],
+        usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
+        finishReason: 'stop',
+        model: 'mock-1',
+      });
+      try {
+        const client = await mcpClient(dmToken);
+        const result = await client.callTool({
+          name: 'draft_content',
+          arguments: {
+            campaignId: consentCampaignId,
+            target: 'arc',
+            entityId: arc.body.id,
+            prompt: 'Make this arc more urgent.',
+            includeCampaignSecrets: true,
+          },
+        });
+        expect(result.isError).toBeFalsy();
+        const proposal = (parseResult(result) as {
+          proposals: Array<{ action: string; entityType: string; entityId: number }>;
+        }).proposals[0];
+        expect(proposal).toMatchObject({
+          action: 'update',
+          entityType: 'story_arc',
+          entityId: arc.body.id,
+        });
+      } finally {
+        generate.mockRestore();
+      }
     });
 
     /**

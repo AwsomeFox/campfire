@@ -21,11 +21,13 @@ import {
   buildNarrationLanguageContract,
   resolveNarrationLanguage,
   StoryBeatProposalCreate,
+  StoryBeatUpdate,
+  StoryArcUpdate,
   ruleSystemAdapter,
 } from '@campfire/schema';
 import type { AiExternalContentPolicy, AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, HomebrewMechanicsProfile, NarrationLanguage, Proposal, Role, RuleSystemAdapter } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, storyArcs, rulePacks } from '../../db/schema';
+import { campaigns, rulePacks, storyArcs } from '../../db/schema';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { fromJsonText } from '../../common/json';
@@ -39,17 +41,21 @@ import { resolveProviderStepUsage } from './providers/step-usage';
 import { isWithheldFinishReason, describeWithheldTurn } from '../ai-driver/driver-safety';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { provenanceEndpointBaseUrl, resolveAiProvenanceEgress } from '../../common/ai-provenance-endpoint';
+import { StorylinesService } from '../storylines/storylines.service';
 
 type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
 
 /** Upper bound on a draft turn's output, before the remaining-budget clamp. */
 const DRAFT_MAX_TOKENS = 4096;
-const CO_DM_PROMPT_VERSION = 'co-dm-draft-v2';
+const CO_DM_PROMPT_VERSION = 'co-dm-draft-v3';
+/** Roughly 25k tokens before system instructions; larger storylines should be edited beat-by-beat. */
+const STORYLINE_PROVIDER_PROMPT_MAX_CHARS = 100_000;
 
 /** Which proposal entity type each co-DM target files under. */
 const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
   npc: 'npc',
   location: 'location',
+  arc: 'story_arc',
   beat: 'story_beat',
   quest: 'quest', // a direct quest draft (#1056)
   faction: 'faction', // a faction draft (#1056)
@@ -96,6 +102,7 @@ export class CoDmService {
     private readonly audit: AuditService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
     private readonly providerConfig: AiProviderConfigService,
+    private readonly storylines: StorylinesService,
   ) {}
 
   /** 403 unless the server-wide experimental flag is on — the same choke point as the AI DM seat. */
@@ -122,7 +129,41 @@ export class CoDmService {
         'The AI Dungeon Master seat is not enabled for this campaign. Configure it first: PUT /campaigns/:id/ai-dm {enabled:true, tokenBudget:N}.',
       );
     }
-    const count = MULTI_TARGETS.has(input.target) ? input.count ?? 1 : 1;
+    const editing = input.entityId != null;
+    if (input.target === 'arc' && !editing) {
+      throw new BadRequestException('Story arcs can be rewritten with entityId; creating arcs with co-DM drafting is not supported');
+    }
+    if (editing && input.target !== 'arc' && input.target !== 'beat') {
+      throw new BadRequestException('entityId is supported only when rewriting an existing story arc or beat');
+    }
+    if (editing && (input.arcId != null || input.count != null)) {
+      throw new BadRequestException('arcId and count are not used when rewriting an existing storyline entity');
+    }
+    // Resolve egress before loading any DM-only storyline prep. A configured provider OR a
+    // custom non-noop injected provider is external unless the operator explicitly declared
+    // its endpoint local (for example an on-box Ollama instance). REST and MCP both enter
+    // through this method, so neither can bypass the per-request secret-content boundary.
+    const { config, endpointScope: resolvedEndpointScope } =
+      await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
+    const providerCanTransmit = config !== null || this.provider.name !== 'noop';
+    const externalSend = resolveAiProvenanceEgress(providerCanTransmit) === 'external';
+    if (editing && externalSend && !input.includeCampaignSecrets) {
+      throw new UnprocessableEntityException(
+        'Storyline rewrites include DM-only arc and beat prep. Set includeCampaignSecrets to true only after reviewing the external AI provider privacy notice.',
+      );
+    }
+    const edit = editing
+      ? await this.storylines.getRewriteContext(campaignId, input.target as 'arc' | 'beat', input.entityId!)
+      : null;
+    const providerPrompt = edit
+      ? JSON.stringify({ rewriteInstructions: input.prompt, currentStoryline: edit.providerContext })
+      : input.prompt;
+    if (edit && providerPrompt.length > STORYLINE_PROVIDER_PROMPT_MAX_CHARS) {
+      throw new UnprocessableEntityException(
+        'Storyline rewrite context is too large for AI editing. Rewrite a single beat or shorten the arc before retrying.',
+      );
+    }
+    const count = MULTI_TARGETS.has(input.target) && !editing ? input.count ?? 1 : 1;
     if (input.target === 'beat' && input.arcId != null) {
       const [arc] = await this.db
         .select({ campaignId: storyArcs.campaignId })
@@ -187,18 +228,16 @@ export class CoDmService {
       await this.resolveLanguageContract(campaignId, input.narrationLanguage),
       adapter,
       campaign?.ruleSystem,
+      editing,
     );
     // `endpointScope` here is the scope that OWNS the resolved endpoint, not merely
     // whether a campaign override row exists — a keyless override executes against the
     // SERVER endpoint (#501).
-    const { config, endpointScope: resolvedEndpointScope } =
-      await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
     // Issue #1993: whether this draft actually leaves the server. Shared with
     // `ScribeService`/`InboxSweepService` via `resolveAiProvenanceEgress` (common/
     // ai-provenance-endpoint.ts) so the three cannot drift on what "external" means — a
     // configured provider is external UNLESS the operator has declared the endpoint local
     // via `AI_PROVIDER_ENDPOINT_IS_LOCAL` (an on-box Ollama, for example).
-    const externalSend = resolveAiProvenanceEgress(config !== null) === 'external';
     const reservation = await this.aiDm.reserveTokenBudget(campaignId, DRAFT_MAX_TOKENS);
 
     let narration = '';
@@ -224,7 +263,7 @@ export class CoDmService {
         const aiProvider: AiProvider = createAiProvider(config);
         const result = await aiProvider.generate({
           system: instructions,
-          messages: [{ role: 'user', content: input.prompt }],
+          messages: [{ role: 'user', content: providerPrompt }],
           model: config.model,
           maxTokens: reservation.tokensReserved,
         });
@@ -257,7 +296,7 @@ export class CoDmService {
         const result = await this.provider.generate({
           campaignId,
           kind: input.target === 'recap' ? 'recap' : 'narrate',
-          prompt: input.prompt,
+          prompt: providerPrompt,
           instructions,
           model: execModel,
           maxTokens: reservation.tokensReserved,
@@ -313,7 +352,7 @@ export class CoDmService {
 
     // Turn the provider text into validated proposal payloads for the target's entity type.
     const entityType = TARGET_ENTITY_TYPE[input.target];
-    const payloads = this.toPayloads(input.target, narration, count, { arcId: input.arcId, adapter });
+    const payloads = this.toPayloads(input.target, narration, count, { arcId: input.arcId, adapter, editing });
 
     // Attribute the proposal to the AI seat + model, not the triggering DM (issue #313).
     // The label reflects the model that actually served the draft when a provider is
@@ -325,7 +364,7 @@ export class CoDmService {
     const modelLabel = resolvedModel || seat.model || 'unconfigured';
     const generationProvenance = this.buildGenerationProvenance({
       target: input.target,
-      prompt: input.prompt,
+      prompt: providerPrompt,
       instructions,
       provider: providerName,
       providerType,
@@ -335,6 +374,7 @@ export class CoDmService {
       ruleset: { id: adapter.id, pack: campaign?.ruleSystem || null, version: packVersion },
       campaignPolicy,
       externalSend,
+      sourceContextHash: edit?.contextHash ?? null,
     });
     const attribution = {
       proposer: `AI DM (${modelLabel})`,
@@ -345,7 +385,19 @@ export class CoDmService {
 
     const proposals: Proposal[] = [];
     for (const payload of payloads) {
-      proposals.push(await this.records.create(campaignId, entityType, null, 'create', payload, user, role, attribution));
+      proposals.push(
+        await this.records.create(
+          campaignId,
+          entityType,
+          input.entityId ?? null,
+          editing ? 'update' : 'create',
+          payload,
+          user,
+          role,
+          attribution,
+          edit?.baseSnapshot,
+        ),
+      );
     }
 
     await this.audit.log({
@@ -356,7 +408,7 @@ export class CoDmService {
       campaignId,
       // `providerName` (not `this.provider.name`) — with a configured provider the
       // injected no-op seam is bypassed entirely, so only the resolved name is truthful.
-      detail: `${input.target} → ${proposals.length} ${entityType} proposal(s) via ${providerName} (+${clampedTokens} tokens, reserved=${reservation.tokensReserved})`,
+      detail: `${input.target} ${editing ? `#${input.entityId} update` : 'create'} → ${proposals.length} ${entityType} proposal(s) via ${providerName} (+${clampedTokens} tokens, reserved=${reservation.tokensReserved})`,
     });
 
     return {
@@ -381,16 +433,13 @@ export class CoDmService {
    * Issue #1993 — co-DM's member-identifying surface, audited against the #501/#1520
    * standard scribe's `consent` block was built for (see `scribe-consent.ts`).
    *
-   * Enumerating what actually reaches the provider on this path: `input.prompt` (the
-   * REQUESTING DM's own free-text brief — never another member's authored words),
-   * `instructions` (the seat persona the DM configured, plus target-shape/ruleset/language
-   * boilerplate this server generates), and `sourceIds: { target }` (a fixed enum label).
-   * Unlike scribe, nothing here is assembled by the server FROM other members' rows —
-   * there is no note, dice roll, or `performedBy`/`rollerUserId` join key anywhere in this
-   * payload, because co-DM never reads campaign source material to build it. The DM's own
-   * brief needs no consent gate for the same reason a dice roll's in-fiction `actor` doesn't
-   * (`scribe-consent.ts`): it is canon the acting party owns, not another member's private
-   * disclosure.
+   * Enumerating what actually reaches the provider on this path: the REQUESTING DM's
+   * free-text brief, the seat persona plus server-authored shape/rules/language boilerplate,
+   * and, for #1311 rewrites, server-loaded DM-only Storylines prep (arc/beat prose,
+   * branches, and the id/title/status labels of linked sessions, quests, or encounters).
+   * That context contains no note, dice roll, `performedBy`/`rollerUserId`, member id, or
+   * other member-authored row. It is DM-authored canon/prep plus relationship labels, so
+   * the member note-consent filter used by scribe has no applicable author surface here.
    *
    * Finding: co-DM's assembled payload carries no member-identifying surface at all, so
    * there is nothing for a per-member consent-conditional filter to strip (applying one
@@ -423,6 +472,7 @@ export class CoDmService {
     ruleset: { id: string; pack: string | null; version: string | null };
     campaignPolicy: AiExternalContentPolicy;
     externalSend: boolean;
+    sourceContextHash: string | null;
   }): AiGenerationProvenance {
     const promptHash = crypto
       .createHash('sha256')
@@ -441,6 +491,7 @@ export class CoDmService {
       endpoint: { scope: input.endpointScope, baseUrl: input.endpointBaseUrl ?? null },
       sourceIds: { target: input.target },
       sourceHash: crypto.createHash('sha256').update(input.prompt).digest('hex'),
+      sourceContextHash: input.sourceContextHash,
       promptVersion: CO_DM_PROMPT_VERSION,
       promptHash,
       ruleset: input.ruleset,
@@ -466,11 +517,12 @@ export class CoDmService {
     languageContract: string,
     adapter: RuleSystemAdapter,
     ruleSystem?: string,
+    editing = false,
   ): string {
     const base = persona ? `${persona}\n\n` : '';
     const shape = DRAFT_JSON_SHAPE(adapter)[target];
     const arrayNote =
-      MULTI_TARGETS.has(target) && count > 1
+      !editing && MULTI_TARGETS.has(target) && count > 1
         ? `Return a JSON ARRAY of exactly ${count} such objects.`
         : 'Return a single JSON object.';
     let systemPrompt = `You are drafting tabletop RPG content for ${adapter.label}.`;
@@ -481,7 +533,7 @@ export class CoDmService {
     }
     return (
       `${base}${languageContract}\n\n` +
-      `${systemPrompt} Reply with ONLY JSON — no prose, ` +
+      `${systemPrompt}${editing ? ' Rewrite the existing entity from the structured currentStoryline context and the rewriteInstructions. Return the complete rewritten title and prose fields.' : ''} Reply with ONLY JSON — no prose, ` +
       `no markdown fences. ${arrayNote} Each object matches: ${shape}`
     );
   }
@@ -511,13 +563,14 @@ export class CoDmService {
     target: CoDmDraftTarget,
     narration: string,
     count: number,
-    opts?: { arcId?: number; adapter?: RuleSystemAdapter },
+    opts?: { arcId?: number; adapter?: RuleSystemAdapter; editing?: boolean },
   ): Record<string, unknown>[] {
     const parsed = extractJson(narration);
 
     switch (target) {
       case 'npc':
       case 'location':
+      case 'arc':
       case 'beat':
       case 'quest':
       case 'faction': {
@@ -548,7 +601,7 @@ export class CoDmService {
   private validate(
     target: CoDmDraftTarget,
     raw: Record<string, unknown>,
-    opts?: { arcId?: number; adapter?: RuleSystemAdapter },
+    opts?: { arcId?: number; adapter?: RuleSystemAdapter; editing?: boolean },
   ): Record<string, unknown> {
     try {
       switch (target) {
@@ -556,11 +609,28 @@ export class CoDmService {
           return NpcCreate.parse(raw) as Record<string, unknown>;
         case 'location':
           return LocationCreate.parse(raw) as Record<string, unknown>;
+        case 'arc':
+          if (opts?.editing) {
+            if (typeof raw.title !== 'string' || typeof raw.summary !== 'string') {
+              throw new Error('arc rewrite responses must include both title and summary');
+            }
+            return StoryArcUpdate.parse({ title: raw.title, summary: raw.summary }) as Record<string, unknown>;
+          }
+          return StoryArcUpdate.parse({
+            title: raw.title ?? raw.name ?? 'Untitled arc',
+            summary: raw.summary ?? raw.body ?? raw.description ?? '',
+          }) as Record<string, unknown>;
         case 'beat':
-          return StoryBeatProposalCreate.parse({
+          if (opts?.editing) {
+            if (typeof raw.title !== 'string' || typeof raw.body !== 'string') {
+              throw new Error('beat rewrite responses must include both title and body');
+            }
+            return StoryBeatUpdate.parse({ title: raw.title, body: raw.body }) as Record<string, unknown>;
+          }
+          return (opts?.editing ? StoryBeatUpdate : StoryBeatProposalCreate).parse({
             title: raw.title ?? raw.name ?? 'Untitled beat',
             body: raw.body ?? raw.summary ?? raw.description ?? '',
-            ...(opts?.arcId != null ? { arcId: opts.arcId } : {}),
+            ...(!opts?.editing && opts?.arcId != null ? { arcId: opts.arcId } : {}),
           }) as Record<string, unknown>;
         case 'quest':
           return QuestCreate.parse({
@@ -620,7 +690,8 @@ const DRAFT_JSON_SHAPE = (adapter: RuleSystemAdapter): Record<CoDmDraftTarget, s
   npc: '{"name": string (required), "role"?: string, "disposition"?: string, "body"?: string, "dmSecret"?: string}',
   location:
     '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
-  beat: '{"title": string (required), "body"?: string (markdown)}',
+  arc: '{"title": string (required), "summary": string (required, markdown)}',
+  beat: '{"title": string (required), "body": string (required, markdown)}',
   quest:
     '{"title": string (required), "body"?: string (markdown), "reward"?: string, "status"?: "available"|"active"|"completed"|"failed", "dmSecret"?: string}',
   faction:

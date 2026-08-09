@@ -658,6 +658,7 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     // (toBeatId is an intra-campaign ref that must remap to the imported beat).
     const arcRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/arcs`).send({ title: 'Rise of the Hand', summary: 'The guild ascends.' });
     arcId = arcRes.body.id;
+    await dmAgent.patch(`/api/v1/arcs/${arcId}`).send({ summary: 'The guild seizes the docks.' });
     const beat1Res = await dmAgent.post(`/api/v1/arcs/${arcId}/beats`).send({ title: 'The Offer', body: 'They approach the party.' });
     beat1Id = beat1Res.body.id;
     const beat2Res = await dmAgent.post(`/api/v1/arcs/${arcId}/beats`).send({ title: 'The Betrayal', body: 'They turn.' });
@@ -745,6 +746,10 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
     expect(offer.branches.length).toBe(1);
     expect(offer.branches[0].label).toBe('If the party accepts');
     expect(offer.branches[0].toBeatId).toBe(betrayal.id);
+    const sourceArcRevisions = await dmAgent.get(`/api/v1/revisions/story_arc/${arcId}`);
+    const importedArcRevisions = await dmAgent.get(`/api/v1/revisions/story_arc/${arc.id}`);
+    expect(importedArcRevisions.body.length).toBe(sourceArcRevisions.body.length);
+    expect(importedArcRevisions.body[0].snapshot.summary).toBe(sourceArcRevisions.body[0].snapshot.summary);
 
     // Timeline: event + current in-world date carried over.
     const events = await dmAgent.get(`/api/v1/campaigns/${imported.id}/timeline`);
