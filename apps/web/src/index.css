@@ -2365,6 +2365,31 @@ a:hover .cf-name-reveal {
     bottom: 16px;
   }
 }
+/*
+ * Phone widths: keep the toast's height predictable.
+ *
+ * It is anchored to the bottom and grows UPWARD, and its meta row wraps — so a
+ * roll whose dice breakdown needed a second line made the toast a line taller
+ * and pushed its top edge into whatever sits above. In the encounter cockpit
+ * that is the side panel's tab strip: the tabs were then covered for the
+ * toast's full 15s life, and tapping one hit the toast instead. A 44px target
+ * that silently stops working after every roll is the bug; the wrap was only
+ * how it got there.
+ *
+ * The meta row is a one-line summary — expression, dice, crit note — and the
+ * full breakdown lives in the shared dice log, so clipping it here loses
+ * nothing that is not a tap away. Tightening the box buys the clearance back.
+ */
+@media (max-width: 420px) {
+  .cf-roll-result-toast {
+    gap: 8px;
+    padding: 8px 8px 8px 12px;
+  }
+  .cf-roll-result-toast__meta {
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+}
 
 /* --- BG-style dice roll overlay (issue #1352) --- */
 .cf-dice-roll-overlay {
@@ -2468,6 +2493,27 @@ a:hover .cf-name-reveal {
 @keyframes cf-die-overlay-land-d20 {
   0%   { transform: rotate(45deg) rotateX(160deg) rotateY(-90deg) scale(1.12); }
   100% { transform: rotate(45deg) rotateX(0deg) rotateY(0deg) scale(1); }
+}
+
+/* 3D dice tray. The canvas is the whole animation — the die faces, shadows and
+   crit/fumble flourish are all drawn by ../features/dice/dice3d.ts, so there is
+   nothing here to theme beyond giving it a stable, aspect-correct box to render
+   into. The 2:1 box matches the roller's camera framing. */
+.cf-dice-roll-overlay__tray {
+  position: relative;
+  width: min(92vw, 560px);
+  aspect-ratio: 2 / 1;
+  max-height: 60vh;
+}
+.cf-dice-roll-overlay__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.cf-dice-roll-overlay__tray .cf-dice-roll-overlay__assist-glyph {
+  bottom: 8px;
+  right: 12px;
+  font-size: 26px;
 }
 
 .cf-tabbar a,

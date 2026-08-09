@@ -26,7 +26,7 @@ test.describe('parseDiceSidesFromExpr (issue #1352)', () => {
 
 test.describe('buildOverlayDice (issue #1352)', () => {
   test('marks dropped dice on advantage settle', () => {
-    const dice = buildOverlayDice([20, 20], [14, 18], [18]);
+    const dice = buildOverlayDice([20, 20], [14, 18], [false, true]);
     expect(dice).toHaveLength(2);
     expect(dice[0].kept).toBe(false);
     expect(dice[1].kept).toBe(true);
@@ -49,6 +49,91 @@ test.describe('Dice roll overlay contracts (issue #1352)', () => {
     expect(cssSource).toMatch(/\.cf-dice-roll-overlay/);
     expect(cssSource).toMatch(/cf-die-overlay-tumble/);
     expect(cssSource).toMatch(/cf-die-overlay-land/);
+  });
+
+  test('3D roll is dynamically imported so three never lands in the entry chunk', () => {
+    const viteSource = readFileSync(resolve(ROOT, 'vite.config.ts'), 'utf8');
+    // A static `import ... from 'three'` anywhere the overlay is statically
+    // reachable from would pull ~600KB into the first paint for every table,
+    // including ones that never roll.
+    expect(overlaySource).toMatch(/import\('\.\.\/features\/dice\/dice3d'\)/);
+    expect(overlaySource).not.toMatch(/^import .* from 'three'/m);
+    expect(readFileSync(resolve(ROOT, 'src/components/RollResultToastContext.tsx'), 'utf8'))
+      .not.toMatch(/from 'three'/);
+    expect(viteSource).toMatch(/vendor-three/);
+  });
+
+  test('overlay tears the 3D roll down and falls back without WebGL', () => {
+    // startDiceRoll returns null when no WebGL context can be created; without
+    // the fallback the roll would show an empty tray and never settle.
+    expect(overlaySource).toMatch(/setCssFallback\(true\)/);
+    expect(overlaySource).toMatch(/data-renderer=/);
+    // Every mount allocates a WebGL context; leaking one per roll exhausts the
+    // browser's context budget within a session.
+    expect(overlaySource).toMatch(/handle\?\.dispose\(\)/);
+    expect(cssSource).toMatch(/\.cf-dice-roll-overlay__canvas/);
+  });
+
+  test('each roll gets its own overlay identity', () => {
+    // Two consecutive 1d20s reconcile onto the same overlay instance unless the
+    // provider keys them apart: same sides, so nothing the 3D roller keys on
+    // changes, and the first throw keeps replaying while the second roll's faces
+    // are dropped. The rendered half of this contract (the settle latch that
+    // makes the key load-bearing) is in test/component/DiceRollOverlay.spec.tsx.
+    expect(contextSource).toMatch(/rollIdRef/);
+    expect(contextSource).toMatch(/rollIdRef\.current \+= 1/);
+    expect(contextSource).toMatch(/key=\{overlay\.id\}/);
+  });
+
+  test('a handle created mid-settle is told the faces', () => {
+    // The settle effect fires once, when the phase flips. A roller born after that
+    // — chunk still loading, or the effect restarted because the roll's dice
+    // changed — would otherwise never be given the faces and would hold its dice
+    // in the air until the backstop gave up on them.
+    expect(overlaySource).toMatch(/phaseRef\.current === 'settling'/);
+    // The theme is locked for the roll so a preference landing mid-flight cannot
+    // restart the throw in mid-air.
+    expect(overlaySource).toMatch(/useState<DiceTheme>\(\(\) => theme \|\| 'nocturne'\)/);
+  });
+
+  test('the crit badge and the crit animation read the same rule', () => {
+    const rollerSource3d = readFileSync(resolve(ROOT, 'src/features/dice/dice3d.ts'), 'utf8');
+    expect(overlaySource).toMatch(/flourishHeroIndex\(/);
+    expect(rollerSource3d).toMatch(/flourishHeroIndex\(/);
+    // Neither may re-derive it: a second copy is how they came to disagree.
+    expect(overlaySource).not.toMatch(/value === 20/);
+    expect(rollerSource3d).not.toMatch(/results\[i\]\?\.value === 20/);
+    // The tray must not decide crit/fumble for itself: d20Flavor already knows
+    // that a pooled `2d20` has no natural result and that a compound roll's kept
+    // dice live in `terms[]`. Re-deriving it from side counts made the dice
+    // disagree with the toast, the audio cue and the announcer.
+    expect(contextSource).toMatch(/flavor: d20Flavor\(r\)/);
+    expect(contextSource).toMatch(/keptFlags: keptFaceFlags\(r\)/);
+    expect(overlaySource).toMatch(/flavor\?: D20Flavor \| null/);
+    // And both must judge the SAME dice. A large roll draws only a selection, so
+    // a badge weighed against the whole roll promises a flourish the tray never
+    // plays — which is how the render cap reopened this after it was closed.
+    expect(overlaySource).toMatch(/renderedDiceIndices\(sides\)/);
+    expect(rollerSource3d).toMatch(/renderedDiceIndices\(sides\)/);
+    // A drawn die must look up its OWN result, not the one at its tray position.
+    expect(rollerSource3d).toMatch(/results\[picked\[i\]\]/);
+  });
+
+  test('a backgrounded tab still reaches the result toast', () => {
+    // requestAnimationFrame is throttled to zero in a background tab, so the
+    // 3D settle callback can never arrive; the toast must not be lost with it.
+    expect(overlaySource).toMatch(/DICE_ROLL_MAX_SETTLE_MS/);
+    expect(overlaySource).toMatch(/settledRef/);
+  });
+
+  test('a slow chunk load does not eat the flight it is waiting for', () => {
+    // Waiting for the chunk and waiting for the dice to land are two different
+    // waits. Run off one clock started when the result arrived, a slow cold load
+    // spent the flight's budget before the dice were even thrown, and the
+    // backstop then unmounted them mid-air. The clock restarts on release.
+    expect(overlaySource).toMatch(/armBackstop\(\)/);
+    const releases = overlaySource.match(/armBackstop\(\);/g) ?? [];
+    expect(releases.length, 'armed at the result AND again on release').toBeGreaterThanOrEqual(2);
   });
 
   test('provider gates overlay with prefersReducedMotion and wires begin/cancel/show', () => {

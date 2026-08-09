@@ -117,6 +117,24 @@ if (existsSync(join(dist, "sw.js"))) {
     sw.includes("campfire-api-json"),
     "sw.js should use the bounded campfire-api-json cache",
   );
+  // The 3D dice roller is fetched on first roll, not pushed to every table on
+  // install: precaching it would hand ~517KB of three.js to tables that never
+  // roll, which is the download its dynamic import exists to avoid. Asserted on
+  // the BUILT worker because the vite config and the runtime matcher can drift
+  // apart without either looking wrong on its own.
+  const precacheManifest = sw.slice(0, sw.indexOf("registerRoute"));
+  check(
+    !/vendor-three-[^"]*\.js/.test(precacheManifest),
+    "sw.js should not precache the three.js chunk (it is fetched on demand)",
+  );
+  check(
+    !/dice3d-[^"]*\.js/.test(precacheManifest),
+    "sw.js should not precache the dice roller chunk (it is fetched on demand)",
+  );
+  check(
+    sw.includes("campfire-dice-roller"),
+    "sw.js should runtime-cache the dice roller chunks so a table that has rolled keeps them offline",
+  );
   check(
     sw.includes("campfire-api-images"),
     "sw.js should use the bounded campfire-api-images cache",

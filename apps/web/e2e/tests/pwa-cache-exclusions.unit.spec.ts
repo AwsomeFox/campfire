@@ -14,8 +14,10 @@ import {
   isSensitiveCachedRequest,
   matchApiImageCache,
   matchApiJsonCache,
+  matchDiceRollerChunk,
   matchNetworkOnlyApi,
   purgeSensitiveApiCacheEntries,
+  DICE_ROLLER_CHUNK_GLOBS,
   API_JSON_CACHE_NAME,
   API_IMAGE_CACHE_NAME,
   LEGACY_API_CACHE_NAME,
@@ -97,6 +99,39 @@ test.describe('pwaCachePolicy matchers (#879)', () => {
     expect(matchNetworkOnlyApi(req('/api/v1/attachments/9?size=thumb'))).toBe(false);
     expect(matchApiJsonCache(req('/api/v1/campaigns/3/summary'))).toBe(true);
     expect(matchApiImageCache(req('/api/v1/campaigns/3/summary'))).toBe(false);
+  });
+});
+
+test.describe('3D dice roller chunks are fetched on demand, not precached', () => {
+  const at = (path: string) => new URL(`https://table.example${path}`);
+
+  test('the roller chunks match, and nothing else does', () => {
+    expect(matchDiceRollerChunk({ url: at('/assets/vendor-three-ConS6arP.js') })).toBe(true);
+    expect(matchDiceRollerChunk({ url: at('/assets/dice3d-BZ7bGpJP.js') })).toBe(true);
+    // Under a reverse-proxy subpath (#798) the same assets carry a prefix.
+    expect(matchDiceRollerChunk({ url: at('/campfire/assets/vendor-three-ConS6arP.js') })).toBe(true);
+    // Everything else stays precached — matching too widely would quietly drop
+    // the app shell out of the offline pack.
+    expect(matchDiceRollerChunk({ url: at('/assets/index-D3JIVi9z.js') })).toBe(false);
+    expect(matchDiceRollerChunk({ url: at('/assets/vendor-react-CODVyrx-.js') })).toBe(false);
+    expect(matchDiceRollerChunk({ url: at('/assets/vendor-three-ConS6arP.css') })).toBe(false);
+    expect(matchDiceRollerChunk({ url: at('/api/v1/campaigns') })).toBe(false);
+  });
+
+  test('the precache exclusions cover exactly what the runtime rule claims', () => {
+    // Two lists, one policy: a chunk excluded from the precache but not matched
+    // at runtime would be unreachable offline for a table that HAS rolled, and a
+    // chunk matched but not excluded would be downloaded by every table anyway.
+    const globToRegExp = (glob: string) =>
+      new RegExp(`^${glob.replace(/\*\*\//g, '').replace(/\./g, '\\.').replace(/\*/g, '[^/]*')}$`);
+    for (const name of ['vendor-three-ConS6arP.js', 'dice3d-BZ7bGpJP.js']) {
+      expect(
+        DICE_ROLLER_CHUNK_GLOBS.some((g) => globToRegExp(g).test(name)),
+        `${name} excluded from precache`,
+      ).toBe(true);
+      expect(matchDiceRollerChunk({ url: at(`/assets/${name}`) }), `${name} cached at runtime`).toBe(true);
+    }
+    expect(DICE_ROLLER_CHUNK_GLOBS.some((g) => globToRegExp(g).test('index-D3JIVi9z.js'))).toBe(false);
   });
 });
 

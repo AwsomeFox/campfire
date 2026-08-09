@@ -5,12 +5,13 @@
  */
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { DiceRoll } from '@campfire/schema';
-import { d20Flavor } from '../lib/d20Flavor';
+import { d20Flavor, type D20Flavor } from '../lib/d20Flavor';
+import { keptFaceFlags } from '../lib/keptFaceFlags';
 import { looksLikeDamageRoll } from '../lib/looksLikeDamageRoll';
 import { expandDiceSidesFromExpr } from '../lib/parseDiceSidesFromExpr';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
 import { DICE_ROLL_REDUCED_MOTION_TUMBLE_MS, SETTLE_VIBRATION_PATTERN, tableAudioEngine, vibrateIfEnabled } from '../lib/tableAudio';
-import { buildOverlayDice, DiceRollOverlay, DICE_ROLL_MIN_TUMBLE_MS, type DiceRollOverlayPhase } from './DiceRollOverlay';
+import { buildOverlayDice, DiceRollOverlay, DICE_ROLL_MIN_HOLD_MS, type DiceRollOverlayPhase } from './DiceRollOverlay';
 import { RollResultToast } from './RollResultToast';
 import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
 
@@ -64,10 +65,33 @@ export interface ShowRollOptions {
 }
 
 interface OverlayState {
+  /**
+   * Identity of THIS roll, used as the overlay's React key.
+   *
+   * Without it, rolling `1d20` again while the previous `1d20` is still in the
+   * air reconciles onto the same overlay instance: the dice have the same sides,
+   * so nothing the 3D roller keys on changes, and it keeps replaying the first
+   * throw. The second roll's faces are then dropped (its handle has already been
+   * released) and the first animation hands off — dice showing the old numbers,
+   * toast reporting the new total. A per-roll key makes each roll a fresh
+   * overlay: new canvas, new throw, new settle latch.
+   */
+  id: number;
   sides: number[];
   phase: DiceRollOverlayPhase;
   values?: number[];
-  kept?: number[];
+  /**
+   * POSITIONAL kept flags, not the roll's kept faces: a compound keep/drop roll
+   * (`2d20kh1+1d4`) has no unambiguous flat `kept`, so the server omits it and
+   * the truth lives in `terms[]` — see ../lib/keptFaceFlags.
+   */
+  keptFlags?: boolean[];
+  /**
+   * The app's single crit/fumble answer for this roll (../lib/d20Flavor), shared
+   * with the toast, the audio cue and the announcer. The overlay must not
+   * re-derive it: a side count cannot tell a pooled `2d20` from an attack.
+   */
+  flavor?: D20Flavor | null;
 }
 
 interface RollResultToastContextValue {
@@ -101,6 +125,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const overlayRef = useRef<OverlayState | null>(null);
   overlayRef.current = overlay;
   const tumbleStartedAtRef = useRef(0);
+  const rollIdRef = useRef(0);
   const pendingShowRef = useRef<{ roll: DiceRoll; options?: ShowRollOptions } | null>(null);
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -150,7 +175,8 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     );
     if (reducedMotion) return;
     tumbleStartedAtRef.current = Date.now();
-    const next: OverlayState = { sides, phase: 'tumbling' };
+    rollIdRef.current += 1;
+    const next: OverlayState = { id: rollIdRef.current, sides, phase: 'tumbling' };
     overlayRef.current = next;
     setOverlay(next);
   }, [clearSettleTimer, tableAudioLevel]);
@@ -183,7 +209,9 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     }
 
     pendingShowRef.current = { roll: r, options };
-    const wait = Math.max(0, DICE_ROLL_MIN_TUMBLE_MS - (Date.now() - tumbleStartedAtRef.current));
+    // Only the hold is gated here. The fall, bounce and settle that follow are
+    // the bulk of the animation and are owned by the overlay itself.
+    const wait = Math.max(0, DICE_ROLL_MIN_HOLD_MS - (Date.now() - tumbleStartedAtRef.current));
 
     const goSettle = () => {
       setOverlay((prev) => {
@@ -193,7 +221,8 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
           sides: options?.animationSides ?? prev.sides,
           phase: 'settling',
           values: r.rolls,
-          kept: r.kept,
+          keptFlags: keptFaceFlags(r),
+          flavor: d20Flavor(r),
         };
       });
     };
@@ -244,7 +273,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     (rollApplyHandler != null || looksLikeDamageRoll(roll));
 
   const overlayDice = overlay
-    ? buildOverlayDice(overlay.sides, overlay.values, overlay.kept)
+    ? buildOverlayDice(overlay.sides, overlay.values, overlay.keptFlags)
     : [];
 
   return (
@@ -254,8 +283,10 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
       {children}
       {overlay && overlayDice.length > 0 && (
         <DiceRollOverlay
+          key={overlay.id}
           dice={overlayDice}
           phase={overlay.phase}
+          flavor={overlay.flavor ?? null}
           theme={me?.user?.diceTheme}
           colorVisionAssist={me?.user?.colorVisionAssist ?? false}
           onSettled={handleOverlaySettled}
