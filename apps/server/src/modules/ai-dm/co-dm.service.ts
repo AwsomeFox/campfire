@@ -139,16 +139,17 @@ export class CoDmService {
     if (editing && (input.arcId != null || input.count != null)) {
       throw new BadRequestException('arcId and count are not used when rewriting an existing storyline entity');
     }
-    // Resolve egress before loading any DM-only storyline prep. A configured provider is
-    // external unless the operator explicitly declared its endpoint local (for example an
-    // on-box Ollama instance). REST and MCP both enter through this method, so neither can
-    // bypass the per-request secret-content consent boundary.
+    // Resolve egress before loading any DM-only storyline prep. A configured provider OR a
+    // custom non-noop injected provider is external unless the operator explicitly declared
+    // its endpoint local (for example an on-box Ollama instance). REST and MCP both enter
+    // through this method, so neither can bypass the per-request secret-content boundary.
     const { config, endpointScope: resolvedEndpointScope } =
       await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
-    const externalSend = resolveAiProvenanceEgress(config !== null) === 'external';
+    const providerCanTransmit = config !== null || this.provider.name !== 'noop';
+    const externalSend = resolveAiProvenanceEgress(providerCanTransmit) === 'external';
     if (editing && externalSend && !input.includeCampaignSecrets) {
       throw new UnprocessableEntityException(
-        'Storyline rewrites include DM-only arc and beat prep. Set includeCampaignSecrets to true only after reviewing the configured external provider privacy notice.',
+        'Storyline rewrites include DM-only arc and beat prep. Set includeCampaignSecrets to true only after reviewing the external AI provider privacy notice.',
       );
     }
     const edit = editing

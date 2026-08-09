@@ -162,6 +162,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     const rewritten = await draft({
       target: 'beat',
       entityId: beat.body.id,
+      includeCampaignSecrets: true,
       prompt: 'Raise the stakes but keep the ferryman central.',
     });
 
@@ -219,6 +220,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     const incompleteArc = await draft({
       target: 'arc',
       entityId: arc.body.id,
+      includeCampaignSecrets: true,
       prompt: 'Rewrite the arc.',
     });
     expect(incompleteArc.status).toBe(422);
@@ -228,6 +230,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     const incompleteBeat = await draft({
       target: 'beat',
       entityId: beat.body.id,
+      includeCampaignSecrets: true,
       prompt: 'Rewrite the beat.',
     });
     expect(incompleteBeat.status).toBe(422);
@@ -253,6 +256,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     const rewritten = await draft({
       target: 'arc',
       entityId: arc.body.id,
+      includeCampaignSecrets: true,
       prompt: 'Make the rebellion immediate and dangerous.',
     });
     expect(rewritten.status).toBe(201);
@@ -304,7 +308,12 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
       await providerRelease;
       return originalGenerate(req, opts);
     };
-    const staleDraftPromise = draft({ target: 'arc', entityId: arc.body.id, prompt: 'Sharpen it again.' }).then((res) => res);
+    const staleDraftPromise = draft({
+      target: 'arc',
+      entityId: arc.body.id,
+      includeCampaignSecrets: true,
+      prompt: 'Sharpen it again.',
+    }).then((res) => res);
     let staleDraft!: request.Response;
     try {
       await providerStarted;
@@ -362,6 +371,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     const branchProposal = await draft({
       target: 'arc',
       entityId: arc.body.id,
+      includeCampaignSecrets: true,
       prompt: 'Rewrite around the available choices.',
     });
     expect(branchProposal.body.proposals[0].generationProvenance.sourceContextHash).toMatch(/^[a-f0-9]{64}$/);
@@ -382,6 +392,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     const linkedProposal = await draft({
       target: 'arc',
       entityId: arc.body.id,
+      includeCampaignSecrets: true,
       prompt: 'Rewrite around the linked play record.',
     });
     const sessionTrashed = await request(h.server)
@@ -410,6 +421,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     const proposal = await draft({
       target: 'arc',
       entityId: arc.body.id,
+      includeCampaignSecrets: true,
       prompt: 'Rewrite around the current choices.',
     });
 
@@ -463,6 +475,7 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     const response = await draft({
       target: 'arc',
       entityId: arc.body.id,
+      includeCampaignSecrets: true,
       prompt: 'p'.repeat(20_000),
     });
 
@@ -846,11 +859,11 @@ describe('co-DM authoring — external-AI consent provenance is explicit, never 
     await h.close();
   });
 
-  it('records consent.externalSend=false on the injected/no-op seam (the legacy default, no provider configured)', async () => {
+  it('treats a custom injected provider as external when no provider config exists', async () => {
     const campaignId = await h.createCampaign('Consent Injected Seam');
     await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
 
-    h.script({ text: JSON.stringify({ name: 'Local Only Warden' }) });
+    h.script({ text: JSON.stringify({ name: 'Injected Warden' }) });
     const res = await request(h.server)
       .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
       .set(dm)
@@ -859,7 +872,7 @@ describe('co-DM authoring — external-AI consent provenance is explicit, never 
     expect(res.status).toBe(201);
     const consent = res.body.proposals[0].generationProvenance.consent;
     expect(consent).toBeTruthy();
-    expect(consent.externalSend).toBe(false);
+    expect(consent.externalSend).toBe(true);
     expect(consent.campaignPolicy).toBe('member_consent'); // campaign default
     // Structurally zero on every co-DM draft — this path never assembles member content.
     expect(consent.includedInboxCount).toBe(0);
@@ -888,11 +901,9 @@ describe('co-DM authoring — external-AI consent provenance is explicit, never 
     expect(consent.campaignPolicy).toBe('member_consent');
   });
 
-  it('requires per-request opt-in before loading DM-only storyline prep for an external provider', async () => {
-    const campaignId = await h.createCampaign('External Storyline Privacy Boundary');
+  it('requires per-request opt-in before an unconfigured custom provider loads DM-only storyline prep', async () => {
+    const campaignId = await h.createCampaign('Injected Storyline Privacy Boundary');
     await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
-    const providerRes = await h.configureProvider(campaignId);
-    expect(providerRes.status).toBe(200);
     const arc = await request(h.server)
       .post(`/api/v1/campaigns/${campaignId}/arcs`)
       .set(dm)
@@ -917,33 +928,37 @@ describe('co-DM authoring — external-AI consent provenance is explicit, never 
 
   /**
    * Review finding (post-#2041): a first draft of this fix set `externalSend = true`
-   * whenever a provider config resolved, which ignored `AI_PROVIDER_ENDPOINT_IS_LOCAL` —
-   * the operator's explicit declaration that the configured endpoint is on-box (an Ollama
+   * whenever a provider could transmit, which ignored `AI_PROVIDER_ENDPOINT_IS_LOCAL` —
+   * the operator's explicit declaration that the effective endpoint is on-box (an Ollama
    * install, matching this project's one-Docker-image / no-required-external-services
    * premise) — and so misreported a purely local generation as external. `ScribeService`
    * and `InboxSweepService` already honored this flag via `resolveEgress`; co-DM now shares
    * the exact same `resolveAiProvenanceEgress` helper (common/ai-provenance-endpoint.ts)
    * rather than re-implementing half the rule.
    */
-  it('records consent.externalSend=false when the operator has declared the configured endpoint local (AI_PROVIDER_ENDPOINT_IS_LOCAL)', async () => {
+  it('allows an injected provider declared local to rewrite without external-send consent', async () => {
     const campaignId = await h.createCampaign('Consent Operator-Declared Local');
     await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
-    const providerRes = await h.configureProvider(campaignId);
-    expect(providerRes.status).toBe(200);
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'On-Box Arc', summary: 'Only the local model may see this.' });
+    expect(arc.status).toBe(201);
 
     const priorLocalFlag = process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;
     process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL = 'true';
     try {
+      h.script({ text: JSON.stringify({ title: 'On-Box Rewrite', summary: 'The local model rewrote this.' }) });
       const res = await request(h.server)
         .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
         .set(dm)
-        .send({ target: 'npc', prompt: JSON.stringify({ name: 'On-Box Warden' }) });
+        .send({ target: 'arc', entityId: arc.body.id, prompt: 'Rewrite this locally.' });
 
       expect(res.status).toBe(201);
       const consent = res.body.proposals[0].generationProvenance.consent;
       expect(consent).toBeTruthy();
-      // A provider IS configured (genuinely serving the draft) but the operator declared
-      // the endpoint local, so nothing left the deployment — externalSend must be false.
+      // A custom provider is injected, but the operator declared its endpoint local, so
+      // nothing left the deployment and the external secret-content opt-in is not required.
       expect(consent.externalSend).toBe(false);
     } finally {
       if (priorLocalFlag === undefined) delete process.env.AI_PROVIDER_ENDPOINT_IS_LOCAL;

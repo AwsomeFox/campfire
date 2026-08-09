@@ -429,18 +429,18 @@ export class StorylinesService {
         .returning()
         .get();
       if (!row) throw staleWrite(opts?.expectedUpdatedAt, existing.updatedAt);
+      if (input.summary !== undefined && input.summary !== existing.summary) {
+        this.revisions.commitProseVersionInTx(tx, {
+          entityType: 'story_arc',
+          entityId: id,
+          campaignId: existing.campaignId,
+          priorProse: existing.summary,
+          nextProse: input.summary,
+          user: opts?.revisionUser ?? user,
+        });
+      }
       return { existing, row };
     }, { behavior: 'immediate' });
-    if (input.summary !== undefined && input.summary !== existing.summary) {
-      await this.revisions.commitProseVersion({
-        entityType: 'story_arc',
-        entityId: id,
-        campaignId: existing.campaignId,
-        priorProse: existing.summary,
-        nextProse: input.summary,
-        user: opts?.revisionUser ?? user,
-      });
-    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -660,18 +660,18 @@ export class StorylinesService {
         .returning()
         .get();
       if (!row) throw staleWrite(opts?.expectedUpdatedAt, currentExisting.updatedAt);
+      if (input.body !== undefined && input.body !== currentExisting.body) {
+        this.revisions.commitProseVersionInTx(tx, {
+          entityType: 'story_beat',
+          entityId: id,
+          campaignId: currentExisting.campaignId,
+          priorProse: currentExisting.body,
+          nextProse: input.body,
+          user: opts?.revisionUser ?? user,
+        });
+      }
       return { existing: currentExisting, row };
     }, { behavior: 'immediate' });
-    if (input.body !== undefined && input.body !== existing.body) {
-      await this.revisions.commitProseVersion({
-        entityType: 'story_beat',
-        entityId: id,
-        campaignId: existing.campaignId,
-        priorProse: existing.body,
-        nextProse: input.body,
-        user: opts?.revisionUser ?? user,
-      });
-    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

@@ -15,6 +15,7 @@ describe('StorylinesService unit coverage tests', () => {
   let holder: DbHolder;
   let previousDataDir: string | undefined;
   let db: DrizzleDb;
+  let revisions: RevisionsService;
   let storylinesService: StorylinesService;
 
   const adminActor: RequestUser = {
@@ -33,7 +34,7 @@ describe('StorylinesService unit coverage tests', () => {
     db = holder.proxy as DrizzleDb;
     const audit = new AuditService(db);
     const moderation = new ModerationService(db, audit);
-    const revisions = new RevisionsService(db, moderation);
+    revisions = new RevisionsService(db, moderation);
 
     storylinesService = new StorylinesService(db, audit, revisions);
 
@@ -102,5 +103,46 @@ describe('StorylinesService unit coverage tests', () => {
 
     await storylinesService.removeBeat(beat.id, adminActor, 'dm');
     await storylinesService.removeArc(arc.id, adminActor, 'dm');
+  });
+
+  it('rolls an arc update back when its prose revision cannot be committed', async () => {
+    const arc = await storylinesService.createArc(
+      campaignId,
+      { title: 'Atomic Arc', summary: 'The original summary.' },
+      adminActor,
+      'dm',
+    );
+    jest.spyOn(revisions, 'commitProseVersionInTx').mockImplementationOnce(() => {
+      throw new Error('revision write failed');
+    });
+
+    await expect(
+      storylinesService.updateArc(arc.id, { summary: 'A partial update must not land.' }, adminActor, 'dm'),
+    ).rejects.toThrow('revision write failed');
+
+    const unchanged = await storylinesService.getArcWithBeatsOrThrow(arc.id);
+    expect(unchanged.summary).toBe('The original summary.');
+    expect(unchanged.updatedAt).toBe(arc.updatedAt);
+  });
+
+  it('rolls a beat update back when its prose revision cannot be committed', async () => {
+    const arc = await storylinesService.createArc(campaignId, { title: 'Atomic Beat Arc' }, adminActor, 'dm');
+    const beat = await storylinesService.addBeat(
+      arc.id,
+      { title: 'Atomic Beat', body: 'The original body.' },
+      adminActor,
+      'dm',
+    );
+    jest.spyOn(revisions, 'commitProseVersionInTx').mockImplementationOnce(() => {
+      throw new Error('revision write failed');
+    });
+
+    await expect(
+      storylinesService.updateBeat(beat.id, { body: 'A partial update must not land.' }, adminActor, 'dm'),
+    ).rejects.toThrow('revision write failed');
+
+    const unchanged = await storylinesService.getBeatWithBranchesOrThrow(beat.id);
+    expect(unchanged.body).toBe('The original body.');
+    expect(unchanged.updatedAt).toBe(beat.updatedAt);
   });
 });
