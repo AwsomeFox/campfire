@@ -1230,6 +1230,38 @@ describe('derived equipped-item actions (issue #2097)', () => {
     }
   });
 
+  it("a redundant equip never erases a concurrent rename's regenerated action", async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'redundant-slot' });
+
+    // Stand in for a rename that committed while a redundant equip was mid-derivation: the
+    // row now carries the rename's own freshly regenerated, correctly-named action.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems)
+      .set({
+        name: 'Renamed By The Winner',
+        equippedAction: JSON.stringify({ name: 'Renamed By The Winner', kind: 'melee', toHit: '+6', damage: '1d8+3 slashing', targetAc: '', notes: '' }),
+        equippedActionSource: 'derived',
+      })
+      .where(eq(inventoryItems.id, itemId))
+      .run();
+
+    // Re-asserting the same equip state must not destroy it. Either the request is refused
+    // as unreconcilable, or it leaves the winner's action alone — never silently erased.
+    const redundant = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'redundant-slot' });
+    expect([200, 409]).toContain(redundant.status);
+
+    const after = db
+      .select({ action: inventoryItems.equippedAction, src: inventoryItems.equippedActionSource })
+      .from(inventoryItems)
+      .where(eq(inventoryItems.id, itemId))
+      .get()!;
+    expect(after.action).not.toBeNull();
+    expect(JSON.parse(after.action!).name).toBe('Renamed By The Winner');
+    expect(after.src).toBe('derived');
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

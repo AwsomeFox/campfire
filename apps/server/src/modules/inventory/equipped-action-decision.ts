@@ -129,20 +129,36 @@ export function resolveEquippedActionWrite(state: EquippedActionDecision): Equip
     // would erase B's brand-new action, leaving the item granting nothing until someone
     // equips again. The winning writer's action is current for the state that actually
     // exists; the rename simply loses the race for the action's title. Leave it be.
-    // …but never when the item is CHANGING HANDS. An action is private to the character it
-    // was granted to, so an ownership change discards it whatever else is true — that rule
-    // outranks preserving a concurrent writer's work, and the state sweep caught an earlier
-    // version of this carve-out violating it.
+    // ONE rule for a stale derivation, arrived at over three review rounds that each corrected
+    // the last: **it never destroys an action that is already there.**
     //
-    // Review (chatgpt-codex-connector P2), correcting the previous round: this branch is
-    // only ever reached by a RENAME (the sole non-equip trigger), and a rename writes the
-    // item's new name regardless. So preserving the winner's action would leave the item
-    // named C while permanently granting an action named B — the mismatch the rename was
-    // supposed to fix, made permanent. Discarding the winner's fresh, correct action is no
-    // better. Neither side can be chosen silently, so the caller is told to refetch and
-    // retry, exactly as a slot conflict or an owner change already does here.
-    const equipWouldArmIt = state.equipTransition;
-    if (!equipWouldArmIt && !state.moved && state.freshHasAction) return { kind: 'conflict' };
+    // The row's action was written by a concurrent writer whose own fences vouched for it
+    // against the state it saw; ours was computed against state that has since moved. Between
+    // "keep theirs" and "discard theirs", nothing in this function's inputs can say which is
+    // right — so neither is chosen silently. The caller refetches and retries, exactly as a
+    // slot conflict or an owner change already does here.
+    //
+    // Earlier versions split this by trigger: clear for an equip, leave for a rename. Both
+    // halves were wrong. Clearing erased a rename's freshly regenerated action on a redundant
+    // equip; leaving let a rename write its new name over an action derived for the old one.
+    // The trigger was never the deciding factor — whether there is someone else's work to
+    // destroy is.
+    //
+    // A MOVE is the one exception, and it is not really an exception: an action is private to
+    // the character it was granted to, so an ownership change discards it whatever else is
+    // true. That rule outranks preserving anyone's work, and the state sweep caught an earlier
+    // carve-out violating it.
+    // Two different reasons a derivation does not land, and they need opposite answers:
+    //
+    //  - The inputs are STILL CURRENT and it simply produced nothing — the accepted snapshot
+    //    no longer describes a weapon, say. Nobody raced us; the row's action is the one we
+    //    set out to replace, and replacing it with nothing is exactly right. CLEAR.
+    //
+    //  - The inputs MOVED under us. Someone else wrote in the meantime, and the row's action
+    //    is theirs. CONFLICT, per the rule above.
+    if (state.derivationInputsUnchanged) return { kind: 'clear' };
+
+    if (!state.moved && state.freshHasAction) return { kind: 'conflict' };
 
     return { kind: 'clear' };
   }
