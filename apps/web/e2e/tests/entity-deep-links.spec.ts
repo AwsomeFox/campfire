@@ -238,7 +238,7 @@ test.describe('Unicode markdown mentions (issue #627)', () => {
   });
 });
 
-test.describe('notification deep links', () => {
+test.describe('notification deep links (issue #2124)', () => {
   test.use({ storageState: stateFor('player') });
 
   /**
