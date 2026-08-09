@@ -124,6 +124,7 @@ function usePanelRevealer(
 function useDeepLinkedPanel(
   reveal: (elementId: string) => boolean,
   activeTabId: string,
+  panelOpen: boolean,
 ): void {
   // Keyed on the router location, not just the tab list: this shell is reused across
   // encounter navigations, so following a second notification while the cockpit is
@@ -134,15 +135,20 @@ function useDeepLinkedPanel(
   revealRef.current = reveal;
   const activeTabRef = useRef(activeTabId);
   activeTabRef.current = activeTabId;
+  const panelOpenRef = useRef(panelOpen);
+  panelOpenRef.current = panelOpen;
 
   useEffect(() => {
     let cancelled = false;
     let attempts = 0;
     let frame = 0;
-    // Whatever tab was showing when this navigation began. If the viewer picks a different
-    // one while we are still waiting for the target to load, they have answered the
-    // question themselves — abandon the resolve rather than yanking them back later.
+    // Whatever the panel was showing when this navigation began — WHICH tab, and whether
+    // it was open at all. If either changes while we are still waiting for the target to
+    // load, the viewer has answered the question themselves; abandon the resolve rather
+    // than yanking them back later. Collapsing counts every bit as much as picking
+    // another tab: a reveal that fires afterwards reopens a panel they just put away.
     const tabAtNavigation = activeTabRef.current;
+    const panelOpenAtNavigation = panelOpenRef.current;
 
     const resolve = () => {
       if (cancelled) return true;
@@ -189,7 +195,7 @@ function useDeepLinkedPanel(
     const maxAttempts = Math.ceil(ENTITY_DEEP_LINK_WINDOW_MS / 250);
     const timer = window.setInterval(() => {
       attempts += 1;
-      if (activeTabRef.current !== tabAtNavigation) {
+      if (activeTabRef.current !== tabAtNavigation || panelOpenRef.current !== panelOpenAtNavigation) {
         cancelled = true;
         window.clearInterval(timer);
         return;
@@ -332,7 +338,7 @@ export function EncounterVttShell({
   // tab used to arrive with its target invisible. Resolving the hash to its owning
   // section and selecting that tab fixes every such link, not just comments.
   const revealPanelFor = usePanelRevealer(tabs, activeTabId, onSelectTab, panelOpen, onPanelOpenChange);
-  useDeepLinkedPanel(revealPanelFor, activeTabId);
+  useDeepLinkedPanel(revealPanelFor, activeTabId, panelOpen);
 
   // Anything outside the panel that jumps to an element inside it (a map token's
   // condition badge) asks for the reveal first — see `revealCockpitPanel`.

@@ -257,6 +257,49 @@ test.describe('encounter cockpit deep links', () => {
     }
   });
 
+  test('collapsing the panel while a deep link is still loading abandons the reveal', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {
+      data: { entityType: 'encounter', entityId: encounterId, body: 'Abandoned reveal probe' },
+    });
+    expect(created.ok(), `create comment: ${await created.text()}`).toBe(true);
+    const commentId = ((await created.json()) as { id: number }).id;
+
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route('**/comments?*', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      await held;
+      await route.continue();
+    });
+
+    try {
+      // Arrive on the deep link with the comment list still in flight, so the resolver is
+      // mid-retry rather than already done.
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}?comment=${commentId}#entity-comment-${commentId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+      // The viewer answers the question themselves.
+      await page.getByTestId('encounter-vtt-panel-close').click();
+      await expect(page.getByTestId('encounter-vtt-panel')).not.toBeVisible();
+
+      release();
+      await expect(page.locator(`#entity-comment-${commentId}`)).toHaveCount(1, { timeout: 15_000 });
+
+      // ...and it must STAY put. This asserts a non-event, so it needs a settle window:
+      // the reveal runs a beat after the target mounts, and checking immediately passes
+      // against an unfixed build that is about to reopen the panel.
+      await page.waitForTimeout(1_500);
+      await expect(page.getByTestId('encounter-vtt-panel')).not.toBeVisible();
+      await expect(page.getByTestId('encounter-vtt-panel-open')).toBeVisible();
+    } finally {
+      await page.unroute('**/comments?*').catch(() => undefined);
+      await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
+    }
+  });
+
   test('a deep link focuses a target that only mounts after the reveal', async ({ page }) => {
     const { campaignId, encounterId } = seed();
     const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {
