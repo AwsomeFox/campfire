@@ -193,6 +193,6 @@ describe('ExportService unit coverage tests', () => {
 
   it('omits raw audit payloads from a non-DM member export', async () => {
     await exportService.buildMemberExport(campaignId, adminActor, 'player');
-    expect(auditListForCampaignExportMock).toHaveBeenCalledWith(campaignId, false);
+    expect(auditListForCampaignExportMock).toHaveBeenCalledWith(campaignId, false, false);
   });
 });
