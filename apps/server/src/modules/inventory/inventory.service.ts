@@ -694,18 +694,27 @@ export class InventoryService {
           role === 'dm'
             ? undefined
             : sql`(${inventoryItems.characterId} is null or (select owner_user_id from characters where id = ${inventoryItems.characterId}) = ${user.id})`,
-          // When NOT regenerating, the row must still have the action state this request read.
-          // Review (chatgpt-codex-connector P2): reading an unequipped, action-less item left
-          // this write unfenced, so another request could equip it and derive from the OLD
-          // snapshot in the meantime — and the refresh would then swap in the new snapshot
-          // while preserving that old-revision action, which is the mismatch this endpoint
-          // exists to prevent. A change here means someone else's write should win.
+          // When NOT regenerating, the ENTIRE action state this request read must still hold —
+          // the action payload, its provenance, and the equip flag, as one unit.
+          //
+          // Review (chatgpt-codex-connector P2, twice). First the path was unfenced, so a
+          // concurrent equip could derive from the OLD snapshot and the refresh would swap in
+          // the new one beside that stale action. Fencing only the PROVENANCE did not fix it:
+          // a concurrent equip regenerating a `derived` action leaves the provenance reading
+          // `derived` exactly as before, so the predicate still passed. The payload is what
+          // actually changed, so the payload is what has to be compared — the same lesson the
+          // equip path's fingerprint learned, applied here rather than adding one more column
+          // and waiting to find the next one.
           ...(regeneration
             ? []
             : [
+                existing.equippedAction === null
+                  ? isNull(inventoryItems.equippedAction)
+                  : eq(inventoryItems.equippedAction, existing.equippedAction),
                 existing.equippedActionSource === null
                   ? isNull(inventoryItems.equippedActionSource)
                   : eq(inventoryItems.equippedActionSource, existing.equippedActionSource),
+                eq(inventoryItems.equipped, existing.equipped),
               ]),
           // When an action IS being written, every input that derivation read must still
           // hold — owner, provenance, equip state, name, the wielder's stats, the campaign's

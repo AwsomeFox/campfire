@@ -1370,6 +1370,40 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(after.body.equippedActionSource).toBeNull();
   });
 
+  it('a refresh never leaves a new snapshot beside an old-revision action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'payload-fence-slot' });
+    // Unequipped, the item RETAINS its derived action — the shape the non-regenerating path
+    // reads, and the one whose fence this exercises.
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      // Re-equip, so the row carries a derived action AND the entry has moved on.
+      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'payload-fence-slot' });
+
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201, 409]).toContain(refreshed.status);
+
+      // The invariant the payload fence protects, and the only part of it HTTP can stage: a
+      // committed snapshot and the action beside it always describe the same revision. The
+      // interleaving the fence exists for — another writer regenerating from the old snapshot
+      // between this request's read and its UPDATE — is not reachable without real
+      // concurrency; the fence is what makes it a 409 rather than a mismatch.
+      const after = db
+        .select({ snap: inventoryItems.compendiumSnapshot, action: inventoryItems.equippedAction })
+        .from(inventoryItems)
+        .where(eq(inventoryItems.id, itemId))
+        .get()!;
+      const persistedDice = JSON.parse(JSON.parse(after.snap!).dataJson).damageDice;
+      if (after.action) expect(JSON.parse(after.action).damage).toContain(persistedDice);
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)
