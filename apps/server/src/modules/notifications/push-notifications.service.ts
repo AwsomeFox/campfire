@@ -5,7 +5,7 @@ import {
   Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import webpush, {
   type PushSubscription as WebPushSubscription,
   type RequestOptions,
@@ -24,6 +24,7 @@ import { pushSubscriptions, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 
 export const WEB_PUSH_TRANSPORT = Symbol('WEB_PUSH_TRANSPORT');
+export const MAX_PUSH_SUBSCRIPTIONS_PER_USER = 10;
 
 /** Narrow transport seam so delivery is deterministic in integration tests. */
 export interface WebPushTransport {
@@ -161,26 +162,52 @@ export class PushNotificationsService {
       throw new BadRequestException('Unsupported browser push endpoint');
     }
 
-    await this.db
-      .insert(pushSubscriptions)
-      .values({
-        userId,
-        endpoint: subscription.endpoint,
-        p256dh: subscription.keys.p256dh,
-        auth: subscription.keys.auth,
-        userAgent: subscription.userAgent,
-        createdAt: nowIso(),
-        lastUsedAt: null,
-      })
-      .onConflictDoUpdate({
-        target: pushSubscriptions.endpoint,
-        set: {
+    const createdAt = nowIso();
+    this.db.transaction((tx) => {
+      tx.insert(pushSubscriptions)
+        .values({
           userId,
+          endpoint: subscription.endpoint,
           p256dh: subscription.keys.p256dh,
           auth: subscription.keys.auth,
           userAgent: subscription.userAgent,
-        },
-      });
+          createdAt,
+          lastUsedAt: null,
+        })
+        .onConflictDoUpdate({
+          target: pushSubscriptions.endpoint,
+          set: {
+            userId,
+            p256dh: subscription.keys.p256dh,
+            auth: subscription.keys.auth,
+            userAgent: subscription.userAgent,
+            createdAt,
+          },
+        })
+        .run();
+
+      const owned = tx
+        .select({
+          id: pushSubscriptions.id,
+          endpoint: pushSubscriptions.endpoint,
+        })
+        .from(pushSubscriptions)
+        .where(eq(pushSubscriptions.userId, userId))
+        .orderBy(asc(pushSubscriptions.createdAt), asc(pushSubscriptions.id))
+        .all();
+      const excess = owned.length - MAX_PUSH_SUBSCRIPTIONS_PER_USER;
+      if (excess <= 0) return;
+
+      // Always retain the endpoint from this request. Pruning the oldest other
+      // rows gives a bounded replacement policy and also repairs pre-cap data.
+      const pruneIds = owned
+        .filter((row) => row.endpoint !== subscription.endpoint)
+        .slice(0, excess)
+        .map((row) => row.id);
+      if (pruneIds.length > 0) {
+        tx.delete(pushSubscriptions).where(inArray(pushSubscriptions.id, pruneIds)).run();
+      }
+    });
     return this.status();
   }
 

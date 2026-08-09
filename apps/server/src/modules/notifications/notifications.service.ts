@@ -24,7 +24,9 @@ import {
   campaignMembers,
   campaigns,
   characters,
+  comments,
   encounters,
+  memberSafetyControls,
   notificationDigestQueue,
   notificationPreferences,
   notificationQuietHours,
@@ -135,6 +137,10 @@ const DIGEST_FLUSH_INTERVAL_MS = 60_000;
 const DIGEST_BATCH_SIZE = 500;
 /** Keep every SQLite `IN (...)` write comfortably below its bind-variable limit. */
 const SQLITE_ID_BATCH_SIZE = 1_000;
+const BLOCK_FILTER_EXEMPT_TYPES = new Set<string>([
+  ...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
+  'safety_hold',
+]);
 
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
@@ -973,6 +979,63 @@ export class NotificationsService implements OnApplicationBootstrap {
   ): Map<number, HiddenStatusDisposition> {
     const guarded = rows.filter((row) => row.hiddenStatusContext !== null);
     return new Map(this.hiddenStatusDispositionsTx(tx, userId, guarded, user).map((row) => [row.id, row.disposition]));
+=======
+   * Reapply the recipient-facing quarantine/block rules immediately before a
+   * deferred excerpt can become either an in-app row or a browser push. The
+   * caller runs this inside the same SQLite transaction as materialization so
+   * moderation cannot land between the safety read and the insert.
+   */
+  private deferredSafetySuppressedIdsTx(
+    tx: SyncDb,
+    rows: Array<typeof notificationDigestQueue.$inferSelect>,
+  ): Set<number> {
+    const suppressed = new Set<number>();
+    const commentIds = [...new Set(rows.flatMap((row) => row.commentId == null ? [] : [row.commentId]))];
+    if (commentIds.length > 0) {
+      const quarantined = tx
+        .select({ id: comments.id })
+        .from(comments)
+        .where(and(inArray(comments.id, commentIds), isNotNull(comments.quarantinedAt)))
+        .all();
+      const quarantinedIds = new Set(quarantined.map((row) => row.id));
+      for (const row of rows) {
+        if (row.commentId != null && quarantinedIds.has(row.commentId)) suppressed.add(row.id);
+      }
+    }
+
+    const recipientIds = [...new Set(rows.map((row) => String(row.userId)))];
+    const blocks = tx
+      .select({
+        ownerUserId: memberSafetyControls.ownerUserId,
+        targetUserId: memberSafetyControls.targetUserId,
+      })
+      .from(memberSafetyControls)
+      .where(
+        and(
+          inArray(memberSafetyControls.ownerUserId, recipientIds),
+          eq(memberSafetyControls.kind, 'block'),
+          isNull(memberSafetyControls.liftedAt),
+        ),
+      )
+      .all();
+    const blockedByOwner = new Map<string, Set<string>>();
+    for (const block of blocks) {
+      if (!block.targetUserId) continue;
+      const targets = blockedByOwner.get(block.ownerUserId) ?? new Set<string>();
+      targets.add(block.targetUserId);
+      blockedByOwner.set(block.ownerUserId, targets);
+    }
+    for (const row of rows) {
+      if (
+        row.actorUserId != null &&
+        !BLOCK_FILTER_EXEMPT_TYPES.has(row.type) &&
+        blockedByOwner.get(String(row.userId))?.has(row.actorUserId)
+      ) {
+        suppressed.add(row.id);
+      }
+    }
+    return suppressed;
+>>>>>>> b134bfd02 (fix: harden deferred browser push delivery)
   }
 
   /**
@@ -998,66 +1061,92 @@ export class NotificationsService implements OnApplicationBootstrap {
           else byCampaign.set(row.campaignId, [row]);
         }
 
-        const deliverRows: Array<typeof notifications.$inferInsert> = [];
-        const deliveredIds: number[] = [];
-        const removedIds: number[] = [];
-
+        const candidateRows: typeof queued = [];
         for (const [campaignId, rows] of byCampaign) {
           const recipients = [...new Set(rows.map((r) => r.userId))];
           const quietByUser = await this.loadQuietHours(recipients, campaignId);
           for (const row of rows) {
             const quiet = quietByUser.get(row.userId);
-            if (!quiet || !isWithinQuietHours(quiet, nowMs)) {
-              deliverRows.push({
-                userId: row.userId,
-                campaignId: row.campaignId,
-                type: row.type,
-                title: row.title,
-                body: row.body,
-                entityType: row.entityType,
-                entityId: row.entityId,
-                commentId: row.commentId,
-                data: row.data,
-                hiddenStatusContext: row.hiddenStatusContext,
-                actorName: row.actorName,
-                actorUserId: row.actorUserId,
-                readAt: null,
-                createdAt: row.createdAt,
-              });
-              deliveredIds.push(row.id);
-            }
+            if (quiet && isWithinQuietHours(quiet, nowMs)) continue;
+            candidateRows.push(row);
           }
         }
 
-        const authorizedDeliverRows: Array<typeof notifications.$inferInsert> = [];
-        const authorizedDeliveredIds: number[] = [];
+        if (candidateRows.length === 0) break;
+
+        const deliverRows: Array<typeof notifications.$inferInsert> = [];
+        const deliveredIds: number[] = [];
+        const removedIds: number[] = [];
+
         this.db.transaction((tx) => {
-          for (let index = 0; index < deliverRows.length; index += 1) {
-            const row = deliverRows[index];
+          const safetySuppressedIds = this.deferredSafetySuppressedIdsTx(tx, candidateRows);
+          for (const row of candidateRows) {
+            if (safetySuppressedIds.has(row.id)) {
+              removedIds.push(row.id);
+              continue;
+            }
             const disposition = row.hiddenStatusContext
               ? this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext)
               : 'allow';
             if (disposition === 'deny') {
-              removedIds.push(deliveredIds[index]);
+              removedIds.push(row.id);
               continue;
             }
-            authorizedDeliverRows.push(disposition === 'redact' ? { ...row, entityType: null, entityId: null, data: null } : row);
-            authorizedDeliveredIds.push(deliveredIds[index]);
+            deliverRows.push(
+              disposition === 'redact'
+                ? {
+                    userId: row.userId,
+                    campaignId: row.campaignId,
+                    type: row.type,
+                    title: row.title,
+                    body: row.body,
+                    entityType: null,
+                    entityId: null,
+                    commentId: row.commentId,
+                    data: null,
+                    hiddenStatusContext: row.hiddenStatusContext,
+                    actorName: row.actorName,
+                    actorUserId: row.actorUserId,
+                    readAt: null,
+                    createdAt: row.createdAt,
+                  }
+                : {
+                    userId: row.userId,
+                    campaignId: row.campaignId,
+                    type: row.type,
+                    title: row.title,
+                    body: row.body,
+                    entityType: row.entityType,
+                    entityId: row.entityId,
+                    commentId: row.commentId,
+                    data: row.data,
+                    hiddenStatusContext: row.hiddenStatusContext,
+                    actorName: row.actorName,
+                    actorUserId: row.actorUserId,
+                    readAt: null,
+                    createdAt: row.createdAt,
+                  },
+            );
+            deliveredIds.push(row.id);
           }
-          const heldRows = queued.filter((row) => !deliveredIds.includes(row.id));
+          const heldRows = queued.filter((row) => !candidateRows.some((c) => c.id === row.id));
           for (const row of heldRows) {
             if (row.hiddenStatusContext && this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext) === 'deny') {
               removedIds.push(row.id);
             }
           }
-          if (authorizedDeliverRows.length > 0) tx.insert(notifications).values(authorizedDeliverRows).run();
-          const consumedIds = [...authorizedDeliveredIds, ...removedIds];
-          if (consumedIds.length > 0) tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, consumedIds)).run();
+          if (deliverRows.length > 0) tx.insert(notifications).values(deliverRows).run();
+          const consumedIds = [...deliveredIds, ...removedIds];
+          if (consumedIds.length > 0) {
+            tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, consumedIds)).run();
+          }
         });
-        if (authorizedDeliveredIds.length === 0 && removedIds.length === 0) break;
-        if (authorizedDeliverRows.length > 0) {
+
+        if (deliveredIds.length === 0 && removedIds.length === 0) break;
+
+        if (deliverRows.length > 0) {
           this.schedulePush(
-            authorizedDeliverRows.map((row) => ({
+            deliverRows.map((row) => ({
               userId: row.userId,
               campaignId: row.campaignId,
               type: row.type as NotificationType,
@@ -1069,7 +1158,7 @@ export class NotificationsService implements OnApplicationBootstrap {
             })),
           );
         }
-        delivered += authorizedDeliveredIds.length;
+        delivered += deliveredIds.length;
 
         if (queued.length < DIGEST_BATCH_SIZE) break;
       }
@@ -1292,7 +1381,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   private static blockedActorFilter(blockedActorIds: string[]): SQL {
     return or(
       isNull(notifications.actorUserId),
-      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold']),
+      inArray(notifications.type, [...BLOCK_FILTER_EXEMPT_TYPES]),
       notInArray(notifications.actorUserId, blockedActorIds),
     )!;
   }
