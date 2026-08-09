@@ -300,6 +300,71 @@ test.describe('encounter cockpit deep links', () => {
     }
   });
 
+  test('a deep link survives the cockpit reopening the panel for a prompt', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    const created = await page.request.post(`/api/v1/campaigns/${fixture.campaignId}/comments`, {
+      data: { entityType: 'encounter', entityId: fixture.encounterId, body: 'Automatic-change probe' },
+    });
+    expect(created.ok(), `create comment: ${await created.text()}`).toBe(true);
+    const commentId = ((await created.json()) as { id: number }).id;
+
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route('**/comments?*', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      await held;
+      await route.continue();
+    });
+
+    try {
+      // Collapse BEFORE the deep-link navigation, so that click is part of the state the
+      // resolver snapshots rather than a change during its wait — this test is about
+      // automatic changes, and a manual one legitimately cancels (see the test above).
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await page.getByTestId('encounter-vtt-panel-close').click();
+      await expect(page.getByTestId('encounter-vtt-panel')).not.toBeVisible();
+
+      await page.evaluate(
+        ([c, e, id]) => {
+          window.history.pushState({}, '', `/c/${c}/encounters/${e}?comment=${id}#entity-comment-${id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        },
+        [fixture.campaignId, fixture.encounterId, commentId] as const,
+      );
+
+      // The COCKPIT now changes the panel state on its own — a concentration save reopens
+      // it. That is not the viewer answering the question, so the deep link must survive
+      // it; cancelling on any state change dropped links nobody had interfered with.
+      const combatants = (await (
+        await page.request.get(`/api/v1/encounters/${fixture.encounterId}`)
+      ).json()) as { combatants: Array<{ id: number }> };
+      const target = combatants.combatants[0];
+      await page.request.post(
+        `/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}/turn-state`,
+        { data: { concentration: 'Bless' } },
+      );
+      await page.request.patch(`/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}`, {
+        data: { hpDelta: -1 },
+      });
+      await expect(page.getByTestId('concentration-check-prompt')).toBeVisible({ timeout: 15_000 });
+
+      release();
+      const comment = page.locator(`#entity-comment-${commentId}`);
+      await expect(comment).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('encounter-vtt-tab-table')).toHaveAttribute('aria-selected', 'true', {
+        timeout: 10_000,
+      });
+    } finally {
+      await page.unroute('**/comments?*').catch(() => undefined);
+      await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
+
   test('a deep link focuses a target that only mounts after the reveal', async ({ page }) => {
     const { campaignId, encounterId } = seed();
     const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {

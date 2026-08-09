@@ -123,8 +123,7 @@ function usePanelRevealer(
 
 function useDeepLinkedPanel(
   reveal: (elementId: string) => boolean,
-  activeTabId: string,
-  panelOpen: boolean,
+  userPanelIntentRef: { current: number },
 ): void {
   // Keyed on the router location, not just the tab list: this shell is reused across
   // encounter navigations, so following a second notification while the cockpit is
@@ -133,22 +132,19 @@ function useDeepLinkedPanel(
   const location = useLocation();
   const revealRef = useRef(reveal);
   revealRef.current = reveal;
-  const activeTabRef = useRef(activeTabId);
-  activeTabRef.current = activeTabId;
-  const panelOpenRef = useRef(panelOpen);
-  panelOpenRef.current = panelOpen;
 
   useEffect(() => {
     let cancelled = false;
     let attempts = 0;
     let frame = 0;
-    // Whatever the panel was showing when this navigation began — WHICH tab, and whether
-    // it was open at all. If either changes while we are still waiting for the target to
-    // load, the viewer has answered the question themselves; abandon the resolve rather
-    // than yanking them back later. Collapsing counts every bit as much as picking
-    // another tab: a reveal that fires afterwards reopens a panel they just put away.
-    const tabAtNavigation = activeTabRef.current;
-    const panelOpenAtNavigation = panelOpenRef.current;
+    // How many times the viewer had touched the panel's own controls when this navigation
+    // began. If that count moves while we are still waiting for the target to load, they
+    // have answered the question themselves — picking another tab or collapsing the panel
+    // both count — so abandon the resolve rather than yanking them back later. Counting
+    // INTENT rather than comparing state matters: the cockpit changes tab and open-state
+    // by itself too (a waiting prompt reopens the panel, an owned turn selects Turn), and
+    // cancelling on those dropped deep links nobody had interfered with.
+    const intentAtNavigation = userPanelIntentRef.current;
 
     const resolve = () => {
       if (cancelled) return true;
@@ -195,7 +191,7 @@ function useDeepLinkedPanel(
     const maxAttempts = Math.ceil(ENTITY_DEEP_LINK_WINDOW_MS / 250);
     const timer = window.setInterval(() => {
       attempts += 1;
-      if (activeTabRef.current !== tabAtNavigation || panelOpenRef.current !== panelOpenAtNavigation) {
+      if (userPanelIntentRef.current !== intentAtNavigation) {
         cancelled = true;
         window.clearInterval(timer);
         return;
@@ -248,6 +244,11 @@ export function EncounterVttShell({
   const pendingFocusRef = useRef<'closed' | 'opened' | null>(null);
   // Reopen for a prompt that needs an answer — but only as it appears, so a viewer who
   // collapses the panel again while it is still up is not fought by this effect.
+  // Bumped ONLY by this shell's own controls — the tab buttons, their arrow traversal, and
+  // the collapse/reopen pair. The cockpit also changes these states by itself (a waiting
+  // prompt reopens the panel, an owned turn selects Turn), and a resolver that cannot tell
+  // the two apart abandons a deep link the viewer never touched.
+  const userPanelIntentRef = useRef(0);
   const panelOpenRef = useRef(panelOpen);
   panelOpenRef.current = panelOpen;
   const onPanelOpenChangeRef = useRef(onPanelOpenChange);
@@ -348,7 +349,7 @@ export function EncounterVttShell({
   // tab used to arrive with its target invisible. Resolving the hash to its owning
   // section and selecting that tab fixes every such link, not just comments.
   const revealPanelFor = usePanelRevealer(tabs, activeTabId, onSelectTab, panelOpen, onPanelOpenChange);
-  useDeepLinkedPanel(revealPanelFor, activeTabId, panelOpen);
+  useDeepLinkedPanel(revealPanelFor, userPanelIntentRef);
 
   // Anything outside the panel that jumps to an element inside it (a map token's
   // condition badge) asks for the reveal first — see `revealCockpitPanel`.
@@ -412,6 +413,7 @@ export function EncounterVttShell({
               title={t('encounters.vtt.showPanel')}
               onClick={() => {
                 pendingFocusRef.current = 'opened';
+                userPanelIntentRef.current += 1;
                 onPanelOpenChange(true);
               }}
             >
@@ -443,7 +445,10 @@ export function EncounterVttShell({
                   // can point at a real element.
                   aria-controls={`cf-vtt-tabpanel-${tab.id}`}
                   tabIndex={tab.id === activeTabId ? 0 : -1}
-                  onClick={() => onSelectTab(tab.id)}
+                  onClick={() => {
+                    userPanelIntentRef.current += 1;
+                    onSelectTab(tab.id);
+                  }}
                   onKeyDown={(event) => {
                     if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
                     event.preventDefault();
@@ -456,6 +461,7 @@ export function EncounterVttShell({
                     const next = forward ? index + 1 : index - 1;
                     const target = tabs[(next + tabs.length) % tabs.length];
                     if (target) {
+                      userPanelIntentRef.current += 1;
                       onSelectTab(target.id);
                       document.getElementById(`cf-vtt-tab-${target.id}`)?.focus();
                     }
@@ -476,6 +482,7 @@ export function EncounterVttShell({
                 title={t('encounters.vtt.hidePanel')}
                 onClick={() => {
                   pendingFocusRef.current = 'closed';
+                  userPanelIntentRef.current += 1;
                   onPanelOpenChange(false);
                 }}
               >
