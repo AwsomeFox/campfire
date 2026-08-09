@@ -3414,7 +3414,11 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
 .cf-vtt-fab {
   position: absolute;
   right: var(--space-4);
-  bottom: 132px;
+  /* 132px clears the initiative strip — but the canvas clips overflow, so on anything
+     shorter than 132 + this button's own 46px the Roll control was pushed off the top
+     edge and could not be clicked at all, stranding the dice tray behind it. Ride down
+     with the canvas instead of insisting on the clearance. */
+  bottom: min(132px, max(8px, calc(100% - 54px)));
   z-index: 13;
   display: inline-flex;
   align-items: center;
@@ -3610,18 +3614,24 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
 .cf-vtt-map .cf-vtt-map-aside,
 .cf-vtt-map .cf-vtt-map-tray {
   position: absolute;
-  top: 56px;
+  /* The 56px clearance over the map's own toolbar row, given away as the canvas runs out
+     — otherwise the overlay starts below the space it has. Held in a variable because the
+     height cap below has to subtract exactly this, and CSS cannot read `top` back. */
+  --cf-vtt-overlay-top: min(56px, max(4px, calc(100% - 88px)));
+  top: var(--cf-vtt-overlay-top);
   /* Half the free canvas at most, so the left-anchored aside and the right-anchored
      tray can never meet. The old `100% - rail - 2*gap` let each take the FULL usable
      width: between roughly 900px and 1240px they overlapped by up to ~120px, and since
      the tray comes later in the DOM at the same z-index it swallowed pointer input over
      the aside's Grid & fog panel. Below 900px they stop floating altogether. */
   width: min(340px, calc((100% - var(--cf-vtt-rail-width) - 4 * var(--space-3)) / 2));
-  /* Never zero. `100% - 190px` alone goes NEGATIVE — and so clamps to nothing — whenever
-     the canvas is short (the body is only guaranteed 96px), which made Grid & fog open
-     onto an empty box despite scrolling fine. Floor it at something usable, then cap at
-     the canvas so the floor cannot itself overflow a canvas smaller than it. */
-  max-height: min(calc(100% - 16px), max(80px, calc(100% - 190px)));
+  /* Never zero, and never taller than the room BELOW its own top edge. `100% - 190px`
+     alone goes negative — and so clamps to nothing — whenever the canvas is short (the
+     body is only guaranteed 96px), which made Grid & fog open onto an empty box despite
+     scrolling fine; a floor that ignores the top offset then overhangs the canvas's
+     clipped edge instead, and a scroller sized to a box hanging past that edge cannot
+     bring its last controls into view. Floor it, then cap it at what actually fits. */
+  max-height: min(calc(100% - var(--cf-vtt-overlay-top) - 8px), max(80px, calc(100% - 190px)));
   overflow-y: auto;
   overscroll-behavior: contain;
   display: flex;
@@ -3734,6 +3744,10 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
     border-bottom: 0;
     border-radius: var(--radius-md) var(--radius-md) 0 0;
   }
+  /* Deliberately a plain offset, unlike the wide layout's canvas-aware clamp: here the
+     map column scrolls (`overflow-y: auto` above), so the button is never clipped by a
+     short canvas — and resolving a percentage against this scrolling container drags it
+     down over the controls beneath instead, where it intercepted their clicks. */
   .cf-vtt-fab { bottom: 96px; }
   /* Phone canvases are far too short for a fixed-height popover: pin the tray to both
      edges of the canvas instead, so its height is whatever fits and its own scroller

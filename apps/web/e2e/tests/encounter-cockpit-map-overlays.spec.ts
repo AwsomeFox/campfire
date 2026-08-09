@@ -191,9 +191,11 @@ test.describe('encounter cockpit — short canvas', () => {
     await page.request.patch(`/api/v1/encounters/${id}`, { data: { mapAttachmentId, gridSize: 8, gridScale: 5 } });
 
     try {
-      // Wide but very short: the canvas ends up near the grid's 96px floor, where the
-      // overlays' `100% - 190px` reserve goes negative and used to clamp to nothing.
-      await page.setViewportSize({ width: 1280, height: 400 });
+      // Wide but very short: this leaves a ~132px canvas — measured, not guessed — which
+      // is below both the overlays' 190px reserve (it goes negative and clamped to
+      // nothing) and the 178px the Roll control needs for its fixed bottom offset plus
+      // its own height. A 400px viewport still yields a 251px canvas and catches neither.
+      await page.setViewportSize({ width: 1280, height: 260 });
       await page.goto(`/c/${campaignId}/encounters/${id}`);
       await expect(page.getByTestId('battle-map-surface')).toBeVisible();
 
@@ -203,15 +205,35 @@ test.describe('encounter cockpit — short canvas', () => {
         const aside = document.querySelector('.cf-vtt-map-aside') as HTMLElement | null;
         const canvas = document.querySelector('.cf-vtt-main') as HTMLElement | null;
         if (!aside || !canvas) return null;
+        const a = aside.getBoundingClientRect();
+        const b = canvas.getBoundingClientRect();
         return {
-          height: Math.round(aside.getBoundingClientRect().height),
-          canvasHeight: Math.round(canvas.getBoundingClientRect().height),
+          height: Math.round(a.height),
+          canvasHeight: Math.round(b.height),
+          overhang: Math.round(Math.max(0, a.bottom - b.bottom, b.top - a.top)),
         };
       });
       expect(usable, 'the map aside must exist').not.toBeNull();
-      // Something rather than nothing, and never taller than the canvas holding it.
-      expect(usable!.height).toBeGreaterThan(40);
-      expect(usable!.height).toBeLessThanOrEqual(usable!.canvasHeight);
+      // Something rather than nothing, and every pixel of it inside the clipping canvas —
+      // a box that overhangs the clipped edge sizes its scroller from the full box, so
+      // the last Grid & fog controls cannot be scrolled into view at all.
+      expect(usable!.height).toBeGreaterThan(24);
+      expect(usable!.overhang, 'the aside must not hang past the canvas edge').toBeLessThanOrEqual(1);
+
+      // The Roll control itself has to stay inside the clipping canvas — a fixed 132px
+      // bottom offset plus its own 46px height put it above the top edge here, where it
+      // cannot be clicked and the dice tray is unreachable no matter how well bounded.
+      const fab = await page.evaluate(() => {
+        const el = document.querySelector('.cf-vtt-fab') as HTMLElement | null;
+        const canvas = document.querySelector('.cf-vtt-main') as HTMLElement | null;
+        if (!el || !canvas) return null;
+        const a = el.getBoundingClientRect();
+        const b = canvas.getBoundingClientRect();
+        return { overhang: Math.round(Math.max(0, a.bottom - b.bottom, b.top - a.top)), height: Math.round(a.height) };
+      });
+      expect(fab, 'the Roll control must exist').not.toBeNull();
+      expect(fab!.height).toBeGreaterThan(20);
+      expect(fab!.overhang, 'the Roll control must not be clipped out of the canvas').toBeLessThanOrEqual(1);
 
       // Close the aside so the Roll button is unobstructed, then check the tray it opens
       // is actually inside the canvas: a fixed 190px bottom offset on a canvas shorter
