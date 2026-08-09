@@ -276,7 +276,7 @@ export class NotificationsService implements OnApplicationBootstrap {
         .where(eq(campaignMembers.campaignId, campaignId));
       const actorId = actor ? numericUserId(actor.id) : null;
       const recipients = members.map((member) => member.userId).filter((id) => actorId === null || id !== actorId);
-      return this.dispatch(
+      return await this.dispatch(
         recipients,
         campaignId,
         event,
