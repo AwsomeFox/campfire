@@ -130,6 +130,8 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
       // reach past half the screen, which is where the old share-of-viewport clamp stopped
       // ceding and the opaque, scroll-locked cockpit began covering the lower banner.
       await page.setViewportSize({ width: 320, height: 560 });
+      // NOTE: this viewport does not trip the ceiling — see the 300x280 test below, which
+      // does. This one guards the ordinary case: chrome above, cockpit below, both usable.
       const archived = await fixture.dm.patch(`/api/v1/campaigns/${fixture.campaignId}`, {
         data: { status: 'paused' },
       });
@@ -168,6 +170,77 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
         () => Math.round(document.querySelector('.cf-vtt')?.getBoundingClientRect().height ?? 0),
       );
       expect(shellHeight, 'the cockpit keeps a usable height of its own').toBeGreaterThanOrEqual(200);
+    } finally {
+      await fixture.dm
+        .patch(`/api/v1/campaigns/${fixture.campaignId}`, { data: { status: 'active' } })
+        .catch(() => undefined);
+      await fixture.dispose();
+    }
+  });
+
+  test('chrome that outgrows the cockpit scrolls instead of being covered', async ({ page, baseURL }) => {
+    const fixture = await privateFixture(baseURL || undefined);
+    try {
+      // Small enough that Layout's own header and banners fill the entire budget on their
+      // own — measured 158px of chrome against a 140px ceiling. Past that line, locking
+      // the page and covering the overflow would strand a safety hold nobody can release,
+      // so the cockpit gives up the viewport instead.
+      await page.setViewportSize({ width: 300, height: 280 });
+      const archived = await fixture.dm.patch(`/api/v1/campaigns/${fixture.campaignId}`, {
+        data: { status: 'paused' },
+      });
+      expect(archived.ok(), `archive campaign: ${await archived.text()}`).toBe(true);
+      const raised = await page.request.post(`/api/v1/campaigns/${fixture.campaignId}/safety/hold`, {
+        data: { anonymous: true },
+      });
+      expect(raised.ok(), `raise hold: ${await raised.text()}`).toBe(true);
+
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+      await expect
+        .poll(
+          async () =>
+            page.evaluate(() => {
+              const main = document.getElementById('main-content');
+              const shell = document.querySelector('.cf-vtt');
+              if (!(main instanceof HTMLElement) || !(shell instanceof HTMLElement)) return null;
+              let lowest = 0;
+              for (let el = main.previousElementSibling; el; el = el.previousElementSibling) {
+                if (!(el instanceof HTMLElement)) continue;
+                const r = el.getBoundingClientRect();
+                if (r.height > 0) lowest = Math.max(lowest, r.bottom);
+              }
+              return {
+                clearance: Math.round(shell.getBoundingClientRect().top - lowest),
+                scrollable: document.documentElement.scrollHeight > window.innerHeight,
+                height: Math.round(shell.getBoundingClientRect().height),
+              };
+            }),
+          { timeout: 10_000 },
+        )
+        .toMatchObject({ scrollable: true });
+
+      const state = await page.evaluate(() => {
+        const main = document.getElementById('main-content');
+        const shell = document.querySelector('.cf-vtt') as HTMLElement | null;
+        if (!(main instanceof HTMLElement) || !shell) return null;
+        let lowest = 0;
+        for (let el = main.previousElementSibling; el; el = el.previousElementSibling) {
+          if (!(el instanceof HTMLElement)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.height > 0) lowest = Math.max(lowest, r.bottom);
+        }
+        return {
+          clearance: Math.round(shell.getBoundingClientRect().top - lowest),
+          height: Math.round(shell.getBoundingClientRect().height),
+        };
+      });
+      expect(state, 'cockpit and chrome must both exist').not.toBeNull();
+      // Nothing of Layout's chrome is underneath the cockpit...
+      expect(state!.clearance).toBeGreaterThanOrEqual(0);
+      // ...and the surface itself is still worth showing.
+      expect(state!.height).toBeGreaterThanOrEqual(300);
     } finally {
       await fixture.dm
         .patch(`/api/v1/campaigns/${fixture.campaignId}`, { data: { status: 'active' } })

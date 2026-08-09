@@ -35,6 +35,14 @@ const INSET_VAR = '--cf-immersive-chrome-inset';
  */
 const CAP_VAR = '--cf-immersive-chrome-cap';
 /**
+ * Set on `<html>` when Layout's chrome above the cockpit wants more room than the cockpit
+ * can cede. Beyond that line the fixed, scroll-locked cockpit would simply cover whatever
+ * did not fit, with no way to reach it — so the surface stops being fixed and the page
+ * scrolls instead. A deliberately rare escape hatch: it takes a viewport short enough
+ * (~320px) that Layout's header and banners alone fill the whole budget.
+ */
+const OVERFLOW_CLASS = 'cf-vtt-chrome-overflow';
+/**
  * The cockpit keeps at least this much of the viewport for itself; everything above it may
  * have the rest. Matches `.cf-vtt`'s own clamp, and the two must stay in step — the cockpit
  * applies that clamp to its `top` regardless of what this hook publishes, so a cap derived
@@ -141,6 +149,14 @@ export function useImmersiveChromeInset(): void {
         root.style.setProperty(CAP_VAR, `${cap}px`);
       }
       const inset = measureImmersiveChromeInsetPx();
+      // The clamp `.cf-vtt` applies to its own `top`, in the same terms — when the chrome
+      // wants more than this, something has to give, and covering it is the one answer
+      // that leaves it unreachable on a locked page.
+      const ceded = Math.max(
+        window.innerHeight * CHROME_BUDGET_RATIO,
+        window.innerHeight - MIN_COCKPIT_HEIGHT_PX,
+      );
+      root.classList.toggle(OVERFLOW_CLASS, inset > ceded);
       if (inset === published) return;
       published = inset;
       root.style.setProperty(INSET_VAR, `${inset}px`);
@@ -202,6 +218,7 @@ export function useImmersiveChromeInset(): void {
       window.removeEventListener('resize', schedule);
       root.style.removeProperty(INSET_VAR);
       root.style.removeProperty(CAP_VAR);
+      root.classList.remove(OVERFLOW_CLASS);
     };
   }, []);
 }

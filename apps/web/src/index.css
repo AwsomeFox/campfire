@@ -3094,6 +3094,23 @@ html.cf-vtt-locked body {
   overflow: hidden;
   overscroll-behavior: none;
 }
+/* The escape hatch, set by `useImmersiveChromeInset` when Layout's chrome above the
+   cockpit wants more room than the cockpit can cede. Locking the page and covering the
+   overflow is the one answer that leaves that chrome unreachable — a safety hold nobody
+   can release — so past that line the cockpit stops owning the viewport: the page scrolls
+   again and the surface takes its height in flow, below whatever is above it. Rare by
+   construction; it needs a viewport short enough that the header and banners alone fill
+   the entire budget. */
+html.cf-vtt-chrome-overflow,
+html.cf-vtt-chrome-overflow body {
+  overflow: visible;
+  overscroll-behavior: auto;
+}
+html.cf-vtt-chrome-overflow .cf-vtt {
+  position: static;
+  top: auto;
+  height: max(320px, calc(100dvh - var(--cf-immersive-chrome-inset, 0px)));
+}
 /* The page cannot scroll while the cockpit owns the viewport, so Layout's campaign-wide
    chrome above it must never grow taller than the screen — a player with several pending
    check requests would otherwise have the lower cards, and the cockpit itself, pushed
