@@ -164,6 +164,7 @@ describe('encounters (e2e)', () => {
     } finally {
       expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' })).status).toBe(200);
     }
+    expect((await request(server).post(`/api/v1/encounters/${created.body.id}/start`).set(dm)).status).toBe(201);
     expect((await request(server).post(`/api/v1/encounters/${created.body.id}/end`).set(dm)).status).toBe(201);
     expect(
       (
