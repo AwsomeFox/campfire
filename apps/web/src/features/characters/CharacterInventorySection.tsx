@@ -2,7 +2,7 @@
  * Character sheet inventory — filters the campaign inventory to this character's
  * pack and reuses the same item controls as the campaign Inventory page (issue #454).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import type { Character, InventoryItem } from '@campfire/schema';
@@ -43,19 +43,34 @@ export function CharacterInventorySection({
   const [adding, setAdding] = useState(false);
   const [showCompendiumPicker, setShowCompendiumPicker] = useState(false);
 
+  /**
+   * Monotonic token so an OLDER reconciliation cannot overwrite newer state.
+   *
+   * Mutations on two different rows each start their own `load()`. Without this, a GET that
+   * captured the list before the second mutation but settled after its GET would replace the
+   * newer result wholesale — putting the Build list and the Play gear actions back to stale,
+   * which is the very failure the publish-what-you-wrote work removed. Bumped by every load
+   * AND by every locally applied mutation, so a refresh already in flight when a write lands
+   * is discarded rather than believed.
+   */
+  const generation = useRef(0);
+
   const load = useCallback(async () => {
     setError(null);
+    const token = ++generation.current;
     try {
       const [itemList, chars] = await Promise.all([
         api.get<InventoryItem[]>(`${API}/campaigns/${campaignId}/inventory`),
         api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`),
       ]);
+      if (token !== generation.current) return;
       setItems(itemList);
       setCharacters(chars);
     } catch (err) {
+      if (token !== generation.current) return;
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
     } finally {
-      setLoading(false);
+      if (token === generation.current) setLoading(false);
     }
   }, [campaignId, t]);
 
@@ -73,6 +88,8 @@ export function CharacterInventorySection({
    */
   const applyChange = useCallback(
     (change?: InventoryItemChange) => {
+      // A write is newer than anything already in flight — invalidate those refreshes.
+      if (change) generation.current += 1;
       if (change && 'updated' in change) {
         const next = change.updated;
         const displacedId = change.displacedId;

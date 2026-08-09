@@ -217,6 +217,7 @@ test.describe('character sheet play surface', () => {
       await expect(page.getByRole('button', { name: /^Roll STR check/ })).toBeVisible();
       await expect(page.getByRole('button', { name: /^Roll initiative/ })).toBeVisible();
       await expect(page.getByRole('button', { name: /to hit \+9/ })).toBeVisible();
+      await expect(page.getByRole('radiogroup', { name: 'Attack roll mode' })).toBeVisible();
 
       // Neither a check NOR a to-hit has a critical variant: the check path treats `crit` as
       // an ordinary die, and the attack chip's handler maps only advantage/disadvantage and
@@ -249,6 +250,9 @@ test.describe('character sheet play surface', () => {
       await expect(page.locator('#character-section-actions').getByText('to hit +9')).toBeVisible();
       await expect(page.getByRole('button', { name: /to hit \+9/ })).toHaveCount(0);
       await expect(page.getByRole('button', { name: /2d6\+4/ })).toHaveCount(0);
+      // ...and the roll-mode chooser goes with them: with no rollable chip on screen it
+      // would announce mode changes that drive nothing.
+      await expect(page.getByRole('radiogroup', { name: 'Attack roll mode' })).toHaveCount(0);
     } finally {
       // Trashing notifies members ("A campaign you were in was deleted") and the bell only
       // fetches the newest 30, so a leftover notice here pushes an older seeded one out of
@@ -737,6 +741,91 @@ test.describe('character sheet play surface', () => {
       for (const item of items as Array<{ id: number; characterId: number | null }>) {
         if (item.characterId === characterId) await ctx.delete(`/api/v1/inventory/${item.id}`);
       }
+      await ctx.delete(`/api/v1/characters/${characterId}`);
+      await ctx.dispose();
+    }
+  });
+
+  /**
+   * Regression (Codex review on #2115): mutations on two rows each start their own refetch.
+   * A GET that captured the list BEFORE the second write but settles after it used to
+   * overwrite the newer state wholesale, undoing the publish-what-you-wrote guarantee.
+   */
+  test('an older inventory refresh cannot revert a newer unequip', async ({ page, baseURL }) => {
+    const campaignId = ownCampaignId;
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Two Hands Full', className: 'Fighter', level: 3 },
+    })).json()).id as number;
+    const ids: number[] = [];
+
+    try {
+      for (const [name, slot] of [['Left Blade', 'off hand'], ['Right Blade', 'main hand']] as const) {
+        const id = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/inventory`, {
+          data: { name, qty: 1, ownerType: 'character', characterId },
+        })).json()).id as number;
+        ids.push(id);
+        await ctx.patch(`/api/v1/inventory/${id}`, {
+          data: {
+            equipped: true,
+            equipSlot: slot,
+            equippedAction: { name: `${name} Strike`, kind: 'melee', toHit: '+5', damage: '1d6+2', targetAc: '', notes: '' },
+          },
+        });
+      }
+
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=build`);
+      const inventory = page.getByTestId('character-inventory');
+      await expect(inventory.getByRole('button', { name: 'Unequip Left Blade' })).toBeVisible();
+
+      // Only the FIRST refetch after a write is held open, so it captures the list before
+      // the second unequip and settles after it — the exact interleaving that reverted.
+      let refreshes = 0;
+      let mutated = false;
+      let captured = false;
+      await page.route(`**/api/v1/campaigns/${campaignId}/inventory`, async (route) => {
+        if (route.request().method() !== 'GET' || !mutated) return route.fallback();
+        refreshes += 1;
+        if (refreshes !== 1) return route.fallback();
+        // Fetch FIRST, then hold the RESPONSE. Sleeping before `fallback()` would delay the
+        // request instead, so it would query the server after the second write and come back
+        // fresh — which is why an earlier draft of this test passed against the bug.
+        const response = await route.fetch();
+        const body = await response.body();
+        captured = true;
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        await route.fulfill({ response, body });
+      });
+      await page.route(`**/api/v1/inventory/*`, async (route) => {
+        if (route.request().method() === 'PATCH') mutated = true;
+        return route.fallback();
+      });
+
+      const firstWrite = page.waitForResponse(
+        (res) => /\/api\/v1\/inventory\/\d+$/.test(res.url()) && res.request().method() === 'PATCH',
+      );
+      await inventory.getByRole('button', { name: 'Unequip Left Blade' }).click();
+      await firstWrite;
+      // The stale snapshot must be taken BEFORE the second write, or there is nothing stale
+      // about it and the test proves nothing.
+      await expect.poll(() => captured, { timeout: 10_000 }).toBe(true);
+      await inventory.getByRole('button', { name: 'Unequip Right Blade' }).click();
+
+      // Assert on PLAY, not on the item cards: a card renders its own post-write `committed`
+      // state, so it would look right even if the published pack were reverted. The gear
+      // actions are what actually read that pack.
+      await expect(inventory.getByRole('button', { name: 'Equip Left Blade' })).toBeVisible({ timeout: 15_000 });
+      // Let the held, stale refresh land before looking.
+      await page.waitForTimeout(3000);
+      await page.getByRole('tab', { name: /^Play/ }).click();
+      const gear = page.getByTestId('character-granted-actions');
+      await expect(gear.getByText('Equip Left Blade to use this action.')).toBeVisible();
+      await expect(gear.getByText('Equip Right Blade to use this action.')).toBeVisible();
+      await expect(gear.getByRole('button', { name: /to hit \+5/ })).toHaveCount(0);
+    } finally {
+      await page.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => undefined);
+      for (const id of ids) await ctx.delete(`/api/v1/inventory/${id}`);
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();
     }

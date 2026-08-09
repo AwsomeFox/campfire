@@ -50,6 +50,7 @@ import type {
   SkillRank,
   LeveledConditionTrack,
   AdapterResourceDef,
+  CriticalDamageRule,
 } from '@campfire/schema';
 import { formatNumber, useFormattingLocale } from '../../lib/format';
 import {
@@ -60,6 +61,7 @@ import {
   type RollCheckDefinition,
   checkCatalogForAdapter,
   checkRollExpr,
+  criticalDamageRuleForAdapter,
   hasAdapterOwnedAttackRoll,
   sortCheckCatalog,
   formatCheckBreakdown,
@@ -2151,6 +2153,7 @@ function ActionsCard({
   //    the encounter would produce materially different numbers.
   //
   // Either way the value still reads as text — the number is real, the roll is not offered.
+  const criticalDamage = criticalDamageRuleForAdapter(adapter);
   const adapterOwnsAttack = hasAdapterOwnedAttackRoll(adapter);
   const canRollAttack = canRoll && !adapterOwnsAttack;
   const canRollDamage = canRoll;
@@ -2296,9 +2299,13 @@ function ActionsCard({
   // chip with no way to set advantage but the one-shot context menu (Codex review on #2115).
   const hasAttackRoll = useMemo(
     () =>
-      character.actions.some((a) => a.toHit && toHitExpr(a.toHit, 'flat')) ||
-      grantedActions.some((item) => item.equipped && item.equippedAction?.toHit && toHitExpr(item.equippedAction.toHit, 'flat')),
-    [character.actions, grantedActions],
+      // `canRollAttack` first: with no rollable to-hit chip on screen — a read-only campaign,
+      // or a system whose adapter owns its attack maths — the chooser would announce mode
+      // changes that drive nothing at all.
+      canRollAttack &&
+      (character.actions.some((a) => a.toHit && toHitExpr(a.toHit, 'flat')) ||
+        grantedActions.some((item) => item.equipped && item.equippedAction?.toHit && toHitExpr(item.equippedAction.toHit, 'flat'))),
+    [canRollAttack, character.actions, grantedActions],
   );
 
   return (
@@ -2436,6 +2443,7 @@ function ActionsCard({
                 action={action}
                 open={openDetails === detailsKey}
                 onToggle={() => setOpenDetails((prev) => (prev === detailsKey ? null : detailsKey))}
+                criticalDamage={criticalDamage}
               />
             </div>
             {canEdit && (
@@ -2587,6 +2595,7 @@ function ActionsCard({
                     action={granted}
                     open={openDetails === detailsKey}
                     onToggle={() => setOpenDetails((prev) => (prev === detailsKey ? null : detailsKey))}
+                    criticalDamage={criticalDamage}
                   />
                 </div>
               </div>
@@ -2607,13 +2616,16 @@ function ActionDetails({
   action,
   open,
   onToggle,
+  criticalDamage,
 }: {
   action: CharacterAction;
   open: boolean;
   onToggle: () => void;
+  /** This campaign's critical rule — see `actionSpecEffects`. */
+  criticalDamage: CriticalDamageRule;
 }) {
   const facts = useMemo(() => actionSpecFacts(action.spec), [action.spec]);
-  const effects = useMemo(() => actionSpecEffects(action.spec), [action.spec]);
+  const effects = useMemo(() => actionSpecEffects(action.spec, criticalDamage), [action.spec, criticalDamage]);
   const source = actionSourceText(action.spec);
   if (facts.length === 0 && effects.length === 0 && !source) return null;
   return (

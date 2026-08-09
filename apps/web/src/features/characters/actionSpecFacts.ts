@@ -7,7 +7,7 @@
  * text-only action (no spec) yields an empty list and the sheet shows its notes alone. Kept
  * out of CharacterPage.tsx so the derivation is unit-testable without a rendered sheet.
  */
-import { describeActionUses, parseRechargeRange, type ActionSpec } from '@campfire/schema';
+import { describeActionUses, parseRechargeRange, type ActionSpec, type CriticalDamageRule } from '@campfire/schema';
 
 export type ActionFact = { readonly label: string; readonly value: string };
 
@@ -168,6 +168,25 @@ function damagePartText(part: { formula: string; flat: number; type: string }): 
  * healing and temp HP have no top-level `CharacterAction` field to fall back on, so reading
  * only `text` made a healing action's entire result invisible on the sheet.
  */
+/**
+ * How this system's critical rule changes a `crit` branch's printed damage.
+ *
+ * By schema convention a hand-authored `crit` branch carries BASE damage and
+ * `rollBranchDamage` applies the campaign's {@link CriticalDamageRule} on top — 5e's
+ * `double-dice` resolves `1d8+3` as `2d8+3`. Printing the branch verbatim therefore
+ * understated every critical. The rule is NAMED rather than recomputed into an expression:
+ * doubling the dice correctly is the resolver's job, and a second implementation here is
+ * exactly the drift that would disagree with it.
+ *
+ * Only the attack `crit` branch is affected; PF2e-style `critSuccess`/`critFailure` degrees
+ * are consequences as authored and are not multiplied again (see `OutcomeBranch`).
+ */
+function criticalDamageNote(rule: CriticalDamageRule | undefined): string {
+  if (rule === 'double-dice') return ', dice doubled on a critical';
+  if (rule === 'double-total') return ', total doubled on a critical';
+  return '';
+}
+
 function branchLines(branch: {
   text: string;
   damage: ReadonlyArray<{ formula: string; flat: number; type: string }>;
@@ -175,7 +194,7 @@ function branchLines(branch: {
   healing: string;
   tempHp: string;
   effects: ReadonlyArray<{ text: string; condition: string; rounds: number | null; saveEnds: boolean; ongoingDamage: number }>;
-}): string[] {
+}, criticalNote = ''): string[] {
   const lines: string[] = [];
   if (branch.text) lines.push(branch.text);
 
@@ -185,7 +204,7 @@ function branchLines(branch: {
   // "on a success" here put that phrase under "On a failure" and misstated the rule. When
   // the branch has damage of its own the halving qualifies THAT amount, so it reads as one
   // line rather than two that look additive.
-  if (damage.length > 0) lines.push(`${damage.join(' + ')} damage${branch.halfDamage ? ' (halved)' : ''}`);
+  if (damage.length > 0) lines.push(`${damage.join(' + ')} damage${branch.halfDamage ? ' (halved)' : ''}${criticalNote}`);
   else if (branch.halfDamage) lines.push('Half damage');
   if (branch.healing.trim()) lines.push(`Heals ${branch.healing.trim()}`);
   if (branch.tempHp.trim()) lines.push(`${branch.tempHp.trim()} temporary hit points`);
@@ -223,14 +242,18 @@ function branchLines(branch: {
  * true statements about two different outcomes, and collapsing them would drop the only
  * thing that says which is which.
  */
-export function actionSpecEffects(spec: ActionSpec | undefined | null): ActionEffectGroup[] {
+export function actionSpecEffects(
+  spec: ActionSpec | undefined | null,
+  /** The campaign's critical rule, so a `crit` branch's base damage is not understated. */
+  criticalDamage?: CriticalDamageRule,
+): ActionEffectGroup[] {
   if (!spec) return [];
   const outcomes = spec.outcomes ?? {};
   const groups: ActionEffectGroup[] = [];
   for (const [outcome, label] of OUTCOME_LABELS) {
     const branch = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
     if (!branch) continue;
-    const unique = [...new Set(branchLines(branch))];
+    const unique = [...new Set(branchLines(branch, outcome === 'crit' ? criticalDamageNote(criticalDamage) : ''))];
     if (unique.length > 0) groups.push({ outcome, label, lines: unique });
   }
   return groups;

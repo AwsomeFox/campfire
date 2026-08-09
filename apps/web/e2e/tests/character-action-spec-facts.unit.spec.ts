@@ -268,6 +268,42 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });
+
+  /**
+   * A hand-authored `crit` branch carries BASE damage by schema convention; the resolver
+   * applies the campaign's `CriticalDamageRule` on top (5e resolves 1d8+3 as 2d8+3). Printing
+   * the branch verbatim understated every critical. The rule is NAMED rather than recomputed
+   * into an expression — doubling correctly is the resolver's job, and a second
+   * implementation here would be free to disagree with it.
+   */
+  test('a crit branch names the system rule instead of understating its damage', () => {
+    const spec = ActionSpec.parse({
+      mode: 'attack',
+      outcomes: {
+        hit: { damage: [{ formula: '1d8', flat: 3, type: 'slashing' }] },
+        crit: { damage: [{ formula: '1d8', flat: 3, type: 'slashing' }] },
+      },
+    });
+    expect(actionSpecEffects(spec, 'double-dice')).toEqual([
+      { outcome: 'crit', label: 'On a critical hit', lines: ['1d8+3 slashing damage, dice doubled on a critical'] },
+      { outcome: 'hit', label: 'On a hit', lines: ['1d8+3 slashing damage'] },
+    ]);
+    expect(actionSpecEffects(spec, 'double-total')[0].lines)
+      .toEqual(['1d8+3 slashing damage, total doubled on a critical']);
+  });
+
+  test('degree branches are consequences as authored — never re-multiplied', () => {
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      outcomes: { critFailure: { damage: [{ formula: '4d6', flat: 0, type: 'fire' }] } },
+    });
+    expect(actionSpecEffects(spec, 'double-dice')[0].lines).toEqual(['4d6 fire damage']);
+  });
+
+  test('with no rule supplied the damage reads plainly', () => {
+    const spec = ActionSpec.parse({ outcomes: { crit: { damage: [{ formula: '1d8', flat: 0, type: '' }] } } });
+    expect(actionSpecEffects(spec)[0].lines).toEqual(['1d8 damage']);
+  });
 });
 
 test.describe('actionSourceText — cites a real source, never the sheet itself', () => {
