@@ -9542,17 +9542,30 @@ export class EncountersService {
       }
     }
 
-    // Issue #489: re-derive the turn pointer against the present, initiative-bearing
-    // roster before flipping status. A combatant removed (or initiative cleared) while
-    // the fight was ended would otherwise leave a stale currentCombatantId until the
-    // next /next-turn self-healed via advanceTurn.
+    // Issue #489: re-derive the turn pointer against the present roster (and, for a system
+    // that rolls initiative, an initiative-bearing one) before flipping status. A combatant
+    // removed (or initiative cleared) while the fight was ended would otherwise leave a
+    // stale currentCombatantId until the next /next-turn self-healed via advanceTurn.
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const sorted = this.sortCombatantsWithAdapter(combatantRows.map(combatantToDomain), 'running', adapter);
     const priorCurrentId = encounterRow.currentCombatantId;
     const priorCurrent = priorCurrentId == null ? undefined : sorted.find((c) => c.id === priorCurrentId);
     // Missing id OR present-but-null-initiative both snap to the top of the order
     // and emit a notice (issue #489) — even when that top happens to be the same id.
-    const pointerInvalid = priorCurrent == null || priorCurrent.initiative === null;
+    //
+    // The null-initiative half is conditional on the system HAVING an initiative roll
+    // (issue #2123, Devin review on #2128). It reads a null as "this pointer is broken",
+    // which held only while `start` guaranteed every running combatant had rolled: before
+    // #2123 that branch was unreachable for a `hasInitiativeRoll: false` system, because
+    // start refused any roster containing a null. Such a system now legitimately runs with
+    // EVERY combatant null (turn order is roster order), so left unconditional this would
+    // discard a perfectly valid pointer on every single reopen — the DM would resume a
+    // Starforged fight back at the top of the roster, mid-round, and read a combat-log
+    // notice blaming a missing initiative that was never supposed to exist. The
+    // missing-from-the-roster half stays unconditional: a combatant that is gone is a
+    // dangling pointer under every rule system.
+    const pointerInvalid =
+      priorCurrent == null || (hasInitiativeRollForAdapter(adapter) && priorCurrent.initiative === null);
     const currentCombatantId = pointerInvalid ? (sorted[0]?.id ?? null) : priorCurrentId;
     const turnIndex = turnIndexFor(sorted, currentCombatantId);
     const turnPointerSnapped = pointerInvalid;

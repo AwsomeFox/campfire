@@ -6651,6 +6651,49 @@ describe('encounters — issue #2123: a system with no initiative roll orders by
     // A rolled row still sorts ahead of every unrolled one, exactly as before this change.
     expect((enc.body.combatants as Array<{ id: number }>)[0].id).toBe(combatantIds[1]);
   });
+
+  it('reopen keeps the turn where it was — an unrolled pointer is not a dangling one here (Devin review on #2128)', async () => {
+    const server = ctx.app.getHttpServer();
+    // `reopen` re-derives the turn pointer and treats a null initiative on the current
+    // combatant as a broken pointer (issue #489). That reading assumed `start` had
+    // guaranteed a rolled roster; a no-initiative system legitimately runs entirely
+    // unrolled, so left unconditional it would snap every reopen back to the top of the
+    // roster mid-round and log a notice blaming an initiative that never existed.
+    //
+    // One authoritative live fight per campaign (issue #744), so retire the encounter the
+    // earlier tests left running before starting a second one.
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm)).status).toBe(201);
+
+    const second = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Second Boarding Action', hidden: false })
+    ).body.id;
+    for (const name of ['Lash', 'Gale', 'Ember']) {
+      await request(server).post(`/api/v1/encounters/${second}/combatants`).set(dm).send({ kind: 'monster', name, hpMax: 6 });
+    }
+    const started = await request(server).post(`/api/v1/encounters/${second}/start`).set(dm);
+    expect(started.status).toBe(201);
+    const order = (started.body.combatants as Array<{ id: number }>).map((c) => c.id);
+
+    // Move the turn off the top so a snap-to-top would be visible.
+    expect((await request(server).post(`/api/v1/encounters/${second}/next-turn`).set(dm)).status).toBe(201);
+    const midFight = await request(server).get(`/api/v1/encounters/${second}`).set(dm);
+    expect(midFight.body.currentCombatantId).toBe(order[1]);
+
+    expect((await request(server).post(`/api/v1/encounters/${second}/end`).set(dm)).status).toBe(201);
+    const reopened = await request(server).post(`/api/v1/encounters/${second}/reopen`).set(dm);
+    expect(reopened.status).toBe(201);
+    expect(reopened.body.status).toBe('running');
+    expect(reopened.body.currentCombatantId).toBe(order[1]);
+    expect(reopened.body.turnIndex).toBe(1);
+
+    const events = await request(server).get(`/api/v1/encounters/${second}/events`).set(dm);
+    expect(
+      (events.body as Array<{ detail: string | null }>).some((e) => (e.detail ?? '').includes('Turn pointer reset')),
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
