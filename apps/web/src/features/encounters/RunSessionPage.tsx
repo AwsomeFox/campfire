@@ -1814,6 +1814,14 @@ export default function RunSessionPage() {
             : null;
           const kind = detectSseTurnBeat(previous, next);
           previousTurnBeatRef.current = next;
+          // Issue #2092: disarm any pending REST catch-up resync. `dataUpdatedAt` records
+          // when a response LANDED, not when the server captured it, so a catch-up GET
+          // issued before this frame can still land after it and overwrite this newer
+          // baseline with pre-turn state — after which the next edge is compared against a
+          // stale baseline and is misread as a round wrap or dropped as a no-op. A live turn
+          // frame is by construction at least as fresh as any GET already in flight, so once
+          // one arrives there is nothing left for the catch-up read to establish.
+          awaitingTurnBeatResyncRef.current = null;
           const tickerKind = previous?.round != null && next.round != null && next.round > previous.round
             ? 'round-wrap'
             : 'turn';

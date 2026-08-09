@@ -40,6 +40,27 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(shouldConsumeTurnBeatResync(20, 21, false, true)).toBe(true);
   });
 
+  // Issue #2092: `dataUpdatedAt` records when a response LANDED, not when the server
+  // captured it. So a catch-up GET issued at reconnect can still land AFTER the live
+  // `encounter.turn_changed` frame it raced, and would then overwrite the newer
+  // SSE-established baseline with pre-turn state — leaving the next edge compared against
+  // a stale baseline (misread as a round wrap, or dropped as a no-op). The SSE handler
+  // therefore disarms the pending resync at the same point it establishes the baseline: a
+  // live turn frame is by construction at least as fresh as any GET already in flight.
+  //
+  // (A window this PR left partly open rather than introduced — on main the resync effect
+  // re-ran on EVERY refetch, so the same overwrite could happen far more often.)
+  test('an SSE turn edge disarms a pending REST resync so a late catch-up read cannot overwrite it', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    // The disarm must sit with the SSE baseline write itself, not somewhere it can be skipped.
+    expect(source).toMatch(/previousTurnBeatRef\.current = next;[\s\S]{0,700}?awaitingTurnBeatResyncRef\.current = null;/);
+
+    // And once disarmed, the gate refuses every completed-fetch shape — including a fetch
+    // strictly newer than the one that armed it, which is precisely the late catch-up read.
+    expect(shouldConsumeTurnBeatResync(null, 21, false, true)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(null, Number.MAX_SAFE_INTEGER, false, true)).toBe(false);
+  });
+
   // Issue #2092: this REST-driven baseline resync used to re-run on EVERY `encounter`
   // change, including the ordinary refetch that `encounter.updated` triggers alongside
   // (and always before) the very `encounter.turn_changed` frame that updates the SAME ref
