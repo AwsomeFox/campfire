@@ -17,14 +17,10 @@
  * This test asserts on RENDER-FUNCTION INVOCATION COUNT instead of DOM output, which is
  * the one thing a memo boundary actually controls. It has no framework support in this
  * repo's e2e-browser or unit(-source-scan) tiers, but the vitest+jsdom `test:component`
- * tier (issue #2025) mounts a real React tree, and `React.memo(Component)` returns a
- * plain, mutable `{ $$typeof, type, compare }` object whose `.type` is the exact inner
- * render function React calls when it does NOT bail out. That is not documented public
- * API, but it has been the stable shape of `React.memo`'s return value since React 16.6
- * and is the same shape debugging tools like why-did-you-render patch into. Swapping
- * `.type` for a spy — then restoring it — needs no changes to GridOverlay.tsx itself, so
- * it adds no render-counting instrumentation to production code (the "production
- * pollution" option #2079 flagged and did not want to pay for).
+ * tier (issue #2025) mounts a real React tree. React exposes no supported per-child render
+ * invocation hook; this test deliberately uses the long-stable memo wrapper `.type` shape,
+ * swaps it only for the test, and restores it in `finally` rather than adding production
+ * instrumentation.
  *
  * What this proves: an unrelated parent re-render, with GridOverlay's own props held
  * referentially stable (the contract `BattleMap`'s `hexCells`/calibration useMemos exist
@@ -43,13 +39,10 @@ afterEach(() => cleanup());
 
 describe('GridOverlay memo boundary (issue #1917 stage 2, issue #2079)', () => {
   test('the render function is not invoked by an unrelated parent re-render when geometry props are unchanged', () => {
-    // A memo()-wrapped component exposes its inner function as `.type` — see the
-    // file-level comment above. A plain, unmemoized function component has no `.type`,
-    // so this precondition alone already fails the exact mutation #2079 measured
-    // (`memo()` removed from GridOverlay).
+    // A plain, unmemoized function component has no `.type`, so this precondition also
+    // fails the exact mutation #2079 measured (`memo()` removed from GridOverlay).
     const memoWrapper = GridOverlay as unknown as { type?: unknown };
     expect(typeof memoWrapper.type).toBe('function');
-
     const originalRender = memoWrapper.type as (props: GridOverlayProps) => unknown;
     const renderSpy = vi.fn((props: GridOverlayProps) => originalRender(props));
     memoWrapper.type = renderSpy;
@@ -106,8 +99,7 @@ describe('GridOverlay memo boundary (issue #1917 stage 2, issue #2079)', () => {
       // byte-identical geometry props must not invoke the render function again.
       expect(renderSpy).toHaveBeenCalledTimes(1);
     } finally {
-      // Restore the real render function so no other test in this process ever sees the
-      // spy, whether this assertion passed or threw.
+      // Restore the real render function so no other test in this process sees the spy.
       memoWrapper.type = originalRender;
     }
   });
