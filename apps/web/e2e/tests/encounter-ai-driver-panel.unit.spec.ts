@@ -38,6 +38,11 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/role="alert"/);
     expect(panel).toMatch(/narrationOwnerRef/);
     expect(panel).toMatch(/liveActivity\.transcriptFetched/);
+    expect(panel).toMatch(/collectPreLiveAnnounceableIds/);
+    expect(panel).toMatch(/beginNarrationLogLive/);
+    expect(panel).toMatch(/resolveToolActivity/);
+    expect(panel).toMatch(/formatSystem: \(systemAddition\) => systemText/);
+    expect(panel).toMatch(/setNarrationStatus\(''\)/);
     expect(panel).toMatch(/charactersQuery\.isError/);
     expect(panel).toMatch(/disabled=\{locked \|\| submitting \|\| playerAttributionPending\}/);
   });

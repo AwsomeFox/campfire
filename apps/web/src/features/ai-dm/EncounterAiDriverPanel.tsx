@@ -19,15 +19,30 @@ import { StuckLadder } from './StuckLadder';
 import { AiPathGuide } from './AiSetupChecklist';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
 import { GroundingPanel } from './GroundingPanel';
-import { TranscriptRow } from './AiDmTranscriptUi';
+import { systemText, TranscriptRow } from './AiDmTranscriptUi';
 import { useAiDmLiveActivity } from './useAiDmLiveActivity';
+import { resolveToolActivity } from './toolActivity';
 import {
   followLatestAfterUserScroll,
   isFeedNearBottom,
   shouldScrollTranscriptToTailOnMount,
   unreadAfterFeedGrowth,
 } from './feedScrollFollow';
-import { NARRATION_LOG_LIVE_REGION, NARRATION_STATUS_LIVE_REGION, NARRATION_VISUAL_TRANSCRIPT, formatNarrationLogAddition, nextComposerStatusAnnouncement, resolveComposerA11ySnapshot, type ComposerA11ySnapshot } from './narrationAccessibility';
+import {
+  NARRATION_LOG_LIVE_REGION,
+  NARRATION_STATUS_LIVE_REGION,
+  NARRATION_VISUAL_TRANSCRIPT,
+  advanceNarrationLog,
+  announceableEntryIds,
+  beginNarrationLogLive,
+  collectPreLiveAnnounceableIds,
+  formatNarrationLogAddition,
+  nextComposerStatusAnnouncement,
+  resolveComposerA11ySnapshot,
+  type ComposerA11ySnapshot,
+  type NarrationLogAddition,
+  type NarrationLogCursor,
+} from './narrationAccessibility';
 import { useDisclosure } from '../../components/useDisclosure';
 import { Btn, Card, Chip, EmptyState } from '../../components/ui';
 import { Field } from '../../components/Field';
@@ -77,11 +92,36 @@ export function EncounterAiDriverPanel({
   const [undoBusy, setUndoBusy] = useState(false);
   const [undoError, setUndoError] = useState<string | null>(null);
   const [narrationStatus, setNarrationStatus] = useState('');
-  const announcedIdsRef = useRef(new Set<string>());
-  const narrationBaselineRef = useRef(false);
+  const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
+  const mountNarrationIdsRef = useRef<Set<string> | null>(null);
+  const pendingPreLiveNarrationIdsRef = useRef(new Set<string>());
   const narrationOwnerRef = useRef('');
   const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
-  const [narrationAnnouncements, setNarrationAnnouncements] = useState<string[]>([]);
+  const [narrationAnnouncements, setNarrationAnnouncements] = useState<NarrationLogAddition[]>([]);
+  if (mountNarrationIdsRef.current === null) {
+    mountNarrationIdsRef.current = announceableEntryIds(transcript.entries);
+  }
+  const displayNarrationAdditions = useCallback(
+    (additions: NarrationLogAddition[]) => additions.map((addition) => {
+      if (addition.kind !== 'tool' || !addition.name) return addition;
+      return {
+        ...addition,
+        text: resolveToolActivity(
+          {
+            type: 'tool',
+            campaignId,
+            name: addition.name,
+            isError: addition.isError === true,
+            proposed: addition.proposed === true,
+            ...(addition.encounterId !== undefined ? { encounterId: addition.encounterId } : {}),
+            at: addition.at ?? '',
+          },
+          { campaignId, encounterId },
+        ).label,
+      };
+    }),
+    [campaignId, encounterId],
+  );
 
   const charactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(campaignId),
@@ -101,26 +141,32 @@ export function EncounterAiDriverPanel({
     const owner = `${me?.user.id ?? ''}:${campaignId}:${liveActivity.mode ?? ''}:${isDm}:${myMembership?.role ?? ''}`;
     if (narrationOwnerRef.current === owner) return;
     narrationOwnerRef.current = owner;
-    announcedIdsRef.current.clear();
-    narrationBaselineRef.current = false;
+    narrationLogCursorRef.current = null;
+    mountNarrationIdsRef.current = announceableEntryIds(transcript.entries);
+    pendingPreLiveNarrationIdsRef.current.clear();
     setNarrationAnnouncements([]);
-  }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role]);
+    setNarrationStatus('');
+    composerA11yRef.current = null;
+  }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role, transcript.entries]);
 
   useEffect(() => {
-    // The first visible entries are persisted/cache history. Do not announce them while the
-    // authoritative request is still racing the initial empty reducer state.
-    if (!narrationBaselineRef.current) {
-      if (!liveActivity.transcriptFetched) return;
-      const finished = transcript.entries.filter((entry) => entry.kind !== 'dm' || entry.status === 'done');
-      finished.forEach((entry) => announcedIdsRef.current.add(entry.id));
-      narrationBaselineRef.current = true;
+    if (!liveActivity.transcriptFetched) {
+      for (const id of collectPreLiveAnnounceableIds(transcript.entries, mountNarrationIdsRef.current!)) {
+        pendingPreLiveNarrationIdsRef.current.add(id);
+      }
       return;
     }
-    const finished = transcript.entries.filter((entry) => entry.kind !== 'dm' || entry.status === 'done');
-    const additions = finished.filter((entry) => !announcedIdsRef.current.has(entry.id));
-    additions.forEach((entry) => announcedIdsRef.current.add(entry.id));
-    if (additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...additions.map((entry) => formatNarrationLogAddition(entry.kind === 'dm' ? { id: entry.id, kind: 'dm', text: entry.committed.join('\n\n') } : entry.kind === 'player' ? { id: entry.id, kind: 'player', memberName: entry.memberName, characterName: entry.characterName, text: entry.text } : entry.kind === 'tool' ? { id: entry.id, kind: 'tool', text: entry.name } : { id: entry.id, kind: 'system', variant: entry.variant, text: entry.text, data: entry.data }))]);
-  }, [liveActivity.transcriptFetched, transcript.entries]);
+    if (narrationLogCursorRef.current === null) {
+      const started = beginNarrationLogLive(transcript.entries, pendingPreLiveNarrationIdsRef.current);
+      narrationLogCursorRef.current = started.cursor;
+      pendingPreLiveNarrationIdsRef.current.clear();
+      if (started.additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...displayNarrationAdditions(started.additions)]);
+      return;
+    }
+    const advanced = advanceNarrationLog(transcript.entries, narrationLogCursorRef.current);
+    narrationLogCursorRef.current = advanced.cursor;
+    if (advanced.additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...displayNarrationAdditions(advanced.additions)]);
+  }, [displayNarrationAdditions, liveActivity.transcriptFetched, transcript.entries]);
 
   const currentCombatantName = useMemo(() => {
     if (!encounter.currentCombatantId) return undefined;
@@ -577,7 +623,16 @@ export function EncounterAiDriverPanel({
       )}
       <div {...NARRATION_STATUS_LIVE_REGION} className="sr-only">{narrationStatus}</div>
       <div {...NARRATION_LOG_LIVE_REGION} aria-label={t('table.narrationLogLabel')} className="sr-only">
-        {narrationAnnouncements.map((announcement, index) => <p key={index}>{announcement}</p>)}
+        {narrationAnnouncements.map((addition) => <p key={addition.id}>{formatNarrationLogAddition(addition, {
+          formatSystem: (systemAddition) => systemText({
+            id: systemAddition.id,
+            kind: 'system',
+            variant: systemAddition.variant,
+            text: systemAddition.text,
+            data: systemAddition.data,
+            at: '',
+          }, t),
+        })}</p>)}
       </div>
     </Card>
   );
