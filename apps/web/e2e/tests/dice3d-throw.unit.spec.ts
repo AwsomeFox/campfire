@@ -4,6 +4,7 @@ import { DICE_ROLL_MAX_SETTLE_MS } from '../../src/components/DiceRollOverlay';
 import {
   dieFaceNormals,
   dieScaleFor,
+  dieFootprintRadius,
   dieSupportRadius,
   dieVertices,
   separateRestingPlaces,
@@ -12,6 +13,7 @@ import {
   upFaceIndex,
 } from '../../src/features/dice/dice3d';
 import { faceValues } from '../../src/features/dice/dice3dFaces';
+import { MAX_RENDERED_DICE } from '../../src/features/dice/renderedDice';
 import {
   dieDelayMs,
   LINGER_MS_FLOURISH,
@@ -160,6 +162,77 @@ test.describe('resting height', () => {
           lowest = Math.min(lowest, v.clone().applyQuaternion(q).y);
         }
         expect(support + lowest, `d${sides} on face ${i}`).toBeCloseTo(0, 6);
+      }
+    }
+  });
+});
+
+/** Separating-axis test for two convex polygons on the tray floor. */
+function polygonsOverlap(a: readonly number[][], b: readonly number[][]): boolean {
+  for (const poly of [a, b]) {
+    for (let i = 0; i < poly.length; i++) {
+      const j = (i + 1) % poly.length;
+      const nx = -(poly[j][1] - poly[i][1]);
+      const nz = poly[j][0] - poly[i][0];
+      const project = (p: readonly number[][]) => p.map(([x, z]) => x * nx + z * nz);
+      const A = project(a);
+      const B = project(b);
+      if (Math.max(...A) <= Math.min(...B) + 1e-9 || Math.max(...B) <= Math.min(...A) + 1e-9) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+test.describe('footprint', () => {
+  test('the footprint radius really does circumscribe the settled silhouette', () => {
+    for (const sides of SERVER_SIDES) {
+      const radius = dieFootprintRadius(sides);
+      for (const normal of dieFaceNormals(sides)) {
+        const flat = new THREE.Quaternion().setFromUnitVectors(normal, new THREE.Vector3(0, 1, 0));
+        for (const v of dieVertices(sides)) {
+          const settled = v.clone().applyQuaternion(flat);
+          expect(Math.hypot(settled.x, settled.z), `d${sides} silhouette`)
+            .toBeLessThanOrEqual(radius + 1e-9);
+        }
+      }
+    }
+  });
+
+  test('settled d6 silhouettes never actually intersect', () => {
+    // The property the separation gap is a PROXY for, tested directly. A cube
+    // resting flat is a 1.62 square reaching 1.146 at the corners, so treating it
+    // as radius 0.86 called dice clear that were visibly through each other
+    // whenever their corners happened to face: 70 intersecting pairs across these
+    // same counts, before the radius was measured rather than assumed.
+    for (let count = 2; count <= MAX_RENDERED_DICE; count++) {
+      const scale = dieScaleFor(count, dieFootprintRadius(6));
+      const thrown = Array.from({ length: count }, (_, i) => ({
+        traj: simulate(throwN(i * 7 + count), dieSupportRadius(6) * scale),
+        radius: dieFootprintRadius(6) * scale,
+      }));
+      separateRestingPlaces(thrown);
+
+      const half = 0.81 * scale;
+      const silhouettes = thrown.map((t) => {
+        const last = t.traj[t.traj.length - 1];
+        const yaw = new THREE.Euler().setFromQuaternion(last.q, 'YXZ').y;
+        const cos = Math.cos(yaw);
+        const sin = Math.sin(yaw);
+        return [[-half, -half], [half, -half], [half, half], [-half, half]].map(([x, z]) => [
+          last.p.x + x * cos - z * sin,
+          last.p.z + x * sin + z * cos,
+        ]);
+      });
+
+      for (let i = 0; i < count; i++) {
+        for (let j = i + 1; j < count; j++) {
+          expect(
+            polygonsOverlap(silhouettes[i], silhouettes[j]),
+            `${count} d6: ${i} and ${j} intersect`,
+          ).toBe(false);
+        }
       }
     }
   });

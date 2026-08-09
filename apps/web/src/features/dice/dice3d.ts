@@ -64,19 +64,12 @@ const WALL_Z = 1.5;
 
 const DROPPED_OPACITY = 0.3;
 
-/**
- * Footprint radius of each solid before the roll's scale is applied — how much
- * floor a settled die claims, which is what spacing and the tray walls care
- * about. Deliberately NOT the same as how high the die sits: see
- * `dieSupportRadius`.
- */
-const DIE_RADIUS = 0.96;
-const D6_RADIUS = 0.86;
 /** Half the d6 box edge (BoxGeometry(1.62)) — its face-down support distance. */
 const D6_SUPPORT = 0.81;
 
 
 const supportRadii = new Map<number, number>();
+const footprintRadii = new Map<number, number>();
 
 /**
  * Distance from a die's centre to the tray when its numbered face is UP — i.e.
@@ -101,6 +94,41 @@ export function dieVertices(sides: number): THREE.Vector3[] {
   return out;
 }
 
+/**
+ * How much floor a settled die claims — the radius of the circle its resting
+ * silhouette fits inside, once the numbered face is flat.
+ *
+ * Measured off the geometry, because a die is not a ball and the number that
+ * spacing needs is not the one anything else uses. A d6 was treated as radius
+ * 0.86, but a cube resting flat is a 1.62 square whose corners reach 1.146 —
+ * a third further out — so two dice the solver called clear could still be
+ * visibly through each other whenever their corners happened to face. Every
+ * other solid was under-measured too, by 2% (d8) to 18% (d12, d20).
+ *
+ * Conservative on purpose: a circle around the silhouette, not the silhouette
+ * itself. Exact polygon separation would have to track each die's final yaw
+ * through the solver, and this buys soundness for a few percent of tray space.
+ *
+ * One value per shape is exact, as with `dieSupportRadius`: these solids are
+ * face-transitive.
+ */
+export function dieFootprintRadius(sides: number): number {
+  const cached = footprintRadii.get(sides);
+  if (cached != null) return cached;
+  const up = new THREE.Vector3(0, 1, 0);
+  const vertices = dieVertices(sides);
+  let widest = 0;
+  for (const normal of dieFaceNormals(sides)) {
+    const flat = new THREE.Quaternion().setFromUnitVectors(normal, up);
+    for (const vertex of vertices) {
+      const settled = vertex.clone().applyQuaternion(flat);
+      widest = Math.max(widest, Math.hypot(settled.x, settled.z));
+    }
+  }
+  footprintRadii.set(sides, widest);
+  return widest;
+}
+
 export function dieSupportRadius(sides: number): number {
   const cached = supportRadii.get(sides);
   if (cached != null) return cached;
@@ -118,8 +146,15 @@ export function dieSupportRadius(sides: number): number {
   supportRadii.set(sides, support);
   return support;
 }
-/** How far apart two resting dice must sit, as a multiple of their radii. */
-const SEPARATION = 1.15;
+/**
+ * Breathing room on top of the footprint radii, so settled dice read as separate
+ * rather than merely not-overlapping.
+ *
+ * Small, because the radii it multiplies are now the real ones. It used to be
+ * 1.15 over radii that under-measured every solid — slop standing in for a
+ * measurement, which is why it did not actually prevent intersection.
+ */
+const SEPARATION = 1.05;
 /**
  * Relaxation passes. Generous because it runs ONCE per roll, off the animation
  * frame, before anything is drawn: at the 60-die ceiling that is ~1770 pairs a
@@ -150,7 +185,7 @@ const SEPARATION_EPS = 0.002;
  * would shrink a three-die roll that comfortably lines up in a single row.
  * Counts of three and under keep the design's sizes untouched.
  */
-export function dieScaleFor(count: number, radius: number = DIE_RADIUS): number {
+export function dieScaleFor(count: number, radius: number = dieFootprintRadius(20)): number {
   let scale = count > 3 ? 0.66 : count > 1 ? 0.82 : 1.05;
   if (count <= 3) return scale;
   for (let i = 0; i < 60; i++) {
@@ -802,7 +837,7 @@ export function startDiceRoll(
   const spread = n > 1 ? Math.min(2.5, 5.4 / n) : 0;
   // Sized against the widest solid in the roll, so a mixed 1d20+8d6 is judged by
   // the d20 it has to make room for rather than by the d6 average.
-  const scale = dieScaleFor(n, drawn.some((s) => s !== 6) ? DIE_RADIUS : D6_RADIUS);
+  const scale = dieScaleFor(n, Math.max(...drawn.map(dieFootprintRadius)));
   const shadowTex = tex.shadow();
   const shadowGeos: THREE.BufferGeometry[] = [];
   const shadowMats: THREE.Material[] = [];
@@ -815,7 +850,7 @@ export function startDiceRoll(
     // Two different radii, because a die's footprint and its ride height are only
     // the same for a sphere: `radius` is the floor it claims (spacing, walls),
     // `rest` is how high its centre sits once the numbered face is up.
-    const radius = (dieSides === 6 ? D6_RADIUS : DIE_RADIUS) * scale;
+    const radius = dieFootprintRadius(dieSides) * scale;
     const rest = dieSupportRadius(dieSides) * scale;
     const init: ThrowInit = {
       pos: new THREE.Vector3(
