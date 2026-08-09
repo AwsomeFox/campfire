@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import type { AuditEntry, AuditListPage, CampaignMember } from '@campfire/schema';
+import type { AuditEntry, AuditListPage, CampaignMember, TrashedEntity } from '@campfire/schema';
 import { AUDIT_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, getWithHeaders, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -115,6 +115,7 @@ export default function CampaignAuditPage() {
   const [draftFilters, setDraftFilters] = useState<AuditFilters>(() => filtersFromSearchParams(searchParams));
   const [members, setMembers] = useState<CampaignMember[]>([]);
   const [items, setItems] = useState<AuditEntry[]>([]);
+  const [trashedTimelineEventIds, setTrashedTimelineEventIds] = useState<ReadonlySet<number> | null>(null);
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -135,6 +136,28 @@ export default function CampaignAuditPage() {
   useEffect(() => {
     if (!Number.isFinite(cid) || !isDm) return;
     void api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`).then(setMembers).catch(() => setMembers([]));
+  }, [cid, isDm]);
+
+  useEffect(() => {
+    let active = true;
+    if (!Number.isFinite(cid) || !isDm) {
+      setTrashedTimelineEventIds(null);
+      return () => {
+        active = false;
+      };
+    }
+    setTrashedTimelineEventIds(null);
+    void api
+      .get<TrashedEntity[]>(`${API}/campaigns/${cid}/trash`)
+      .then((items) => {
+        if (active) setTrashedTimelineEventIds(new Set(items.filter((item) => item.type === 'timeline_event').map((item) => item.id)));
+      })
+      .catch(() => {
+        if (active) setTrashedTimelineEventIds(null);
+      });
+    return () => {
+      active = false;
+    };
   }, [cid, isDm]);
 
   const loadPage = useCallback(
@@ -385,6 +408,7 @@ export default function CampaignAuditPage() {
                   entry={entry}
                   members={members}
                   highlighted={entry.id === highlightId}
+                  trashedTimelineEventIds={trashedTimelineEventIds}
                 />
               )}
             </VirtualList>

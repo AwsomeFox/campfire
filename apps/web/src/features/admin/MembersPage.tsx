@@ -23,6 +23,7 @@ import type {
   InviteRole,
   Role,
   AuditEntry,
+  TrashedEntity,
 } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
@@ -109,6 +110,11 @@ export default function MembersPage() {
     useCallback(() => api.get<AuditEntry[]>(`${API}/campaigns/${id}/audit`), [id]),
     isDm,
     t('admin.errors.loadAuditLog'),
+  );
+  const trashPanel = usePanelData<TrashedEntity[]>(
+    useCallback(() => api.get<TrashedEntity[]>(`${API}/campaigns/${id}/trash`), [id]),
+    isDm,
+    t('errors.loadFailed'),
   );
   const grantsPanel = usePanelData<GuestDmGrant[]>(
     useCallback(() => api.get<GuestDmGrant[]>(`${API}/campaigns/${id}/members/grants`), [id]),
@@ -234,7 +240,16 @@ export default function MembersPage() {
         {auditPanel.error && !auditPanel.data ? (
           <ErrorNote message={auditPanel.error} onRetry={auditPanel.retry} />
         ) : (
-          <AuditList entries={auditPanel.data ?? []} members={members ?? []} campaignId={id} />
+          <AuditList
+            entries={auditPanel.data ?? []}
+            members={members ?? []}
+            campaignId={id}
+            trashedTimelineEventIds={
+              trashPanel.data == null
+                ? null
+                : new Set(trashPanel.data.filter((item) => item.type === 'timeline_event').map((item) => item.id))
+            }
+          />
         )}
       </Card>
     </div>
@@ -1677,10 +1692,12 @@ function AuditList({
   entries,
   members,
   campaignId,
+  trashedTimelineEventIds,
 }: {
   entries: AuditEntry[];
   members: CampaignMember[];
   campaignId: number;
+  trashedTimelineEventIds: ReadonlySet<number> | null;
 }) {
   const { t } = useTranslation();
   const preview = entries.slice(0, 10);
@@ -1688,7 +1705,7 @@ function AuditList({
   return (
     <div className="text-xs space-y-2 text-slate-400" role="list">
       {preview.map((e) => (
-        <AuditEntryRow key={e.id} entry={e} members={members} />
+        <AuditEntryRow key={e.id} entry={e} members={members} trashedTimelineEventIds={trashedTimelineEventIds} />
       ))}
       {entries.length > preview.length && (
         <div className="text-[11px] text-secondary pt-1">
