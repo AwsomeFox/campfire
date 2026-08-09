@@ -233,10 +233,14 @@ function branchLines(branch: {
   // the branch has damage of its own the halving qualifies THAT amount, so it reads as one
   // line rather than two that look additive.
   if (damage.length > 0) lines.push(`${damage.join(' + ')} damage${branch.halfDamage ? ' (halved)' : ''}${criticalNote}`);
-  // A branch that halves with no damage of its own halves the FAILURE branch's. If that
-  // branch has none either, the resolver rolls nothing at all — so saying "Half damage"
-  // would promise a consequence using the action never applies.
-  else if (branch.halfDamage && fallbackHasDamage) lines.push('Half damage');
+  // A branch that halves with no damage of its own halves the FAILURE branch's. Two conditions,
+  // and both are the RESOLVER's: `resolveOneTarget` borrows the failure branch only when the
+  // selected branch's RAW `damage.length === 0`, so a defaulted `damage: [{}]` — non-empty, but
+  // filtered away above because it prints nothing — makes it roll the selected branch for zero
+  // instead of borrowing (#2115 review). And if the failure branch has no real damage either,
+  // there is nothing to halve. Either way, saying "Half damage" would promise a consequence
+  // using the action never applies.
+  else if (branch.halfDamage && (branch.damage ?? []).length === 0 && fallbackHasDamage) lines.push('Half damage');
   if (branch.healing.trim()) lines.push(`Heals ${branch.healing.trim()}`);
   if (branch.tempHp.trim()) lines.push(`${branch.tempHp.trim()} temporary hit points`);
 

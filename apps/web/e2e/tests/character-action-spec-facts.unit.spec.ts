@@ -400,6 +400,38 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     expect(actionSpecEffects(descriptive).map((g) => g.outcome)).toEqual(['hit', 'success']);
   });
 
+  /**
+   * #2115 review, second pass: the borrow is gated on the SELECTED branch's raw array too.
+   * `resolveOneTarget` reads `branch.damage.length === 0 && branch.halfDamage`, so a defaulted
+   * `success.damage: [{}]` — non-empty, but printing nothing — makes the resolver roll the
+   * selected branch for zero rather than borrow the failure branch's dice.
+   */
+  test('a placeholder on the halving branch stops the borrow, not just on the fallback', () => {
+    const placeholderOnSuccess = ActionSpec.parse({
+      mode: 'save',
+      outcomes: {
+        success: { halfDamage: true, damage: [{}] },
+        failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }] },
+      },
+    });
+    expect(actionSpecEffects(placeholderOnSuccess)).toEqual([
+      { outcome: 'failure', label: 'On a failure', lines: ['8d6 fire damage'] },
+    ]);
+
+    // Truly empty on the halving branch: the borrow happens, so the promise is real.
+    const empty = ActionSpec.parse({
+      mode: 'save',
+      outcomes: {
+        success: { halfDamage: true },
+        failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }] },
+      },
+    });
+    expect(actionSpecEffects(empty)).toEqual([
+      { outcome: 'success', label: 'On a success', lines: ['Half damage'] },
+      { outcome: 'failure', label: 'On a failure', lines: ['8d6 fire damage'] },
+    ]);
+  });
+
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });
