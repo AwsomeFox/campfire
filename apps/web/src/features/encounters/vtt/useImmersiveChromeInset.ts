@@ -36,8 +36,6 @@ const INSET_VAR = '--cf-immersive-chrome-inset';
 const CAP_VAR = '--cf-immersive-chrome-cap';
 /** The cockpit never cedes more than this share of the viewport. Matches `.cf-vtt`'s clamp. */
 const CHROME_BUDGET_RATIO = 0.5;
-/** Below this the caps stop shrinking — a scroller too short to show one row helps nobody. */
-const MIN_CHROME_CAP_PX = 72;
 
 /**
  * Campaign-wide chrome the cockpit must not cover. Both are optional: the safety bar
@@ -96,7 +94,15 @@ export function measureImmersiveChromeCapPx(): number {
   }
   const above = Number.isFinite(top) ? Math.max(0, top) : 0;
   const budget = window.innerHeight * CHROME_BUDGET_RATIO;
-  return Math.max(MIN_CHROME_CAP_PX, Math.floor(budget - above));
+  // Exactly what is left under the cockpit's own 50vh clamp, which `.cf-vtt` applies to
+  // its `top` regardless of what this returns — so any floor added here is a floor the
+  // cockpit will not honour. There used to be a 72px one, on the reasoning that a
+  // scroller too short to show a row helps nobody; but once Layout's own header and
+  // wrapped banners push `above` within 72px of the budget, that floor let a pending
+  // check prompt extend PAST the clamp, where the scroll-locked cockpit covered its
+  // lower controls — the precise failure this hook exists to prevent. Unreachable is
+  // worse than short, so the honest answer is however little remains.
+  return Math.max(0, Math.floor(budget - above));
 }
 
 export function useImmersiveChromeInset(): void {

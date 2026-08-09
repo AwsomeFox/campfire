@@ -16,6 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from 
 import { scrollBehavior } from '../../../lib/prefersReducedMotion';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
+import { ENTITY_DEEP_LINK_WINDOW_MS } from '../../../app/EntityDeepLinkFocus';
 import { useImmersiveChromeInset } from './useImmersiveChromeInset';
 import { REVEAL_COCKPIT_PANEL_EVENT, type RevealCockpitPanelDetail } from './revealCockpitPanel';
 
@@ -168,8 +169,14 @@ function useDeepLinkedPanel(
     };
 
     if (resolve()) return undefined;
-    // ~5s of retries at 250ms: long enough for a comment list to arrive, short enough
-    // that it cannot fight a tab the viewer picks in the meantime.
+    // Retried at 250ms for exactly as long as `EntityDeepLinkFocus` keeps observing.
+    // The two windows MUST match: that observer fires its single focus attempt the moment
+    // the target mounts, so a comment list that takes longer than this poller was willing
+    // to wait got that one attempt against an element still inside a hidden panel — the
+    // notification then opened on the right encounter with its target neither revealed
+    // nor focused. Giving up early cannot fight a viewer who picks another tab either,
+    // since the tab check below abandons the resolve outright.
+    const maxAttempts = Math.ceil(ENTITY_DEEP_LINK_WINDOW_MS / 250);
     const timer = window.setInterval(() => {
       attempts += 1;
       if (activeTabRef.current !== tabAtNavigation) {
@@ -177,7 +184,7 @@ function useDeepLinkedPanel(
         window.clearInterval(timer);
         return;
       }
-      if (resolve() || attempts > 20) window.clearInterval(timer);
+      if (resolve() || attempts > maxAttempts) window.clearInterval(timer);
     }, 250);
     return () => {
       cancelled = true;
