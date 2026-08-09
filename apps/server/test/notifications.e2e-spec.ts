@@ -938,14 +938,20 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     );
     expect(hiddenCombatant).toBeDefined();
 
-    const statusNotifications = async (agent: ReturnType<typeof request.agent>, title: string, expected: number) => {
+    const statusNotifications = async (
+      agent: ReturnType<typeof request.agent>,
+      title: string,
+      expected: number,
+      encounterId?: number,
+    ) => {
       let matching: Notification[] = [];
       for (let attempt = 0; attempt < 20; attempt += 1) {
         matching = (await listFor(agent)).filter(
           (notification) =>
             notification.type === 'character_downed' &&
             notification.campaignId === hiddenCampaignId &&
-            notification.title === title,
+            notification.title === title &&
+            (encounterId === undefined || notification.entityId === encounterId),
         );
         if (matching.length === expected) {
           // Notification dispatch is intentionally best-effort and starts after
@@ -958,7 +964,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
             (notification) =>
               notification.type === 'character_downed' &&
               notification.campaignId === hiddenCampaignId &&
-              notification.title === title,
+              notification.title === title &&
+              (encounterId === undefined || notification.entityId === encounterId),
           );
           if (matching.length === 0) return matching;
         }
@@ -1072,10 +1079,10 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       demoteDualRoleDmAtWrite.mockRestore();
     }
 
-    const dualRoleOwnerDowned = await statusNotifications(coDm, 'Character downed!', 1);
+    const dualRoleOwnerDowned = await statusNotifications(coDm, 'Character downed!', 1, dualRoleEncounter.body.id);
     expect(dualRoleOwnerDowned[0].body).toContain('Dual Role Hero was downed');
     expect(dualRoleOwnerDowned[0].entityId).toBe(dualRoleEncounter.body.id);
-    expect((await statusNotifications(spectator, 'Character downed!', 1))[0].entityId).toBe(dualRoleEncounter.body.id);
+    expect((await statusNotifications(spectator, 'Character downed!', 1, dualRoleEncounter.body.id))[0].entityId).toBe(dualRoleEncounter.body.id);
 
     db.update(campaignMembers)
       .set({ role: 'dm' })
@@ -1101,7 +1108,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .patch(`/api/v1/encounters/${visibleEncounter.body.id}/combatants/${visibleCombatant.id}`)
       .send({ hpSet: 0 });
     expect(visibleDowned.status).toBe(200);
-    const spectatorVisible = await statusNotifications(spectator, 'Character downed!', 1);
+    const spectatorVisible = await statusNotifications(spectator, 'Character downed!', 1, visibleEncounter.body.id);
     expect(spectatorVisible[0].title).toBe('Character downed!');
     expect(spectatorVisible[0].entityId).toBe(visibleEncounter.body.id);
 
