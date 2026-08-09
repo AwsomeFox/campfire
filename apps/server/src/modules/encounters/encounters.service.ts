@@ -6152,6 +6152,8 @@ export class EncountersService {
       .where(and(eq(characters.id, characterId), eq(characters.campaignId, encounterRow.campaignId)))
       .limit(1);
     const roles = await this.notifications.memberRoles(encounterRow.campaignId);
+    const narrowlyDelivered = new Set<number>();
+    let retriedVisibleFanout = false;
     for (const [memberId, memberRole] of roles) {
       const isDm = memberRole === 'dm';
       const isOwner = String(memberId) === character?.ownerUserId;
@@ -6159,7 +6161,7 @@ export class EncountersService {
       // The player may learn their character's state, but a hidden encounter
       // remains a DM-only entity and must not become a notification deep-link.
       const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
-      const delivered = await this.notifications.notifyUserIfHiddenEncounterRecipient(
+      let delivered = await this.notifications.notifyUserIfHiddenEncounterRecipient(
         memberId,
         encounterRow.campaignId,
         user,
@@ -6167,11 +6169,35 @@ export class EncountersService {
         isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
         encounterRow.id,
       );
+      // The first broad guard can correctly refuse a hidden encounter, then a
+      // reveal can win before this narrow write. Retry broad fan-out exactly
+      // once from the transaction-observed transition; exclude prior narrow
+      // deliveries so the retry cannot duplicate DM/owner rows.
+      if (delivered === 'visible' && !retriedVisibleFanout) {
+        retriedVisibleFanout = true;
+        if (await this.notifications.notifyCampaignIfEncounterVisible(
+          encounterRow.campaignId,
+          encounterRow.id,
+          characterId,
+          user,
+          event,
+          narrowlyDelivered,
+        )) return;
+        delivered = await this.notifications.notifyUserIfHiddenEncounterRecipient(
+          memberId,
+          encounterRow.campaignId,
+          user,
+          recipientEvent,
+          isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
+          encounterRow.id,
+        );
+      }
+      if (delivered === 'delivered') narrowlyDelivered.add(memberId);
       // A recipient can legitimately hold both authorities. If their DM
       // membership changed after discovery, retry only their personal-status
       // payload under the independently revalidated ownership authority.
-      if (!delivered && isDm && isOwner) {
-        await this.notifications.notifyUserIfHiddenEncounterRecipient(
+      if (delivered === 'skipped' && isDm && isOwner) {
+        const ownerDelivered = await this.notifications.notifyUserIfHiddenEncounterRecipient(
           memberId,
           encounterRow.campaignId,
           user,
@@ -6179,6 +6205,7 @@ export class EncountersService {
           { kind: 'character_owner', characterId },
           encounterRow.id,
         );
+        if (ownerDelivered === 'delivered') narrowlyDelivered.add(memberId);
       }
     }
   }

@@ -136,6 +136,7 @@ type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0]
 
 type HiddenStatusAudience = 'campaign_member' | 'permanent_dm' | 'character_owner';
 type HiddenStatusDisposition = 'allow' | 'redact' | 'project_redact' | 'deny' | 'filter';
+type HiddenRecipientDelivery = 'delivered' | 'skipped' | 'visible';
 
 interface HiddenStatusReadGuard {
   filteredIds: Set<number>;
@@ -315,6 +316,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     characterId: number,
     actor: RequestUser | null,
     event: NotificationEvent,
+    excludedRecipientIds: ReadonlySet<number> = new Set(),
   ): Promise<boolean> {
     try {
       const members = await this.db
@@ -322,7 +324,8 @@ export class NotificationsService implements OnApplicationBootstrap {
         .from(campaignMembers)
         .where(eq(campaignMembers.campaignId, campaignId));
       const actorId = actor ? numericUserId(actor.id) : null;
-      const recipients = members.map((member) => member.userId).filter((id) => actorId === null || id !== actorId);
+      const recipients = members.map((member) => member.userId)
+        .filter((id) => (actorId === null || id !== actorId) && !excludedRecipientIds.has(id));
       const hiddenStatusContext: HiddenStatusContext = { encounterId, characterId, audience: 'campaign_member' };
       return await this.dispatch(
         recipients,
@@ -355,9 +358,9 @@ export class NotificationsService implements OnApplicationBootstrap {
     event: NotificationEvent,
     authority: { kind: 'permanent_dm'; characterId: number } | { kind: 'character_owner'; characterId: number },
     encounterId: number,
-  ): Promise<boolean> {
+  ): Promise<HiddenRecipientDelivery> {
     const recipient = numericUserId(userId);
-    if (recipient === null || (actor && recipient === numericUserId(actor.id))) return true;
+    if (recipient === null || (actor && recipient === numericUserId(actor.id))) return 'delivered';
     const hiddenStatusContext: HiddenStatusContext = {
       encounterId,
       characterId: authority.characterId,
@@ -365,10 +368,20 @@ export class NotificationsService implements OnApplicationBootstrap {
     };
     if (!Number.isInteger(hiddenStatusContext.characterId) || hiddenStatusContext.characterId <= 0 || !Number.isInteger(encounterId) || encounterId <= 0) {
       this.logger.warn(`notifyUserIfHiddenEncounterRecipient refused malformed hidden-status context for user ${recipient} in campaign ${campaignId}`);
-      return false;
+      return 'skipped';
     }
     try {
-      return await this.dispatch([recipient], campaignId, event, actor?.id ?? null, actor?.id ?? null, (tx) => {
+      let visibilityChanged = false;
+      const delivered = await this.dispatch([recipient], campaignId, event, actor?.id ?? null, actor?.id ?? null, (tx) => {
+        const encounter = tx
+          .select({ hidden: encounters.hidden })
+          .from(encounters)
+          .where(and(eq(encounters.id, encounterId), eq(encounters.campaignId, campaignId)))
+          .get();
+        if (!encounter?.hidden) {
+          visibilityChanged = true;
+          return false;
+        }
         if (authority.kind === 'permanent_dm') {
           return Boolean(
             tx.select({ userId: campaignMembers.userId })
@@ -384,9 +397,10 @@ export class NotificationsService implements OnApplicationBootstrap {
             .get(),
         );
       }, hiddenStatusContext);
+      return delivered ? 'delivered' : visibilityChanged ? 'visible' : 'skipped';
     } catch (err) {
       this.logger.warn(`notifyUserIfHiddenEncounterRecipient failed for user ${recipient} in campaign ${campaignId}: ${String(err)}`);
-      return false;
+      return 'skipped';
     }
   }
 

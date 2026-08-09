@@ -1162,6 +1162,48 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(raceOwner[0].entityType).toBeNull();
     expect(raceOwner[0].entityId).toBeNull();
     expect(raceCoDm[0].entityId).toBe(raceEncounter.body.id);
+
+    // The inverse transition is also a durable-write race: an initially
+    // hidden encounter can be revealed after broad fan-out declines but before
+    // the first narrow recipient write. Retry broad delivery once and do not
+    // duplicate the recipients that may already have received a narrow row.
+    const revealRaceCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Reveal Race Hero', hpCurrent: 10, hpMax: 10 });
+    expect(revealRaceCharacter.status).toBe(201);
+    const revealRaceEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Reveal Race Window', hidden: true });
+    expect(revealRaceEncounter.status).toBe(201);
+    const revealRaceRoster = await dm.get(`/api/v1/encounters/${revealRaceEncounter.body.id}`);
+    const revealRaceCombatant = revealRaceRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === revealRaceCharacter.body.id,
+    );
+    expect(revealRaceCombatant).toBeDefined();
+    const revealAtNarrowWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[5] === revealRaceEncounter.body.id) {
+        db.update(encounters).set({ hidden: false }).where(eq(encounters.id, revealRaceEncounter.body.id)).run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      expect((await dm
+        .patch(`/api/v1/encounters/${revealRaceEncounter.body.id}/combatants/${revealRaceCombatant.id}`)
+        .send({ hpSet: 0 })).status).toBe(200);
+    } finally {
+      revealAtNarrowWrite.mockRestore();
+    }
+    const waitForRevealRace = async (agent: ReturnType<typeof request.agent>) => {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const rows = (await listFor(agent)).filter((row) => row.body.includes('Reveal Race Hero was downed'));
+        if (rows.length === 1) return rows[0];
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error('Timed out waiting for one reveal-race notification');
+    };
+    expect((await waitForRevealRace(player)).entityId).toBe(revealRaceEncounter.body.id);
+    expect((await waitForRevealRace(coDm)).entityId).toBe(revealRaceEncounter.body.id);
+    expect((await waitForRevealRace(spectator)).entityId).toBe(revealRaceEncounter.body.id);
   });
 
   it('removes persisted hidden-status rows when a recipient loses DM or owner authority, including before digest delivery (#2112)', async () => {
