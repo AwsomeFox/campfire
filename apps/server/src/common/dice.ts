@@ -1,6 +1,9 @@
 import { randomInt } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
 import {
+  DICE_ALLOWED_SIDES,
+  DICE_MAX_COUNT,
+  DICE_MAX_MODIFIER_ABS,
   DiceExprPattern,
   rollActionDice,
   type ActionDiceRoll,
@@ -32,9 +35,13 @@ import {
  *  - dlN: drop the lowest N dice    (stat-gen: "4d6dl1")
  * Keep N must be 1..count; drop N must be 1..count-1 (at least one die survives).
  */
-const ALLOWED_SIDES = new Set([2, 4, 6, 8, 10, 12, 20, 100]);
-const MAX_COUNT = 20;
-const MAX_MODIFIER_ABS = 999;
+// Issue #2097 review: these bounds moved to @campfire/schema's dice-bounds so a producer
+// building an ActionSpec can ask "will the roller accept this?" BEFORE marking the spec
+// resolvable, instead of finding out mid-combat. This module stays the enforcement point;
+// it just no longer owns a second copy of the numbers.
+const ALLOWED_SIDES = DICE_ALLOWED_SIDES;
+const MAX_COUNT = DICE_MAX_COUNT;
+const MAX_MODIFIER_ABS = DICE_MAX_MODIFIER_ABS;
 
 export type KeepMode = 'kh' | 'kl' | 'dh' | 'dl';
 

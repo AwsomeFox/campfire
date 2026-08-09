@@ -5428,6 +5428,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // 0176 confirmed free on main and every claude/codex/work/port/feat/fix remote branch
   // at the time this was taken (see the same caveat on 0174 above).
   { name: '0176_combatants_clear_legacy_manual_order_2095', run: migrateCombatantsTableClearLegacyManualOrder2095 },
+  // #2097 equipped-action provenance — renumbered to 0177 when #2095 landed 0176 on main
+  // first. This ordinal never shipped on any real database as 0176.
 ];
 
 /**
