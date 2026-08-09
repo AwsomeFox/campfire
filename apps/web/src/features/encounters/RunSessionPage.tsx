@@ -438,6 +438,7 @@ const InitiativeStrip = memo(function InitiativeStrip({
   combatants,
   currentCombatantId,
   charactersById,
+  memberNamesByUserId,
   turnPulse = false,
   hpFeedbackByCombatant,
   colorVisionAssist = false,
@@ -448,6 +449,7 @@ const InitiativeStrip = memo(function InitiativeStrip({
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
+  memberNamesByUserId: ReadonlyMap<string, string>;
   turnPulse?: boolean;
   hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
@@ -736,7 +738,11 @@ const InitiativeStrip = memo(function InitiativeStrip({
               {c.controllerUserId != null && (
                 <span
                   data-testid={`strip-controller-badge-${c.id}`}
-                  title={`Controlled by user #${c.controllerUserId}`}
+                  title={t('encounters.controller.controlledBy', {
+                    name:
+                      memberNamesByUserId.get(String(c.controllerUserId)) ??
+                      t('encounters.controller.unknownController'),
+                  })}
                   style={{
                     position: 'absolute',
                     top: -3,
@@ -4794,6 +4800,7 @@ export default function RunSessionPage() {
               combatants={orderedCombatants}
               currentCombatantId={encounter.currentCombatantId}
               charactersById={charactersById}
+              memberNamesByUserId={aoeDeclarerNames}
               turnPulse={turnPulse}
               hpFeedbackByCombatant={hpFeedbackByCombatant}
               colorVisionAssist={me?.user.colorVisionAssist ?? false}

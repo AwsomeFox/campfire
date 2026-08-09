@@ -60,7 +60,8 @@
       "giveControlTo": "Give control to {{name}}",
       "giveControl": "Give control to player",
       "clearControl": "Clear player control",
-      "controlledBy": "Controlled by {{name}}"
+      "controlledBy": "Controlled by {{name}}",
+      "unknownController": "a campaign player"
     },
     "generate": "Generate encounter",
     "quickFight": "Quick fight",

@@ -40,6 +40,7 @@ import {
   notificationDigestQueue,
   sessionShares,
   castSessions,
+  combatants,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { nextUpdatedAt } from '../../common/stale-write';
@@ -419,6 +420,12 @@ export class UsersService {
             `Cannot disable: assign an enabled DM first for: ${orphanedCampaignNames.join(', ')}`,
           );
         }
+        // A disabled account must not retain delegated authority that silently
+        // becomes active again if the account is later re-enabled.
+        tx.update(combatants)
+          .set({ controllerUserId: null })
+          .where(eq(combatants.controllerUserId, id))
+          .run();
       }
 
       const update: Partial<typeof users.$inferInsert> = { updatedAt: nowIso() };

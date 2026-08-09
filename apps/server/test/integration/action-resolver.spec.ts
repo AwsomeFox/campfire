@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { and, eq } from 'drizzle-orm';
 import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
-import { actionApplyChains, actionPendingResolutions, auditLog, campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks } from '../../src/db/schema';
+import { actionApplyChains, actionPendingResolutions, auditLog, campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks, users } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { ActionResolverService } from '../../src/modules/encounters/action-resolver.service';
@@ -163,6 +163,44 @@ describe('action resolver (real SQLite, service layer)', () => {
   it('a player cannot list another player’s character actions', () => {
     const { service, encounterId, actor } = seed();
     expect(() => service.listUsableActions(encounterId, actor, bob, 'player')).toThrow(/your own character/i);
+  });
+
+  it('#1941 intentionally lets a delegated controller list only the combat action contract', () => {
+    const { orm, service, encounterId, drake } = seed();
+    const controller: RequestUser = { id: '101', name: 'Controller', serverRole: 'user', devRole: 'player' };
+    const ts = new Date().toISOString();
+    orm.insert(users)
+      .values({ id: 101, username: 'delegated-controller', displayName: 'Controller', createdAt: ts, updatedAt: ts })
+      .run();
+    orm.update(combatants)
+      .set({
+        controllerUserId: 101,
+        statblockJson: JSON.stringify({
+          ac: 18,
+          dmNotes: 'secret encounter plan',
+          actions: [
+            {
+              name: 'Delegated Claw',
+              kind: 'action',
+              spec: {
+                mode: 'attack',
+                attack: { bonus: '+5' },
+                cost: { slot: 'action', count: 1 },
+                targets: { count: 1, allow: 'enemy' },
+                outcomes: {},
+              },
+            },
+          ],
+        }),
+      })
+      .where(eq(combatants.id, drake))
+      .run();
+
+    const actions = service.listUsableActions(encounterId, drake, controller, 'player');
+    expect(actions).toHaveLength(1);
+    expect(actions[0].name).toBe('Delegated Claw');
+    expect(actions[0]).not.toHaveProperty('dmNotes');
+    expect(() => service.listUsableActions(encounterId, drake, bob, 'player')).toThrow(/your own character/i);
   });
 
   // Issue #1921: listUsableActions surfaces remaining-uses state, and it tracks a real spend.

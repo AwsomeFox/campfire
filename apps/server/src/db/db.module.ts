@@ -5009,7 +5009,9 @@ function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): v
   if (hasCombatantsTable) {
     const columns = sqlite.prepare("PRAGMA table_info(combatants)").all() as Array<{ name: string }>;
     if (!columns.some((c) => c.name === "controller_user_id")) {
-      sqlite.exec("ALTER TABLE combatants ADD COLUMN controller_user_id INTEGER");
+      sqlite.exec(
+        "ALTER TABLE combatants ADD COLUMN controller_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
+      );
     }
   }
 }

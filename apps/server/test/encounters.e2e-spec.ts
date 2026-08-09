@@ -10038,80 +10038,186 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
 
   describe('delegated combatant controllerUserId (issue #1941)', () => {
     it('allows DM to assign and clear controllerUserId, granting combatant rights to player', async () => {
-      const server = ctx.app.getHttpServer();
-      const db = ctx.app.get<DrizzleDb>(DB);
+      const realCtx = await createTestAppNoDevAuth();
+      const server = realCtx.app.getHttpServer();
+      try {
+        const adminAgent = request.agent(server);
+        const setup = await adminAgent
+          .post('/api/v1/auth/setup')
+          .send({ username: 'controller-admin-1941', password: 'controller-admin-password-1' });
+        expect(setup.status).toBe(201);
 
-      // Create a fresh campaign with DM and player p-1
-      const camp = await request(server)
-        .post('/api/v1/campaigns')
-        .set(dm)
-        .send({ name: 'Delegated Control Campaign' });
-      const campaignId = camp.body.id;
+        // Dev-auth identities are not persisted users, so create a real account and
+        // cookie session for the delegated controller.
+        const createdPlayer = await adminAgent
+          .post('/api/v1/users')
+          .send({
+            username: 'controller-player-1941',
+            displayName: 'Controller Player',
+            password: 'controller-password-1',
+            serverRole: 'user',
+          });
+        expect(createdPlayer.status).toBe(201);
+        const playerUserId = createdPlayer.body.id;
+        const controllerAgent = request.agent(server);
+        const login = await controllerAgent
+          .post('/api/v1/auth/login')
+          .send({ username: 'controller-player-1941', password: 'controller-password-1' });
+        expect(login.status).toBe(201);
 
-      // Join player p-1 as member
-      await request(server).post(`/api/v1/campaigns/${campaignId}/join`).set(player);
+        const camp = await adminAgent
+          .post('/api/v1/campaigns')
+          .send({ name: 'Delegated Control Campaign' });
+        const campaignId = camp.body.id;
 
-      // Find user id of player p-1 from DB
-      const playerUser = await db.query.users.findFirst({
-        where: (u, { eq }) => eq(u.username, 'p-1'),
-      });
-      expect(playerUser).toBeDefined();
-      const playerUserId = playerUser!.id;
+        const membership = await adminAgent
+          .post(`/api/v1/campaigns/${campaignId}/members`)
+          .send({ userId: playerUserId, role: 'player' });
+        expect(membership.status).toBe(201);
 
-      // DM creates encounter and adds a summoned creature combatant
-      const enc = await request(server)
-        .post(`/api/v1/campaigns/${campaignId}/encounters`)
-        .set(dm)
-        .send({ name: 'Summon Fight' });
-      const encounterId = enc.body.id;
+        // DM creates encounter and adds a summoned creature combatant
+        const enc = await adminAgent
+          .post(`/api/v1/campaigns/${campaignId}/encounters`)
+          .send({ name: 'Summon Fight', hidden: false });
+        const encounterId = enc.body.id;
 
-      const summonRes = await request(server)
-        .post(`/api/v1/encounters/${encounterId}/combatants`)
-        .set(dm)
-        .send({ kind: 'monster', name: 'Fire Elemental Companion', hpMax: 50, controllerUserId: playerUserId });
-      expect(summonRes.status).toBe(201);
-      expect(summonRes.body.controllerUserId).toBe(playerUserId);
-      const summonId = summonRes.body.id;
+        const summonRes = await adminAgent
+          .post(`/api/v1/encounters/${encounterId}/combatants`)
+          .send({
+            kind: 'monster',
+            name: 'Fire Elemental Companion',
+            hpMax: 50,
+            controllerUserId: playerUserId,
+            statblock: {
+              ac: 13,
+              notes: 'DM-only elemental notes',
+              abilityScores: {},
+              resources: {},
+              spellSlots: {},
+              actions: [],
+              traits: [],
+            },
+          });
+        expect(summonRes.status).toBe(201);
+        expect(summonRes.body.controllerUserId).toBe(playerUserId);
+        const summonId = summonRes.body.id;
 
-      // Non-DM cannot assign controllerUserId (403)
-      const failAssign = await request(server)
-        .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
-        .set(player)
-        .send({ controllerUserId: playerUserId });
-      expect(failAssign.status).toBe(403);
+        // Non-DM cannot assign controllerUserId (403)
+        const failAssign = await controllerAgent
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
+          .send({ controllerUserId: playerUserId });
+        expect(failAssign.status).toBe(403);
 
-      // Non-member assignment fails with 400
-      const failNonMember = await request(server)
-        .post(`/api/v1/encounters/${encounterId}/combatants`)
-        .set(dm)
-        .send({ kind: 'monster', name: 'Wolf', hpMax: 20, controllerUserId: 999999 });
-      expect(failNonMember.status).toBe(400);
+        // Non-member assignment fails with 400
+        const failNonMember = await adminAgent
+          .post(`/api/v1/encounters/${encounterId}/combatants`)
+          .send({ kind: 'monster', name: 'Wolf', hpMax: 20, controllerUserId: 999999 });
+        expect(failNonMember.status).toBe(400);
 
-      // Delegated controller player can update HP/conditions on their controlled combatant
-      const playerUpdate = await request(server)
-        .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
-        .set(player)
-        .send({ hpDelta: -10 });
-      expect(playerUpdate.status).toBe(200);
+        // Delegated controller player can update HP/conditions on their controlled combatant
+        const playerUpdate = await controllerAgent
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
+          .send({ hpDelta: -10 });
+        expect(playerUpdate.status).toBe(200);
+        expect(playerUpdate.body.statblock).toBeNull();
 
-      // Delegated controller sees exact HP when viewing encounter while statblock remains hidden
-      const playerEncounterView = await request(server)
-        .get(`/api/v1/encounters/${encounterId}`)
-        .set(player);
-      expect(playerEncounterView.status).toBe(200);
-      const controlledCombatantView = playerEncounterView.body.combatants.find((c: any) => c.id === summonId);
-      expect(controlledCombatantView.hpCurrent).toBe(40);
-      expect(controlledCombatantView.hpMax).toBe(50);
-      expect(controlledCombatantView.statblock).toBeNull();
+        // Delegated controller sees exact HP when viewing encounter while statblock remains hidden
+        const playerEncounterView = await controllerAgent.get(`/api/v1/encounters/${encounterId}`);
+        expect(playerEncounterView.status).toBe(200);
+        const controlledCombatantView = playerEncounterView.body.combatants.find((c: any) => c.id === summonId);
+        expect(controlledCombatantView.hpCurrent).toBe(40);
+        expect(controlledCombatantView.hpMax).toBe(50);
+        expect(controlledCombatantView.statblock).toBeNull();
 
-      // DM can clear controllerUserId
-      const clearRes = await request(server)
-        .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
-        .set(dm)
-        .send({ controllerUserId: null });
-      expect(clearRes.status).toBe(200);
-      expect(clearRes.body.controllerUserId).toBeNull();
+        // DM can clear controllerUserId
+        const clearRes = await adminAgent
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
+          .send({ controllerUserId: null });
+        expect(clearRes.status).toBe(200);
+        expect(clearRes.body.controllerUserId).toBeNull();
+      } finally {
+        await closeTestApp(realCtx);
+      }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1935 — turn timer: turnTimerSeconds PATCH authorization + turnStartedAt's
+// PATCH-proofing and REST/MCP-shared exposure on every role's GET. The stamping
+// itself (start/next-turn/undo/end/reopen) is covered at the service layer in
+// test/unit/encounters-turn-timer.spec.ts — this block only exercises what needs
+// the real HTTP/DTO layer: role gating and the strict-schema PATCH rejection.
+// ---------------------------------------------------------------------------
+describe('encounters — turn timer (issue #1935, e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Turn Timer Campaign' })).body.id;
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Timer Drill', hidden: false });
+    encounterId = created.body.id;
+    await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Goblin', hpMax: 10 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('DM PATCH turnTimerSeconds succeeds and is reflected on GET', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ turnTimerSeconds: 90 });
+    expect(res.status).toBe(200);
+    expect(res.body.turnTimerSeconds).toBe(90);
+
+    const got = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(got.body.turnTimerSeconds).toBe(90);
+  });
+
+  it('non-DM PATCH of turnTimerSeconds is rejected 403', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ turnTimerSeconds: 60 });
+    expect(res.status).toBe(403);
+
+    const got = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(got.body.turnTimerSeconds).toBe(90);
+  });
+
+  it('a negative turnTimerSeconds is rejected 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ turnTimerSeconds: -30 });
+    expect(res.status).toBe(400);
+  });
+
+  it('turnStartedAt in a PATCH body is rejected 400 — it is not part of EncounterUpdate at all (strict DTO)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ turnStartedAt: '2020-01-01T00:00:00.000Z' });
+    expect(res.status).toBe(400);
+  });
+
+  it('turnStartedAt and turnTimerSeconds are exposed identically to a DM and a player GET (not a secret)', async () => {
+    const server = ctx.app.getHttpServer();
+    const start = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(start.status).toBe(201);
+    expect(typeof start.body.turnStartedAt).toBe('string');
+    expect(Number.isNaN(Date.parse(start.body.turnStartedAt))).toBe(false);
+
+    const dmGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const playerGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(playerGet.status).toBe(200);
+    expect(typeof playerGet.body.turnTimerSeconds).toBe('number');
+    expect(playerGet.body.turnStartedAt).toBe(dmGet.body.turnStartedAt);
+    expect(playerGet.body.turnTimerSeconds).toBe(dmGet.body.turnTimerSeconds);
   });
 });
 

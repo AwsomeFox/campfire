@@ -2770,6 +2770,36 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0175 adds combatants.controller_user_id with the same users FK as a fresh database (#1941)', () => {
+    expect(MIGRATION_NAMES).toContain('0175_combatants_controller_user_id_1941');
+
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'combatants')).toContain('controller_user_id');
+      const foreignKeys = sqlite.prepare("SELECT * FROM pragma_foreign_key_list('combatants')").all() as Array<{
+        table: string;
+        from: string;
+        to: string;
+        on_delete: string;
+      }>;
+      expect(foreignKeys).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            table: 'users',
+            from: 'controller_user_id',
+            to: 'id',
+            on_delete: 'SET NULL',
+          }),
+        ]),
+      );
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it("0172 adds users.table_audio and defaults existing rows to 'off' (#1920)", () => {
     expect(MIGRATION_NAMES).toContain('0172_users_table_audio_1920');
 
@@ -2808,4 +2838,3 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 });
-

@@ -695,14 +695,16 @@ export class ActionResolverService {
    * hand-authored sheet actions PLUS any equipped inventory item's action (merged, in
    * that order — equipping a longsword adds an attack without touching the manually
    * authored list); monsters/NPCs use inline statblocks or expanded compendium actions.
-   * A player may list only their own character's actions; the DM may list any.
+   * A player may list only their own character's or delegated combatant's actions;
+   * the DM may list any. Delegated access intentionally exposes the action contract
+   * needed to take a turn, but never the combatant's full statblock response.
    */
   listUsableActions(encounterId: number, combatantId: number, user: RequestUser, role: Role): UsableAction[] {
     const encounter = this.encounterRowOrThrow(encounterId);
     const combatant = this.combatantRowOrThrow(encounterId, combatantId);
     const isDm = role === 'dm';
     if (!isDm && !this.isCombatantControlledBy(combatant, user, role)) {
-      throw new ForbiddenException('You may only list actions for your own or controlled combatant.');
+      throw new ForbiddenException('You may only list actions for your own character or a controlled combatant.');
     }
     const character = this.linkedCharacter(combatant);
     if (character) {
@@ -770,7 +772,9 @@ export class ActionResolverService {
     // Authorization: monster/NPC actions are DM-only; a player may act only with their own PC or controlled combatant.
     if (!isDm) {
       if (!this.isCombatantControlledBy(actor, user, role)) {
-        throw new ForbiddenException('Only the DM or controlling player may resolve an action for this combatant.');
+        throw new ForbiddenException(
+          'Only the DM may resolve a monster/NPC action unless you control it; a player may act only with their own character or a controlled combatant.',
+        );
       }
       this.assertPlayerActiveTurn(encounter, actor, role);
     }

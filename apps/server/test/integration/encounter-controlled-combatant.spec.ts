@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { eq } from 'drizzle-orm';
 import { DbHolder, DrizzleDb } from '../../src/db/db.module';
 import { campaigns, combatants, encounters } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -238,6 +239,61 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
     expect(patchedToken.tokenY).toBe(60);
   });
 
+  it('lets a controller spend turn state and statblock resources without exposing the statblock', async () => {
+    const combatant = await encountersService.addCombatant(
+      encounterId,
+      {
+        kind: 'monster',
+        name: 'Clockwork Companion',
+        hpMax: 18,
+        controllerUserId: player1UserId,
+        statblock: {
+          ac: 13,
+          notes: 'DM-only construct notes',
+          abilityScores: {},
+          resources: { charges: { max: 3, used: 0, name: 'Charges' } },
+          spellSlots: {},
+          actions: [],
+          traits: [],
+        },
+      },
+      dmActor,
+      'dm',
+    );
+
+    const turnState = await encountersService.updateCombatantTurnState(
+      encounterId,
+      combatant.id,
+      { moveFt: 5 },
+      player1Actor,
+      'player',
+    );
+    expect(turnState.turnState.movementUsedFt).toBe(5);
+    expect(turnState.statblock).toBeNull();
+
+    const spent = await encountersService.adjustCombatantResource(
+      encounterId,
+      combatant.id,
+      { key: 'charges', delta: 1 },
+      player1Actor,
+      'player',
+    );
+    expect(spent.statblock).toBeNull();
+
+    const [stored] = await db.select().from(combatants).where(eq(combatants.id, combatant.id));
+    expect(JSON.parse(stored.statblockJson!).resources.charges.used).toBe(1);
+
+    await expect(
+      encountersService.adjustCombatantResource(
+        encounterId,
+        combatant.id,
+        { key: 'charges', delta: 1 },
+        player2Actor,
+        'player',
+      ),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
   it('allows controller player to roll initiative for controlled combatant', async () => {
     const combatant = await encountersService.addCombatant(
       encounterId,
@@ -275,6 +331,21 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
     // Verify combatant's controllerUserId was reset to null
     const rows = await db.select().from(combatants);
     expect(rows[0].controllerUserId).toBeNull();
+  });
+
+  it('clears controllerUserId when the controlling account is disabled', async () => {
+    const combatant = await encountersService.addCombatant(
+      encounterId,
+      { kind: 'monster', name: 'Delegated Construct', hpMax: 20, controllerUserId: player1UserId },
+      dmActor,
+      'dm',
+    );
+    expect(combatant.controllerUserId).toBe(player1UserId);
+
+    await usersService.update(player1UserId, { disabled: true });
+
+    const [stored] = await db.select().from(combatants).where(eq(combatants.id, combatant.id));
+    expect(stored.controllerUserId).toBeNull();
   });
 
   it("clears controllerUserId when the controlling member is demoted to viewer role", async () => {
