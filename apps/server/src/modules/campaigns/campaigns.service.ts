@@ -31,6 +31,7 @@ import { fromJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
+  campaignLibraryBulkOperations,
   notes,
   quests,
   questObjectives,
@@ -445,6 +446,40 @@ function safeJson(text: string): unknown {
   } catch {
     return null;
   }
+}
+
+/**
+ * Null out every `derived` equipped action recorded in a bulk-operation journal, returning the
+ * rewritten JSON — or null when nothing needed changing, so the caller can skip the write.
+ *
+ * Structure-agnostic on purpose: the journal is a heterogeneous record of whatever the
+ * operation touched, and this only cares about the `equippedAction`/`equippedActionSource`
+ * pair wherever it appears. A `manual` action (or one with no provenance, which predates
+ * migration 0177 and was therefore hand-authored) is left exactly as recorded.
+ */
+function scrubDerivedActionsFromJournal(beforeJson: string | null): string | null {
+  if (!beforeJson) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(beforeJson);
+  } catch {
+    return null;
+  }
+  let changed = false;
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (!node || typeof node !== 'object') return node;
+    const record = { ...(node as Record<string, unknown>) };
+    if (record.equippedActionSource === 'derived') {
+      record.equippedAction = null;
+      record.equippedActionSource = null;
+      changed = true;
+    }
+    for (const key of Object.keys(record)) record[key] = walk(record[key]);
+    return record;
+  };
+  const next = walk(parsed);
+  return changed ? JSON.stringify(next) : null;
 }
 
 function toDomain(row: typeof campaigns.$inferSelect): Campaign {
@@ -1392,12 +1427,40 @@ export class CampaignsService {
       .from(inventoryItems)
       .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')))
       .all();
-    if (affected.length === 0) return [];
+    // NOTE: no early return on an empty `affected`. The journals are scrubbed below whether
+    // or not any LIVE row still carries a derived action — and the case where none does is
+    // exactly the dangerous one: a bulk move clears the live action while its journal keeps
+    // the copy, so an early return here would skip the only cleanup that matters.
+    if (affected.length > 0) {
+      tx.update(inventoryItems)
+        .set({ equippedAction: null, equippedActionSource: null, updatedAt: nowIso() })
+        .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')))
+        .run();
+    }
 
-    tx.update(inventoryItems)
-      .set({ equippedAction: null, equippedActionSource: null, updatedAt: nowIso() })
-      .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')))
-      .run();
+    // …and the UNDO JOURNALS, which hold their own copies (issue #2097 review). A bulk
+    // operation's `beforeJson` keeps the pre-operation action indefinitely, and undo restores
+    // it verbatim — so a journal written before a system switch would put the old mechanics
+    // back the moment anyone undid an unrelated bulk operation.
+    //
+    // Scrubbed HERE, at the one moment those copies actually become invalid, rather than by
+    // having undo refuse to restore derived actions at all: that refusal (this feature's
+    // previous answer) also broke every ORDINARY undo, returning items equipped but granting
+    // nothing when no mechanics had changed. Same transaction as the live rows, so the two
+    // copies can never disagree.
+    for (const journal of tx
+      .select({ id: campaignLibraryBulkOperations.id, beforeJson: campaignLibraryBulkOperations.beforeJson })
+      .from(campaignLibraryBulkOperations)
+      .where(eq(campaignLibraryBulkOperations.campaignId, campaignId))
+      .all()) {
+      const scrubbed = scrubDerivedActionsFromJournal(journal.beforeJson);
+      if (scrubbed !== null) {
+        tx.update(campaignLibraryBulkOperations)
+          .set({ beforeJson: scrubbed, inverseJson: scrubbed })
+          .where(eq(campaignLibraryBulkOperations.id, journal.id))
+          .run();
+      }
+    }
 
     return [...new Set(affected.map((row) => row.characterId).filter((cid): cid is number => cid != null))];
   }

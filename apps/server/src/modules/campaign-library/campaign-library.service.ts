@@ -506,8 +506,7 @@ export class CampaignLibraryService {
                   ? this.restorableEquippedAction(scalar.equippedAction, scalar.equippedActionSource)
                   : { action: null, source: null };
               // The provenance is written in the same statement as the action, never left
-              // behind describing a null — and a journaled `derived` action is dropped rather
-              // than resurrected; see `restorableEquippedAction`.
+              // behind describing a null; see `restorableEquippedAction`.
               const keepEquippedAction = keepRestorable.action;
               const keepEquippedActionSource = keepRestorable.source;
               tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
@@ -534,8 +533,7 @@ export class CampaignLibraryService {
                   ? this.restorableEquippedAction(scalar.equippedAction, scalar.equippedActionSource)
                   : { action: null, source: null };
               // The provenance is written in the same statement as the action, never left
-              // behind describing a null — and a journaled `derived` action is dropped rather
-              // than resurrected; see `restorableEquippedAction`.
+              // behind describing a null; see `restorableEquippedAction`.
               const keepEquippedAction = keepRestorable.action;
               const keepEquippedActionSource = keepRestorable.source;
               tx.run(
@@ -1006,29 +1004,23 @@ export class CampaignLibraryService {
   /**
    * What a bulk UNDO may restore into `equipped_action` (issue #2097 review).
    *
-   * A `manual` action round-trips verbatim — a human wrote it, and whether it still applies
-   * is their call, exactly as the mechanics-change cleanup leaves manual rows alone. So does
-   * an action with no provenance at all: those predate migration 0177, and derived actions
-   * did not exist before it.
+   * Everything the journal recorded, verbatim — including a `derived` action.
    *
-   * A `derived` action does NOT. It encodes the rule system it was computed under, and the
-   * journal is a snapshot: the live row can be cleaned up by a mechanics change (or, once the
-   * bulk move already nulled its action, be invisible to that cleanup entirely) while
-   * `beforeJson` keeps the pre-change action indefinitely. Restoring it verbatim therefore
-   * resurrects old-system mechanics under the campaign's current adapter, which is the one
-   * thing this feature's cleanup exists to prevent. Dropped instead — the owner's next equip
-   * regenerates it correctly, and this feature's standing rule is that an empty action is
-   * visibly unfinished while a wrong one is not.
+   * That is safe because the journals are SCRUBBED at the one moment their derived copies
+   * become invalid: `CampaignsService` nulls them, in the same transaction as the live rows,
+   * whenever the campaign's mechanics change. An earlier version of this method refused to
+   * restore derived actions at all, which did close that hole but broke every ordinary undo
+   * — an item came back equipped and granting nothing when nothing had changed. Scrubbing at
+   * the source keeps the common case correct and still leaves nothing stale to resurrect.
+   *
+   * A party-stash destination is the one thing still filtered here: such an item can never
+   * carry an action whatever the journal says.
    */
   private restorableEquippedAction(
     action: string | null | undefined,
     source: string | null | undefined,
   ): { action: string | null; source: string | null } {
-    // A NULL provenance is not "derived" — it is a row that predates migration 0177, and
-    // derived actions did not exist before it, so such an action was necessarily authored by
-    // a human. Treated like `manual` and restored, which also keeps existing campaigns'
-    // undo behaviour exactly as it was.
-    if (!action || source === 'derived') return { action: null, source: null };
+    if (!action) return { action: null, source: null };
     return { action, source: source ?? null };
   }
 

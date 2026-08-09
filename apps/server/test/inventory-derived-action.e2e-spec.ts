@@ -1130,18 +1130,15 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(after.body.equippedAction).not.toBeNull();
   });
 
-  it('undoing a bulk move never resurrects a journaled DERIVED action', async () => {
+  it('an ORDINARY bulk undo restores the derived action it recorded', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'journal-slot' });
-
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'undo-ordinary-slot' });
     const other = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
-      .send({ name: 'Journal Recipient', level: 1, stats: { STR: 10 } });
+      .send({ name: 'Ordinary Undo Recipient', level: 1, stats: { STR: 10 } });
 
-    // The forward move clears the live action — so a later mechanics cleanup cannot even see
-    // this row — while the undo journal keeps the pre-move derived action indefinitely.
     const moved = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
       .set(dm)
@@ -1153,10 +1150,68 @@ describe('derived equipped-item actions (issue #2097)', () => {
       .set(dm);
     expect(undone.status).toBe(201);
 
+    // Nothing about the campaign's mechanics changed, so the journal's copy is still valid.
+    // Refusing to restore it (an earlier version of this feature) returned the item equipped
+    // and granting nothing, for no safety benefit.
     const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
-    // The equip state round-trips; the derived action does not, because it encodes the system
-    // it was computed under and the journal is a snapshot that no cleanup can reach.
     expect(after.body.equipped).toBe(true);
+    expect(after.body.equippedAction).not.toBeNull();
+    expect(after.body.equippedActionSource).toBe('derived');
+  });
+
+  it('a bulk undo after a system switch restores no derived action, because the journal was scrubbed', async () => {
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo After Switch' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Undo Switcher', level: 5, stats: { STR: 16 } });
+    const other = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Undo Switch Recipient', level: 1, stats: { STR: 10 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'undo-switch-slot' });
+
+    // The bulk move journals the 5e-derived action, and the forward move clears the live row
+    // — so only the journal still holds it.
+    const moved = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk`)
+      .set(dm)
+      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: other.body.id, targets: [{ entityType: 'inventory_item', entityId: item.body.id }] });
+    expect(moved.status).toBe(201);
+
+    const profile = {
+      slug: 'e2e-undo-switch-hack',
+      label: 'E2E Undo Switch Hack',
+      mechanicsSummary: 'A homebrew hack for the undo-after-switch case, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const switched = await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(switched.status).toBe(200);
+
+    const undone = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk/${moved.body.operationId}/undo`)
+      .set(dm);
+    expect(undone.status).toBe(201);
+
+    // The switch scrubbed the journal's derived copy, so undo has nothing stale to resurrect.
+    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
     expect(after.body.equippedAction).toBeNull();
     expect(after.body.equippedActionSource).toBeNull();
   });

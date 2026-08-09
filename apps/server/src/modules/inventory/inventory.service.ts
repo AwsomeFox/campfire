@@ -640,139 +640,88 @@ export class InventoryService {
     const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
     const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
     if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
-    // Review (chatgpt-codex-connector P2, authorization): the SNAPSHOT write carries the same
-    // owner predicate as the regeneration below, so the two cannot half-apply. Keyed on the id
-    // alone it accepted the new revision even when a DM had moved and equipped the item onto
-    // another player mid-request — and the regeneration then correctly refused to touch that
-    // player's action, leaving the item with a NEW accepted snapshot and an action derived
-    // from the OLD one. Either both land or neither does; a predicate miss is a conflict the
-    // caller retries, exactly like the slot and owner conflicts elsewhere in this service.
-    let [row] = await this.db
+    const nextSnapshotJson = JSON.stringify(snapshot);
+    const nextRefJson = JSON.stringify(buildCompendiumRef(entry, pack));
+
+    // Review (chatgpt-codex-connector P2): the snapshot and the action it implies are written
+    // in ONE statement. Accepting the revision first and regenerating afterwards left a window
+    // where the item advertised the new revision while still granting the old one's attack —
+    // a combat request landing in that gap resolved stale mechanics, and a crash between the
+    // two writes made the mismatch permanent. So the derivation runs BEFORE anything is
+    // written, against the snapshot about to be accepted, and both columns move together.
+    const regenerationOwnerId = existing.ownerType === 'character' ? existing.characterId : null;
+    const shouldRegenerate =
+      existing.equipped &&
+      regenerationOwnerId != null &&
+      existing.equippedActionSource === EquippedActionSource.enum.derived &&
+      // The caller was authorized against the owner this request READ, and the entry/pack
+      // lookups above await — so re-ask before deriving. The write itself re-asserts it too
+      // (below), because a check before an await is only ever a fast path.
+      (await this.canWriteOwner('character', regenerationOwnerId, existing.campaignId, user, role));
+
+    const regeneration = shouldRegenerate
+      ? await this.deriveActionForEquip(
+          { ...existing, compendiumSnapshot: nextSnapshotJson },
+          regenerationOwnerId as number,
+          existing.name,
+        )
+      : null;
+
+    const [row] = await this.db
       .update(inventoryItems)
-      .set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() })
+      .set({
+        compendiumRef: nextRefJson,
+        compendiumSnapshot: nextSnapshotJson,
+        compendiumState: 'linked',
+        updatedAt: nowIso(),
+        ...(regeneration
+          ? {
+              equippedAction: regeneration.action ? JSON.stringify(regeneration.action) : null,
+              equippedActionSource: regeneration.action ? EquippedActionSource.enum.derived : null,
+            }
+          : {}),
+      })
       .where(
         and(
           eq(inventoryItems.id, id),
+          // Nobody else accepted a revision while this request was reading — otherwise this
+          // write would silently undo theirs.
+          existing.compendiumSnapshot === null
+            ? isNull(inventoryItems.compendiumSnapshot)
+            : eq(inventoryItems.compendiumSnapshot, existing.compendiumSnapshot),
+          // Authorization rides on the write, not merely before it: a revision fence answers
+          // "is this data current?", never "may this caller write it?".
           role === 'dm'
             ? undefined
             : sql`(${inventoryItems.characterId} is null or (select owner_user_id from characters where id = ${inventoryItems.characterId}) = ${user.id})`,
+          // When an action is being written too, every input that derivation read must still
+          // hold — owner, provenance, equip state, name, the wielder's stats, the campaign's
+          // mechanics. Any of them moving means someone else's write should win.
+          ...(regeneration
+            ? [
+                eq(inventoryItems.equipped, true),
+                eq(inventoryItems.characterId, regenerationOwnerId as number),
+                eq(inventoryItems.equippedActionSource, EquippedActionSource.enum.derived),
+                eq(inventoryItems.name, existing.name),
+                sql`(select updated_at from characters where id = ${regenerationOwnerId}) is ${regeneration.characterRevision === null ? sql`null` : sql`${regeneration.characterRevision}`}`,
+                sql`(select json_array(coalesce(rule_system, ''), custom_mechanics_profile) from campaigns where id = ${existing.campaignId}) is ${regeneration.mechanicsRevision === null ? sql`null` : sql`${regeneration.mechanicsRevision}`}`,
+              ]
+            : []),
         ),
       )
       .returning();
+
     if (!row) {
       throw new ConflictException({
-        code: 'INVENTORY_OWNER_CHANGED',
-        message: `Item ${id} changed hands after this request was authorized — refetch and retry.`,
+        code: 'INVENTORY_REFRESH_CONFLICT',
+        message: `Item ${id} changed after this request was read — refetch and retry the refresh.`,
       });
     }
 
-    // Issue #2097 review (chatgpt-codex-connector P2): accepting an upstream revision is
-    // precisely the moment a DERIVED action becomes stale — the whole point of this endpoint
-    // is that the item now reports the new revision as accepted, so changed damage dice or a
-    // changed type must reach encounter rolls immediately rather than waiting for the owner
-    // to happen to unequip and re-equip. Regenerate from the freshly-accepted snapshot; a
-    // derivation that now yields nothing CLEARS the action, for the same reason it does on
-    // the equip path. `manual` is untouched here as everywhere else.
-    //
-    // Review (chatgpt-codex-connector P2, authorization): the caller was authorized against
-    // the owner this request READ. The entry and pack lookups above await, so a DM can move
-    // and equip the item onto a different player in that window — and every other check here
-    // would then happily regenerate THAT player's private action on this caller's behalf.
-    // Re-authorized against the owner as the row now stands. A caller with no business
-    // writing it simply skips the regeneration rather than getting a 403: the snapshot
-    // refresh they did ask for has already been applied, so failing here would report failure
-    // for work that succeeded, and the new owner's own next equip or refresh regenerates it.
-    const regenerationOwnerId = row.ownerType === 'character' ? row.characterId : null;
-    const mayRegenerate =
-      regenerationOwnerId != null &&
-      (await this.canWriteOwner('character', regenerationOwnerId, row.campaignId, user, role));
-    if (
-      row.equipped &&
-      row.ownerType === 'character' &&
-      row.characterId != null &&
-      row.equippedActionSource === EquippedActionSource.enum.derived &&
-      mayRegenerate
-    ) {
-      const ownerId = row.characterId;
-      // The exact revision this derivation reads. Review (chatgpt-codex-connector P2): the
-      // predicate below fences on it, because owner + provenance alone do not say WHICH
-      // revision the pending derivation was computed from. Two refreshes racing — A accepts
-      // revision A, B accepts revision B, B commits first — would otherwise let A's
-      // conditional update still pass every other check and write revision-A mechanics onto
-      // a row whose snapshot now says revision B.
-      const derivedFromSnapshot = row.compendiumSnapshot;
-      const regeneration = await this.deriveActionForEquip(row, ownerId, row.name);
-      const regenerated = regeneration.action;
-      // Review (chatgpt-codex-connector P2) — the same time-of-check/time-of-use race the
-      // equip path re-validates against, reached through this endpoint instead. The
-      // derivation above AWAITS, so between reading the row and writing it another request
-      // can author a manual action, or move and re-equip the item onto someone else. An
-      // update keyed on the item id alone would then clobber that authored action, or hand
-      // the new owner an attack computed from the OLD owner's stats.
-      //
-      // So the write carries its own predicate: still equipped, still `derived`, still the
-      // same character. A predicate miss means the world moved on and this regeneration is
-      // stale — drop it silently rather than forcing it through. `update()` gets the same
-      // guarantee from its in-transaction `fresh` recheck; this path has no surrounding
-      // transaction, so the condition rides on the UPDATE itself.
-      const [regeneratedRow] = await this.db
-        .update(inventoryItems)
-        .set({
-          equippedAction: regenerated ? JSON.stringify(regenerated) : null,
-          equippedActionSource: regenerated ? EquippedActionSource.enum.derived : null,
-          updatedAt: nowIso(),
-        })
-        .where(
-          and(
-            eq(inventoryItems.id, id),
-            eq(inventoryItems.equipped, true),
-            eq(inventoryItems.characterId, ownerId),
-            eq(inventoryItems.equippedActionSource, EquippedActionSource.enum.derived),
-            // …and the row must still hold the revision this derivation actually read.
-            derivedFromSnapshot === null
-              ? isNull(inventoryItems.compendiumSnapshot)
-              : eq(inventoryItems.compendiumSnapshot, derivedFromSnapshot),
-            // …and the same name the action was titled with. This path never renames, so a
-            // plain equality is right here: the derivation read `row.name`, and any other
-            // value means a rename landed and its own regeneration should win.
-            eq(inventoryItems.name, row.name),
-            // …and the wielder must still be the one the math was computed from. Expressed as
-            // a subquery so it is evaluated by the UPDATE itself rather than in a separate
-            // read that could go stale between the check and the write.
-            sql`(select updated_at from characters where id = ${ownerId}) is ${regeneration.characterRevision === null ? sql`null` : sql`${regeneration.characterRevision}`}`,
-            // …and the campaign must still be playing the system the math was computed under.
-            // A concurrent switch CLEARS derived rows (CampaignsService.update), and this
-            // write must not put one back.
-            sql`(select json_array(coalesce(rule_system, ''), custom_mechanics_profile) from campaigns where id = ${row.campaignId}) is ${regeneration.mechanicsRevision === null ? sql`null` : sql`${regeneration.mechanicsRevision}`}`,
-            // …and, for a non-DM caller, the wielder must STILL be their own character.
-            //
-            // Review (chatgpt-codex-connector P1, authorization): the `mayRegenerate` check
-            // above is a check-then-act with an await in between — `deriveActionForEquip`
-            // reads the character, so a DM reassigning that character to another user in
-            // that window is captured by the derivation itself, meaning the character-revision
-            // fence agrees and the former owner writes the new owner's private action. A
-            // revision fence answers "is this data current?", never "may this caller write
-            // it?", so authorization has to ride on the UPDATE rather than precede it. DMs
-            // are unconstrained here exactly as `assertCanWriteOwner` leaves them.
-            role === 'dm'
-              ? undefined
-              : sql`(select owner_user_id from characters where id = ${ownerId}) = ${user.id}`,
-          ),
-        )
-        .returning();
-      if (regeneratedRow) {
-        row = regeneratedRow;
-        // The owner's merged action list changed, so live encounter screens have to hear
-        // about it — same signal `update()`'s equip path emits (issue #1901). Emitted only
-        // when the write actually landed: a predicate miss changed nothing here, and
-        // whichever request DID win emitted its own.
-        this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: ownerId, userId: user.id });
-      } else {
-        // Re-read so the response reflects whatever the winning writer committed rather than
-        // the pre-derivation snapshot this method started from.
-        const [current] = await this.db.select().from(inventoryItems).where(eq(inventoryItems.id, id)).limit(1);
-        if (current) row = current;
-      }
+    if (regeneration && existing.characterId != null) {
+      // The owner's merged action list changed, so live encounter screens have to hear about
+      // it — same signal `update()`'s equip path emits (issue #1901).
+      this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: existing.characterId, userId: user.id });
     }
 
     await this.audit.log({
