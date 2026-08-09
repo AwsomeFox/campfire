@@ -39,6 +39,25 @@ export function newIdempotencyKey(): string {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * What a mutation actually did, handed to `onChanged` so a caller does not have to refetch
+ * to learn it. A caller that only refetches may ignore it entirely.
+ *
+ * Without this, a successful equip whose follow-up GET failed left every other view of the
+ * item stale — the card showed the new state from its own `committed`, while a parent that
+ * derives from the fetched list kept the old one (Codex review on #2115).
+ */
+export type InventoryItemChange =
+  /**
+   * `displacedId` is the OTHER item a slot swap unequipped. The server does both halves
+   * atomically but returns only the newly equipped one, so without this a consumer applying
+   * the response still believes the incumbent is equipped — and would offer two
+   * slot-conflicting items at once until a refetch happened to succeed.
+   */
+  | { readonly updated: InventoryItem; readonly displacedId?: number }
+  | { readonly created: InventoryItem }
+  | { readonly deletedId: number };
+
 export function ItemSection({
   title,
   icon,
@@ -56,7 +75,7 @@ export function ItemSection({
   characters: Pick<PartyCharacter, 'id' | 'name'>[];
   writableOwners: Character[];
   canEditItem: (item: InventoryItem) => boolean;
-  onChanged: () => void;
+  onChanged: (change?: InventoryItemChange) => void;
   partyStashTitle: string;
   /** When true, omit the outer Card wrapper (embedded in another card). */
   embedded?: boolean;
@@ -103,7 +122,7 @@ export function ItemRow({
   editable: boolean;
   characters: Pick<PartyCharacter, 'id' | 'name'>[];
   writableOwners: Character[];
-  onChanged: () => void;
+  onChanged: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -141,7 +160,7 @@ export function ItemRow({
       setCommitted(updated);
       setSlotConflict(null);
       setEquipOpen(false);
-      onChanged();
+      onChanged({ updated });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
         setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? trimmed });
@@ -198,7 +217,8 @@ export function ItemRow({
       setCommitted(updated);
       setSlotConflict(null);
       setEquipOpen(false);
-      onChanged();
+      // Report BOTH halves of the atomic swap — see `displacedId`.
+      onChanged({ updated, displacedId: slotConflict.itemId });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
         setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? slotConflict.slot });
@@ -216,7 +236,7 @@ export function ItemRow({
     try {
       const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, { equipped: false });
       setCommitted(updated);
-      onChanged();
+      onChanged({ updated });
     } catch (err) {
       setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
     } finally {
@@ -230,7 +250,7 @@ export function ItemRow({
     try {
       const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, body);
       setCommitted(updated);
-      onChanged();
+      onChanged({ updated });
       return updated;
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
@@ -253,7 +273,7 @@ export function ItemRow({
     setError(null);
     try {
       await api.delete(`${API}/inventory/${committed.id}`);
-      onChanged();
+      onChanged({ deletedId: committed.id });
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.deleteItem' }));
     } finally {
@@ -265,7 +285,7 @@ export function ItemRow({
     setBusy(true); setError(null);
     try {
       const updated = await api.post<InventoryItem>(`${API}/inventory/${committed.id}/compendium/${action}`);
-      setCommitted(updated); onChanged();
+      setCommitted(updated); onChanged({ updated });
     } catch (err) { setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' })); }
     finally { setBusy(false); }
   }
@@ -563,7 +583,7 @@ export function AddItemForm({
   /** Initial owner select value — 'party' or a character id string. */
   defaultOwner?: string;
   onCancel: () => void;
-  onCreated: () => void;
+  onCreated: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState('');
@@ -609,8 +629,8 @@ export function AddItemForm({
         body.ownerType = 'character';
         body.characterId = Number(owner);
       }
-      await api.post(`${API}/campaigns/${campaignId}/inventory`, body);
-      onCreated();
+      const created = await api.post<InventoryItem>(`${API}/campaigns/${campaignId}/inventory`, body);
+      onCreated(created && typeof created.id === 'number' ? { created } : undefined);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.addItem' }));
     } finally {
@@ -734,9 +754,9 @@ export function AddItemForm({
           owners={owners}
           defaultOwner={owner}
           onClose={() => setShowCompendiumPicker(false)}
-          onCreated={() => {
+          onCreated={(change) => {
             setShowCompendiumPicker(false);
-            onCreated();
+            onCreated(change);
           }}
         />
       )}
@@ -755,7 +775,7 @@ export function CompendiumItemPickerModal({
   owners: Character[];
   defaultOwner?: string;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const dialogRef = useDialog({ onClose });
@@ -814,7 +834,7 @@ export function CompendiumItemPickerModal({
       const ownerType = owner === 'party' ? 'party' : 'character';
       const characterId = owner === 'party' ? null : Number(owner);
       const qtyParsed = Math.max(1, Number(qty) || 1);
-      await api.post(`${API}/campaigns/${campaignId}/inventory/from-compendium`, {
+      const created = await api.post<InventoryItem>(`${API}/campaigns/${campaignId}/inventory/from-compendium`, {
         ruleEntryId: selectedEntry.id,
         ownerType,
         characterId,
@@ -822,7 +842,7 @@ export function CompendiumItemPickerModal({
         notes: notes.trim(),
         duplicateMode,
       });
-      onCreated();
+      onCreated(created && typeof created.id === 'number' ? { created } : undefined);
       onClose();
     } catch (err) {
       const code = err instanceof Error && 'body' in err ? (err as { body?: { code?: string } }).body?.code : '';

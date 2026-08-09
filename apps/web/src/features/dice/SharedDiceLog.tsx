@@ -54,7 +54,13 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   useTimeTick();
   const { t } = useTranslation();
   const { me } = useAuth();
-  const { canMemberWrite } = useCampaignAccessFor(campaignId);
+  // `canAnyMemberWrite`, not `canMemberWrite`: `POST /campaigns/:id/roll` calls
+  // `requireMemberOnWritableCampaign`, which asserts membership and writability and nothing
+  // about role, so a VIEWER may roll. Gating the tray on the viewer-excluding flag hid controls
+  // the server would have accepted — and told the user the campaign was archived when it was
+  // not. Visible on the character sheet (#2115 review), where a viewer who owns a character
+  // saw enabled action chips beside a tray claiming the campaign was read-only.
+  const { canAnyMemberWrite, writable } = useCampaignAccessFor(campaignId);
   const campaign = useCampaign(campaignId);
   const supportsActionDice = Boolean(
     ruleSystemAdapter(campaign?.ruleSystem, campaign?.customMechanicsProfile).attributeDicePool,
@@ -368,7 +374,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   return (
     <Card className="space-y-2.5">
       <span className="card-kicker">{compact ? t('dice.dice') : t('dice.diceLog')}</span>
-      {canMemberWrite ? (
+      {canAnyMemberWrite ? (
         <>
           <DiceTray
             onSubmitExpr={submitExpr}
@@ -472,7 +478,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         </>
       ) : (
         <p className="text-muted m-0" style={{ fontSize: 11.5 }}>
-          Dice rolling is disabled while this campaign is archived (read-only).
+          {writable
+            ? 'Dice rolling is available to campaign members.'
+            : 'Dice rolling is disabled while this campaign is archived (read-only).'}
         </p>
       )}
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
