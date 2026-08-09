@@ -117,7 +117,7 @@ test.describe('turn-change beat (issue #1906)', () => {
     const nextTurnMutStart = source.indexOf('const nextTurnMut = useKeyedMutation({');
     const nextTurnMutBody = source.slice(nextTurnMutStart, source.indexOf('const undoTurnMut', nextTurnMutStart));
     expect(nextTurnMutBody).toMatch(/api\.post<EncounterWithCombatants>\(`\$\{API\}\/encounters\/\$\{eid\}\/next-turn`/);
-    expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*const seeded = queryClient\.setQueryData<EncounterWithCombatants>\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) => preferNewerEncounterSnapshot\(\s*current,\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\),\s*\),\s*\);/);
+    expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*queryClient\.setQueryData<EncounterWithCombatants>\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) => preferNewerEncounterSnapshot\(\s*current,\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\),\s*\),\s*\);/);
   });
 
   test('orders a delayed encounter PATCH response against the seeded turn before replacing the cache', () => {

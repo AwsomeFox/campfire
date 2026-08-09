@@ -36,7 +36,6 @@ import { endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import {
   applyOptimisticHpDelta,
-  rebaseOptimisticHpEncounter,
   replayOptimisticHpDeltas,
   rollbackOptimisticHpTargets,
   type OptimisticHpDelta,
@@ -902,6 +901,9 @@ export default function RunSessionPage() {
     actorCombatantId?: number;
   } | null>(null);
   const pendingApplySequence = useRef(0);
+  const [bulkHpApplyPending, setBulkHpApplyPending] = useState(false);
+  const bulkHpApplyPendingRef = useRef(false);
+  const turnAdvancePendingRef = useRef(false);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -2479,7 +2481,10 @@ export default function RunSessionPage() {
       // without touching the i18n-jsx-baseline.json ratchet.
       return api.post<EncounterWithCombatants>(`${API}/encounters/${eid}/next-turn`, { expectedCurrentCombatantId, idempotencyKey });
     },
-    onMutate: () => setActionError(null),
+    onMutate: () => {
+      turnAdvancePendingRef.current = true;
+      setActionError(null);
+    },
     // Issue #2092: `headerBusy` (gating the Next Turn button) tracks only
     // `nextTurnMut.isPending`, which clears the instant this POST resolves — well
     // before `onSettled`'s invalidate-triggered GET has round-tripped. A DM who
@@ -2495,35 +2500,20 @@ export default function RunSessionPage() {
     // reconciliation the regular GET applies, so the next click already sees the turn
     // that just committed.
     onSuccess: (data) => {
-      const seeded = queryClient.setQueryData<EncounterWithCombatants>(
+      queryClient.setQueryData<EncounterWithCombatants>(
         queryKeys.encounter(eid),
         (current: EncounterWithCombatants | undefined) => preferNewerEncounterSnapshot(
           current,
           reconcileEncounterPatchResponse(data, pendingEncounterPatches.current.values(), '', eid),
         ),
       );
-      const hpQueue = optimisticHpQueueRef.current;
-      if (seeded && hpQueue.encounterId === eid && hpQueue.base && hpQueue.operations.size > 0) {
-        // HP steppers remain enabled while Next Turn runs. Move their replay ledger onto
-        // the advanced turn before another HP callback can rebuild the cache from its old
-        // base. Remove this client's optimistic field changes from `seeded` so replay
-        // cannot double-apply them while concurrent authoritative HP changes remain in
-        // the new base; turn state, condition durations, and action uses stay authoritative.
-        hpQueue.base = rebaseOptimisticHpEncounter(
-          hpQueue.base,
-          seeded,
-          hpQueue.operations.values(),
-          ruleSystem,
-          campaign?.customMechanicsProfile,
-        );
-        replayPendingOptimisticHpDeltas();
-      }
     },
     onError: (err) => {
       if (isAmbiguousOutcome(err)) enterReconciling();
       else reportTurnAdvanceError(err);
     },
     onSettled: () => {
+      turnAdvancePendingRef.current = false;
       invalidateEncounter(queryClient, eid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
     },
@@ -2654,7 +2644,7 @@ export default function RunSessionPage() {
         saveOutcome === undefined &&
         isCrit === undefined &&
         damageDice === undefined
-          ? { combatantId, delta, sequence: queue.nextSequence++, reflected: false }
+          ? { combatantId, delta, sequence: queue.nextSequence++ }
           : undefined;
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
       const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
@@ -2694,11 +2684,6 @@ export default function RunSessionPage() {
       return { previousCombatant };
     },
     onSuccess: (combatant, vars, ctx) => {
-      const queue = optimisticHpQueueRef.current;
-      if (ctx?.encounterId === eid && ctx.optimisticOperationId && queue.encounterId === eid) {
-        const operation = queue.operations.get(ctx.optimisticOperationId);
-        if (operation) operation.reflected = true;
-      }
       if (!vars.isCrit) return;
       if (!ctx?.previousCombatant) return;
       const before = ctx.previousCombatant;
@@ -2758,66 +2743,67 @@ export default function RunSessionPage() {
       actorId?: number,
     ) => {
       if (applications.length === 0) return;
-      setActionError(null);
-      await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
-      const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
+      if (turnAdvancePendingRef.current) return;
+      bulkHpApplyPendingRef.current = true;
+      setBulkHpApplyPending(true);
       const targets = new Set(applications.map(({ combatantId }) => combatantId));
-      const hasDamageMetadata = applications.some(({ damage }) =>
-        damage.damageType !== undefined ||
-        damage.saveOutcome !== undefined ||
-        damage.isCrit !== undefined ||
-        damage.damageDice !== undefined
-      );
-      if (
-        previous &&
-        !hasDamageMetadata
-      ) {
-        const queue = optimisticHpQueueRef.current;
-        const queuedCombatants = queue.encounterId === eid && queue.base && queue.operations.size > 0
-          ? replayOptimisticHpDeltas(
-              queue.base.combatants,
-              [...queue.operations.values()].sort((a, b) => a.sequence - b.sequence).map(({ combatantId, delta: pendingDelta }) => ({ combatantId, delta: pendingDelta })),
-              ruleSystem,
-              campaign?.customMechanicsProfile,
-            )
-          : null;
-        const queuedTargetIds = new Set([...queue.operations.values()].map(({ combatantId }) => combatantId));
-        const pendingBaseline = queuedCombatants
-          ? previous.combatants.map((combatant) => queuedTargetIds.has(combatant.id)
-              ? queuedCombatants.find((queued) => queued.id === combatant.id) ?? combatant
-              : combatant)
-          : previous.combatants;
-        const feedbackBaseline = hpFeedbackSnapshotRef.current?.encounterId === eid
-          ? [...hpFeedbackSnapshotRef.current.combatants.values()]
-          : pendingBaseline;
-        const optimisticCombatants = pendingBaseline.map((c) =>
-          targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem, campaign?.customMechanicsProfile) : c,
-        );
-        appendHpFeedbackEvents(diffHpFeedback(hpFeedbackSnapshot(feedbackBaseline), optimisticCombatants));
-        const snapshot = hpFeedbackSnapshotRef.current;
-        if (snapshot?.encounterId === eid) {
-          for (const combatant of optimisticCombatants) {
-            if (targets.has(combatant.id)) snapshot.combatants.set(combatant.id, combatant);
-          }
-        }
-        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
-          ...previous,
-          combatants: optimisticCombatants,
-        });
-      }
       const bulkOperationId = newOperationId();
-      const feedbackOperation = { targets, stale: new Map<number, HpFeedbackSnapshot>(), emitted: new Set<number>() };
-      bulkHpFeedbackOperationsRef.current.set(bulkOperationId, feedbackOperation);
-      // Issue #580: one id for this apply-to-all, extended per target so each PATCH gets a
-      // distinct key (the server fingerprints the payload, so one key cannot cover two
-      // different combatants). This loop is a plain async function, not a TanStack
-      // mutation, so it is not auto-retried and the retry hazard the keys guard does not
-      // arise here — their value is that every resulting combat-log line carries the
-      // operation id, so an AoE burst is identifiable as one action in the audit trail.
-      // A DM manually re-running a half-failed apply-to-all still double-applies to the
-      // targets that succeeded; making that safe needs a stable id on the pending-apply
-      // itself and is deliberately left out of this change.
+      let previous: EncounterWithCombatants | undefined;
       try {
+        setActionError(null);
+        await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
+        previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
+        const hasDamageMetadata = applications.some(({ damage }) =>
+          damage.damageType !== undefined ||
+          damage.saveOutcome !== undefined ||
+          damage.isCrit !== undefined ||
+          damage.damageDice !== undefined
+        );
+        if (previous && !hasDamageMetadata) {
+          const queue = optimisticHpQueueRef.current;
+          const queuedCombatants = queue.encounterId === eid && queue.base && queue.operations.size > 0
+            ? replayOptimisticHpDeltas(
+                queue.base.combatants,
+                [...queue.operations.values()].sort((a, b) => a.sequence - b.sequence).map(({ combatantId, delta: pendingDelta }) => ({ combatantId, delta: pendingDelta })),
+                ruleSystem,
+                campaign?.customMechanicsProfile,
+              )
+            : null;
+          const queuedTargetIds = new Set([...queue.operations.values()].map(({ combatantId }) => combatantId));
+          const pendingBaseline = queuedCombatants
+            ? previous.combatants.map((combatant) => queuedTargetIds.has(combatant.id)
+                ? queuedCombatants.find((queued) => queued.id === combatant.id) ?? combatant
+                : combatant)
+            : previous.combatants;
+          const feedbackBaseline = hpFeedbackSnapshotRef.current?.encounterId === eid
+            ? [...hpFeedbackSnapshotRef.current.combatants.values()]
+            : pendingBaseline;
+          const optimisticCombatants = pendingBaseline.map((c) =>
+            targets.has(c.id) ? applyOptimisticHpDelta(c, delta, ruleSystem, campaign?.customMechanicsProfile) : c,
+          );
+          appendHpFeedbackEvents(diffHpFeedback(hpFeedbackSnapshot(feedbackBaseline), optimisticCombatants));
+          const snapshot = hpFeedbackSnapshotRef.current;
+          if (snapshot?.encounterId === eid) {
+            for (const combatant of optimisticCombatants) {
+              if (targets.has(combatant.id)) snapshot.combatants.set(combatant.id, combatant);
+            }
+          }
+          queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
+            ...previous,
+            combatants: optimisticCombatants,
+          });
+        }
+        const feedbackOperation = { targets, stale: new Map<number, HpFeedbackSnapshot>(), emitted: new Set<number>() };
+        bulkHpFeedbackOperationsRef.current.set(bulkOperationId, feedbackOperation);
+        // Issue #580: one id for this apply-to-all, extended per target so each PATCH gets a
+        // distinct key (the server fingerprints the payload, so one key cannot cover two
+        // different combatants). This loop is a plain async function, not a TanStack
+        // mutation, so it is not auto-retried and the retry hazard the keys guard does not
+        // arise here — their value is that every resulting combat-log line carries the
+        // operation id, so an AoE burst is identifiable as one action in the audit trail.
+        // A DM manually re-running a half-failed apply-to-all still double-applies to the
+        // targets that succeeded; making that safe needs a stable id on the pending-apply
+        // itself and is deliberately left out of this change.
         const results = await Promise.all(applications.map(async ({ combatantId, damage }) => {
           const combatant = await api.patch<Combatant>(
             `${API}/encounters/${eid}/combatants/${combatantId}`,
@@ -2860,12 +2846,13 @@ export default function RunSessionPage() {
         await invalidateEncounter(queryClient, eid);
       } catch (err) {
         bulkHpFeedbackOperationsRef.current.delete(bulkOperationId);
-        if (previous) {
+        const rollbackBaseline = previous;
+        if (rollbackBaseline) {
           const restored = queryClient.setQueryData<EncounterWithCombatants>(
             queryKeys.encounter(eid),
             (current) => current
-              ? rollbackOptimisticHpTargets(current, previous, targets)
-              : previous,
+              ? rollbackOptimisticHpTargets(current, rollbackBaseline, targets)
+              : rollbackBaseline,
           );
           seedHpFeedbackSnapshot(restored);
         }
@@ -2874,6 +2861,9 @@ export default function RunSessionPage() {
         if (isAmbiguousOutcome(err)) enterReconciling();
         else reportError(err);
         throw err;
+      } finally {
+        bulkHpApplyPendingRef.current = false;
+        setBulkHpApplyPending(false);
       }
     },
     [eid, queryClient, reportError, ruleSystem, enterReconciling, isDm, seedHpFeedbackSnapshot, appendHpFeedbackEvents],
@@ -3054,10 +3044,13 @@ export default function RunSessionPage() {
   // Issue #580: next-turn no longer rides the generic (unkeyed) runControl mutation. It
   // carries an operation id AND the combatant the DM believes holds the turn, so a lost
   // response replays and a co-DM's simultaneous advance conflicts instead of skipping.
-  const nextTurn = () =>
+  const nextTurn = () => {
+    if (queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) > 0 || bulkHpApplyPendingRef.current) return;
+    turnAdvancePendingRef.current = true;
     nextTurnMut.mutate({
       expectedCurrentCombatantId: encounter?.status === 'running' ? (encounter.currentCombatantId ?? null) : null,
     });
+  };
   const undoTurn = () => undoTurnMut.mutate();
   const toggleEscalationHold = (held: boolean) => escalationControl.mutate({ held });
   const clearEscalationOverride = () => escalationControl.mutate({ override: null });
@@ -3597,7 +3590,7 @@ export default function RunSessionPage() {
   // #580): while the client is checking committed state, every non-idempotent DM control
   // is unavailable, which is the "reconcile before another action is allowed" rule.
   const headerBusy =
-    runControl.isPending || nextTurnMut.isPending || undoTurnMut.isPending || deleteEncounterMut.isPending || escalationControl.isPending || reconcileBlocks;
+    runControl.isPending || nextTurnMut.isPending || hpDelta.isPending || bulkHpApplyPending || undoTurnMut.isPending || deleteEncounterMut.isPending || escalationControl.isPending || reconcileBlocks;
   const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
 
   useKeyboardGuardedAction(
@@ -3877,7 +3870,7 @@ export default function RunSessionPage() {
   );
   const applyDamageBarOnApply = useCallback(
     (combatantId: number, delta: number, damage: DirectDamageMetadata) => {
-      if (!pendingApply) return;
+      if (!pendingApply || turnAdvancePendingRef.current) return;
       const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
       hpDelta.mutate({ combatantId, delta, actorId, ...damage });
       setPendingApply(null);
@@ -3886,6 +3879,7 @@ export default function RunSessionPage() {
   );
   const applyDamageBarOnApplyToAll = useCallback(
     (applications: TargetDamageApplication[], delta: number) => {
+      if (turnAdvancePendingRef.current) return;
       const actorId = pendingApply?.actorCombatantId ?? currentCombatantId ?? undefined;
       void applyHpDeltaBulk(applications, delta, actorId)
         .then(() => setPendingApply(null))
@@ -4575,7 +4569,7 @@ export default function RunSessionPage() {
           campaignId={cid}
           rulesHintCompendiumAvailable={rulesHintCompendiumAvailable}
           onHpDelta={(id, delta) => {
-            if (reconcileBlocks) return;
+            if (reconcileBlocks || turnAdvancePendingRef.current) return;
             const actorId = hpLogActorId(currentCombatantId, id);
             hpDelta.mutate({ combatantId: id, delta, actorId });
           }}
@@ -5079,7 +5073,7 @@ export default function RunSessionPage() {
                   onHpDelta={(delta) => {
                     // Belt-and-braces with the `busy` prop above: never let a second damage
                     // intent start while the outcome of the previous one is still unknown (#580).
-                    if (reconcileBlocks) return;
+                    if (reconcileBlocks || turnAdvancePendingRef.current) return;
                     const actorId = hpLogActorId(currentCombatantId, c.id);
                     hpDelta.mutate({ combatantId: c.id, delta, actorId });
                   }}
