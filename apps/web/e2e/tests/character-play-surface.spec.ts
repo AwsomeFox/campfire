@@ -1140,3 +1140,62 @@ test.describe('character sheet play surface', () => {
     }
   });
 });
+
+/**
+ * Regression (Codex review on #2115): the shared roll feed embedded beside the sheet gated its
+ * dice tray on `canMemberWrite`, which excludes viewers — but `POST /campaigns/:id/roll` calls
+ * `requireMemberOnWritableCampaign`, which asserts membership and writability and nothing about
+ * role. A viewer who OWNS a character can read their own sheet (read authority is dm-or-owner,
+ * not a role floor), so they saw enabled action chips beside a tray that hid every control and
+ * told them the campaign was archived when it was active.
+ */
+test.describe('character sheet roll feed — viewer authority', () => {
+  test.use({ storageState: stateFor('viewer') });
+
+  let campaignId = 0;
+  let characterId = 0;
+
+  test.beforeAll(async ({ baseURL }) => {
+    const viewerCtx = await request.newContext({ baseURL: baseURL! });
+    await viewerCtx.post('/api/v1/auth/login', { data: CREDS.viewer });
+    const viewerUserId = (await (await viewerCtx.get('/api/v1/me')).json()).user.id as number;
+    await viewerCtx.dispose();
+
+    const dm = await request.newContext({ baseURL: baseURL! });
+    await dm.post('/api/v1/auth/login', { data: CREDS.dm });
+    campaignId = (await (await dm.post('/api/v1/campaigns', { data: { name: 'Viewer Roll Feed' } })).json()).id as number;
+    expect((await dm.post(`/api/v1/campaigns/${campaignId}/members`, { data: { userId: viewerUserId, role: 'viewer' } })).ok()).toBeTruthy();
+    const res = await dm.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: {
+        name: 'Watchful Scribe',
+        className: 'Cleric',
+        level: 2,
+        ownerUserId: String(viewerUserId),
+        hpMax: 14,
+        hpCurrent: 14,
+        stats: { STR: 10, DEX: 12, CON: 12, INT: 12, WIS: 16, CHA: 10 },
+      },
+    });
+    expect(res.ok()).toBeTruthy();
+    characterId = (await res.json()).id as number;
+    await dm.dispose();
+  });
+
+  test.afterAll(async ({ baseURL }) => {
+    if (!campaignId) return;
+    const dm = await request.newContext({ baseURL: baseURL! });
+    await dm.post('/api/v1/auth/login', { data: CREDS.dm });
+    await dm.delete(`/api/v1/campaigns/${campaignId}`);
+    await dm.delete(`/api/v1/campaigns/${campaignId}/purge`);
+    await dm.dispose();
+  });
+
+  test('a viewer who owns the character gets the dice tray the endpoint would accept', async ({ page }) => {
+    await page.goto(`/c/${campaignId}/characters/${characterId}?tab=play`);
+    const feed = page.getByTestId('character-roll-feed');
+    await expect(feed.getByRole('button', { name: 'Add a d20' })).toBeVisible();
+    // The old copy was doubly wrong for this user: the campaign is active, and the reason the
+    // tray was hidden was their role.
+    await expect(feed.getByText(/archived/i)).toHaveCount(0);
+  });
+});

@@ -290,6 +290,31 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     ]);
   });
 
+  /**
+   * #2115 review: every `DamagePart` field is optional and defaults, so `damage: [{}]` is a
+   * schema-valid NON-EMPTY array that `rollBranchDamage` resolves to zero. An array-length
+   * test called that fallback damage-bearing and promised "Half damage" for an effect the
+   * resolver never applies — the same class of untrue disclosure as the empty-fallback case
+   * above, one layer down.
+   */
+  test('a placeholder damage part is not something to halve', () => {
+    const placeholder = ActionSpec.parse({
+      mode: 'save',
+      outcomes: { success: { halfDamage: true }, failure: { damage: [{}] } },
+    });
+    expect(actionSpecEffects(placeholder)).toEqual([]);
+
+    // A part with a formula, or a positive flat amount, IS real damage — both still print.
+    const flatOnly = ActionSpec.parse({
+      mode: 'save',
+      outcomes: { success: { halfDamage: true }, failure: { damage: [{ flat: 4, type: 'force' }] } },
+    });
+    expect(actionSpecEffects(flatOnly)).toEqual([
+      { outcome: 'success', label: 'On a success', lines: ['Half damage'] },
+      { outcome: 'failure', label: 'On a failure', lines: ['4 force damage'] },
+    ]);
+  });
+
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });

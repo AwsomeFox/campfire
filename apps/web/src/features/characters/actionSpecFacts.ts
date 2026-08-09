@@ -235,6 +235,20 @@ function branchLines(branch: {
 }
 
 /**
+ * Whether a damage part can actually produce damage when the resolver rolls it.
+ *
+ * Not `damage.length` — every `DamagePart` field is optional and defaults (`formula: ''`,
+ * `flat: 0`), so a schema-valid `damage: [{}]` is a non-empty array that `rollBranchDamage`
+ * resolves to zero (#2115 review). Not `damagePartText` either: that renders a `flat: -3`
+ * part as text, while the resolver clamps it with `Math.max(0, amount)`. This is the
+ * resolver's own question — is there a formula to roll, or a positive flat amount to add —
+ * so "Half damage" is promised only where halving has something to halve.
+ */
+function partCanDealDamage(part: { formula: string; flat: number }): boolean {
+  return part.formula.trim() !== '' || part.flat > 0;
+}
+
+/**
  * Player-safe effect lines from the spec's outcome branches — the template's "Effects"
  * list. Branch prose, mechanical consequences, and applied conditions; never hidden
  * monster numbers.
@@ -253,7 +267,7 @@ export function actionSpecEffects(
   if (!spec) return [];
   const outcomes = spec.outcomes ?? {};
   // What a save-for-half branch would actually halve — see `branchLines`.
-  const fallbackHasDamage = (outcomes.failure?.damage ?? []).length > 0;
+  const fallbackHasDamage = (outcomes.failure?.damage ?? []).some(partCanDealDamage);
   const groups: ActionEffectGroup[] = [];
   for (const [outcome, label] of OUTCOME_LABELS) {
     const branch = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
