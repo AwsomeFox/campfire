@@ -144,3 +144,36 @@ test.describe('encounter cockpit layout', () => {
     }
   });
 });
+
+test.describe('encounter cockpit deep links', () => {
+  test('a comment deep link reveals the panel that owns it', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+
+    // Comment-reply notifications link to `#entity-comment-<id>`, and the discussion for
+    // an encounter lives in the cockpit's Table tab. `EntityDeepLinkFocus` focuses and
+    // scrolls the target but cannot reveal a hidden ancestor, so without the shell
+    // selecting the owning panel the notification arrives with its comment invisible.
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {
+      data: { entityType: 'encounter', entityId: encounterId, body: 'Deep-linked reply probe' },
+    });
+    expect(created.ok(), `create comment: ${await created.text()}`).toBe(true);
+    const commentId = ((await created.json()) as { id: number }).id;
+
+    try {
+      await page.goto(
+        `/c/${campaignId}/encounters/${encounterId}?comment=${commentId}#entity-comment-${commentId}`,
+      );
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+      // The Table tab takes over from the audience default, and the comment is on screen.
+      await expect(page.getByTestId('encounter-vtt-tab-table')).toHaveAttribute(
+        'aria-selected',
+        'true',
+        { timeout: 15_000 },
+      );
+      await expect(page.locator(`#entity-comment-${commentId}`)).toBeVisible();
+    } finally {
+      await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
+    }
+  });
+});

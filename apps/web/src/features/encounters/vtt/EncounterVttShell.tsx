@@ -12,7 +12,7 @@
  * open/closed state contract and tab semantics; it owns no encounter state, so
  * RunSessionPage keeps every permission, secrecy and sync decision it already had.
  */
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useImmersiveChromeInset } from './useImmersiveChromeInset';
 
@@ -55,11 +55,68 @@ type Props = {
   panelSlot: ReactNode;
   /** Dialogs, snackbars and other portaled-in-place overlays. */
   children?: ReactNode;
+  /**
+   * The canvas is showing setup (no map attached) rather than a board. The turn bar then
+   * stacks under it instead of floating over it — an overlay on top of the upload and
+   * generate controls makes the ones near the bottom unclickable however far you scroll.
+   */
+  mapStacked?: boolean;
   /** Extra classes for the root (print hooks live here). */
   className?: string;
   /** Spread onto the root — RunSessionPage passes its entity-target props. */
   rootProps?: Record<string, unknown>;
 };
+
+/**
+ * Select whichever panel owns the element the URL hash points at.
+ *
+ * The target may not exist yet — a comment thread is fetched — so this retries over a
+ * short window rather than giving up on the first frame, and stops as soon as it
+ * resolves. A hash pointing at something outside the panel (or at nothing) is left
+ * alone, as is a tab the viewer has since chosen for themselves.
+ */
+function useDeepLinkedPanel(
+  tabs: readonly VttTab[],
+  activeTabId: string,
+  onSelectTab: (id: string) => void,
+): void {
+  const onSelectRef = useRef(onSelectTab);
+  onSelectRef.current = onSelectTab;
+  const activeRef = useRef(activeTabId);
+  activeRef.current = activeTabId;
+  const tabIds = tabs.map((tab) => tab.id).join(',');
+
+  useEffect(() => {
+    let cancelled = false;
+    let attempts = 0;
+
+    const resolve = () => {
+      if (cancelled) return true;
+      const hash = window.location.hash.slice(1);
+      if (!hash) return true;
+      const target = document.getElementById(hash);
+      if (!target) return false;
+      const section = target.closest<HTMLElement>('.cf-vtt-panel-section');
+      const owner = section?.id?.replace('cf-vtt-tabpanel-', '');
+      if (owner && owner !== activeRef.current && tabIds.split(',').includes(owner)) {
+        onSelectRef.current(owner);
+      }
+      return true;
+    };
+
+    if (resolve()) return undefined;
+    // ~5s of retries at 250ms: long enough for a comment list to arrive, short enough
+    // that it cannot fight a tab the viewer picks in the meantime.
+    const timer = window.setInterval(() => {
+      attempts += 1;
+      if (resolve() || attempts > 20) window.clearInterval(timer);
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [tabIds]);
+}
 
 export function EncounterVttShell({
   backSlot,
@@ -79,6 +136,7 @@ export function EncounterVttShell({
   onPanelOpenChange,
   panelSlot,
   children,
+  mapStacked = false,
   className,
   rootProps,
 }: Props) {
@@ -90,6 +148,13 @@ export function EncounterVttShell({
   // how far down they reach and insets its own top by it — see the hook's doc.
   useImmersiveChromeInset();
 
+  // Reveal the panel a deep link points into. Comment-reply notifications land on
+  // `#entity-comment-…`, and `EntityDeepLinkFocus` focuses and scrolls the target — but
+  // neither reveals a hidden ancestor, so a link into a panel that is not the selected
+  // tab used to arrive with its target invisible. Resolving the hash to its owning
+  // section and selecting that tab fixes every such link, not just comments.
+  useDeepLinkedPanel(tabs, activeTabId, onSelectTab);
+
   // The shell is `position: fixed` and owns the viewport, so a scrollable body
   // behind it only produces rubber-banding on touch. Restored on unmount so
   // navigating away from the encounter leaves the rest of the app scrollable.
@@ -100,7 +165,10 @@ export function EncounterVttShell({
   }, []);
 
   return (
-    <div className={`cf-vtt${className ? ` ${className}` : ''}`} {...rootProps}>
+    <div
+      className={`cf-vtt${mapStacked ? ' cf-vtt--stacked-map' : ''}${className ? ` ${className}` : ''}`}
+      {...rootProps}
+    >
       <header className="cf-vtt-header">
         {backSlot}
         <div className="cf-vtt-title">

@@ -282,7 +282,8 @@ test('an encounter-level PATCH rejected as STALE_WRITE renders the conflict, rol
     });
 
     await dmPage.goto(`/c/${campaignId}/encounters/${encounterId}`);
-    await openCockpitTab(dmPage, 'party');
+    // Player-visibility is table-wide setup, so the cockpit keeps its bar in the Table tab.
+    await openCockpitTab(dmPage, 'table');
 
     const visibleBar = dmPage.getByTestId('visible-to-players-bar');
     await expect(visibleBar).toBeVisible();

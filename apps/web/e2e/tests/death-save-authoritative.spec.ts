@@ -127,7 +127,10 @@ test.describe('authoritative player death saves (#1462)', () => {
 
         for (const [index, control] of testCase.controls.entries()) {
           if (control === 'workspace') {
+            // The workspace control is the Turn tab's; the roster row below is Party.
+            await openCockpitTab(page, 'turn');
             await page.getByTestId('turn-roll-death-save').click();
+            await openCockpitTab(page, 'party');
           } else {
             await row.getByRole('button', { name: 'Roll a death save' }).click();
           }

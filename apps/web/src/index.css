@@ -3421,7 +3421,10 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
   bottom: 190px;
   z-index: 13;
   width: min(320px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-4)));
-  max-height: min(60vh, 520px);
+  /* Bounded by the CANVAS, not the viewport: the tray is absolutely positioned inside a
+     canvas that clips overflow, so a `60vh` tray in a shorter canvas had its top — and
+     its primary dice controls — cut off with no way to scroll them back. */
+  max-height: min(520px, calc(100% - 200px));
   overflow-y: auto;
   overscroll-behavior: contain;
   border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
@@ -3460,6 +3463,46 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
 }
 /* No map yet: the upload/generate flow is long-form, so let it scroll. */
 .cf-vtt-map--empty { overflow-y: auto; }
+
+/* Setup, not a board: stack the turn bar under the canvas instead of floating it over
+   the upload and generate controls, which it otherwise swallows clicks for. Same
+   arrangement the narrow-viewport rules use, for the same reason. */
+.cf-vtt--stacked-map .cf-vtt-main {
+  display: flex;
+  flex-direction: column;
+}
+.cf-vtt--stacked-map .cf-vtt-map {
+  position: relative;
+  inset: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.cf-vtt--stacked-map .cf-vtt-strip {
+  position: static;
+  flex: none;
+  padding-left: var(--space-3);
+  background: none;
+}
+.cf-vtt--stacked-map .cf-vtt-strip-toggle {
+  position: static;
+  align-self: flex-start;
+  margin-bottom: var(--space-1);
+}
+/* The roll control and its tray stack too — a floating button over a setup form eats
+   clicks on whatever sits beneath it (it was swallowing the generator's Cancel). */
+.cf-vtt--stacked-map .cf-vtt-fab {
+  position: static;
+  align-self: flex-end;
+  flex: none;
+  margin: 0 var(--space-4) var(--space-3);
+}
+.cf-vtt--stacked-map .cf-vtt-tray {
+  position: static;
+  flex: none;
+  width: auto;
+  max-height: 320px;
+  margin: 0 var(--space-4) var(--space-2);
+}
 
 .cf-vtt-map .cf-vtt-rail {
   position: absolute;
@@ -3637,7 +3680,15 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
     border-radius: var(--radius-md) var(--radius-md) 0 0;
   }
   .cf-vtt-fab { bottom: 96px; }
-  .cf-vtt-tray { bottom: 150px; }
+  /* Phone canvases are far too short for a fixed-height popover: pin the tray to both
+     edges of the canvas instead, so its height is whatever fits and its own scroller
+     handles the rest. */
+  .cf-vtt-tray {
+    top: var(--space-2);
+    bottom: 150px;
+    max-height: none;
+    width: min(320px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-3)));
+  }
   /* Phone-width canvases are too small to float chrome over: a 340px aside on a
      ~325px canvas blankets the map, so the surface is not even hoverable. Below this
      width the map column goes back to scrolling, with the secondary chrome in flow

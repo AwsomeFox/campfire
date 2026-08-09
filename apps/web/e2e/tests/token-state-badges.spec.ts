@@ -149,7 +149,8 @@ test('40-token map smoke keeps token drag feedback available (#1905)', async ({ 
       expect(placed.ok()).toBeTruthy();
     }
     await page.goto(encounterUrl());
-    await openCockpitTab(page, 'party');
+    // Map tokens only — no need to open the roster, and with 40+ combatants rendering it
+    // is the expensive part of this smoke test.
     const tokens = page.locator('[data-testid^="map-token-"][role="button"]');
     await expect(tokens).toHaveCount(combatants.length);
     const token = tokens.first();

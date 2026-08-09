@@ -993,6 +993,8 @@ export default function RunSessionPage() {
   type PanelTab = 'turn' | 'party' | 'log' | 'table';
   /** `null` means "use the audience/state default" — see `panelTab` below. An explicit choice always wins and sticks. */
   const [panelTabChoice, setPanelTabChoice] = useState<PanelTab | null>(null);
+  /** The default, resolved once and then held — see `panelTab`. */
+  const defaultPanelTabRef = useRef<PanelTab | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [diceTrayOpen, setDiceTrayOpen] = useState(false);
   const [turnBarCollapsed, setTurnBarCollapsed] = useState(false);
@@ -3839,8 +3841,14 @@ export default function RunSessionPage() {
   // is the opposite: the Turn tab is their sheet and their End turn. Either way the
   // Turn tab only has content while combat is running, so a preparing or ended
   // encounter always opens on the roster rather than on an empty panel.
-  const panelTab: PanelTab =
-    panelTabChoice ?? (!isDm && encounter.status === 'running' ? 'turn' : 'party');
+  // Resolved once, on the first render that has an encounter, and then frozen. Deriving it
+  // every render meant the tab moved under the viewer whenever an input changed — a co-DM
+  // demoted to player mid-session had the roster replaced by the turn workspace while they
+  // were reading it. A default is for the first paint, not a rule the panel keeps enforcing.
+  if (defaultPanelTabRef.current === null) {
+    defaultPanelTabRef.current = !isDm && encounter.status === 'running' ? 'turn' : 'party';
+  }
+  const panelTab: PanelTab = panelTabChoice ?? defaultPanelTabRef.current;
 
   const lifecycle = dmLifecycleActions(encounter.status);
   const deleteCopy = deleteConfirmCopy(encounter.status);
@@ -3987,6 +3995,7 @@ export default function RunSessionPage() {
       // user's text-size preference (reading-preferences.spec.ts). BattleMap already marks
       // itself `reading-exempt` so map geometry does not scale with body text.
       className={`cf-print-root reading-surface${isDm ? ' cf-print-encounter' : ''}`}
+      mapStacked={encounter.mapAttachmentId == null}
       rootProps={entityTargetProps('encounter', encounter.id)}
       backSlot={
         <div className="cf-vtt-back">
