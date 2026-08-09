@@ -1037,7 +1037,9 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     // authorized personal-status notification, with no encounter deep-link.
     const dualRoleCharacter = await coDm
       .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
-      .send({ name: 'Dual Role Hero', hpCurrent: 10, hpMax: 10 });
+      // A DM-created character is otherwise intentionally unowned. Establish
+      // the dual DM + current-owner authority this regression covers.
+      .send({ name: 'Dual Role Hero', hpCurrent: 10, hpMax: 10, ownerUserId: String(coDmId) });
     expect(dualRoleCharacter.status).toBe(201);
     const dualRoleEncounter = await dm
       .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
@@ -1188,7 +1190,10 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     const createHiddenCombatant = async (name: string, hidden = true, owner = player) => {
       const character = await owner
         .post(`/api/v1/campaigns/${guardedCampaignId}/characters`)
-        .send({ name, hpCurrent: 10, hpMax: 10 });
+        // DMs may create unowned characters; this helper's explicit `owner`
+        // argument must still produce an owned character when exercising the
+        // dual-role read and delivery paths.
+        .send({ name, hpCurrent: 10, hpMax: 10, ...(owner === coDm ? { ownerUserId: String(coDmId) } : {}) });
       expect(character.status).toBe(201);
       const encounter = await dm
         .post(`/api/v1/campaigns/${guardedCampaignId}/encounters`)

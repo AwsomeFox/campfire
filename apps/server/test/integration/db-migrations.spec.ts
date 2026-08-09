@@ -2936,6 +2936,11 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const seeded = openDatabase(dataDir);
     try {
       const ts = '2026-08-09T00:00:00.000Z';
+      // The deferred queue has real campaign and recipient foreign keys even
+      // in this legacy-shaped fixture, so establish both parents explicitly.
+      seeded.sqlite.prepare(
+        "INSERT INTO users (id, username, display_name, password_hash, server_role, disabled, created_at, updated_at) VALUES (1, 'legacy-hidden-status-recipient', 'Legacy hidden status recipient', 'hash', 'user', 0, ?, ?)",
+      ).run(ts, ts);
       seeded.sqlite.prepare('INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, ?, ?, ?)').run('Legacy hidden status', ts, ts);
       seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 1, ?, ?)').run('Now hidden', ts, ts);
       seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 0, ?, ?)').run('Visible at upgrade', ts, ts);
