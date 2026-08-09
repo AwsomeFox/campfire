@@ -315,6 +315,44 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     ]);
   });
 
+  /**
+   * #2115 review: a hand-authored `crit` branch is schema-valid in any system, but OSR's
+   * `resolveAttack` returns only hit or miss, so no roll reaches it. Printing "On a critical
+   * hit" — with doubled dice — described an outcome the table can never produce.
+   */
+  test('attack-crit branches are omitted for a system with no critical hits', () => {
+    const spec = ActionSpec.parse({
+      outcomes: {
+        crit: { damage: [{ formula: '2d6', flat: 0, type: 'slashing' }] },
+        hit: { damage: [{ formula: '1d6', flat: 2, type: 'slashing' }] },
+        critMiss: { text: 'Weapon slips' },
+        miss: { text: 'Turned aside' },
+      },
+    });
+    expect(actionSpecEffects(spec, 'double-dice', false)).toEqual([
+      { outcome: 'hit', label: 'On a hit', lines: ['1d6+2 slashing damage'] },
+      { outcome: 'miss', label: 'On a miss', lines: ['Turned aside'] },
+    ]);
+    // Default (and 5e) keeps them.
+    expect(actionSpecEffects(spec, 'double-dice').map((g) => g.outcome)).toEqual(['crit', 'hit', 'miss', 'critMiss']);
+  });
+
+  /**
+   * Degrees of success answer to `degreeOfSuccess`, not to attack crits — a system can have
+   * one without the other, so this capability has no authority over those branches.
+   */
+  test('degree branches are untouched by the attack-crit capability', () => {
+    const spec = ActionSpec.parse({
+      mode: 'save',
+      outcomes: { critSuccess: { text: 'Unharmed' }, failure: { text: 'Singed' }, critFailure: { text: 'Scorched' } },
+    });
+    expect(actionSpecEffects(spec, 'double-dice', false).map((g) => g.outcome)).toEqual([
+      'critSuccess',
+      'failure',
+      'critFailure',
+    ]);
+  });
+
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });

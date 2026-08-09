@@ -62,6 +62,7 @@ import {
   checkCatalogForAdapter,
   checkRollExpr,
   criticalDamageRuleForAdapter,
+  hasCriticalHitsForAdapter,
   hasAdapterOwnedAttackRoll,
   sortCheckCatalog,
   formatCheckBreakdown,
@@ -234,18 +235,25 @@ export default function CharacterPage() {
    * in — leaving the stepper reading an absolute number the server no longer held, so the next
    * click restored temp HP the rest had cleared (Codex review on #2115). The control captures
    * this counter before its request and the merge is dropped if it moved, so a superseded
-   * response is rejected instead of overwriting the state that superseded it.
+   * response is rejected instead of overwriting the state that superseded it. The stepper is
+   * also held disabled while a refresh is in flight — rejecting the merge stops the stale
+   * number being written back to state, but only an inert control stops the user sending a
+   * new ABSOLUTE value computed from a display the pending refresh is about to replace.
    */
   const characterEpochRef = useRef(0);
 
   const load = useCallback(async () => {
+    // Bumped when the refresh STARTS, not when it lands. A Long Rest commits its clear and
+    // then calls `load()` without awaiting it, so a temp-HP response arriving while that GET
+    // is still in flight would otherwise pass an epoch check that had not moved yet and
+    // restore the value the rest cleared (#2115 review). Anything already in flight when a
+    // refresh begins is superseded by definition.
+    characterEpochRef.current += 1;
     setLoading(true);
     setError(null);
     setNotFound(false);
     try {
       const data = await api.get<Character>(`${API}/characters/${id}`);
-      // Newer server truth than anything currently in flight — see `characterEpochRef`.
-      characterEpochRef.current += 1;
       setCharacter(data);
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
@@ -506,6 +514,7 @@ export default function CharacterPage() {
           adapter={adapter}
           canEdit={canEdit}
           onChange={load}
+          refreshing={loading}
           onTempHp={(hpTemp, epoch) => {
             if (epoch !== characterEpochRef.current) return false;
             setCharacter((prev) => (prev ? { ...prev, hpTemp } : prev));
@@ -1544,6 +1553,7 @@ function CharacterVitalsRail({
   onChange,
   onTempHp,
   readCharacterEpoch,
+  refreshing,
   onError,
   roller,
   leveledConditionTrack,
@@ -1562,6 +1572,8 @@ function CharacterVitalsRail({
   onTempHp: (hpTemp: number, epoch: number) => boolean;
   /** Reads the sheet's current refresh epoch, captured before a write. */
   readCharacterEpoch: () => number;
+  /** A sheet refresh is in flight — absolute-value controls must not act on a stale display. */
+  refreshing: boolean;
   onError: (msg: string | null) => void;
   roller: Roller;
   leveledConditionTrack: LeveledConditionTrack | null | undefined;
@@ -1651,6 +1663,7 @@ function CharacterVitalsRail({
                 character={character}
                 onTempHp={onTempHp}
                 readCharacterEpoch={readCharacterEpoch}
+                refreshing={refreshing}
                 onChange={onChange}
                 onError={onError}
               />
@@ -1832,6 +1845,7 @@ function TempHpControl({
   character,
   onTempHp,
   readCharacterEpoch,
+  refreshing,
   onChange,
   onError,
 }: {
@@ -1843,6 +1857,8 @@ function TempHpControl({
   onTempHp: (hpTemp: number, epoch: number) => boolean;
   /** Reads the sheet's refresh epoch. Captured BEFORE the request, compared after. */
   readCharacterEpoch: () => number;
+  /** A refresh is in flight, so the displayed number this control writes from is provisional. */
+  refreshing: boolean;
   /** Fallback refresh, awaited, for a response that is not a character. */
   onChange: () => void | Promise<void>;
   onError: (msg: string | null) => void;
@@ -1879,7 +1895,7 @@ function TempHpControl({
         density="xs"
         ghost
         style={{ minWidth: 44, minHeight: 44 }}
-        disabled={busy || character.hpTemp <= 0}
+        disabled={busy || refreshing || character.hpTemp <= 0}
         aria-label={`Remove 1 temporary hit point from ${character.name}`}
         onClick={() => void set(character.hpTemp - 1)}
       >
@@ -2222,6 +2238,7 @@ function ActionsCard({
   // Either way the value still reads as text — the number is real, the roll is not offered.
   const criticalDamage = criticalDamageRuleForAdapter(adapter);
   const allowCritDamage = allowsCriticalDamageRoll(adapter);
+  const hasCriticalHits = hasCriticalHitsForAdapter(adapter);
   const adapterOwnsAttack = hasAdapterOwnedAttackRoll(adapter);
   const canRollAttack = canRoll && !adapterOwnsAttack;
   const canRollDamage = canRoll;
@@ -2514,6 +2531,7 @@ function ActionsCard({
                 open={openDetails === detailsKey}
                 onToggle={() => setOpenDetails((prev) => (prev === detailsKey ? null : detailsKey))}
                 criticalDamage={criticalDamage}
+                hasCriticalHits={hasCriticalHits}
               />
             </div>
             {canEdit && (
@@ -2668,6 +2686,7 @@ function ActionsCard({
                     open={openDetails === detailsKey}
                     onToggle={() => setOpenDetails((prev) => (prev === detailsKey ? null : detailsKey))}
                     criticalDamage={criticalDamage}
+                hasCriticalHits={hasCriticalHits}
                   />
                 </div>
               </div>
@@ -2689,15 +2708,21 @@ function ActionDetails({
   open,
   onToggle,
   criticalDamage,
+  hasCriticalHits,
 }: {
   action: CharacterAction;
   open: boolean;
   onToggle: () => void;
   /** This campaign's critical rule — see `actionSpecEffects`. */
   criticalDamage: CriticalDamageRule;
+  /** False for a system whose attack resolution has no critical tier — see `actionSpecEffects`. */
+  hasCriticalHits: boolean;
 }) {
   const facts = useMemo(() => actionSpecFacts(action.spec), [action.spec]);
-  const effects = useMemo(() => actionSpecEffects(action.spec, criticalDamage), [action.spec, criticalDamage]);
+  const effects = useMemo(
+    () => actionSpecEffects(action.spec, criticalDamage, hasCriticalHits),
+    [action.spec, criticalDamage, hasCriticalHits],
+  );
   const source = actionSourceText(action.spec);
   if (facts.length === 0 && effects.length === 0 && !source) return null;
   return (

@@ -142,6 +142,13 @@ const OUTCOME_LABELS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
+ * The branches an ATTACK roll's critical tier produces — the ones a system without critical
+ * hits can never reach. Deliberately excludes `critSuccess` / `critFailure`, which are degrees
+ * of success and answer to a different capability.
+ */
+const ATTACK_CRIT_OUTCOMES: ReadonlySet<string> = new Set(['crit', 'critMiss']);
+
+/**
  * One typed damage component as text: "2d6 fire", "1d8+3 slashing", "5 fire".
  *
  * `DamagePart` keeps dice in `formula` and the modifier in `flat` (that split is what lets
@@ -263,6 +270,18 @@ export function actionSpecEffects(
   spec: ActionSpec | undefined | null,
   /** The campaign's critical rule, so a `crit` branch's base damage is not understated. */
   criticalDamage?: CriticalDamageRule,
+  /**
+   * Whether this system has critical hits at all. `false` drops the attack-crit branches
+   * outright: a spec may carry a hand-authored `crit`, but in a system whose `resolveAttack`
+   * returns only hit or miss (OSR) no roll reaches it, so printing "On a critical hit" —
+   * with doubled dice, no less — describes an outcome the table can never produce
+   * (#2115 review).
+   *
+   * Only `crit` / `critMiss` are affected. `critSuccess` / `critFailure` are DEGREE branches,
+   * owned by `degreeOfSuccess`, and a system can have degrees without attack crits or the
+   * reverse — so this capability has no authority over them.
+   */
+  hasCriticalHits = true,
 ): ActionEffectGroup[] {
   if (!spec) return [];
   const outcomes = spec.outcomes ?? {};
@@ -270,6 +289,7 @@ export function actionSpecEffects(
   const fallbackHasDamage = (outcomes.failure?.damage ?? []).some(partCanDealDamage);
   const groups: ActionEffectGroup[] = [];
   for (const [outcome, label] of OUTCOME_LABELS) {
+    if (!hasCriticalHits && ATTACK_CRIT_OUTCOMES.has(outcome)) continue;
     const branch = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
     if (!branch) continue;
     const unique = [

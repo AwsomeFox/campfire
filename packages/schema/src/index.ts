@@ -5879,30 +5879,38 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
  * rule that only covered the neutral path silently let a 5e draft sheet roll a fabricated
  * +0 initiative.
  *
- * The test is the ABILITY-DERIVED COMPONENT of the breakdown, not the final total and not
- * mere ability presence, because each of those gets one of the two cases wrong: a 13th Age
- * level-3 character with no DEX totals +3 from `levelInitiativeBonus` alone (a total-based
- * test calls that complete), while a PF1e character with a native `initiative` bonus and no
- * DEX has a real source (an ability-presence test calls that incomplete).
+ * The question is whether initiative has a SOURCE, which is not the same as whether it has a
+ * value. A 13th Age level-3 character with no DEX totals +3 from `levelInitiativeBonus` alone,
+ * so a total-based test would call that complete; a PF1e character with a native `initiative`
+ * bonus and no DEX has a real source, so an ability-presence test alone would call it
+ * incomplete. Provenance is therefore ASKED, never inferred: an adapter that tracks it exposes
+ * `initiativeModifierOrNull` and gets the final word (PF1e's `initiative: 0` is a declared
+ * +0, not a missing score — a nonzero-contribution test read it as the latter, #2115 review),
+ * and everyone else falls back to whether the declared `initiativeAbility` score is set.
  */
 function withInitiativeCompleteness(
+  adapter: RuleSystemAdapter,
   catalog: RollCheckDefinition[],
   character: CheckCatalogCharacter,
 ): RollCheckDefinition[] {
   const stats = normalizeStats(character.stats);
   return catalog.map((def) => {
+    if (def.category !== 'initiative' || def.incomplete) return def;
+    // An adapter that tracks provenance answers directly — no inference. Raw stats, not the
+    // uppercased map, because the native keys this reads (`initiative`, `init`) are lowercase.
+    if (adapter.initiativeModifierOrNull) {
+      const resolved = adapter.initiativeModifierOrNull(character.stats ?? stats, 'score', character.level);
+      return resolved === null ? { ...def, incomplete: true } : def;
+    }
     const ability = def.ability;
-    if (def.category !== 'initiative' || def.incomplete || !ability) return def;
-    if (readAbilityScoreOrNull(stats, ability) !== null) return def;
-    const fromAbility = def.breakdown
-      .filter((c) => c.label.toLowerCase() === ability.toLowerCase())
-      .reduce((sum, c) => sum + c.value, 0);
-    return fromAbility === 0 ? { ...def, incomplete: true } : def;
+    if (!ability) return def;
+    return readAbilityScoreOrNull(stats, ability) === null ? { ...def, incomplete: true } : def;
   });
 }
 
 export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
   const catalog = withInitiativeCompleteness(
+    adapter,
     adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character),
     character,
   );

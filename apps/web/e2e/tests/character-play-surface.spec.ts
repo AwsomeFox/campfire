@@ -732,6 +732,71 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115, second pass): the same ordering, but with the rest's
+   * REFRESH still in flight when the temp-HP response lands. `RestControls` does not await
+   * `onChange()`, so an epoch advanced when the GET resolves has not moved yet at that moment
+   * and the stale merge passes. The epoch advances when the refresh STARTS, and the stepper
+   * stays inert until it lands so no absolute value is computed from a display about to be
+   * replaced.
+   */
+  test('a temp HP response that lands mid-refresh is rejected too', async ({ page, baseURL }) => {
+    const campaignId = ownCampaignId;
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Warded Mid Refresh', className: 'Abjurer', level: 3, hpMax: 20, hpCurrent: 20, hpTemp: 5 },
+    })).json()).id as number;
+    await ctx.dispose();
+
+    const sent: unknown[] = [];
+    let releasePatch: (() => void) | null = null;
+    let releaseGet: (() => void) | null = null;
+    await page.route(`**/api/v1/characters/${characterId}`, async (route) => {
+      const method = route.request().method();
+      if (method === 'PATCH') {
+        sent.push(JSON.parse(route.request().postData() ?? '{}'));
+        if (sent.length > 1) return route.fallback();
+        const response = await route.fetch();
+        await new Promise<void>((resolve) => {
+          releasePatch = resolve;
+        });
+        return route.fulfill({ response });
+      }
+      // Hold the rest's refresh open so the PATCH response arrives while it is still pending.
+      if (method === 'GET' && sent.length === 1) {
+        const response = await route.fetch();
+        await new Promise<void>((resolve) => {
+          releaseGet = resolve;
+        });
+        return route.fulfill({ response });
+      }
+      return route.fallback();
+    });
+
+    await page.goto(`/c/${campaignId}/characters/${characterId}`);
+    const value = page.getByTestId('character-temp-hp-value');
+    await expect(value).toHaveText('5');
+
+    const plus = page.getByTestId('character-temp-hp').getByRole('button', { name: /Add 1 temporary hit point/ });
+    await plus.click();
+    await expect.poll(() => sent.length).toBe(1);
+
+    await page.getByTestId('rest-controls').getByRole('button', { name: /Long rest/i }).click();
+    // The refresh is in flight and pinned open; the PATCH response lands inside that window.
+    await expect.poll(() => releaseGet !== null).toBe(true);
+    releasePatch!();
+    // Nothing may be sent from a provisional display while the refresh is pending.
+    await expect(plus).toBeDisabled();
+
+    releaseGet!();
+    await expect(value).toHaveText('0');
+    await expect(plus).toBeEnabled();
+    await plus.click();
+    await expect(value).toHaveText('1');
+    expect(sent).toEqual([{ hpTemp: 6 }, { hpTemp: 1 }]);
+  });
+
+  /**
    * Regression (Codex review on #2115): `PATCH /characters/:id` writes death-save counters
    * verbatim — unlike the encounter path it does NOT derive `deathState` from them — so an
    * editable pip here could leave three failures sitting at 'dying', on the sheet and in a

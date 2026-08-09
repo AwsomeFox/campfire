@@ -287,17 +287,33 @@ test.describe('neutral initiative declares the score it reads', () => {
     expect(initiativeOfPf1e({ STR: 10 })?.incomplete).toBe(true);
   });
 
-  test('a non-ability source keeps the entry complete', () => {
-    const nativeSourced = {
+  /**
+   * An adapter with a source outside the declared ability DECLARES it, via
+   * `initiativeModifierOrNull` — the seam PF1e already uses. It is not inferred from the
+   * number coming out non-zero, because a system can legitimately resolve to +0 from a real
+   * source (#2115 review) and another can resolve non-zero from no source at all (13th Age's
+   * level bonus, below).
+   */
+  test('an adapter that tracks provenance gets the final word', () => {
+    const sourced = {
       ...Archmage13aAdapter,
       initiativeAbility: 'DEX',
       levelInitiativeBonus: undefined,
       initiativeModifier: () => 5,
+      initiativeModifierOrNull: () => 5,
     } as unknown as typeof Archmage13aAdapter;
-    const def = checkCatalogForAdapter(nativeSourced, { level: 3, stats: { STR: 12 }, saveProficiencies: [], skills: {} })
+    const def = checkCatalogForAdapter(sourced, { level: 3, stats: { STR: 12 }, saveProficiencies: [], skills: {} })
       .find((c) => c.category === 'initiative');
     expect(def?.modifier).toBe(5);
     expect(def?.incomplete).toBeFalsy();
+
+    // ...and the same adapter reporting no source is incomplete even though the numeric seam
+    // still hands back a rollable 5.
+    const unsourced = { ...sourced, initiativeModifierOrNull: () => null } as unknown as typeof Archmage13aAdapter;
+    const missing = checkCatalogForAdapter(unsourced, { level: 3, stats: { STR: 12 }, saveProficiencies: [], skills: {} })
+      .find((c) => c.category === 'initiative');
+    expect(missing?.modifier).toBe(5);
+    expect(missing?.incomplete).toBe(true);
   });
 
   test('a set ability score is complete, obviously', () => {
@@ -385,5 +401,48 @@ test.describe('allowsCriticalDamageRoll — crits are a capability, not a damage
    */
   test('a double-total system is offered no chip rather than a dice-doubled one', () => {
     expect(allowsCriticalDamageRoll(Pf2eAdapter)).toBe(false);
+  });
+});
+
+/**
+ * #2115 review — an initiative check is "incomplete" when it has no SOURCE, not when its value
+ * happens to be zero.
+ *
+ * PF1e stores a native flat Init bonus (`initiative` / `init`) that already folds in DEX and
+ * feats, and `initiative: 0` is a perfectly ordinary declared bonus. A rule that inferred
+ * provenance from a nonzero contribution read that as a missing score and replaced a real +0
+ * with "—", so provenance is now ASKED via `initiativeModifierOrNull` where an adapter tracks
+ * it, and falls back to ability presence where it does not.
+ */
+test.describe('initiative completeness asks for provenance, never infers it', () => {
+  const catalogInitiative = (adapter: Parameters<typeof checkCatalogForAdapter>[0], stats: Record<string, number>) =>
+    checkCatalogForAdapter(adapter, { level: 3, stats, saveProficiencies: [], skills: {} })
+      .find((c) => c.category === 'initiative');
+
+  test('a declared PF1e +0 is a real bonus, not a missing score', () => {
+    const zero = catalogInitiative(Pathfinder1eAdapter, { initiative: 0 });
+    expect(zero?.modifier).toBe(0);
+    expect(zero?.incomplete).toBeFalsy();
+
+    // The same value with no source at all IS incomplete.
+    const none = catalogInitiative(Pathfinder1eAdapter, { STR: 10 });
+    expect(none?.modifier).toBe(0);
+    expect(none?.incomplete).toBe(true);
+  });
+
+  test('a native bonus survives even beside an unrelated score', () => {
+    const native = catalogInitiative(Pathfinder1eAdapter, { init: 0, STR: 10 });
+    expect(native?.incomplete).toBeFalsy();
+  });
+
+  /**
+   * 13th Age adds `levelInitiativeBonus` on top of DEX, so a level-3 character with no DEX
+   * still totals +3 — the case a total-based test would wave through.
+   */
+  test('a level bonus does not disguise a missing ability', () => {
+    expect(catalogInitiative(Archmage13aAdapter, { STR: 12 })?.incomplete).toBe(true);
+    expect(catalogInitiative(Archmage13aAdapter, { DEX: 14 })?.incomplete).toBeFalsy();
+    expect(catalogInitiative(Dnd5eAdapter, { STR: 14 })?.incomplete).toBe(true);
+    expect(catalogInitiative(Dnd5eAdapter, { DEX: 16 })?.incomplete).toBeFalsy();
   });
 });
