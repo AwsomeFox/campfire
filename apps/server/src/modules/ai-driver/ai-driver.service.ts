@@ -1461,6 +1461,9 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_death_save',
   'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   'roll_check',
+  // #1314: DM-only creature checks share the encounter service's lifecycle, audit, and
+  // creature-attributed dice-log protections with their REST counterpart.
+  'roll_creature_check',
   'request_check',
   'resolve_check_request',
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
@@ -1635,7 +1638,8 @@ export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  * Reasons a tool needs no argument-level guard:
  *  - it is a dice/save roll with no persisted effect on its own — nothing has happened until
  *    something else applies the result (roll_dice, roll_action_dice, roll_initiative,
- *    roll_combatant_initiative, roll_death_save, saving_throw);
+ *    roll_combatant_initiative, roll_death_save, saving_throw, roll_check,
+ *    roll_creature_check);
  *  - begin_encounter/end_encounter/remove_combatant are fully bounded by the PER-PROFILE policy
  *    classes already (PROFILE_TOOL_OVERRIDES denies or confirms them outright in every profile
  *    that matters — there is no argument shape to further restrict);
@@ -1659,6 +1663,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_death_save',
   'saving_throw',
   'roll_check',
+  'roll_creature_check',
   'request_check',
   'resolve_check_request',
   'commit_encounter',
@@ -2417,6 +2422,9 @@ const DRIVER_APPROVABLE_ENTITY_READS: ReadonlyMap<string, string> = new Map<stri
   ['get_faction', 'factionId'],
   ['get_session', 'sessionId'],
   ['get_encounter', 'encounterId'],
+  // #1314: creature mechanics expose DM-only modifiers. Approval is bound to the
+  // individual combatant, never the broader encounter, so it cannot unlock a roster.
+  ['list_creature_checks', 'combatantId'],
   ['get_timeline_event', 'eventId'],
   ['get_inventory_item', 'itemId'],
   ['get_attachment', 'attachmentId'],
