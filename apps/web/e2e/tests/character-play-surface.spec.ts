@@ -785,8 +785,9 @@ test.describe('character sheet play surface', () => {
     // The refresh is in flight and pinned open; the PATCH response lands inside that window.
     await expect.poll(() => releaseGet !== null).toBe(true);
     releasePatch!();
-    // Nothing may be sent from a provisional display while the refresh is pending.
-    await expect(plus).toBeDisabled();
+    // The rejected merge leaves the pre-rest number on screen — the refresh has not landed yet,
+    // and the response that WOULD have said 6 was dropped.
+    await expect(value).toHaveText('5');
 
     releaseGet!();
     await expect(value).toHaveText('0');
@@ -794,6 +795,71 @@ test.describe('character sheet play surface', () => {
     await plus.click();
     await expect(value).toHaveText('1');
     expect(sent).toEqual([{ hpTemp: 6 }, { hpTemp: 1 }]);
+  });
+
+  /**
+   * Regression (Codex review on #2115, third pass): rejecting the stale RESPONSE is only half
+   * of it. The stepper sends an ABSOLUTE value read off the display, so while a rest's refresh
+   * is in flight both buttons must be inert — otherwise a click computes `hpTemp + 1` from the
+   * pre-rest number and writes temp HP the rest just cleared straight back to the server, with
+   * no stale response involved for an epoch check to catch. `−` gated on the refresh from the
+   * start; `+` did not.
+   *
+   * Ordering here is deliberate: the PATCH settles COMPLETELY (the sheet shows 6 and the
+   * controls re-enable) before the rest begins, so `busy` is provably false and only the
+   * refresh gate can be holding the buttons.
+   */
+  test('both temp HP steppers are inert while a rest refresh is in flight', async ({ page, baseURL }) => {
+    const campaignId = ownCampaignId;
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Warded Then Waiting', className: 'Abjurer', level: 3, hpMax: 20, hpCurrent: 20, hpTemp: 5 },
+    })).json()).id as number;
+    await ctx.dispose();
+
+    const sent: unknown[] = [];
+    let releaseGet: (() => void) | null = null;
+    await page.route(`**/api/v1/characters/${characterId}`, async (route) => {
+      const method = route.request().method();
+      if (method === 'PATCH') {
+        sent.push(JSON.parse(route.request().postData() ?? '{}'));
+        return route.fallback();
+      }
+      // Hold only the refresh that follows the rest.
+      if (method === 'GET' && sent.length === 1) {
+        const response = await route.fetch();
+        await new Promise<void>((resolve) => {
+          releaseGet = resolve;
+        });
+        return route.fulfill({ response });
+      }
+      return route.fallback();
+    });
+
+    await page.goto(`/c/${campaignId}/characters/${characterId}`);
+    const value = page.getByTestId('character-temp-hp-value');
+    const plus = page.getByTestId('character-temp-hp').getByRole('button', { name: /Add 1 temporary hit point/ });
+    const minus = page.getByTestId('character-temp-hp').getByRole('button', { name: /Remove 1 temporary hit point/ });
+    await expect(value).toHaveText('5');
+
+    // Settled: 6 on screen and both controls live again, so `busy` is false from here.
+    await plus.click();
+    await expect(value).toHaveText('6');
+    await expect(plus).toBeEnabled();
+
+    await page.getByTestId('rest-controls').getByRole('button', { name: /Long rest/i }).click();
+    await expect.poll(() => releaseGet !== null).toBe(true);
+    await expect(plus).toBeDisabled();
+    await expect(minus).toBeDisabled();
+    // Still the pre-rest display: whatever a click here computed would be wrong.
+    await expect(value).toHaveText('6');
+
+    releaseGet!();
+    await expect(value).toHaveText('0');
+    await expect(plus).toBeEnabled();
+    // Only the settled +1 was ever sent — nothing was written from the provisional display.
+    expect(sent).toEqual([{ hpTemp: 6 }]);
   });
 
   /**

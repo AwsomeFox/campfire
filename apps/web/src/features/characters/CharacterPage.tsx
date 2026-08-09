@@ -1908,7 +1908,7 @@ function TempHpControl({
         density="xs"
         ghost
         style={{ minWidth: 44, minHeight: 44 }}
-        disabled={busy}
+        disabled={busy || refreshing}
         aria-label={`Add 1 temporary hit point to ${character.name}`}
         onClick={() => void set(character.hpTemp + 1)}
       >
