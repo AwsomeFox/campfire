@@ -2,6 +2,9 @@
  * Browser Web Push display + click handling (issue #1323).
  * Loaded by the generated Workbox service worker via importScripts.
  */
+const PUSH_WORKER_CAPABILITY_REQUEST = 'campfire:push-capability';
+const PUSH_WORKER_CAPABILITY_RESPONSE = 'campfire:push-capable:v1';
+
 function fallbackUrl() {
   return self.registration.scope;
 }
@@ -14,6 +17,11 @@ function safeTarget(value) {
     return fallbackUrl();
   }
 }
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type !== PUSH_WORKER_CAPABILITY_REQUEST) return;
+  event.ports[0]?.postMessage(PUSH_WORKER_CAPABILITY_RESPONSE);
+});
 
 self.addEventListener('push', (event) => {
   const payload = (() => {

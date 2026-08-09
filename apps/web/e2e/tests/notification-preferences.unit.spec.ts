@@ -63,6 +63,22 @@ test.describe('Notification preferences card (#789)', () => {
     expect(PUSH_WORKER_SOURCE).toContain('openWindow(target)');
   });
 
+  test('requires the active worker to confirm push capability before subscribing', () => {
+    const enableSource = BROWSER_PUSH_SOURCE.slice(
+      BROWSER_PUSH_SOURCE.indexOf('export async function enableBrowserPush'),
+    );
+    expect(BROWSER_PUSH_SOURCE).toContain('registration.active');
+    expect(BROWSER_PUSH_SOURCE).toContain('new MessageChannel()');
+    expect(PUSH_WORKER_SOURCE).toContain("addEventListener('message'");
+    expect(PUSH_WORKER_SOURCE).toContain('campfire:push-capable:v1');
+    expect(enableSource.indexOf('requirePushCapableWorker(registration)')).toBeLessThan(
+      enableSource.indexOf('Notification.requestPermission()'),
+    );
+    expect(enableSource.indexOf('requirePushCapableWorker(registration)')).toBeLessThan(
+      enableSource.indexOf('pushManager.subscribe'),
+    );
+  });
+
   test('detaches the browser capability on logout and global authentication loss', () => {
     expect(BROWSER_PUSH_SOURCE).toContain('detachBrowserPushLocally');
     expect(BROWSER_PUSH_SOURCE).toContain('pendingLocalDetach');

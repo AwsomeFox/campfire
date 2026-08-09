@@ -14,6 +14,9 @@ export type BrowserPushUiState =
     };
 
 const SERVICE_WORKER_READY_TIMEOUT_MS = 10_000;
+const PUSH_WORKER_CAPABILITY_TIMEOUT_MS = 1_500;
+const PUSH_WORKER_CAPABILITY_REQUEST = 'campfire:push-capability';
+const PUSH_WORKER_CAPABILITY_RESPONSE = 'campfire:push-capable:v1';
 const PUSH_ENDPOINT_STORAGE_KEY = 'cf.browserPushEndpoint';
 let pendingLocalDetach: Promise<void> = Promise.resolve();
 
@@ -117,6 +120,42 @@ async function readyRegistration(): Promise<ServiceWorkerRegistration> {
   }
 }
 
+async function requirePushCapableWorker(registration: ServiceWorkerRegistration): Promise<void> {
+  const worker = registration.active;
+  const unavailable = () =>
+    new Error(
+      'The active Campfire service worker cannot receive push notifications. Install the pending update or reload, then try again.',
+    );
+  if (!worker) throw unavailable();
+
+  await new Promise<void>((resolve, reject) => {
+    const channel = new MessageChannel();
+    let settled = false;
+    let timer = 0;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      channel.port1.close();
+      if (error) reject(error);
+      else resolve();
+    };
+    timer = window.setTimeout(
+      () => finish(unavailable()),
+      PUSH_WORKER_CAPABILITY_TIMEOUT_MS,
+    );
+    channel.port1.onmessage = (event: MessageEvent<unknown>) => {
+      finish(event.data === PUSH_WORKER_CAPABILITY_RESPONSE ? undefined : unavailable());
+    };
+    channel.port1.onmessageerror = () => finish(unavailable());
+    try {
+      worker.postMessage({ type: PUSH_WORKER_CAPABILITY_REQUEST }, [channel.port2]);
+    } catch {
+      finish(unavailable());
+    }
+  });
+}
+
 function subscriptionBody(subscription: PushSubscription): BrowserPushSubscription {
   const json = subscription.toJSON();
   const p256dh = json.keys?.p256dh;
@@ -179,12 +218,13 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
 
 export async function enableBrowserPush(publicKey: string): Promise<void> {
   await pendingLocalDetach;
+  const registration = await readyRegistration();
+  await requirePushCapableWorker(registration);
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') {
     throw new Error(permission === 'denied' ? 'Browser notifications are blocked.' : 'Browser notification permission was not granted.');
   }
 
-  const registration = await readyRegistration();
   const existing = await registration.pushManager.getSubscription();
   const subscription =
     existing ??

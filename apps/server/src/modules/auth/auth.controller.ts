@@ -196,11 +196,11 @@ export class AuthController {
   async logout(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
-    @Body() body?: LogoutRequestDto,
+    @Body() body: LogoutRequestDto,
   ): Promise<void> {
     const token = req.cookies?.[SESSION_COOKIE_NAME] as string | undefined;
     if (token) {
-      await this.auth.logout(token, body?.pushEndpoint);
+      await this.auth.logout(token, body.pushEndpoint);
     }
     res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
   }
