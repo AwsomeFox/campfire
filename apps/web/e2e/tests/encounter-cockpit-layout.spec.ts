@@ -393,6 +393,58 @@ test.describe('encounter cockpit panel collapse', () => {
     }
   });
 
+  test('a second queued concentration check reopens the panel again', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+
+      const combatants = (await (
+        await page.request.get(`/api/v1/encounters/${fixture.encounterId}`)
+      ).json()) as { combatants: Array<{ id: number }> };
+      const target = combatants.combatants[0];
+      expect(target, 'fixture needs a combatant').toBeTruthy();
+
+      const concentrating = await page.request.post(
+        `/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}/turn-state`,
+        { data: { concentration: 'Bless' } },
+      );
+      expect(concentrating.ok(), `set concentration: ${await concentrating.text()}`).toBe(true);
+      // Small hits on purpose: dropping the target to 0 breaks concentration, which
+      // CLEARS the queue this test is about.
+      const damage = async () => {
+        const damaged = await page.request.patch(
+          `/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}`,
+          { data: { hpDelta: -1 } },
+        );
+        expect(damaged.ok(), `apply damage: ${await damaged.text()}`).toBe(true);
+      };
+
+      await damage();
+      await expect(page.getByTestId('concentration-check-prompt')).toBeVisible({ timeout: 15_000 });
+
+      // The viewer puts the panel away with the first save still up.
+      await page.getByTestId('encounter-vtt-panel-close').click();
+      await expect(page.getByTestId('encounter-vtt-panel')).not.toBeVisible();
+
+      // A second hit APPENDS to the queue rather than replacing it, so the prompt on
+      // screen is unchanged — still the head — and a key built from that head alone never
+      // moved. The panel stayed shut over a fight now waiting on two answers.
+      await damage();
+      const queued = (await (
+        await page.request.get(`/api/v1/encounters/${fixture.encounterId}`)
+      ).json()) as { combatants: Array<{ id: number; turnState: { pendingConcentrationChecks: unknown[] } }> };
+      const depth =
+        queued.combatants.find((c) => c.id === target.id)?.turnState.pendingConcentrationChecks.length ?? 0;
+      expect(depth, 'the second hit must actually queue behind the first').toBeGreaterThan(1);
+
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible({ timeout: 15_000 });
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+
   test('a prompt that reopens the panel takes the keyboard with it', async ({ page }) => {
     const fixture = await createRunningEncounter(page);
     try {

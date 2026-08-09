@@ -49,7 +49,10 @@ test.describe('the cockpit attention key', () => {
 
 test('RunSessionPage feeds every prompt into the key rather than a priority ternary', () => {
   const source = readFileSync(resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'), 'utf8');
-  expect(source).toContain("['concentration', pendingConcentrationCheck]");
+  // Concentration checks are a QUEUE, and one can land on any eligible combatant, so the
+  // key spreads all of them rather than naming the head that happens to be on screen.
+  expect(source).toContain("...waitingConcentrationChecks.map((check) => ['concentration', check] as const)");
+  expect(source).toContain('const waitingConcentrationChecks = orderedCombatants.flatMap');
   expect(source).toContain("['apply', pendingApply]");
   expect(source).toContain("['action', pendingActionUse]");
   expect(source).toContain("['group', pendingGroupActionUse]");

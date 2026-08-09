@@ -3949,6 +3949,17 @@ export default function RunSessionPage() {
         combatant.turnState.pendingConcentrationChecks.length > 0,
     );
   const pendingConcentrationCheck = concentrationCheckCombatant?.turnState.pendingConcentrationChecks[0] ?? null;
+  // Every check the viewer could be shown, not just the one on screen. These QUEUE: a
+  // second hit while the first save is still up appends rather than replaces, and a check
+  // can land on another eligible combatant entirely. Keying attention on the displayed
+  // head alone meant the key never changed for either, so a panel the viewer had
+  // collapsed stayed shut over a fight that was waiting on them. Same eligibility as the
+  // two lookups above — never a monster/NPC queue for a non-resolver (#43 / #606).
+  const waitingConcentrationChecks = orderedCombatants.flatMap((combatant) =>
+    canEditCombatantPermission(combatant) || combatant.kind === 'character'
+      ? combatant.turnState.pendingConcentrationChecks.map((check) => ({ id: `${combatant.id}:${check.id}` }))
+      : [],
+  );
   const canResolveConcentrationCheck =
     concentrationCheckCombatant != null && canEditCombatantPermission(concentrationCheckCombatant);
 
@@ -3967,7 +3978,7 @@ export default function RunSessionPage() {
   // the tab switch and is visible whichever section is showing.
   // Every waiting prompt, not just the first — see `waitingPromptsKey`.
   const attentionKey = waitingPromptsKey([
-    ['concentration', pendingConcentrationCheck],
+    ...waitingConcentrationChecks.map((check) => ['concentration', check] as const),
     ['apply', pendingApply],
     ['action', pendingActionUse],
     ['group', pendingGroupActionUse],
