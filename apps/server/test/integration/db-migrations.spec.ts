@@ -2978,6 +2978,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     try {
       reduced.pragma('foreign_keys = OFF');
       reduced.exec('DROP TABLE encounters');
+      reduced.exec('DROP TABLE campaigns');
       reduced.prepare("DELETE FROM __migrations WHERE name = '0180_hidden_status_notification_authorization_2112'").run();
     } finally {
       reduced.close();

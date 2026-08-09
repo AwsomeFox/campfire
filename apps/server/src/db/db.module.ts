@@ -5114,6 +5114,7 @@ function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): v
  * later visibility change.
  */
 function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Database): void {
+  const campaignsTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'campaigns'").get();
   for (const table of ['notifications', 'notification_digest_queue']) {
     const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     if (!exists) continue;
@@ -5121,6 +5122,10 @@ function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Datab
     if (!columns.some((column) => column.name === 'hidden_status_context')) {
       sqlite.exec(`ALTER TABLE ${table} ADD COLUMN hidden_status_context TEXT`);
     }
+    // Reduced fixtures may retain notification tables while omitting their
+    // campaign foreign-key parent. The additive column migration is still
+    // safe; only the legacy cleanup requires a complete campaign schema.
+    if (!campaignsTable) continue;
     // Legacy rows lack the affected character and audience. Retaining even a
     // currently-visible row would let a subsequent hide bypass revalidation.
     sqlite.prepare(
