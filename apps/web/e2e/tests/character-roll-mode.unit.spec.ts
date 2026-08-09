@@ -1,5 +1,12 @@
 import { expect, test } from '@playwright/test';
-import { Dnd5eAdapter, StarforgedAdapter, hasInitiativeRollForAdapter } from '@campfire/schema';
+import {
+  Dnd5eAdapter,
+  OpenLegendAdapter,
+  StarforgedAdapter,
+  checkCatalogForAdapter,
+  hasInitiativeRollForAdapter,
+  hasNeutralD20ChecksForAdapter,
+} from '@campfire/schema';
 import { ROLL_MODES, rollModeOptions, rollModeSummary, resolveRollMode, rollModeForClick, type RollMode } from '../../src/features/characters/rollMode';
 
 /**
@@ -146,5 +153,48 @@ test.describe('hasInitiativeRollForAdapter — omission means yes, opting out is
     expect(hasInitiativeRollForAdapter(StarforgedAdapter)).toBe(false);
     // The die is a seam artifact, which is exactly why reading it cannot answer the question.
     expect(StarforgedAdapter.initiativeDie).toBe(6);
+  });
+});
+
+/**
+ * Codex review on #2115 — these capabilities have to be enforced in the SHARED catalog, not
+ * at a render site. `checkCatalogForAdapter` is the one seam the character sheet, the
+ * encounter card, REST `/checks` + `/checks/roll`, and the MCP `list_checks`/`roll_check`
+ * tools all read; gating only the sheet left every other caller able to discover and persist
+ * a roll the adapter says does not exist.
+ */
+test.describe('checkCatalogForAdapter — offers nothing a system cannot actually roll', () => {
+  const character = {
+    level: 3,
+    stats: { STR: 12, DEX: 14, EDGE: 2, IRON: 3 },
+    saveProficiencies: [],
+    skills: {},
+  };
+
+  test('5e is unaffected — it keeps initiative and its d20 checks', () => {
+    const catalog = checkCatalogForAdapter(Dnd5eAdapter, character);
+    expect(catalog.some((c) => c.category === 'initiative')).toBe(true);
+    expect(catalog.some((c) => c.category === 'ability')).toBe(true);
+    expect(hasNeutralD20ChecksForAdapter(Dnd5eAdapter)).toBe(true);
+  });
+
+  test('Starforged contributes no checks at all — no d20 checks, and no initiative roll', () => {
+    expect(hasNeutralD20ChecksForAdapter(StarforgedAdapter)).toBe(false);
+    expect(checkCatalogForAdapter(StarforgedAdapter, character)).toEqual([]);
+  });
+
+  test('Open Legend contributes no checks — its attribute roll is an exploding pool', () => {
+    expect(hasNeutralD20ChecksForAdapter(OpenLegendAdapter)).toBe(false);
+    const catalog = checkCatalogForAdapter(OpenLegendAdapter, character);
+    expect(catalog.some((c) => c.category === 'ability')).toBe(false);
+    expect(catalog.some((c) => c.category === 'save')).toBe(false);
+    // It DOES roll initiative (Agility-monotonic), so that entry legitimately survives.
+    expect(catalog.some((c) => c.category === 'initiative')).toBe(true);
+  });
+
+  test('omission still means yes for both capabilities', () => {
+    expect(hasNeutralD20ChecksForAdapter({})).toBe(true);
+    expect(hasNeutralD20ChecksForAdapter(null)).toBe(true);
+    expect(hasInitiativeRollForAdapter({})).toBe(true);
   });
 });

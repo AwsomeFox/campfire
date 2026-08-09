@@ -4312,6 +4312,15 @@ export function hasInitiativeRollForAdapter(adapter?: Pick<RuleSystemAdapter, 'h
   return adapter?.hasInitiativeRoll !== false;
 }
 
+/**
+ * Whether the neutral `d20 + modifier` catalog describes this system's checks — see
+ * {@link RuleSystemAdapter.hasNeutralD20Checks}. Omission means yes, so an adapter must opt
+ * out deliberately and every existing system is unchanged.
+ */
+export function hasNeutralD20ChecksForAdapter(adapter?: Pick<RuleSystemAdapter, 'hasNeutralD20Checks'> | null): boolean {
+  return adapter?.hasNeutralD20Checks !== false;
+}
+
 // ---------- adapter-defined grid distance rules (issue #467) ----------
 // Square grids default to Euclidean straight-line ruler distance; hex grids use
 // cube/axial hex steps. 5e optionally counts every other diagonal as 2 squares.
@@ -4605,6 +4614,24 @@ export interface RuleSystemAdapter {
    * 5e sets this to true; systems without 5e death saves set it to false or omit it.
    */
   readonly hasDeathSaves?: boolean;
+  /**
+   * OPTIONAL — whether the NEUTRAL check catalog honestly describes this system's checks.
+   * Default true.
+   *
+   * {@link neutralCheckCatalog} emits ability/save/skill entries as `d20 + modifier` with a
+   * flat +2 proficiency term. That is a reasonable generic shape for a d20 system without
+   * its own `buildCheckCatalog`, and a LIE for a system that does not roll d20 checks at
+   * all: Ironsworn: Starforged resolves moves on a d6 action die against challenge dice,
+   * and Open Legend rolls an exploding attribute dice pool (score 5 is 1d20 + 2d6, see
+   * `attributeDicePool`). Neither can be expressed as a flat d20 modifier, so offering one
+   * does not merely look wrong — the server resolves that same definition and PERSISTS the
+   * wrong number to the shared dice log.
+   *
+   * Systems in that position set this false until they have an adapter-owned
+   * `buildCheckCatalog`, and the catalog returns nothing rather than something incorrect.
+   * Read through {@link hasNeutralD20ChecksForAdapter}.
+   */
+  readonly hasNeutralD20Checks?: boolean;
   /**
    * OPTIONAL — whether this system rolls initiative AT ALL. Default true.
    *
@@ -5210,6 +5237,10 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
     const hp = d.hp ?? d.hitPoints ?? d.hit_points;
     return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
   },
+  // Open Legend rolls an EXPLODING attribute dice pool (see `attributeDicePool`), not a flat
+  // d20 + modifier, so the neutral catalog cannot describe its checks — and the server
+  // resolves that same definition, so an offered check would persist a wrong result.
+  hasNeutralD20Checks: false,
   attributeDicePool(score: number): AttributeDicePool {
     return openLegendAttributeDicePool(score);
   },
@@ -5690,7 +5721,10 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
   const initLevel = adapter.levelInitiativeBonus?.(character.level) ?? 0;
   const initMod = initBase + initLevel;
   const initiativeLabel = adapter.id === ARCHMAGE_ADAPTER_ID ? 'DEX' : 'initiative';
-  out.push({
+  // A system with no initiative roll gets no initiative check — its `initiativeDie` exists
+  // only to satisfy the generic roller seam (see `hasInitiativeRoll`), so emitting an entry
+  // would let REST and MCP discover and persist a turn-order roll the game does not have.
+  if (hasInitiativeRollForAdapter(adapter)) out.push({
     id: 'initiative',
     label: 'Initiative',
     category: 'initiative',
@@ -5709,6 +5743,10 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
     supportsAdvantage: true,
     supportsDegrees: false,
   });
+
+  // Everything below is `d20 + modifier`. For a system that does not roll d20 checks, the
+  // honest catalog is an empty one — see `hasNeutralD20Checks`.
+  if (!hasNeutralD20ChecksForAdapter(adapter)) return out;
 
   for (const ability of abilityKeys) {
     const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
@@ -5775,7 +5813,13 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
  * tools, the character sheet, and the encounter card all call — so the math is identical.
  */
 export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
-  return adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character);
+  const catalog = adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character);
+  // Enforced HERE, not at each render site: this is the one seam the sheet, the encounter
+  // card, REST `/checks` + `/checks/roll`, and the MCP `list_checks`/`roll_check` tools all
+  // read, so filtering anywhere else would leave the others able to roll what the adapter
+  // says does not exist.
+  if (hasInitiativeRollForAdapter(adapter)) return catalog;
+  return catalog.filter((c) => c.category !== 'initiative');
 }
 
 /** Find a single check by its stable id within a character's catalog, or null. */

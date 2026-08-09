@@ -60,7 +60,6 @@ import {
   type RollCheckDefinition,
   checkCatalogForAdapter,
   checkRollExpr,
-  hasInitiativeRollForAdapter,
   initiativeModelForAdapter,
   sortCheckCatalog,
   formatCheckBreakdown,
@@ -1522,13 +1521,12 @@ function CharacterVitalsRail({
   defenseLabel: string;
   defenseTitle: string;
 }) {
-  // The neutral catalog carries an initiative entry for every system, including two that
-  // have no personal initiative roll to offer: a GROUP-initiative system (Swords & Wizardry,
-  // Labyrinth Lord, OSE roll one d6 per SIDE) and a system with no initiative roll at all
-  // (Starforged — its d6 exists only to satisfy the roller seam, which is why this asks the
-  // adapter rather than reading `initiativeDie`). The tile is omitted for both.
-  const showInitiative =
-    hasInitiativeRollForAdapter(adapter) && initiativeModelForAdapter(adapter).mode !== 'group';
+  // A system with NO initiative roll (Starforged) already contributes no entry — that is
+  // enforced in `checkCatalogForAdapter`, so REST and MCP cannot roll it either. This adds
+  // only the DISPLAY rule the catalog cannot express: group initiative IS rolled, just once
+  // per side, so its entry is legitimate for the encounter while a per-character tile here
+  // would contradict both the adapter and the encounter's own group flow.
+  const showInitiative = initiativeModelForAdapter(adapter).mode !== 'group';
   const initiative = useMemo(() => {
     const def = checkCatalogForAdapter(adapter, character).find((c) => c.category === 'initiative') ?? null;
     if (!def) return null;

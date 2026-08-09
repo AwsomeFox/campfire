@@ -180,7 +180,11 @@ test.describe('character sheet play surface', () => {
       await expect(page.getByRole('button', { name: /^Roll initiative/ })).toHaveCount(0);
       await expect(page.getByRole('button', { name: /^Roll .* save/ })).toHaveCount(0);
     } finally {
+      // Trashing notifies members ("A campaign you were in was deleted") and the bell only
+      // fetches the newest 30, so a leftover notice here pushes an older seeded one out of
+      // range for another spec. Purge removes the campaign's notifications with it.
       await ctx.delete(`/api/v1/campaigns/${campaign.id}`);
+      await ctx.delete(`/api/v1/campaigns/${campaign.id}/purge`);
       await ctx.dispose();
     }
   });
@@ -209,7 +213,11 @@ test.describe('character sheet play surface', () => {
       // ...and nothing offers to roll them as a d20 check.
       await expect(abilities.getByRole('button')).toHaveCount(0);
     } finally {
+      // Trashing notifies members ("A campaign you were in was deleted") and the bell only
+      // fetches the newest 30, so a leftover notice here pushes an older seeded one out of
+      // range for another spec. Purge removes the campaign's notifications with it.
       await ctx.delete(`/api/v1/campaigns/${campaign.id}`);
+      await ctx.delete(`/api/v1/campaigns/${campaign.id}/purge`);
       await ctx.dispose();
     }
   });
@@ -263,8 +271,11 @@ test.describe('character sheet play surface', () => {
       await page.goto(`/c/${individual.id}/characters/${soloCharacter}?tab=play`);
       await expect(page.getByTestId('character-vitals').getByText('Initiative')).toBeVisible();
     } finally {
-      await ctx.delete(`/api/v1/campaigns/${group.id}`);
-      await ctx.delete(`/api/v1/campaigns/${individual.id}`);
+      // Purged, not just trashed — see the note on the archived-campaign test above.
+      for (const id of [group.id, individual.id]) {
+        await ctx.delete(`/api/v1/campaigns/${id}`);
+        await ctx.delete(`/api/v1/campaigns/${id}/purge`);
+      }
       await ctx.dispose();
     }
   });
