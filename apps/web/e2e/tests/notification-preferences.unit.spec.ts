@@ -78,6 +78,19 @@ test.describe('Notification preferences card (#789)', () => {
       rotationSource.indexOf('forgetEndpoint()'),
     );
   });
+  test('blocks future rebinding when denied-permission cleanup cannot unsubscribe', () => {
+    const permissionCleanupSource = BROWSER_PUSH_SOURCE.slice(
+      BROWSER_PUSH_SOURCE.indexOf("if (Notification.permission === 'denied')"),
+      BROWSER_PUSH_SOURCE.indexOf('return {', BROWSER_PUSH_SOURCE.indexOf("if (Notification.permission === 'denied')")),
+    );
+    expect(permissionCleanupSource).toContain('subscription.unsubscribe().catch(() => false)');
+    expect(permissionCleanupSource).toContain('if (unsubscribed)');
+    expect(permissionCleanupSource).toContain('blockAutomaticRebind()');
+    expect(permissionCleanupSource).toContain('rebindBlocked = true');
+    expect(permissionCleanupSource.indexOf('blockAutomaticRebind()')).toBeLessThan(
+      permissionCleanupSource.indexOf('subscription && !rebindBlocked'),
+    );
+  });
   test('service worker displays pushes and opens/focuses their Campfire link', () => {
     expect(PUSH_WORKER_SOURCE).toContain("addEventListener('push'");
     expect(PUSH_WORKER_SOURCE).toContain("addEventListener('notificationclick'");
@@ -108,6 +121,17 @@ test.describe('Notification preferences card (#789)', () => {
     expect(AUTH_PROVIDER_SOURCE).toContain('browserPushEndpointForLogout');
     expect(AUTH_PROVIDER_SOURCE).toContain("api.post(`${API}/auth/logout`, pushEndpoint ? { pushEndpoint } : {})");
     expect(AUTH_PROVIDER_SOURCE.match(/detachBrowserPushLocally\(\)/g)?.length).toBeGreaterThanOrEqual(4);
+  });
+
+  test('retains the logout endpoint in memory when localStorage is unavailable', () => {
+    const endpointSource = BROWSER_PUSH_SOURCE.slice(
+      BROWSER_PUSH_SOURCE.indexOf('function rememberEndpoint'),
+      BROWSER_PUSH_SOURCE.indexOf('function blockAutomaticRebind'),
+    );
+    expect(endpointSource).toContain('pushEndpointInMemory = endpoint');
+    expect(endpointSource).toContain('localStorage.getItem(PUSH_ENDPOINT_STORAGE_KEY) ?? pushEndpointInMemory');
+    expect(endpointSource).toContain('return pushEndpointInMemory');
+    expect(endpointSource).toContain('pushEndpointInMemory = null');
   });
 
   test('blocks automatic rebinding when auth-transition cleanup leaves a subscription behind', () => {

@@ -20,6 +20,7 @@ const PUSH_WORKER_CAPABILITY_RESPONSE = 'campfire:push-capable:v1';
 const PUSH_ENDPOINT_STORAGE_KEY = 'cf.browserPushEndpoint';
 const PUSH_REBIND_BLOCKED_STORAGE_KEY = 'cf.browserPushRebindBlocked';
 let pendingLocalDetach: Promise<void> = Promise.resolve();
+let pushEndpointInMemory: string | null = null;
 let pushRebindBlockedInMemory = false;
 
 export function browserPushSupported(): boolean {
@@ -43,6 +44,7 @@ function applicationServerKey(value: string): ArrayBuffer {
 }
 
 function rememberEndpoint(endpoint: string): void {
+  pushEndpointInMemory = endpoint;
   try {
     localStorage.setItem(PUSH_ENDPOINT_STORAGE_KEY, endpoint);
   } catch {
@@ -52,9 +54,9 @@ function rememberEndpoint(endpoint: string): void {
 
 function rememberedEndpoint(): string | null {
   try {
-    return localStorage.getItem(PUSH_ENDPOINT_STORAGE_KEY);
+    return localStorage.getItem(PUSH_ENDPOINT_STORAGE_KEY) ?? pushEndpointInMemory;
   } catch {
-    return null;
+    return pushEndpointInMemory;
   }
 }
 
@@ -64,6 +66,7 @@ export function browserPushEndpointForLogout(): string | undefined {
 }
 
 function forgetEndpoint(): void {
+  pushEndpointInMemory = null;
   try {
     localStorage.removeItem(PUSH_ENDPOINT_STORAGE_KEY);
   } catch {
@@ -231,7 +234,7 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
   }
 
   if (!subscription) allowAutomaticRebind();
-  const rebindBlocked = automaticRebindBlocked();
+  let rebindBlocked = automaticRebindBlocked();
 
   // Permission can be revoked outside Campfire. The next preferences visit
   // cleans up both sides so the server does not retain a dead capability.
@@ -242,9 +245,21 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
         json: { endpoint },
       });
     }
-    await subscription?.unsubscribe().catch(() => false);
     forgetEndpoint();
-    subscription = null;
+    if (subscription) {
+      const unsubscribed = await subscription.unsubscribe().catch(() => false);
+      if (unsubscribed) {
+        allowAutomaticRebind();
+        rebindBlocked = false;
+        subscription = null;
+      } else {
+        blockAutomaticRebind();
+        rebindBlocked = true;
+      }
+    } else {
+      allowAutomaticRebind();
+      rebindBlocked = false;
+    }
   } else if (subscription && !rebindBlocked) {
     // Idempotently re-bind this browser to the current signed-in user. This is
     // essential on shared devices where the PushManager subscription survives
