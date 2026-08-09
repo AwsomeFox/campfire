@@ -353,7 +353,7 @@ export class CampaignsController {
   @ApiOperation({
     summary: "List a campaign's trashed (soft-deleted) entities",
     description:
-      'dm role required. The per-campaign Trash (issue #269): this campaign\'s soft-deleted child entities (issue #116) — ' +
+      'dm role required; readable when the campaign is archived. The per-campaign Trash (issue #269): this campaign\'s soft-deleted child entities (issue #116) — ' +
       'sessions, characters, quests, npcs, locations, factions, encounters, story arcs, story beats, and timeline events — newest-trashed first, as {type,id,name,deletedAt} rows. Restore any ' +
       'of them with POST /<route>/:id/restore (e.g. POST /sessions/:id/restore; timeline events use POST /timeline/:id/restore). Notes are excluded (their restore is ' +
       "author-scoped, not DM-only). This is where the delete dialog/toast's \"restore from the campaign Trash\" leads.",
@@ -361,7 +361,7 @@ export class CampaignsController {
   @ApiResponse({ status: 200, description: 'Trashed entities in the campaign.' })
   @ApiResponse({ status: 403, description: 'Not a dm of this campaign.' })
   async trash(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'dm');
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
     return this.campaigns.listTrashedEntities(id);
   }
 
