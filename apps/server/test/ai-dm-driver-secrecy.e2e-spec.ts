@@ -265,7 +265,7 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
     expect(approved.status).toBe(201);
     expect(approved.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: false, proposed: false, encounterId }]);
     const approvedResult = toolResultFor(h, 'roll-with-grant') ?? '';
-    expect(approvedResult).toContain('"modifier":6');
+    expect(approvedResult).toMatch(/"modifier":\s*6/);
     expect(approvedResult).toContain('DM-ONLY');
     const approvals = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approvals`).set(dm);
     expect(approvals.body).toHaveLength(0);
