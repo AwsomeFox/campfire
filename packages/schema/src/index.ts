@@ -4577,6 +4577,12 @@ export interface RuleSystemAdapter {
    */
   readonly criticalDamage?: CriticalDamageRule;
   /**
+   * OPTIONAL — declare `false` if this system has no critical hit at all (issue #1598 review).
+   * Read through {@link hasCriticalHitsForAdapter}; see its note on why {@link criticalDamage}
+   * is the wrong field to gate a crit-offering control on.
+   */
+  readonly hasCriticalHits?: boolean;
+  /**
    * OPTIONAL, OPT-IN — declare this only if the structured action resolver's OWN maths is this
    * system's maths (issue #1053 review): a single d20 plus a flat modifier, compared against
    * ascending armour class, with 5e's level-based proficiency bonus. See

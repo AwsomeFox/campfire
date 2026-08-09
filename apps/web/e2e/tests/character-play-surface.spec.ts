@@ -675,6 +675,63 @@ test.describe('character sheet play surface', () => {
   });
 
   /**
+   * Regression (Codex review on #2115): the temp HP stepper applies its PATCH's own response,
+   * which is only safe while nothing else writes the same field. A Long Rest clears `hpTemp`
+   * and is enabled independently, so a PATCH whose response is slow could land AFTER the rest
+   * and merge the pre-rest number back in — and because the stepper sends an ABSOLUTE value
+   * read off that number, the next click restored temp HP the rest had just cleared.
+   *
+   * The rest is issued while the PATCH is still in flight and its response released afterwards,
+   * so ordering is forced rather than raced.
+   */
+  test('a temp HP response that lands after a long rest is rejected, not merged', async ({ page, baseURL }) => {
+    const campaignId = ownCampaignId;
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const characterId = (await (await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
+      data: { name: 'Warded Then Rested', className: 'Abjurer', level: 3, hpMax: 20, hpCurrent: 20, hpTemp: 5 },
+    })).json()).id as number;
+    await ctx.dispose();
+
+    const sent: unknown[] = [];
+    let release: (() => void) | null = null;
+    await page.route(`**/api/v1/characters/${characterId}`, async (route) => {
+      if (route.request().method() !== 'PATCH') return route.fallback();
+      const body = JSON.parse(route.request().postData() ?? '{}');
+      sent.push(body);
+      // Only the first PATCH is held; later ones (the assertion click) go straight through.
+      if (sent.length > 1) return route.fallback();
+      const response = await route.fetch();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return route.fulfill({ response });
+    });
+
+    await page.goto(`/c/${campaignId}/characters/${characterId}`);
+    const value = page.getByTestId('character-temp-hp-value');
+    await expect(value).toHaveText('5');
+
+    // In flight and held: the server now holds 6, the sheet still shows 5.
+    await page.getByTestId('character-temp-hp').getByRole('button', { name: /Add 1 temporary hit point/ }).click();
+    await expect.poll(() => sent.length).toBe(1);
+
+    await page.getByTestId('rest-controls').getByRole('button', { name: /Long rest/i }).click();
+    await expect(value).toHaveText('0');
+
+    release!();
+    // The stepper re-enables when its request settles; the displayed value must still be the
+    // rest's, not the response's.
+    await expect(page.getByTestId('character-temp-hp').getByRole('button', { name: /Add 1 temporary hit point/ })).toBeEnabled();
+    await expect(value).toHaveText('0');
+
+    // The absolute value the next click sends is the proof: 1, not 7.
+    await page.getByTestId('character-temp-hp').getByRole('button', { name: /Add 1 temporary hit point/ }).click();
+    await expect(value).toHaveText('1');
+    expect(sent).toEqual([{ hpTemp: 6 }, { hpTemp: 1 }]);
+  });
+
+  /**
    * Regression (Codex review on #2115): `PATCH /characters/:id` writes death-save counters
    * verbatim — unlike the encounter path it does NOT derive `deathState` from them — so an
    * editable pip here could leave three failures sitting at 'dying', on the sheet and in a

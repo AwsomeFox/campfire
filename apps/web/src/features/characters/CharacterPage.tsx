@@ -148,7 +148,7 @@ import {
   rollPreview,
 } from '../../lib/characterStats';
 import { RollModeChooser } from './RollModeChooser';
-import { rollModeForClick, showsInitiativeTile, toCheckRollMode, rollModeSummary } from './rollMode';
+import { allowsCriticalDamageRoll, rollModeForClick, showsInitiativeTile, toCheckRollMode, rollModeSummary } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -225,12 +225,27 @@ export default function CharacterPage() {
     [adapter, character],
   );
 
+  /**
+   * Bumped every time the sheet is replaced with a fresh server read.
+   *
+   * `TempHpControl` applies its PATCH's own response rather than awaiting a refresh, which is
+   * correct until something else writes the SAME field while that request is in flight: Long
+   * Rest clears `hpTemp` and refreshes, and the older PATCH response then merged its value back
+   * in — leaving the stepper reading an absolute number the server no longer held, so the next
+   * click restored temp HP the rest had cleared (Codex review on #2115). The control captures
+   * this counter before its request and the merge is dropped if it moved, so a superseded
+   * response is rejected instead of overwriting the state that superseded it.
+   */
+  const characterEpochRef = useRef(0);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     setNotFound(false);
     try {
       const data = await api.get<Character>(`${API}/characters/${id}`);
+      // Newer server truth than anything currently in flight — see `characterEpochRef`.
+      characterEpochRef.current += 1;
       setCharacter(data);
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
@@ -491,7 +506,12 @@ export default function CharacterPage() {
           adapter={adapter}
           canEdit={canEdit}
           onChange={load}
-          onTempHp={(hpTemp) => setCharacter((prev) => (prev ? { ...prev, hpTemp } : prev))}
+          onTempHp={(hpTemp, epoch) => {
+            if (epoch !== characterEpochRef.current) return false;
+            setCharacter((prev) => (prev ? { ...prev, hpTemp } : prev));
+            return true;
+          }}
+          readCharacterEpoch={() => characterEpochRef.current}
           onError={setActionError}
           roller={roller}
           leveledConditionTrack={leveledConditionTrack}
@@ -1523,6 +1543,7 @@ function CharacterVitalsRail({
   canEdit,
   onChange,
   onTempHp,
+  readCharacterEpoch,
   onError,
   roller,
   leveledConditionTrack,
@@ -1534,8 +1555,13 @@ function CharacterVitalsRail({
   canEdit: boolean;
   /** Reloads the sheet. Returns a promise so TempHpControl can await it — see its note. */
   onChange: () => void | Promise<void>;
-  /** Applies an authoritative `hpTemp` from a write's own response — that field only. */
-  onTempHp: (hpTemp: number) => void;
+  /**
+   * Applies an authoritative `hpTemp` from a write's own response — that field only, and only
+   * while `epoch` still matches. Returns whether it was applied.
+   */
+  onTempHp: (hpTemp: number, epoch: number) => boolean;
+  /** Reads the sheet's current refresh epoch, captured before a write. */
+  readCharacterEpoch: () => number;
   onError: (msg: string | null) => void;
   roller: Roller;
   leveledConditionTrack: LeveledConditionTrack | null | undefined;
@@ -1621,7 +1647,13 @@ function CharacterVitalsRail({
           {canEdit && (
             <div className="space-y-2 cf-print-hide">
               <HpEditor character={character} onChange={onChange} onError={onError} />
-              <TempHpControl character={character} onTempHp={onTempHp} onChange={onChange} onError={onError} />
+              <TempHpControl
+                character={character}
+                onTempHp={onTempHp}
+                readCharacterEpoch={readCharacterEpoch}
+                onChange={onChange}
+                onError={onError}
+              />
               <RestControls character={character} onChange={onChange} onError={onError} adapter={adapter} />
             </div>
           )}
@@ -1799,12 +1831,18 @@ function VitalsBlock({
 function TempHpControl({
   character,
   onTempHp,
+  readCharacterEpoch,
   onChange,
   onError,
 }: {
   character: Character;
-  /** Applies the authoritative `hpTemp` from the PATCH response — that field only. */
-  onTempHp: (hpTemp: number) => void;
+  /**
+   * Applies the authoritative `hpTemp` from the PATCH response — that field only, and only if
+   * the sheet has not been refreshed since `epoch`. Returns whether it was applied.
+   */
+  onTempHp: (hpTemp: number, epoch: number) => boolean;
+  /** Reads the sheet's refresh epoch. Captured BEFORE the request, compared after. */
+  readCharacterEpoch: () => number;
   /** Fallback refresh, awaited, for a response that is not a character. */
   onChange: () => void | Promise<void>;
   onError: (msg: string | null) => void;
@@ -1816,11 +1854,17 @@ function TempHpControl({
     if (busy || next === character.hpTemp || next < 0) return;
     setBusy(true);
     onError(null);
+    // Captured BEFORE the request: anything that refreshes the sheet while this is in flight
+    // moves it, and the response is then older than what the user is looking at.
+    const epoch = readCharacterEpoch();
     try {
       const updated = await api.patch<Character>(`${API}/characters/${character.id}`, { hpTemp: next });
-      if (updated && typeof updated.hpTemp === 'number') onTempHp(updated.hpTemp);
+      let applied = true;
+      if (updated && typeof updated.hpTemp === 'number') applied = onTempHp(updated.hpTemp, epoch);
       else await onChange();
-      announce(`${character.name} temporary hit points ${next}`);
+      // Superseded writes stay silent: `next` is no longer what the sheet holds, and announcing
+      // it would tell a screen-reader user a number the server has already moved past.
+      if (applied) announce(`${character.name} temporary hit points ${next}`);
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't update temporary hit points.");
     } finally {
@@ -2177,6 +2221,7 @@ function ActionsCard({
   //
   // Either way the value still reads as text — the number is real, the roll is not offered.
   const criticalDamage = criticalDamageRuleForAdapter(adapter);
+  const allowCritDamage = allowsCriticalDamageRoll(adapter);
   const adapterOwnsAttack = hasAdapterOwnedAttackRoll(adapter);
   const canRollAttack = canRoll && !adapterOwnsAttack;
   const canRollDamage = canRoll;
@@ -2453,7 +2498,7 @@ function ActionsCard({
                         title={`Roll ${action.name} damage (${dmgExpr})`}
                         disabled={roller.rolling}
                         allowAdvantage={false}
-                        allowCrit={criticalDamage === 'double-dice'}
+                        allowCrit={allowCritDamage}
                         onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${action.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
                       />
                     ) : (
@@ -2602,7 +2647,7 @@ function ActionsCard({
                               title={`Roll ${granted.name} damage (${dmgExpr})`}
                               disabled={roller.rolling}
                               allowAdvantage={false}
-                              allowCrit={criticalDamage === 'double-dice'}
+                              allowCrit={allowCritDamage}
                               onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${granted.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
                             />
                           ) : (

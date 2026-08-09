@@ -454,6 +454,14 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
     // OSR profile omits `conditions` and keeps the shared OSR_CONDITIONS list unchanged.
     conditions: profile.conditions ?? OSR_CONDITIONS,
     /**
+     * No critical hits in these rules — the machine-readable half of the `resolveAttack` note
+     * below, which was until now only prose. `resolveAttack` returns `hit` or `miss` and never
+     * `crit`, so any UI offering a "critical hit" damage roll for an OSR campaign produces a
+     * total the authoritative resolver cannot reach; `hasCriticalHitsForAdapter` is what those
+     * controls gate on.
+     */
+    hasCriticalHits: false,
+    /**
      * This variant's OWN attack roll (issue #1598), via {@link osrAttackHits} — the function
      * this file already provided but nothing called. `osrAttackHits` reads the ATTACKER'S
      * THAC0, which this codebase does not store per-character; `attackBonusToThac0` derives an

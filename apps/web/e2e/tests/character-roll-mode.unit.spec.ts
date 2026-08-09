@@ -6,6 +6,7 @@ import {
   OSR_VARIANT_ADAPTERS,
   OpenLegendAdapter,
   Pathfinder1eAdapter,
+  Pf2eAdapter,
   StarforgedAdapter,
   listRuleSystemAdapters,
   checkCatalogForAdapter,
@@ -19,6 +20,7 @@ import {
   resolveRollMode,
   rollModeForClick,
   showsInitiativeTile,
+  allowsCriticalDamageRoll,
   type RollMode,
 } from '../../src/features/characters/rollMode';
 
@@ -352,5 +354,36 @@ test.describe('showsInitiativeTile — the tile asks the capability, not just th
     expect(showsInitiativeTile(Dnd5eAdapter)).toBe(true);
     expect(showsInitiativeTile(BasicFantasyAdapter)).toBe(true);
     expect(showsInitiativeTile(OpenLegendAdapter)).toBe(true);
+  });
+});
+
+/**
+ * Issue #1598 review — a "Critical Hit" damage roll must not be offered where the system has
+ * no critical hit.
+ *
+ * The gate used to be the crit-damage FORMULA, which every adapter has (undeclared ones default
+ * to 5e's `double-dice`). That answers "by how much", not "at all", so an OSR gear action with
+ * dice damage got a Critical Hit menu item even though `createOsrVariantAdapter.resolveAttack`
+ * returns only `hit` or `miss` — the sheet could commit a doubled total that resolving the same
+ * item authoritatively can never produce.
+ */
+test.describe('allowsCriticalDamageRoll — crits are a capability, not a damage formula', () => {
+  test('a system whose attack resolution has no crit tier is offered none', () => {
+    for (const [id, adapter] of Object.entries(OSR_VARIANT_ADAPTERS)) {
+      expect(allowsCriticalDamageRoll(adapter), id).toBe(false);
+    }
+  });
+
+  test('5e keeps its crit — the default is unchanged for undeclared adapters', () => {
+    expect(allowsCriticalDamageRoll(Dnd5eAdapter)).toBe(true);
+    expect(allowsCriticalDamageRoll(Archmage13aAdapter)).toBe(true);
+  });
+
+  /**
+   * Not a capability question — PF2e HAS crits. `critDamageExpr` doubles dice, and PF2e doubles
+   * the total, so this control offers nothing rather than a number that is wrong for the system.
+   */
+  test('a double-total system is offered no chip rather than a dice-doubled one', () => {
+    expect(allowsCriticalDamageRoll(Pf2eAdapter)).toBe(false);
   });
 });

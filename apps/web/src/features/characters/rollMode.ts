@@ -14,7 +14,13 @@
  * notion would simply not render the chooser (the action surface gates on
  * `RollMode.isApplicable`).
  */
-import { hasInitiativeRollForAdapter, initiativeModelForAdapter, type RuleSystemAdapter } from '@campfire/schema';
+import {
+  criticalDamageRuleForAdapter,
+  hasCriticalHitsForAdapter,
+  hasInitiativeRollForAdapter,
+  initiativeModelForAdapter,
+  type RuleSystemAdapter,
+} from '@campfire/schema';
 
 /**
  * Whether the character sheet shows an initiative tile for this system.
@@ -32,6 +38,22 @@ import { hasInitiativeRollForAdapter, initiativeModelForAdapter, type RuleSystem
  */
 export function showsInitiativeTile(adapter: RuleSystemAdapter): boolean {
   return hasInitiativeRollForAdapter(adapter) && initiativeModelForAdapter(adapter).mode !== 'group';
+}
+
+/**
+ * Whether a damage chip on the sheet may offer a "Critical Hit" roll for this system.
+ *
+ * Two independent conditions, and the sheet used to check only the second:
+ *  - the system HAS critical hits — OSR resolves an attack to hit or miss and nothing else,
+ *    so a doubled total here is one `resolve_action` could never produce for the same item;
+ *  - and its crit rule is one this control can actually express. `critDamageExpr` doubles
+ *    dice, so a `double-total` system (PF2e/SF2e) is offered no chip rather than a wrong one.
+ *
+ * Extracted for the same reason as {@link showsInitiativeTile}: it is a rule about real
+ * adapters, so it should be testable against real adapters.
+ */
+export function allowsCriticalDamageRoll(adapter: RuleSystemAdapter): boolean {
+  return hasCriticalHitsForAdapter(adapter) && criticalDamageRuleForAdapter(adapter) === 'double-dice';
 }
 
 /** The three roll modes a d20 check/attack can be taken with. */

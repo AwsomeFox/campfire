@@ -70,6 +70,20 @@ export interface ResolverAdapter {
    */
   readonly criticalDamage?: CriticalDamageRule;
   /**
+   * OPTIONAL — declare `false` if this system has no critical hit at all (issue #1598 review).
+   *
+   * Distinct from {@link criticalDamage}, which answers "how much does a crit multiply?" and
+   * therefore presupposes that crits exist. A damage formula is not evidence either way: every
+   * adapter has one, including the systems whose attack resolution can only come out hit or
+   * miss, so a UI that offered a crit wherever damage dice existed was reading the wrong field.
+   *
+   * Omission means `true` — the same direction as `criticalDamage`'s default, and for the same
+   * reason: an unaudited adapter keeps the behaviour it has always had rather than being guessed
+   * into a rules change. Declare `false` only where the system's own {@link resolveAttack} is
+   * incapable of returning `crit`.
+   */
+  readonly hasCriticalHits?: boolean;
+  /**
    * OPTIONAL, OPT-IN — see {@link ResolverMathProfile}. An adapter that does not declare it is
    * treated as NOT implemented by the structured resolver, which is the safe direction.
    */
@@ -211,6 +225,19 @@ export function checkProficiencyBonusForAdapter(adapter: ResolverAdapter, level:
  */
 export function criticalDamageRuleForAdapter(adapter: Pick<ResolverAdapter, 'criticalDamage'>): CriticalDamageRule {
   return adapter.criticalDamage ?? 'double-dice';
+}
+
+/**
+ * Whether this system has critical hits at all (issue #1598 review).
+ *
+ * The question a crit-offering control must ask. It used to be answered by
+ * {@link criticalDamageRuleForAdapter} returning a formula, but that function answers
+ * "by how much", defaults for every undeclared adapter, and so said yes even for OSR,
+ * whose `resolveAttack` returns only `hit` or `miss`. A sheet gated on the formula could
+ * commit doubled damage that resolving the same attack authoritatively never produces.
+ */
+export function hasCriticalHitsForAdapter(adapter: Pick<ResolverAdapter, 'hasCriticalHits'>): boolean {
+  return adapter.hasCriticalHits !== false;
 }
 
 /**
