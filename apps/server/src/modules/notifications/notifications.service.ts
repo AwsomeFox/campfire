@@ -463,8 +463,11 @@ export class NotificationsService implements OnApplicationBootstrap {
     const suppressed = await suppressedRecipients(this.db, recipients.map(String), {
       campaignId,
       actorUserId: blockActorUserId,
-      entityType: event.entityType ?? null,
-      entityId: event.entityId ?? null,
+      // Owner-safe hidden-status payloads intentionally omit the encounter
+      // deep-link, but their private context still anchors a recipient's
+      // existing encounter-thread mute before anything is persisted.
+      entityType: event.entityType ?? (hiddenStatusContext ? 'encounter' : null),
+      entityId: event.entityId ?? hiddenStatusContext?.encounterId ?? null,
     });
     const allowed = suppressed.size === 0 ? recipients : recipients.filter((id) => !suppressed.has(String(id)));
     if (allowed.length === 0) return true;

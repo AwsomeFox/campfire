@@ -1366,6 +1366,31 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       entityId: scopedVisibleOwner.encounter.body.id,
     });
 
+    // If a visible encounter is hidden at the durable fan-out boundary, the
+    // owner-safe fallback must still respect the recipient's existing mute of
+    // that encounter even though its public payload has no entity identity.
+    const mutedOwner = await createHiddenCombatant('Muted Owner Fallback Hero', false, coDm);
+    const mute = await coDm
+      .post(`/api/v1/campaigns/${guardedCampaignId}/safety/mutes`)
+      .send({ entityType: 'encounter', entityId: mutedOwner.encounter.body.id });
+    expect(mute.status).toBe(201);
+    const notifyMutedWhenVisible = notifications.notifyCampaignIfEncounterVisible.bind(notifications);
+    const hideMutedAtFanout = jest.spyOn(notifications, 'notifyCampaignIfEncounterVisible').mockImplementation(async (...args) => {
+      if (args[1] === mutedOwner.encounter.body.id) {
+        db.update(encounters).set({ hidden: true }).where(eq(encounters.id, mutedOwner.encounter.body.id)).run();
+      }
+      return notifyMutedWhenVisible(...args);
+    });
+    try {
+      expect((await dm
+        .patch(`/api/v1/encounters/${mutedOwner.encounter.body.id}/combatants/${mutedOwner.combatant.id}`)
+        .send({ hpSet: 0 })).status).toBe(200);
+    } finally {
+      hideMutedAtFanout.mockRestore();
+    }
+    expect((await listFor(coDm)).some((row) => row.body.includes('Muted Owner Fallback Hero was downed'))).toBe(false);
+    expect((await coDm.delete(`/api/v1/campaigns/${guardedCampaignId}/safety/controls/${mute.body.id}`)).status).toBe(200);
+
     // Bell polling must not re-run membership, encounter, and ownership
     // lookups for every retained hidden-status row. Several rows now exercise
     // the guard, yet each authorization table is prepared exactly once.
