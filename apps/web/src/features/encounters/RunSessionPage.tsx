@@ -1175,6 +1175,19 @@ export default function RunSessionPage() {
   // (refetchInterval pauses in the background by default) as a backstop to the SSE
   // push below; SSE remains the fast path (invalidate-on-event), the poll only catches
   // anything a dropped stream missed. The ~5s cadence matches the pre-SSE poll.
+  // Capture the retained cache timestamp before useQuery can start this encounter's
+  // mount refetch. Reading it later from a passive effect can observe the completed
+  // response instead, leaving the turn-beat resync gate armed until an unrelated read.
+  const [turnBeatLoadWatermark, setTurnBeatLoadWatermark] = useState(() => ({
+    encounterId: eid,
+    dataUpdatedAt: queryClient.getQueryState(queryKeys.encounter(eid))?.dataUpdatedAt ?? 0,
+  }));
+  if (turnBeatLoadWatermark.encounterId !== eid) {
+    setTurnBeatLoadWatermark({
+      encounterId: eid,
+      dataUpdatedAt: queryClient.getQueryState(queryKeys.encounter(eid))?.dataUpdatedAt ?? 0,
+    });
+  }
   const encounterQuery = useQuery({
     queryKey: queryKeys.encounter(eid),
     queryFn: async () =>
@@ -1459,14 +1472,14 @@ export default function RunSessionPage() {
 
   useEffect(() => {
     previousTurnBeatRef.current = null;
-    awaitingTurnBeatResyncRef.current = queryClient.getQueryState(queryKeys.encounter(eid))?.dataUpdatedAt ?? 0;
+    awaitingTurnBeatResyncRef.current = turnBeatLoadWatermark.dataUpdatedAt;
     ownedTurnFeedbackRef.current = null;
     setTurnOwnerFromEvent(null);
     setTurnOwnerPendingCombatantId(null);
     setTurnBeat(null);
     setTurnPulse(false);
     if (turnPulseTimerRef.current != null) window.clearTimeout(turnPulseTimerRef.current);
-  }, [eid, queryClient]);
+  }, [eid, turnBeatLoadWatermark.dataUpdatedAt]);
 
   // A loaded encounter is a silent baseline. This prevents opening an already
   // running encounter from replaying a turn-start beat, and (via

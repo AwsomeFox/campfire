@@ -26,10 +26,21 @@ test.describe('turn-change beat (issue #1906)', () => {
 
   test('clears a previous encounter baseline on encounter switch, and only resyncs it from a REST refetch on load or reconnect (issue #2092)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = queryClient\.getQueryState\(queryKeys\.encounter\(eid\)\)\?\.dataUpdatedAt \?\? 0;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = turnBeatLoadWatermark\.dataUpdatedAt;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
     expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
     expect(source).toMatch(/if \(!encounter \|\| encounter\.id !== eid\) return;\s*if \(!shouldConsumeTurnBeatResync\([\s\S]*?encounterQuery\.dataUpdatedAt,[\s\S]*?encounterQuery\.isFetching,[\s\S]*?encounterQuery\.isSuccess,[\s\S]*?\)\) return;\s*awaitingTurnBeatResyncRef\.current = null;[\s\S]*previousTurnBeatRef\.current = \{/);
     expect(source).not.toContain('previousTurnBeatRef.current?.encounterId === eid ||');
+  });
+
+  test('captures the load resync watermark before useQuery can finish the mount refetch', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const watermarkCapture = source.indexOf('const [turnBeatLoadWatermark, setTurnBeatLoadWatermark] = useState');
+    const encounterQuery = source.indexOf('const encounterQuery = useQuery({');
+
+    expect(watermarkCapture).toBeGreaterThan(-1);
+    expect(watermarkCapture).toBeLessThan(encounterQuery);
+    expect(source).toMatch(/const \[turnBeatLoadWatermark, setTurnBeatLoadWatermark\] = useState\(\(\) => \(\{\s*encounterId: eid,\s*dataUpdatedAt: queryClient\.getQueryState\(queryKeys\.encounter\(eid\)\)\?\.dataUpdatedAt \?\? 0,\s*\}\)\);/);
+    expect(source).toMatch(/if \(turnBeatLoadWatermark\.encounterId !== eid\) \{\s*setTurnBeatLoadWatermark\(\{\s*encounterId: eid,\s*dataUpdatedAt: queryClient\.getQueryState\(queryKeys\.encounter\(eid\)\)\?\.dataUpdatedAt \?\? 0,\s*\}\);\s*\}/);
   });
 
   test('consumes a resync only after a newer successful encounter fetch, including structurally shared data', () => {
