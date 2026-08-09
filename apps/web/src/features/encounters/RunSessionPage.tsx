@@ -51,7 +51,7 @@ import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
 import { TurnElapsedChip } from './TurnElapsedChip';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
-import { detectSseTurnBeat, isStaleTurnBeatFrame, shouldReconcileTurnBeatRead, type TurnBeatSnapshot } from './turnBeat';
+import { detectSseTurnBeat, isStaleTurnBeatFrame, previousTurnBeatForFrame, shouldReconcileTurnBeatRead, type PendingPolledTurnBeat, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -1429,6 +1429,7 @@ export default function RunSessionPage() {
   const [characterOwnershipRefreshPending, setCharacterOwnershipRefreshPending] = useState(false);
   const turnBeatSequence = useRef(0);
   const previousTurnBeatRef = useRef<TurnBeatSnapshot | null>(null);
+  const pendingPolledTurnBeatRef = useRef<PendingPolledTurnBeat | null>(null);
   // Freshness revision for (re)deriving `previousTurnBeatRef` from the REST-fetched
   // `encounter` row (issue #2092). Starts at zero so the first successful load
   // establishes a silent baseline; the reconnect/stream-recovery handlers below
@@ -1497,6 +1498,7 @@ export default function RunSessionPage() {
 
   useEffect(() => {
     previousTurnBeatRef.current = null;
+    pendingPolledTurnBeatRef.current = null;
     awaitingTurnBeatResyncRef.current = turnBeatLoadWatermark.readRevision;
     ownedTurnFeedbackRef.current = null;
     setTurnOwnerFromEvent(null);
@@ -1518,14 +1520,22 @@ export default function RunSessionPage() {
     const previous = previousTurnBeatRef.current?.encounterId === eid
       ? previousTurnBeatRef.current
       : null;
+    const armedAfterReadRevision = awaitingTurnBeatResyncRef.current;
     if (!shouldReconcileTurnBeatRead(
-      awaitingTurnBeatResyncRef.current,
+      armedAfterReadRevision,
       completedRead.revision,
       previous?.turnVersion ?? null,
       completedRead.encounter.turnVersion,
     )) return;
     awaitingTurnBeatResyncRef.current = null;
     const readEncounter = completedRead.encounter;
+    // Preserve the pre-poll comparison point for the one matching SSE revision. The
+    // transaction commits before its post-commit event emission, so an ordinary poll can
+    // legitimately observe the new turn first. Explicit load/reconnect resyncs remain
+    // silent baselines and therefore do not create a pending visible edge.
+    pendingPolledTurnBeatRef.current = armedAfterReadRevision == null && previous != null
+      ? { turnVersion: readEncounter.turnVersion, previous }
+      : null;
     const current = readEncounter.currentCombatantId == null
       ? undefined
       : readEncounter.combatants.find((combatant) => combatant.id === readEncounter.currentCombatantId);
@@ -1823,13 +1833,18 @@ export default function RunSessionPage() {
           return;
         }
         if (event.type === 'encounter.turn_changed') {
-          const previous = previousTurnBeatRef.current?.encounterId === eid
+          const currentBaseline = previousTurnBeatRef.current?.encounterId === eid
             ? previousTurnBeatRef.current
             : null;
           // A backstop poll or a later stream frame may already have established a newer
           // server-owned revision. Ignore a delayed older frame before it can regress turn
           // ownership, title state, ticker feedback, or the comparison baseline.
-          if (isStaleTurnBeatFrame(previous?.turnVersion ?? null, event.turnVersion)) return;
+          if (isStaleTurnBeatFrame(currentBaseline?.turnVersion ?? null, event.turnVersion)) return;
+          const previous = previousTurnBeatForFrame(
+            currentBaseline,
+            pendingPolledTurnBeatRef.current,
+            event.turnVersion,
+          );
           // The SSE frame itself is the edge. It carries only viewer-safe ids;
           // the displayed name and identity colour come from this viewer's
           // already-authorized roster, never a new server payload.
@@ -1862,6 +1877,7 @@ export default function RunSessionPage() {
           };
           const kind = detectSseTurnBeat(previous, next);
           previousTurnBeatRef.current = next;
+          pendingPolledTurnBeatRef.current = null;
           // Issue #2092: disarm any pending REST catch-up resync. A read revision records
           // when a response LANDED, not when the server captured it, so a catch-up GET
           // issued before this frame can still land after it and overwrite this newer

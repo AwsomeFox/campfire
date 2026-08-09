@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { formatDocumentTitle, setDocumentTitlePrefix } from '../../src/app/routeFocus';
 import { isCampaignEvent } from '../../src/lib/useCampaignEvents';
-import { detectSseTurnBeat, detectTurnBeat, isStaleTurnBeatFrame, shouldConsumeTurnBeatResync, shouldReconcileTurnBeatRead, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
+import { detectSseTurnBeat, detectTurnBeat, isStaleTurnBeatFrame, previousTurnBeatForFrame, shouldConsumeTurnBeatResync, shouldReconcileTurnBeatRead, turnBeatKey, type PendingPolledTurnBeat, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
 
 const initial: TurnBeatSnapshot = {
   encounterId: 8,
@@ -27,7 +27,7 @@ test.describe('turn-change beat (issue #1906)', () => {
 
   test('clears a previous encounter baseline on encounter switch, and only resyncs it from a REST refetch on load or reconnect (issue #2092)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = turnBeatLoadWatermark\.readRevision;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*pendingPolledTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = turnBeatLoadWatermark\.readRevision;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
     expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
     expect(source).toMatch(/const completedRead = latestEncounterReadRef\.current;\s*if \(!completedRead \|\| completedRead\.encounterId !== eid\) return;[\s\S]*if \(!shouldReconcileTurnBeatRead\([\s\S]*?completedRead\.encounter\.turnVersion,[\s\S]*?\)\) return;\s*awaitingTurnBeatResyncRef\.current = null;[\s\S]*previousTurnBeatRef\.current = \{/);
     expect(source).not.toContain('previousTurnBeatRef.current?.encounterId === eid ||');
@@ -68,11 +68,27 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('drops a stale stream frame before applying turn-owner or beat state', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     const handlerStart = source.indexOf("if (event.type === 'encounter.turn_changed') {");
-    const staleGuard = source.indexOf('if (isStaleTurnBeatFrame(previous?.turnVersion ?? null, event.turnVersion)) return;', handlerStart);
+    const staleGuard = source.indexOf('if (isStaleTurnBeatFrame(currentBaseline?.turnVersion ?? null, event.turnVersion)) return;', handlerStart);
     const ownerWrite = source.indexOf('setTurnOwnerFromEvent(', handlerStart);
     expect(handlerStart).toBeGreaterThan(-1);
     expect(staleGuard).toBeGreaterThan(handlerStart);
     expect(staleGuard).toBeLessThan(ownerWrite);
+  });
+
+  test('preserves the edge when a poll wins the race with its equal-version frame', () => {
+    const polled = { ...initial, combatantId: 13, turnVersion: 5 };
+    const pendingPoll: PendingPolledTurnBeat = { turnVersion: 5, previous: initial };
+
+    expect(detectSseTurnBeat(previousTurnBeatForFrame(polled, pendingPoll, 5), polled)).toBe('turn');
+    expect(previousTurnBeatForFrame(polled, pendingPoll, 4)).toBe(polled);
+    expect(previousTurnBeatForFrame(polled, pendingPoll, 6)).toBe(polled);
+  });
+
+  test('records only ordinary poll reconciliation as a pending visible edge', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/pendingPolledTurnBeatRef\.current = armedAfterReadRevision == null && previous != null\s*\? \{ turnVersion: readEncounter\.turnVersion, previous \}\s*: null;/);
+    expect(source).toMatch(/const previous = previousTurnBeatForFrame\(\s*currentBaseline,\s*pendingPolledTurnBeatRef\.current,\s*event\.turnVersion,\s*\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = next;\s*pendingPolledTurnBeatRef\.current = null;/);
   });
 
   test('does not let an optimistic cache write impersonate the catch-up encounter read', () => {

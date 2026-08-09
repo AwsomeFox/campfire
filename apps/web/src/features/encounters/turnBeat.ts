@@ -11,6 +11,11 @@ export type TurnBeatSnapshot = {
   isYourTurn: boolean;
 };
 
+export type PendingPolledTurnBeat = {
+  turnVersion: number;
+  previous: TurnBeatSnapshot;
+};
+
 export type TurnBeatKind = 'your-turn' | 'turn' | 'round-wrap';
 
 /**
@@ -51,6 +56,21 @@ export function isStaleTurnBeatFrame(
   return previousTurnVersion != null
     && eventTurnVersion != null
     && eventTurnVersion < previousTurnVersion;
+}
+
+/**
+ * A poll may observe a committed turn immediately before its matching stream
+ * frame is emitted. Compare that one equal-version frame with the pre-poll
+ * snapshot so the real-time edge remains visible.
+ */
+export function previousTurnBeatForFrame(
+  current: TurnBeatSnapshot | null,
+  pendingPoll: PendingPolledTurnBeat | null,
+  eventTurnVersion: number | undefined,
+): TurnBeatSnapshot | null {
+  return pendingPoll != null && eventTurnVersion === pendingPoll.turnVersion
+    ? pendingPoll.previous
+    : current;
 }
 
 export function turnBeatKey(snapshot: TurnBeatSnapshot): string | null {
