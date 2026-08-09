@@ -1,12 +1,43 @@
 /**
- * Baldur's Gate-style dice tumbling overlay (issue #1352). Shown while a local roll
- * is in flight; settles on the server-returned faces, then hands off to RollResultToast.
+ * Dice tumbling overlay (issue #1352). Shown while a local roll is in flight;
+ * settles on the server-returned faces, then hands off to RollResultToast.
+ *
+ * The dice are the design project's physical 3D throw (see
+ * ../features/dice/dice3d.ts): they hang spinning above the tray until the
+ * server answers, then fall, bounce and come to rest with the rolled face up.
+ * three.js is pulled in by dynamic import so it stays out of the entry chunk —
+ * a table that never rolls never downloads it.
+ *
+ * The original CSS overlay is kept as the fallback for anything without a usable
+ * WebGL context. It is not dead code: it is the only path on a locked-down
+ * browser, a software-rendering VM, or a device that has already exhausted its
+ * WebGL context budget, and it is what the unit tier renders.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DiceTheme } from '@campfire/schema';
+import type { Dice3dHandle, Dice3dSettleDie } from '../features/dice/dice3d';
+import { prefersReducedMotion } from '../lib/prefersReducedMotion';
 
+/**
+ * Minimum time the dice stay in the air before they are allowed to fall. Short,
+ * because the throw itself is another ~1.2s of tumble — this only guarantees the
+ * dice were airborne at all when a fast server answers.
+ */
+export const DICE_ROLL_MIN_HOLD_MS = 300;
+/**
+ * Clatter window for the table-audio cue (../lib/tableAudio). Deliberately
+ * longer than the hold: the taps should carry across the fall, not stop when the
+ * dice are released.
+ */
 export const DICE_ROLL_MIN_TUMBLE_MS = 650;
+/** CSS-fallback landing animation. */
 export const DICE_ROLL_SETTLE_MS = 550;
+/**
+ * Backstop for the 3D path. requestAnimationFrame does not run in a background
+ * tab, so without this a roll started and then backgrounded would never reach
+ * `onSettled` and the result toast would never appear.
+ */
+export const DICE_ROLL_MAX_SETTLE_MS = 4000;
 
 export type DiceRollOverlayPhase = 'tumbling' | 'settling';
 
@@ -66,22 +97,107 @@ export function DiceRollOverlay({
   colorVisionAssist?: boolean;
   onSettled: () => void;
 }) {
+  const activeTheme: DiceTheme = theme || 'nocturne';
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const handleRef = useRef<Dice3dHandle | null>(null);
+  const pendingSettleRef = useRef<Dice3dSettleDie[] | null>(null);
+  const settledRef = useRef(false);
+  /** True once the 3D path has been ruled out — no WebGL, or the chunk failed. */
+  const [cssFallback, setCssFallback] = useState(false);
+
+  const onSettledRef = useRef(onSettled);
+  onSettledRef.current = onSettled;
+  const settleOnce = useCallback(() => {
+    if (settledRef.current) return;
+    settledRef.current = true;
+    onSettledRef.current();
+  }, []);
+
+  // Stable keys: the provider rebuilds `dice` on every render, so effects keyed
+  // on the array identity alone would restart the throw continuously.
+  const sidesKey = dice.map((d) => d.sides).join(',');
+  const resultKey = dice.map((d) => `${d.sides}:${d.value ?? ''}:${d.kept ? 'k' : 'x'}`).join(',');
+
+  const sides = useMemo(() => sidesKey.split(',').filter(Boolean).map(Number), [sidesKey]);
+  const settleResults = useMemo<Dice3dSettleDie[]>(
+    () =>
+      resultKey
+        .split(',')
+        .filter(Boolean)
+        .map((entry) => {
+          const [, value, kept] = entry.split(':');
+          return { value: Number(value) || 1, kept: kept === 'k' };
+        }),
+    [resultKey],
+  );
+
+  // --- 3D path -------------------------------------------------------------
+
+  useEffect(() => {
+    if (cssFallback || sides.length === 0) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    let cancelled = false;
+    let handle: Dice3dHandle | null = null;
+
+    void import('../features/dice/dice3d')
+      .then(({ startDiceRoll }) => {
+        if (cancelled) return;
+        handle = startDiceRoll(canvas, {
+          sides,
+          theme: activeTheme,
+          reducedMotion: prefersReducedMotion(),
+          onSettled: settleOnce,
+        });
+        if (!handle) {
+          setCssFallback(true);
+          return;
+        }
+        handleRef.current = handle;
+        const pending = pendingSettleRef.current;
+        if (pending) {
+          pendingSettleRef.current = null;
+          handle.settle(pending);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setCssFallback(true);
+      });
+
+    return () => {
+      cancelled = true;
+      handleRef.current = null;
+      handle?.dispose();
+    };
+  }, [cssFallback, sides, activeTheme, settleOnce]);
+
+  useEffect(() => {
+    if (cssFallback || phase !== 'settling') return;
+    if (handleRef.current) handleRef.current.settle(settleResults);
+    else pendingSettleRef.current = settleResults;
+
+    const backstop = window.setTimeout(settleOnce, DICE_ROLL_MAX_SETTLE_MS);
+    return () => window.clearTimeout(backstop);
+  }, [cssFallback, phase, settleResults, settleOnce]);
+
+  // --- CSS fallback --------------------------------------------------------
+
   const [faces, setFaces] = useState<number[]>(() => dice.map((d) => randomFace(d.sides)));
 
   useEffect(() => {
-    if (phase !== 'tumbling') return;
+    if (!cssFallback || phase !== 'tumbling') return;
     const id = window.setInterval(() => {
-      setFaces(dice.map((d) => randomFace(d.sides)));
+      setFaces(sides.map((s) => randomFace(s)));
     }, 70);
     return () => window.clearInterval(id);
-  }, [phase, dice]);
+  }, [cssFallback, phase, sides]);
 
   useEffect(() => {
-    if (phase !== 'settling') return;
-    setFaces(dice.map((d) => d.value ?? 1));
-    const id = window.setTimeout(onSettled, DICE_ROLL_SETTLE_MS);
+    if (!cssFallback || phase !== 'settling') return;
+    const id = window.setTimeout(settleOnce, DICE_ROLL_SETTLE_MS);
     return () => window.clearTimeout(id);
-  }, [phase, dice, onSettled]);
+  }, [cssFallback, phase, settleOnce]);
 
   const displayFaces = useMemo(() => {
     if (phase === 'settling') return dice.map((d) => d.value ?? 1);
@@ -90,7 +206,14 @@ export function DiceRollOverlay({
 
   if (dice.length === 0) return null;
 
-  const activeTheme = theme || 'nocturne';
+  // The crit/fumble glyph badge rides on top of the canvas in the 3D path (the
+  // flourish there is a gold or red flash, which is exactly the distinction
+  // colorVisionAssist exists to back up) and on the die itself in the fallback.
+  const critFumble =
+    phase === 'settling'
+      ? dice.find((d) => d.sides === 20 && d.kept && (d.value === 20 || d.value === 1))
+      : undefined;
+  const overlayResult = critFumble ? (critFumble.value === 20 ? 'crit' : 'fumble') : null;
 
   return (
     <div
@@ -98,55 +221,80 @@ export function DiceRollOverlay({
       data-testid="dice-roll-overlay"
       data-phase={phase}
       data-dice-theme={activeTheme}
+      data-renderer={cssFallback ? 'css' : '3d'}
+      // The 3D path draws the dice into a canvas, so this is the only DOM-level
+      // record of what is actually being rolled. Kept on both paths so a check
+      // does not silently pass on whichever renderer the machine happened to get.
+      data-dice={sidesKey}
       role="presentation"
       aria-hidden="true"
     >
-      <div className="cf-dice-roll-overlay__stage">
-        {dice.map((die, i) => {
-          const val = displayFaces[i];
-          const isCrit = phase === 'settling' && die.sides === 20 && val === 20;
-          const isFumble = phase === 'settling' && die.sides === 20 && val === 1;
-
-          return (
-            <div
-              key={i}
-              className={[
-                'cf-dice-roll-overlay__die',
-                `cf-dice-roll-overlay__die--d${die.sides}`,
-                phase === 'settling' && !die.kept ? 'cf-dice-roll-overlay__die--dropped' : '',
-                isCrit ? 'cf-dice-roll-overlay__die--crit' : '',
-                isFumble ? 'cf-dice-roll-overlay__die--fumble' : '',
-              ].filter(Boolean).join(' ')}
-              data-sides={die.sides}
+      {!cssFallback && (
+        <div className="cf-dice-roll-overlay__tray">
+          <canvas
+            ref={canvasRef}
+            className="cf-dice-roll-overlay__canvas"
+            data-testid="dice-roll-overlay-canvas"
+          />
+          {colorVisionAssist && overlayResult && (
+            <span
+              className="cf-dice-roll-overlay__assist-glyph"
+              data-testid="dice-roll-overlay-assist-glyph"
+              data-result={overlayResult}
             >
+              {overlayResult === 'crit' ? '★' : '💀'}
+            </span>
+          )}
+        </div>
+      )}
+      {cssFallback && (
+        <div className="cf-dice-roll-overlay__stage">
+          {dice.map((die, i) => {
+            const val = displayFaces[i];
+            const isCrit = phase === 'settling' && die.sides === 20 && val === 20;
+            const isFumble = phase === 'settling' && die.sides === 20 && val === 1;
+
+            return (
               <div
+                key={i}
                 className={[
-                  'cf-dice-roll-overlay__inner',
-                  phase === 'tumbling' ? 'cf-dice-roll-overlay__inner--tumble' : 'cf-dice-roll-overlay__inner--land',
-                ].join(' ')}
+                  'cf-dice-roll-overlay__die',
+                  `cf-dice-roll-overlay__die--d${die.sides}`,
+                  phase === 'settling' && !die.kept ? 'cf-dice-roll-overlay__die--dropped' : '',
+                  isCrit ? 'cf-dice-roll-overlay__die--crit' : '',
+                  isFumble ? 'cf-dice-roll-overlay__die--fumble' : '',
+                ].filter(Boolean).join(' ')}
+                data-sides={die.sides}
               >
-                <span className="cf-dice-roll-overlay__value" aria-hidden="true">
-                  {val}
-                </span>
-                <span className="cf-dice-roll-overlay__type" aria-hidden="true">
-                  d{die.sides}
-                </span>
-                {isCrit && <div className="cf-dice-roll-overlay__crit-ring" />}
-                {isFumble && <div className="cf-dice-roll-overlay__fumble-void" />}
-                {colorVisionAssist && (isCrit || isFumble) && (
-                  <span
-                    className="cf-dice-roll-overlay__assist-glyph"
-                    data-testid="dice-roll-overlay-assist-glyph"
-                    data-result={isCrit ? 'crit' : 'fumble'}
-                  >
-                    {isCrit ? '★' : '💀'}
+                <div
+                  className={[
+                    'cf-dice-roll-overlay__inner',
+                    phase === 'tumbling' ? 'cf-dice-roll-overlay__inner--tumble' : 'cf-dice-roll-overlay__inner--land',
+                  ].join(' ')}
+                >
+                  <span className="cf-dice-roll-overlay__value" aria-hidden="true">
+                    {val}
                   </span>
-                )}
+                  <span className="cf-dice-roll-overlay__type" aria-hidden="true">
+                    d{die.sides}
+                  </span>
+                  {isCrit && <div className="cf-dice-roll-overlay__crit-ring" />}
+                  {isFumble && <div className="cf-dice-roll-overlay__fumble-void" />}
+                  {colorVisionAssist && (isCrit || isFumble) && (
+                    <span
+                      className="cf-dice-roll-overlay__assist-glyph"
+                      data-testid="dice-roll-overlay-assist-glyph"
+                      data-result={isCrit ? 'crit' : 'fumble'}
+                    >
+                      {isCrit ? '★' : '💀'}
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

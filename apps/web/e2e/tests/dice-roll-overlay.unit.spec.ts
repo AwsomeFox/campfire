@@ -51,6 +51,36 @@ test.describe('Dice roll overlay contracts (issue #1352)', () => {
     expect(cssSource).toMatch(/cf-die-overlay-land/);
   });
 
+  test('3D roll is dynamically imported so three never lands in the entry chunk', () => {
+    const viteSource = readFileSync(resolve(ROOT, 'vite.config.ts'), 'utf8');
+    // A static `import ... from 'three'` anywhere the overlay is statically
+    // reachable from would pull ~600KB into the first paint for every table,
+    // including ones that never roll.
+    expect(overlaySource).toMatch(/import\('\.\.\/features\/dice\/dice3d'\)/);
+    expect(overlaySource).not.toMatch(/^import .* from 'three'/m);
+    expect(readFileSync(resolve(ROOT, 'src/components/RollResultToastContext.tsx'), 'utf8'))
+      .not.toMatch(/from 'three'/);
+    expect(viteSource).toMatch(/vendor-three/);
+  });
+
+  test('overlay tears the 3D roll down and falls back without WebGL', () => {
+    // startDiceRoll returns null when no WebGL context can be created; without
+    // the fallback the roll would show an empty tray and never settle.
+    expect(overlaySource).toMatch(/setCssFallback\(true\)/);
+    expect(overlaySource).toMatch(/data-renderer=/);
+    // Every mount allocates a WebGL context; leaking one per roll exhausts the
+    // browser's context budget within a session.
+    expect(overlaySource).toMatch(/handle\?\.dispose\(\)/);
+    expect(cssSource).toMatch(/\.cf-dice-roll-overlay__canvas/);
+  });
+
+  test('a backgrounded tab still reaches the result toast', () => {
+    // requestAnimationFrame is throttled to zero in a background tab, so the
+    // 3D settle callback can never arrive; the toast must not be lost with it.
+    expect(overlaySource).toMatch(/DICE_ROLL_MAX_SETTLE_MS/);
+    expect(overlaySource).toMatch(/settledRef/);
+  });
+
   test('provider gates overlay with prefersReducedMotion and wires begin/cancel/show', () => {
     expect(contextSource).toMatch(/prefersReducedMotion/);
     expect(contextSource).toMatch(/beginRollAnimation/);

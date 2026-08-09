@@ -315,8 +315,11 @@ test.describe('encounter dice — apply rolled damage', () => {
       await expect(page.getByTestId('shared-dice-log').getByText('2d6+1d8+3', { exact: false })).toBeVisible();
       const overlay = page.getByTestId('dice-roll-overlay');
       await expect(overlay).toBeVisible();
-      await expect(overlay.locator('[data-sides="6"]')).toHaveCount(2);
-      await expect(overlay.locator('[data-sides="8"]')).toHaveCount(1);
+      // The 3D roller draws the dice into a canvas, and whether this machine
+      // gets WebGL at all decides which renderer runs — so assert on the
+      // overlay's own record of the dice rather than on per-die elements that
+      // only the CSS fallback emits.
+      await expect(overlay).toHaveAttribute('data-dice', '6,6,8');
     } finally {
       await teardownDrill(dm, drill);
       await playerCtx.dispose();

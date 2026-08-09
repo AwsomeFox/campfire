@@ -10,7 +10,7 @@ import { looksLikeDamageRoll } from '../lib/looksLikeDamageRoll';
 import { expandDiceSidesFromExpr } from '../lib/parseDiceSidesFromExpr';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
 import { DICE_ROLL_REDUCED_MOTION_TUMBLE_MS, SETTLE_VIBRATION_PATTERN, tableAudioEngine, vibrateIfEnabled } from '../lib/tableAudio';
-import { buildOverlayDice, DiceRollOverlay, DICE_ROLL_MIN_TUMBLE_MS, type DiceRollOverlayPhase } from './DiceRollOverlay';
+import { buildOverlayDice, DiceRollOverlay, DICE_ROLL_MIN_HOLD_MS, type DiceRollOverlayPhase } from './DiceRollOverlay';
 import { RollResultToast } from './RollResultToast';
 import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
 
@@ -183,7 +183,9 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     }
 
     pendingShowRef.current = { roll: r, options };
-    const wait = Math.max(0, DICE_ROLL_MIN_TUMBLE_MS - (Date.now() - tumbleStartedAtRef.current));
+    // Only the hold is gated here. The fall, bounce and settle that follow are
+    // the bulk of the animation and are owned by the overlay itself.
+    const wait = Math.max(0, DICE_ROLL_MIN_HOLD_MS - (Date.now() - tumbleStartedAtRef.current));
 
     const goSettle = () => {
       setOverlay((prev) => {

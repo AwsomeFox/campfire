@@ -98,6 +98,14 @@ export default defineConfig({
           if (id.includes('node_modules/@dnd-kit/')) {
             return 'vendor-dnd';
           }
+          // three is only reached through the dice overlay's dynamic import, so
+          // it never lands in the entry chunk — pinning it to its own vendor
+          // chunk keeps it out of the lazy route chunks too, and lets the
+          // service worker keep one cached copy across releases that don't
+          // bump three itself.
+          if (id.includes('node_modules/three/')) {
+            return 'vendor-three';
+          }
         },
       },
     },
