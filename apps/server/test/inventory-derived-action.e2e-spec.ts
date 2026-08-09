@@ -923,6 +923,100 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(edited.body.equippedAction.spec.attack.bonus).toBe('+7');
   });
 
+  it('a refresh announces from the COMMITTED row, so a concurrent equip is not missed', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    // Deliberately UNEQUIPPED when the refresh starts.
+
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string; characterId?: number }> = [];
+    const service = ctx.app.get(InventoryService) as unknown as {
+      assertCanWriteOwner: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = service.assertCanWriteOwner.bind(service);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const authSpy = jest.spyOn(service, 'assertCanWriteOwner').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args);
+      // Another request equips the item between this refresh's read and its transaction, and
+      // emits its own tick. Review (chatgpt-codex-connector P2): deciding from the stale
+      // pre-transaction row then suppressed the refresh's tick, so a client that had already
+      // handled the equip cached an action built from the snapshot this write replaces.
+      db.update(inventoryItems).set({ equipped: true, equipSlot: 'raced-equip-slot' }).where(eq(inventoryItems.id, itemId)).run();
+      return result;
+    });
+    const emitSpy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string; characterId?: number });
+    });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+      expect(emitted.some((e) => e.type === 'character.updated' && e.characterId === characterId)).toBe(true);
+    } finally {
+      emitSpy.mockRestore();
+      authSpy.mockRestore();
+      restoreLongswordEntry();
+    }
+  });
+
+  it('a PATCH that renames the item BACK still announces the change', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'rename-back-slot' });
+
+    // Review (chatgpt-codex-connector P2): a full-object PATCH read name A and resends A while
+    // a concurrent request renames the item to B. This write genuinely changes the row back
+    // from B to A, but `input.name !== existing.name` is false because both stale values are
+    // A — and the only tick emitted was for B, leaving open caches showing a B-titled action
+    // the server now derives as A.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const service = ctx.app.get(InventoryService) as unknown as {
+      assertCanWriteOwner: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = service.assertCanWriteOwner.bind(service);
+    const authSpy = jest.spyOn(service, 'assertCanWriteOwner').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args);
+      db.update(inventoryItems).set({ name: 'Renamed By Someone Else' }).where(eq(inventoryItems.id, itemId)).run();
+      return result;
+    });
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string; characterId?: number }> = [];
+    const emitSpy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string; characterId?: number });
+    });
+    try {
+      const resent = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Longsword' });
+      expect(resent.status).toBe(200);
+      expect(resent.body.name).toBe('Longsword');
+      expect(resent.body.equippedAction.name).toBe('Longsword');
+      expect(emitted.some((e) => e.type === 'character.updated' && e.characterId === characterId)).toBe(true);
+    } finally {
+      emitSpy.mockRestore();
+      authSpy.mockRestore();
+    }
+  });
+
+  it('a PATCH that renames nothing still announces nothing', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'rename-noop-slot' });
+
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string }> = [];
+    const spy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string });
+    });
+    try {
+      // Comparing against the transactional row must not turn every full-object resend into
+      // an invalidation — the name has to actually change.
+      const resent = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Longsword', notes: 'a note' });
+      expect(resent.status).toBe(200);
+      expect(emitted.some((e) => e.type === 'character.updated')).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   // ---- ownership and secrecy ----
 
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {

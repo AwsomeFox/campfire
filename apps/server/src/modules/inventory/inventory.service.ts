@@ -636,8 +636,15 @@ export class InventoryService {
     // keeps offering the previous revision's attack, which resolving then rejects as changed.
     // Gated on there being no STORED action: a human's action is returned verbatim and a
     // refresh does not touch it.
-    if (existing.ownerType === 'character' && existing.characterId != null && existing.equipped && existing.equippedAction == null) {
-      this.events.emit({ type: 'character.updated', campaignId: existing.campaignId, characterId: existing.characterId, userId: user.id });
+    //
+    // Decided from the COMMITTED row, not the pre-transaction read (chatgpt-codex-connector
+    // P2, second round). A concurrent request can equip this item — emitting its own tick —
+    // between the read above and this transaction; a stale `existing.equipped` of false then
+    // suppressed the refresh's tick, and a client that had already handled the equip would
+    // cache an action derived from the snapshot this write just replaced. The owner fence
+    // covers who may write; it says nothing about what the row now IS.
+    if (row.ownerType === 'character' && row.characterId != null && row.equipped && row.equippedAction == null) {
+      this.events.emit({ type: 'character.updated', campaignId: row.campaignId, characterId: row.characterId, userId: user.id });
     }
 
     const refreshed = await this.withCompendiumState(row);
@@ -784,6 +791,12 @@ export class InventoryService {
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
     // retries observe a single committed apply (issue #782).
     let committed!: InventoryItem;
+    /**
+     * The item's name as it stood INSIDE the transaction, before this write. The baseline for
+     * "did this PATCH actually rename the item?" — see the invalidation below for why the
+     * pre-transaction read is the wrong one to ask.
+     */
+    let nameBeforeWrite = existing.name;
     let replayed = false;
     let qtyConflict: InventoryItem | null = null;
     // Issue #1901 rework (review: devin-ai-integration + chatgpt-codex-connector P2 on
@@ -913,6 +926,7 @@ export class InventoryService {
         // what happens to a HUMAN-authored one — store it, clear it, or leave it. There is
         // nothing cached to keep current, so none of the fences, revisions, or conflict
         // paths this block used to carry are needed.
+        nameBeforeWrite = fresh.name;
         const actionWrite: 'authored' | 'clear' | 'leave' =
           input.equippedAction !== undefined ? (input.equippedAction ? 'authored' : 'clear') : moved ? 'clear' : 'leave';
 
@@ -1145,8 +1159,15 @@ export class InventoryService {
     // invalidation in the one case it exists for. The cost of an extra invalidation on a
     // renamed non-action item is a refetch; the cost of a missing one is an encounter card
     // offering an action under a name the item no longer has.
-    const renamedGrantingItem =
-      input.name !== undefined && input.name !== existing.name && committed.equipped && committed.ownerType === 'character';
+    //
+    // Compared against the row INSIDE the transaction (chatgpt-codex-connector P2, second
+    // round), not the pre-transaction read and not `input.name`. A full-object PATCH that read
+    // name A and resends A, landing after a concurrent rename to B, genuinely changes the row
+    // back from B to A — but `input.name !== existing.name` is false, because both stale
+    // values are A. The only tick emitted was for B, leaving open caches showing a B-titled
+    // action the server now derives as A. What matters is whether this write changed the name
+    // that is actually stored.
+    const renamedGrantingItem = committed.name !== nameBeforeWrite && committed.equipped && committed.ownerType === 'character';
     const actionContentChanged = equippedActionEdited || renamedGrantingItem;
 
     await this.audit.log({
