@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -242,6 +242,45 @@ describe('RulesService unit coverage tests', () => {
     await rulesService.uninstall(base.id, adminActor);
     expect(await rulesService.getPackBySlug(base.slug)).toBeUndefined();
     expect((await rulesService.getPackOrThrow(supplement.id)).extendsPackSlug).toBe(base.slug);
+  });
+
+  it('revalidates a fresh extension base inside the install transaction', async () => {
+    const [base] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'queued-extension-base',
+        name: 'Queued Extension Base',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'base',
+        installedAt: nowIso(),
+        entryCount: 0,
+      })
+      .returning();
+
+    await expect(
+      rulesService.installFromUpload(
+        {
+          source: 'upload',
+          pack: {
+            slug: 'queued-fresh-extension',
+            name: 'Queued Fresh Extension',
+            license: 'CC0',
+            kind: 'extension',
+            extendsPackSlug: base.slug,
+          },
+          entries: [{ slug: 'entry', name: 'Entry', type: 'other' }],
+        },
+        adminActor,
+        () => {
+          // Simulate uninstall after enqueue/preflight but before persistPack starts its
+          // transaction. The fresh pack must not commit a dangling relationship.
+          db.delete(rulePacks).where(eq(rulePacks.id, base.id)).run();
+        },
+      ),
+    ).rejects.toThrow(BadRequestException);
+    expect(await rulesService.getPackBySlug('queued-fresh-extension')).toBeUndefined();
   });
 
   it('creates, updates, duplicates, and archives campaign homebrew entries', async () => {

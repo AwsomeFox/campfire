@@ -2214,6 +2214,25 @@ export class RulesService implements OnModuleInit {
     try {
       pack = this.db.transaction((tx) => {
         this.assertCurrentJobCanPersist();
+        // The enqueue-time relationship check can be stale by the time a background
+        // upload finishes classifying entries. Re-read the declared base while this
+        // transaction owns the same writer slot as the fresh pack insert, so uninstall
+        // or reclassification cannot leave a newly-installed pack pointing at a missing
+        // or non-base pack.
+        if (meta.extendsPackSlug) {
+          const base = tx
+            .select({ kind: rulePacks.kind })
+            .from(rulePacks)
+            .where(eq(rulePacks.slug, meta.extendsPackSlug))
+            .limit(1)
+            .get();
+          if (!base) {
+            throw new BadRequestException(`extendsPackSlug "${meta.extendsPackSlug}" is not installed`);
+          }
+          if (base.kind !== 'base') {
+            throw new BadRequestException(`extendsPackSlug "${meta.extendsPackSlug}" must identify a base pack`);
+          }
+        }
         const [packRow] = tx
           .insert(rulePacks)
           .values({
@@ -2450,6 +2469,20 @@ export class RulesService implements OnModuleInit {
             throw new ConflictException(
               `Rule pack "${before.slug}" cannot be changed from base to ${nextKind} while campaigns or installed extensions depend on it as a base`,
             );
+          }
+        }
+        if (nextExtendsPackSlug) {
+          const base = tx
+            .select({ kind: rulePacks.kind })
+            .from(rulePacks)
+            .where(eq(rulePacks.slug, nextExtendsPackSlug))
+            .limit(1)
+            .get();
+          if (!base) {
+            throw new BadRequestException(`extendsPackSlug "${nextExtendsPackSlug}" is not installed`);
+          }
+          if (base.kind !== 'base') {
+            throw new BadRequestException(`extendsPackSlug "${nextExtendsPackSlug}" must identify a base pack`);
           }
         }
         if (nextKind === 'extension' && nextExtendsPackSlug) {

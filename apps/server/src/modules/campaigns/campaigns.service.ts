@@ -683,9 +683,11 @@ export class CampaignsService {
    * gated above) keeps working unconditionally — this only blocks an explicit write that
    * (re)selects the adapterless slug going forward.
    */
-  private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
-    if (!ruleSystem) return;
-    const [pack] = await this.db.select({ id: rulePacks.id, kind: rulePacks.kind }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
+  private assertRuleSystemPack(
+    ruleSystem: string,
+    hasCustomMechanicsProfile: boolean,
+    pack: { kind: string } | undefined,
+  ): void {
     if (pack && pack.kind !== 'base') {
       throw new BadRequestException(
         `ruleSystem "${ruleSystem}" is a ${pack.kind} content pack and cannot drive campaign mechanics. Enable it as additional content instead.`,
@@ -706,9 +708,33 @@ export class CampaignsService {
     }
   }
 
-  /** Validate and canonicalize content-only pack selection for one campaign. */
-  private async validateEnabledPackSlugs(slugs: string[] | undefined, primaryRuleSystem: string): Promise<string[] | undefined> {
-    if (slugs === undefined) return undefined;
+  private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
+    if (!ruleSystem) return;
+    const [pack] = await this.db.select({ kind: rulePacks.kind }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
+    this.assertRuleSystemPack(ruleSystem, hasCustomMechanicsProfile, pack);
+  }
+
+  /**
+   * Authoritative counterpart to validateRuleSystem for a campaign write transaction.
+   * The async preflight gives callers an early error, but pack installation metadata may
+   * change before a later campaign insert/update reserves SQLite's writer slot.
+   */
+  private validateRuleSystemTx(
+    tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
+    ruleSystem: string | undefined,
+    hasCustomMechanicsProfile: boolean,
+  ): void {
+    if (!ruleSystem) return;
+    const pack = tx
+      .select({ kind: rulePacks.kind })
+      .from(rulePacks)
+      .where(eq(rulePacks.slug, ruleSystem))
+      .limit(1)
+      .get();
+    this.assertRuleSystemPack(ruleSystem, hasCustomMechanicsProfile, pack);
+  }
+
+  private normalizeEnabledPackSlugs(slugs: string[], primaryRuleSystem: string): string[] {
     const normalized = [...new Set(slugs.map((slug) => slug.trim()).filter(Boolean))]
       .filter((slug) => slug !== primaryRuleSystem);
     const schemaResult = CampaignSchema.shape.enabledPackSlugs.safeParse(normalized);
@@ -717,19 +743,21 @@ export class CampaignsService {
         `enabledPackSlugs violates the campaign schema: ${schemaResult.error.issues[0]?.message ?? 'invalid pack selection'}`,
       );
     }
-    if (schemaResult.data.length === 0) return [];
+    return schemaResult.data;
+  }
 
-    const rows = await this.db
-      .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
-      .from(rulePacks)
-      .where(inArray(rulePacks.slug, schemaResult.data));
+  private assertEnabledPackRows(
+    slugs: string[],
+    primaryRuleSystem: string,
+    rows: Array<{ slug: string; kind: string; extendsPackSlug: string | null }>,
+  ): void {
     const bySlug = new Map(rows.map((row) => [row.slug, row]));
-    const missing = schemaResult.data.filter((slug) => !bySlug.has(slug));
+    const missing = slugs.filter((slug) => !bySlug.has(slug));
     if (missing.length > 0) {
       throw new BadRequestException(`enabledPackSlugs contains pack(s) that are not installed: ${missing.join(', ')}`);
     }
-    const enabled = new Set([primaryRuleSystem, ...schemaResult.data].filter(Boolean));
-    for (const slug of schemaResult.data) {
+    const enabled = new Set([primaryRuleSystem, ...slugs].filter(Boolean));
+    for (const slug of slugs) {
       const pack = bySlug.get(slug)!;
       if (pack.kind === 'extension' && (!pack.extendsPackSlug || !enabled.has(pack.extendsPackSlug))) {
         throw new BadRequestException(
@@ -737,7 +765,35 @@ export class CampaignsService {
         );
       }
     }
-    return schemaResult.data;
+  }
+
+  /** Validate and canonicalize content-only pack selection for one campaign. */
+  private async validateEnabledPackSlugs(slugs: string[] | undefined, primaryRuleSystem: string): Promise<string[] | undefined> {
+    if (slugs === undefined) return undefined;
+    const normalized = this.normalizeEnabledPackSlugs(slugs, primaryRuleSystem);
+    if (normalized.length === 0) return [];
+
+    const rows = await this.db
+      .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
+      .from(rulePacks)
+      .where(inArray(rulePacks.slug, normalized));
+    this.assertEnabledPackRows(normalized, primaryRuleSystem, rows);
+    return normalized;
+  }
+
+  /** Re-read enabled pack rows inside the transaction that stores their slugs. */
+  private validateEnabledPackSlugsTx(
+    tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
+    slugs: string[],
+    primaryRuleSystem: string,
+  ): void {
+    if (slugs.length === 0) return;
+    const rows = tx
+      .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
+      .from(rulePacks)
+      .where(inArray(rulePacks.slug, slugs))
+      .all();
+    this.assertEnabledPackRows(slugs, primaryRuleSystem, rows);
   }
 
   /**
@@ -831,6 +887,8 @@ export class CampaignsService {
     try {
       row = this.db.transaction((tx) => {
         this.governance.enforceTx(tx, govCtx);
+        this.validateRuleSystemTx(tx, input.ruleSystem, input.customMechanicsProfile != null);
+        this.validateEnabledPackSlugsTx(tx, enabledPackSlugs ?? [], input.ruleSystem ?? '');
         const [inserted] = tx
           .insert(campaigns)
           .values({
@@ -1072,6 +1130,17 @@ export class CampaignsService {
     }
     const customMechanicsProfilePatch =
       nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
+    const revalidatePackSelectionTx = (tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0]) => {
+      if (nextEnabledPackSlugs === undefined) return;
+      // A primary slug is authoritative only when this PATCH writes it. Do not make an
+      // unrelated enabled-pack edit reject a legacy campaign whose old primary pack was
+      // already removed; the pre-existing behavior deliberately keeps those campaigns
+      // otherwise editable.
+      if (input.ruleSystem !== undefined) {
+        this.validateRuleSystemTx(tx, effectiveRuleSystem, profileBacksEffectiveRuleSystem);
+      }
+      this.validateEnabledPackSlugsTx(tx, nextEnabledPackSlugs, effectiveRuleSystem);
+    };
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of
@@ -1174,6 +1243,7 @@ export class CampaignsService {
     if (archiving && opts?.revokeInvites) {
       const ts = nowIso();
       const { row, revoked, wasEnabled, pinsCleared } = this.db.transaction((tx) => {
+        revalidatePackSelectionTx(tx);
         const before = tx
           .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
           .from(campaigns)
@@ -1284,6 +1354,7 @@ export class CampaignsService {
     };
     if (shouldResetPins) {
       const resetResult = this.db.transaction((tx) => {
+        revalidatePackSelectionTx(tx);
         sampleMechanics(tx);
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
@@ -1339,6 +1410,7 @@ export class CampaignsService {
       }
 
       const written = this.db.transaction((tx) => {
+        revalidatePackSelectionTx(tx);
         sampleMechanics(tx);
         const row = tx
           .update(campaigns)
@@ -2928,6 +3000,8 @@ export class CampaignsService {
       // Issue #851: the authoritative, race-free governance check — first statement
       // inside the transaction, atomic with the insert below.
       this.governance.enforceTx(tx, govCtx);
+      this.validateRuleSystemTx(tx, ruleSystem, customMechanicsProfile != null);
+      this.validateEnabledPackSlugsTx(tx, enabledPackSlugs, ruleSystem);
       const [campaignRow] = tx
         .insert(campaigns)
         .values({

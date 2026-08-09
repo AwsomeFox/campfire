@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { BadRequestException } from '@nestjs/common';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignsService } from '../../src/modules/campaigns/campaigns.service';
@@ -23,8 +24,8 @@ import { CampaignEventsService } from '../../src/modules/events/campaign-events.
 import { AiDmService } from '../../src/modules/ai-dm/ai-dm.service';
 import { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { UsersService } from '../../src/modules/users/users.service';
-import { campaigns as campaignsTable } from '../../src/db/schema';
-import { count } from 'drizzle-orm';
+import { campaigns as campaignsTable, rulePacks } from '../../src/db/schema';
+import { count, eq } from 'drizzle-orm';
 import type { RequestUser } from '../../src/common/user.types';
 
 describe('CampaignsService unit coverage tests', () => {
@@ -235,6 +236,93 @@ describe('CampaignsService unit coverage tests', () => {
 
     await campaignsService.remove(created.id, creatorActor);
     await campaignsService.purge(created.id, creatorActor, { confirm: 'PURGE' });
+  });
+
+  it('revalidates enabled pack rows inside create and update transactions', async () => {
+    const creatorActor: RequestUser = {
+      id: String(creatorUserId),
+      name: 'Creator',
+      serverRole: 'user',
+    };
+    const ts = new Date().toISOString();
+    const [base] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'transaction-base',
+        name: 'Transaction Base',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'base',
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+    const insertSupplement = () =>
+      db
+        .insert(rulePacks)
+        .values({
+          slug: 'transaction-supplement',
+          name: 'Transaction Supplement',
+          version: '1',
+          license: 'CC0',
+          sourceUrl: '',
+          kind: 'supplement' as const,
+          installedAt: ts,
+          entryCount: 0,
+        })
+        .returning()
+        .get();
+    let supplement = insertSupplement();
+
+    (dummyGovernance.resolveContext as jest.Mock).mockImplementationOnce(async () => {
+      // Simulate uninstall after the async pack preflight but before create() reserves
+      // the writer slot for its governance+insert transaction.
+      db.delete(rulePacks).where(eq(rulePacks.id, supplement.id)).run();
+      return {
+        bypass: true,
+        policy: 'everyone',
+        isServerAdmin: false,
+        canCreateCampaigns: true,
+        userId: null,
+        limits: { activePerUser: null, totalPerUser: null, activeServerWide: null, totalServerWide: null },
+        defaultStorageQuotaBytes: null,
+      };
+    });
+    await expect(
+      campaignsService.create(
+        { name: 'Raced Create', ruleSystem: base.slug, enabledPackSlugs: [supplement.slug] },
+        creatorActor,
+      ),
+    ).rejects.toThrow(BadRequestException);
+
+    supplement = insertSupplement();
+    const target = await campaignsService.create(
+      { name: 'Raced Update', ruleSystem: base.slug },
+      creatorActor,
+    );
+    // The injected DB is a forwarding proxy, so stage the interleaving on the live ORM:
+    // remove the pack immediately before update() enters its first write transaction.
+    const orm = (holder as unknown as { orm: DrizzleDb }).orm;
+    const original = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const realTransaction = orm.transaction.bind(orm);
+    let staged = false;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      if (!staged) {
+        staged = true;
+        db.delete(rulePacks).where(eq(rulePacks.id, supplement.id)).run();
+      }
+      return realTransaction(fn);
+    };
+    try {
+      await expect(
+        campaignsService.update(target.id, { enabledPackSlugs: [supplement.slug] }, creatorActor),
+      ).rejects.toThrow(BadRequestException);
+    } finally {
+      if (original) Object.defineProperty(orm, 'transaction', original);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
+    expect((await campaignsService.getOrThrow(target.id)).enabledPackSlugs).toEqual([]);
   });
 
   it('previews and executes campaign cloning', async () => {
