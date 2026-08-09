@@ -183,7 +183,7 @@ export default function CharacterPage() {
   const id = Number(characterId);
   const navigate = useNavigate();
   const { me } = useAuth();
-  const { isDm, canDmWrite, canPlayerWrite, canMemberWrite } = useCampaignAccess();
+  const { isDm, canDmWrite, canPlayerWrite, canAnyMemberWrite } = useCampaignAccess();
   const activeCampaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   // Rule-system adapter resolved from the active campaign (issue #234, #2003): drives ability
   // modifiers and the condition vocabulary instead of a call-site 5e default.
@@ -535,7 +535,7 @@ export default function CharacterPage() {
                 onError={setActionError}
                 roller={roller}
                 adapter={adapter}
-                canRoll={canMemberWrite}
+                canRoll={canAnyMemberWrite}
                 packItems={packItems}
                 onShowInventory={() => setTab('build', { focus: 'inventory' })}
               />
@@ -2133,7 +2133,11 @@ function ActionsCard({
 }: SheetCardProps & {
   roller: Roller;
   adapter: RuleSystemAdapter;
-  /** Campaign membership + writability — the authority `POST /campaigns/:id/roll` requires. */
+  /**
+   * Membership + writability, VIEWERS INCLUDED — `POST /campaigns/:id/roll` runs
+   * `requireMemberOnWritableCampaign`, which asserts no role floor. A viewer-role member who
+   * owns this sheet may still roll, so this must not be the stricter `canMemberWrite`.
+   */
   canRoll: boolean;
   packItems: InventoryItem[];
   onShowInventory: () => void;

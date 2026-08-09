@@ -194,7 +194,7 @@ function branchLines(branch: {
   healing: string;
   tempHp: string;
   effects: ReadonlyArray<{ text: string; condition: string; rounds: number | null; saveEnds: boolean; ongoingDamage: number }>;
-}, criticalNote = ''): string[] {
+}, criticalNote = '', fallbackHasDamage = false): string[] {
   const lines: string[] = [];
   if (branch.text) lines.push(branch.text);
 
@@ -205,7 +205,10 @@ function branchLines(branch: {
   // the branch has damage of its own the halving qualifies THAT amount, so it reads as one
   // line rather than two that look additive.
   if (damage.length > 0) lines.push(`${damage.join(' + ')} damage${branch.halfDamage ? ' (halved)' : ''}${criticalNote}`);
-  else if (branch.halfDamage) lines.push('Half damage');
+  // A branch that halves with no damage of its own halves the FAILURE branch's. If that
+  // branch has none either, the resolver rolls nothing at all — so saying "Half damage"
+  // would promise a consequence using the action never applies.
+  else if (branch.halfDamage && fallbackHasDamage) lines.push('Half damage');
   if (branch.healing.trim()) lines.push(`Heals ${branch.healing.trim()}`);
   if (branch.tempHp.trim()) lines.push(`${branch.tempHp.trim()} temporary hit points`);
 
@@ -249,11 +252,17 @@ export function actionSpecEffects(
 ): ActionEffectGroup[] {
   if (!spec) return [];
   const outcomes = spec.outcomes ?? {};
+  // What a save-for-half branch would actually halve — see `branchLines`.
+  const fallbackHasDamage = (outcomes.failure?.damage ?? []).length > 0;
   const groups: ActionEffectGroup[] = [];
   for (const [outcome, label] of OUTCOME_LABELS) {
     const branch = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
     if (!branch) continue;
-    const unique = [...new Set(branchLines(branch, outcome === 'crit' ? criticalDamageNote(criticalDamage) : ''))];
+    const unique = [
+      ...new Set(
+        branchLines(branch, outcome === 'crit' ? criticalDamageNote(criticalDamage) : '', fallbackHasDamage),
+      ),
+    ];
     if (unique.length > 0) groups.push({ outcome, label, lines: unique });
   }
   return groups;

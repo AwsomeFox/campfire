@@ -265,6 +265,31 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     expect(actionSpecEffects(spec)).toEqual([]);
   });
 
+  /**
+   * A half-damage branch with nothing of its own halves the FAILURE branch's damage. When
+   * that branch has none either, the resolver rolls zero — so the line would promise a
+   * consequence the action never applies.
+   */
+  test('half damage is only claimed when there is something to halve', () => {
+    const nothingToHalve = ActionSpec.parse({
+      mode: 'save',
+      outcomes: { success: { halfDamage: true }, failure: { text: 'Knocked back' } },
+    });
+    expect(actionSpecEffects(nothingToHalve)).toEqual([
+      { outcome: 'failure', label: 'On a failure', lines: ['Knocked back'] },
+    ]);
+
+    // The ordinary basic-save shape is unchanged.
+    const basicSave = ActionSpec.parse({
+      mode: 'save',
+      outcomes: { success: { halfDamage: true }, failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }] } },
+    });
+    expect(actionSpecEffects(basicSave)).toEqual([
+      { outcome: 'success', label: 'On a success', lines: ['Half damage'] },
+      { outcome: 'failure', label: 'On a failure', lines: ['8d6 fire damage'] },
+    ]);
+  });
+
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });
