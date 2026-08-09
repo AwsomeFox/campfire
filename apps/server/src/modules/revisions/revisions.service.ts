@@ -21,6 +21,7 @@ import {
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { notDeleted } from '../../common/soft-delete';
 import { nextUpdatedAt } from '../../common/stale-write';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -699,7 +700,7 @@ export class RevisionsService {
         const row = db
           .select({ campaignId: storyArcs.campaignId, prose: storyArcs.summary, updatedAt: storyArcs.updatedAt })
           .from(storyArcs)
-          .where(eq(storyArcs.id, entityId))
+          .where(and(eq(storyArcs.id, entityId), notDeleted(storyArcs.deletedAt)))
           .limit(1)
           .get();
         return row ?? null;

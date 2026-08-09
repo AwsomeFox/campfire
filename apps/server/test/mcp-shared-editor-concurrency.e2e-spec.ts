@@ -127,5 +127,22 @@ describe('MCP vs browser shared-editor concurrency — #881', () => {
     expect(restored.isError).toBeFalsy();
     const current = await agent.get(`/api/v1/arcs/${arc.body.id}`);
     expect(current.body.summary).toBe('The original arc summary.');
+
+    expect((await agent.delete(`/api/v1/arcs/${arc.body.id}`)).status).toBe(200);
+    expect((await agent.get(`/api/v1/revisions/story_arc/${arc.body.id}`)).status).toBe(404);
+    expect((await agent.post(`/api/v1/revisions/story_arc/${arc.body.id}/${revisions[0].id}/restore`)).status).toBe(404);
+
+    const trashedList = await client.callTool({
+      name: 'list_revisions',
+      arguments: { entityType: 'story_arc', entityId: arc.body.id },
+    });
+    expect(trashedList.isError).toBe(true);
+    expect(bodyOf<{ error: { status: number } }>(trashedList).error.status).toBe(404);
+    const trashedRestore = await client.callTool({
+      name: 'restore_revision',
+      arguments: { entityType: 'story_arc', entityId: arc.body.id, revisionId: revisions[0].id },
+    });
+    expect(trashedRestore.isError).toBe(true);
+    expect(bodyOf<{ error: { status: number } }>(trashedRestore).error.status).toBe(404);
   });
 });
