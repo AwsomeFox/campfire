@@ -393,6 +393,52 @@ test.describe('encounter cockpit panel collapse', () => {
     }
   });
 
+  test('a prompt that reopens the panel takes the keyboard with it', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+
+      // Collapse from the keyboard, which hands focus to the reopen tab by design.
+      await page.getByTestId('encounter-vtt-panel-close').focus();
+      await page.keyboard.press('Enter');
+      const reopen = page.getByTestId('encounter-vtt-panel-open');
+      await expect(reopen).toBeFocused();
+
+      // A prompt now arrives and reopens the panel, unmounting the very control they are
+      // standing on — without a transfer, focus falls to the document at exactly the
+      // moment something starts waiting on them.
+      const combatants = (await (
+        await page.request.get(`/api/v1/encounters/${fixture.encounterId}`)
+      ).json()) as { combatants: Array<{ id: number }> };
+      const target = combatants.combatants[0];
+      expect(target, 'fixture needs a combatant').toBeTruthy();
+      await page.request.post(
+        `/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}/turn-state`,
+        { data: { concentration: 'Bless' } },
+      );
+      await page.request.patch(`/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}`, {
+        data: { hpDelta: -6 },
+      });
+
+      await expect(page.getByTestId('concentration-check-prompt')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+      await expect(async () => {
+        const stranded = await page.evaluate(
+          () => document.activeElement === document.body || document.activeElement === null,
+        );
+        expect(stranded, 'focus must not fall back to the document').toBe(false);
+        const insidePanel = await page.evaluate(
+          () => !!document.activeElement?.closest('[data-testid="encounter-vtt-panel"]'),
+        );
+        expect(insidePanel, 'focus must land inside the panel the prompt appeared in').toBe(true);
+      }).toPass({ timeout: 5_000 });
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+
   test('scrolls a waiting prompt into view on a panel that was already open', async ({ page }) => {
     const fixture = await createRunningEncounter(page);
     try {

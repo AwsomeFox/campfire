@@ -259,7 +259,17 @@ export function EncounterVttShell({
   const panelBodyRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!attentionKey) return;
-    if (!panelOpenRef.current) onPanelOpenChangeRef.current(true);
+    if (!panelOpenRef.current) {
+      // Reopening unmounts the reopen tab. If that is what the keyboard user is standing
+      // on — it is where focus was handed when they collapsed — losing it drops them to
+      // the document, right as something starts waiting on an answer. Hand focus onward
+      // through the same transfer the manual toggle uses, which lands on the close button
+      // inside the panel the prompt has just appeared in.
+      if (reopenButtonRef.current && document.activeElement === reopenButtonRef.current) {
+        pendingFocusRef.current = 'opened';
+      }
+      onPanelOpenChangeRef.current(true);
+    }
     // Next frame: a panel that was just reopened has not been laid out yet, and
     // scrollTo on a `hidden` element does nothing.
     const frame = requestAnimationFrame(() => {
