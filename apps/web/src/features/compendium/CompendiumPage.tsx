@@ -74,6 +74,11 @@ export default function CompendiumPage() {
   const { isDm, canDmWrite } = useCampaignAccess();
   const { loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const campaignPack = campaign?.ruleSystem || '';
+  const contentPackSlugs = useMemo(
+    () => [...new Set([campaignPack, ...(campaign?.enabledPackSlugs ?? [])].filter(Boolean))],
+    [campaignPack, campaign?.enabledPackSlugs],
+  );
+  const hasContentPacks = contentPackSlugs.length > 0;
   // The campaign record comes from the shared campaigns list; if that list failed
   // to load we'd otherwise sit blank forever (the search effect waits for the
   // campaign to resolve). Distinguish "still loading" from "couldn't load".
@@ -174,7 +179,7 @@ export default function CompendiumPage() {
 
   // The campaign's chosen rule system, not just "some pack is installed server-wide",
   // decides whether the compendium has anything to show for THIS campaign.
-  const noRuleSystemChosen = campaign !== undefined && !campaignPack;
+  const noRuleSystemChosen = campaign !== undefined && contentPackSlugs.length === 0;
   const noPacksInstalled = packs !== null && packs.length === 0;
 
   useEffect(() => {
@@ -191,10 +196,10 @@ export default function CompendiumPage() {
         const params = new URLSearchParams();
         if (searchQuery.trim()) params.set('q', searchQuery.trim());
         if (type !== 'all') params.set('type', type);
-        if (campaignPack) params.set('pack', campaignPack);
+        for (const slug of contentPackSlugs) params.append('pack', slug);
         if (urlCursor) params.set('cursor', urlCursor);
         const [page, homebrew, libMonsters] = await Promise.all([
-          campaignPack ? api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`) : Promise.resolve<RuleSearchPage>({ items: [], total: 0, hasMore: false, limit: 50, facets: [] }),
+          hasContentPacks ? api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`) : Promise.resolve<RuleSearchPage>({ items: [], total: 0, hasMore: false, limit: 50, facets: [] }),
           api.get<RuleEntry[]>(`${API}/campaigns/${id}/homebrew`).catch(() => []),
           api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${id}/library/monsters`).catch(() => []),
         ]);
@@ -234,7 +239,10 @@ export default function CompendiumPage() {
     noPacksInstalled,
     noRuleSystemChosen,
     campaignPack,
+    contentPackSlugs,
+    hasContentPacks,
     campaign,
+    id,
     urlCursor,
     reloadToken,
     t,
@@ -249,7 +257,7 @@ export default function CompendiumPage() {
       const params = new URLSearchParams();
       if (searchQuery.trim()) params.set('q', searchQuery.trim());
       if (type !== 'all') params.set('type', type);
-      if (campaignPack) params.set('pack', campaignPack);
+      for (const slug of contentPackSlugs) params.append('pack', slug);
       params.set('cursor', nextCursor);
       const page = await api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`);
       // A filter change started a fresh primary fetch — discard this stale page.
@@ -505,7 +513,7 @@ export default function CompendiumPage() {
           <Card>
             <Skeleton lines={4} />
           </Card>
-        ) : !shouldRenderCompendiumResults({ campaignResolved: campaign !== undefined, homebrewCount, hasGlobalPack: Boolean(campaignPack && !noPacksInstalled) }) ? (
+        ) : !shouldRenderCompendiumResults({ campaignResolved: campaign !== undefined, homebrewCount, hasGlobalPack: hasContentPacks && !noPacksInstalled }) ? (
           <Card density="compact" className="items-center text-center" style={{ padding: 24 }}>
             <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>No rule system or campaign homebrew yet.</p>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>Create homebrew above, or select an installed rule system in Campaign settings.</p>
@@ -582,7 +590,9 @@ export default function CompendiumPage() {
                       onUpdated={() => setReloadToken((n) => n + 1)}
                     />
                   ))}
-                  {results.map((entry) => (
+                  {results.map((entry) => {
+                    const entryPack = entry.campaignId == null ? packs?.find((pack) => pack.id === entry.packId) : undefined;
+                    return (
                     <Card
                       key={entry.id}
                       to={`/c/${id}/compendium/${entry.id}`}
@@ -611,6 +621,9 @@ export default function CompendiumPage() {
                       <span style={{ flex: 1, minWidth: 0 }}>
                         <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>
                           {entry.name}
+                          {entryPack && contentPackSlugs.length > 1 ? (
+                            <span className="tag tag-secondary" style={{ fontSize: 9 }}>{entryPack.name}</span>
+                          ) : null}
                         </span>
                         <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
                           {entry.summary}
@@ -623,7 +636,8 @@ export default function CompendiumPage() {
                         ›
                       </span>
                     </Card>
-                  ))}
+                    );
+                  })}
                 </div>
                 {hasMore && (
                   <button

@@ -114,10 +114,11 @@ export function RulePacksCard() {
   const usageBySlug = useMemo(() => {
     const map = new Map<string, Campaign[]>();
     for (const c of campaigns) {
-      if (!c.ruleSystem) continue;
-      const list = map.get(c.ruleSystem) ?? [];
-      list.push(c);
-      map.set(c.ruleSystem, list);
+      for (const slug of new Set([c.ruleSystem, ...(c.enabledPackSlugs ?? [])].filter(Boolean))) {
+        const list = map.get(slug) ?? [];
+        list.push(c);
+        map.set(slug, list);
+      }
     }
     return map;
   }, [campaigns]);
@@ -182,7 +183,7 @@ export function RulePacksCard() {
 
       <p className="text-[11px] text-secondary">
         Rule packs are server-wide (not per-campaign) and readable by any signed-in user. Installing or removing a
-        pack here affects every campaign that has it selected as its rule system. Usage counts are server-wide
+        pack here affects every campaign that has it selected as its primary system or enabled content. Usage counts are server-wide
         (every campaign using the pack, even ones you can't see).
       </p>
     </Card>
@@ -229,7 +230,11 @@ function PackRow({
 
   return (
     <tr>
-      <td className="py-2.5 pr-4 font-semibold text-white">{pack.name}</td>
+      <td className="py-2.5 pr-4 font-semibold text-white">
+        {pack.name}
+        <span className="tag tag-neutral ml-2" style={{ fontSize: 9 }}>{pack.kind}</span>
+        {pack.extendsPackSlug ? <span className="block text-[10px] font-normal text-secondary">extends {pack.extendsPackSlug}</span> : null}
+      </td>
       <td className="pr-4 text-slate-400">{pack.version || '—'}</td>
       <td className="pr-4 text-slate-400">{pack.license || '—'}</td>
       <td className="pr-4 text-slate-400">{pack.entryCount}</td>
@@ -249,7 +254,7 @@ function PackRow({
           type="button"
           className="text-[11px] text-rose-500/80 hover:text-rose-400 disabled:opacity-40"
           disabled={installing || uninstalling || usageCount > 0}
-          title={usageCount > 0 ? 'Migrate every campaign using this rule system before uninstalling it.' : undefined}
+          title={usageCount > 0 ? 'Disable or replace this pack in every campaign before uninstalling it.' : undefined}
           onClick={() => {
             setConfirming(true);
           }}
@@ -263,7 +268,7 @@ function PackRow({
               <div className="space-y-2 text-left">
                 <p>
                   This removes {pack.entryCount} entries and cannot be undone.
-                  No campaign has it selected, so removal will not change campaign rules.
+                  No campaign has it selected or enabled, so removal will not change campaign rules content.
                 </p>
               </div>
             }
@@ -567,7 +572,8 @@ function RulePackUploadPanel({
         Upload Custom Rule Pack (JSON)
       </p>
       <p className="text-[11px] text-slate-400">
-        Upload a custom rule pack JSON file. Must contain a pack header (name, slug, version, license) and an array of entries. Content must carry a recognized open license or self-authored license.
+        Upload a custom rule pack JSON file. The pack header accepts kind: base, extension, or supplement;
+        extensions must also name an installed base in extendsPackSlug. Content must carry a recognized open or self-authored license.
       </p>
       <div className="flex flex-col gap-2">
         <input
@@ -595,5 +601,3 @@ function RulePackUploadPanel({
     </div>
   );
 }
-
-

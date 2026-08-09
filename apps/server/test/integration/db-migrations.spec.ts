@@ -51,7 +51,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size', 'can_create_campaigns']));
 
       expect(columnNames(sqlite, 'campaigns')).toEqual(
-        expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at', 'public_recap_sharing_enabled']),
+        expect.arrayContaining(['rule_system', 'enabled_pack_slugs', 'map_attachment_id', 'ics_token', 'ics_token_expires_at', 'public_recap_sharing_enabled']),
       );
       expect(columnNames(sqlite, 'characters')).toEqual(
         expect.arrayContaining([
@@ -74,7 +74,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'npcs')).toContain('hidden');
       expect(columnNames(sqlite, 'npcs')).toContain('icon_slug'); // 0037 (issue #302)
       expect(columnNames(sqlite, 'rule_entries')).toContain('icon_slug'); // 0038 (issue #305)
-      expect(columnNames(sqlite, 'rule_packs')).toContain('manifest_hash'); // 0148 (issue #1518)
+      expect(columnNames(sqlite, 'rule_packs')).toEqual(
+        expect.arrayContaining(['manifest_hash', 'kind', 'extends_pack_slug']),
+      );
       expect(columnNames(sqlite, 'sessions')).toContain('dm_secret');
       expect(columnNames(sqlite, 'api_tokens')).toContain('admin_enabled');
       expect(columnNames(sqlite, 'oauth_access_tokens')).toEqual(
@@ -2898,4 +2900,3 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 });
-

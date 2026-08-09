@@ -1748,6 +1748,28 @@ function migrateRulePacksTableForManifestHash(sqlite: Database.Database): void {
   sqlite.exec("ALTER TABLE rule_packs ADD COLUMN manifest_hash TEXT NOT NULL DEFAULT ''");
 }
 
+/** Issue #1319: separate a campaign's primary rules adapter from content-only packs. */
+function migrateRulePackRelationships1319(sqlite: Database.Database): void {
+  const campaignTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'").get();
+  if (campaignTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'enabled_pack_slugs')) {
+      sqlite.exec("ALTER TABLE campaigns ADD COLUMN enabled_pack_slugs TEXT NOT NULL DEFAULT '[]'");
+    }
+  }
+
+  const packsTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_packs'").get();
+  if (packsTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(rule_packs)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'kind')) {
+      sqlite.exec("ALTER TABLE rule_packs ADD COLUMN kind TEXT NOT NULL DEFAULT 'base'");
+    }
+    if (!columns.some((column) => column.name === 'extends_pack_slug')) {
+      sqlite.exec('ALTER TABLE rule_packs ADD COLUMN extends_pack_slug TEXT');
+    }
+  }
+}
+
 /** Campaign-private compendium rows and their immutable edit history (issue #741). */
 function migrateCampaignHomebrew741(sqlite: Database.Database): void {
   const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='rule_entries'").get();
@@ -5430,6 +5452,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0176_combatants_clear_legacy_manual_order_2095', run: migrateCombatantsTableClearLegacyManualOrder2095 },
   // #2097 equipped-action provenance — renumbered to 0177 when #2095 landed 0176 on main
   // first. This ordinal never shipped on any real database as 0176.
+  // #1319 landed after main claimed 0177 above. This migration has not shipped under
+  // its former branch-local ordinal, so renumbering it to the next free slot is safe.
+  { name: '0178_rule_pack_relationships_1319', run: migrateRulePackRelationships1319 },
 ];
 
 /**

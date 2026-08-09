@@ -1,7 +1,7 @@
 import type * as React from 'react';
 import { useEffect, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { CampaignLibraryMonster, Character, CombatantKind, CombatantStatblock as CombatantStatblockData, CustomMechanicsProfile, Npc, RuleEntry } from '@campfire/schema';
+import type { CampaignLibraryMonster, Character, CombatantKind, CombatantStatblock as CombatantStatblockData, CustomMechanicsProfile, Npc, RuleEntry, RulePack } from '@campfire/schema';
 import { COMBATANT_STATBLOCK_HELP, defaultCombatantStatblock } from '@campfire/schema';
 import { api, API, translateApiError } from '../../../lib/api';
 import { useAnnounce } from '../../../components/Announcer';
@@ -26,6 +26,8 @@ const ADD_TAB_LABELS: Record<AddTab, string> = {
   party: 'Party',
   npc: 'NPC',
 };
+const EMPTY_PACK_SLUGS: string[] = [];
+const EMPTY_RULE_PACKS: RulePack[] = [];
 
 export type Props = {
   encounterId: number;
@@ -33,6 +35,8 @@ export type Props = {
   characters: Character[];
   existingCombatantCharacterIds: Set<number>;
   rulePack: string;
+  enabledPackSlugs?: string[];
+  installedPacks?: RulePack[];
   customMechanicsProfile?: CustomMechanicsProfile | null;
   onAdded: () => Promise<void> | void;
 };
@@ -43,6 +47,8 @@ export function AddCombatantPanel({
   characters,
   existingCombatantCharacterIds,
   rulePack,
+  enabledPackSlugs = EMPTY_PACK_SLUGS,
+  installedPacks = EMPTY_RULE_PACKS,
   customMechanicsProfile,
   onAdded,
 }: Props) {
@@ -180,7 +186,21 @@ export function AddCombatantPanel({
       setSearching(true);
       try {
         const baseParams = new URLSearchParams({ q: debouncedQuery.trim() });
-        if (rulePack) baseParams.set('pack', rulePack);
+        // Encounter statblocks may only come from the primary pack or a pack that
+        // explicitly declares compatibility with it. Other enabled packs remain
+        // reference-only in Compendium/AI lookups so foreign combat math is never
+        // silently interpreted through this campaign's adapter.
+        const compatiblePackSlugs = [...new Set([
+          rulePack,
+          ...enabledPackSlugs.filter((slug) =>
+            installedPacks.some((pack) => pack.slug === slug && pack.extendsPackSlug === rulePack),
+          ),
+        ].filter(Boolean))];
+        if (compatiblePackSlugs.length > 0) {
+          for (const slug of compatiblePackSlugs) baseParams.append('pack', slug);
+        } else {
+          baseParams.set('homebrewOnly', 'true');
+        }
         if (cid) baseParams.set('campaignId', String(cid));
         // Hazards belong to the Compendium add/drag-drop flow only. The NPC tab's picker is
         // monster-focused and its UI doesn't surface entry type, so keep it to monsters.
@@ -214,7 +234,7 @@ export function AddCombatantPanel({
     // prop without remounting AddCombatantPanel. Without cid in the dependency list the
     // effect kept a stale closed-over campaign id until tab/query/rulePack happened to
     // change too, scoping the search (and any add) to the PREVIOUS campaign.
-  }, [tab, debouncedQuery, rulePack, cid]);
+  }, [tab, debouncedQuery, rulePack, enabledPackSlugs, installedPacks, cid]);
 
   async function addManual(e: FormEvent) {
     e.preventDefault();

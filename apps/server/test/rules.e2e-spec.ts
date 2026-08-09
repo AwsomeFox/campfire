@@ -2253,6 +2253,54 @@ describe('rules / rule packs — a campaign that already stores an importer-only
       await fake.close();
     }
   });
+
+  it('JSON import drops an installed supplement instead of selecting it as the primary rule system', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const slug = 'import-content-only-pack';
+    await db.insert(rulePacks).values({
+      slug,
+      name: 'Import Content Only Pack',
+      version: '1',
+      license: 'CC0',
+      sourceUrl: '',
+      kind: 'supplement',
+      installedAt: new Date().toISOString(),
+      entryCount: 0,
+    });
+
+    const importRes = await request(server)
+      .post('/api/v1/campaigns/import')
+      .set(preexistingDm)
+      .send({ campaign: { name: 'Imported Content Campaign', ruleSystem: slug } });
+
+    expect(importRes.status).toBe(201);
+    expect(importRes.body.ruleSystem).toBe('');
+  });
+
+  it('JSON import rejects more enabled packs than the shared campaign schema permits', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const slugs = Array.from({ length: 51 }, (_, index) => `import-pack-${index}`);
+    await db.insert(rulePacks).values(
+      slugs.map((slug) => ({
+        slug,
+        name: slug,
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'supplement' as const,
+        installedAt: new Date().toISOString(),
+        entryCount: 0,
+      })),
+    );
+
+    const importRes = await request(server)
+      .post('/api/v1/campaigns/import')
+      .set(preexistingDm)
+      .send({ campaign: { name: 'Too Many Packs', enabledPackSlugs: slugs } });
+
+    expect(importRes.status).toBe(400);
+    expect(importRes.body.message).toMatch(/enabledPackSlugs.*campaign schema/i);
+  });
 });
 
 /**
@@ -2646,12 +2694,29 @@ describe('rules search pagination (issue #613)', () => {
     return job.pack.id as number;
   }
 
+  it('accepts one primary plus 50 supplemental pack filters and rejects a 52nd slug', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignMaximum = Array.from({ length: 51 }, (_, i) => `pack-${i}`);
+    const accepted = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ pack: campaignMaximum })
+      .set(dm);
+    expect(accepted.status).toBe(200);
+
+    const rejected = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ pack: [...campaignMaximum, 'pack-51'] })
+      .set(dm);
+    expect(rejected.status).toBe(400);
+    expect(String(rejected.body.message)).toMatch(/at most 51 pack slugs/i);
+  });
+
   it('returns totals/hasMore/nextCursor and pages stably across multi-pack ties', async () => {
     const server = ctx.app.getHttpServer();
     // Two packs with identical names — id tiebreak must keep order stable across pages.
     const packA = await uploadMany(
       Array.from({ length: 30 }, (_, i) => `Alpha Twin ${String(i).padStart(2, '0')}`),
-      'page-pack-a',
+      'page,pack-a',
     );
     const packB = await uploadMany(
       Array.from({ length: 30 }, (_, i) => `Alpha Twin ${String(i).padStart(2, '0')}`),
@@ -2660,6 +2725,16 @@ describe('rules search pagination (issue #613)', () => {
     const packC = await uploadMany(
       Array.from({ length: 25 }, (_, i) => `Browse Node ${String(i).padStart(2, '0')}`),
       'page-pack-c',
+    );
+
+    const commaSafeUnion = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'Alpha Twin 00', pack: ['page,pack-a', 'page-pack-b'] })
+      .set(dm);
+    expect(commaSafeUnion.status).toBe(200);
+    expect(commaSafeUnion.body.total).toBe(2);
+    expect(new Set(commaSafeUnion.body.items.map((entry: { packId: number }) => entry.packId))).toEqual(
+      new Set([packA, packB]),
     );
 
     const page1 = await request(server).get('/api/v1/rules/search').query({ limit: 20 }).set(dm);

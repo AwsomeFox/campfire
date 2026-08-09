@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 export interface RulesLookupPanelProps {
   campaignId: number;
   ruleSystem?: string | null;
+  enabledPackSlugs?: string[];
   customMechanicsProfile?: CustomMechanicsProfile | null;
 }
 
@@ -69,11 +70,12 @@ export function updateRecentLookups(prev: RuleEntry[], entry: RuleEntry): RuleEn
 }
 
 /** Build search query params for /rules/search endpoint. Omits `pack` when ruleSystem is empty. */
-export function buildSearchUrlParams(query: string, ruleSystem?: string | null, limit = 8): URLSearchParams {
+export function buildSearchUrlParams(query: string, ruleSystem?: string | null, limit = 8, enabledPackSlugs: string[] = []): URLSearchParams {
   const params = new URLSearchParams();
   const trimmed = query.trim();
   if (trimmed) params.set('q', trimmed);
-  if (ruleSystem) params.set('pack', ruleSystem);
+  const packSlugs = [...new Set([ruleSystem ?? '', ...enabledPackSlugs].filter(Boolean))].sort();
+  for (const slug of packSlugs) params.append('pack', slug);
   params.set('limit', String(limit));
   return params;
 }
@@ -89,13 +91,18 @@ export function resolvePackName(packId: number | undefined, packMap: Map<number,
   return packMap.get(packId) ?? null;
 }
 
-/** Resolve pack slug by packId when providing ruleSystem for statblock rendering. */
-export function resolvePackSlug(packId: number | undefined, packSlugMap: Map<number, string>): string | null {
-  if (!packId) return null;
-  return packSlugMap.get(packId) ?? null;
+/** Supplemental content uses the campaign adapter; without one, fall back to its declared base or owning base pack. */
+export function resolveStatblockSystem(
+  ruleSystem: string | null | undefined,
+  packId: number | undefined,
+  packMap: ReadonlyMap<number, Pick<RulePack, 'slug' | 'extendsPackSlug'>>,
+): string | null | undefined {
+  if (ruleSystem || !packId) return ruleSystem;
+  const pack = packMap.get(packId);
+  return pack?.extendsPackSlug || pack?.slug || ruleSystem;
 }
 
-export function RulesLookupPanel({ campaignId, ruleSystem, customMechanicsProfile }: RulesLookupPanelProps) {
+export function RulesLookupPanel({ campaignId, ruleSystem, enabledPackSlugs = [], customMechanicsProfile }: RulesLookupPanelProps) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -144,20 +151,21 @@ export function RulesLookupPanel({ campaignId, ruleSystem, customMechanicsProfil
     return map;
   }, [installedPacks]);
 
-  const packSlugMap = useMemo(() => {
-    const map = new Map<number, string>();
+  const packMap = useMemo(() => {
+    const map = new Map<number, RulePack>();
     for (const p of installedPacks) {
-      map.set(p.id, p.slug);
+      map.set(p.id, p);
     }
     return map;
   }, [installedPacks]);
 
   const effectivePack = ruleSystem || '';
-  const searchParams = buildSearchUrlParams(debouncedQuery, effectivePack, 8);
+  const effectivePacksKey = JSON.stringify([...new Set([effectivePack, ...enabledPackSlugs].filter(Boolean))].sort());
+  const searchParams = buildSearchUrlParams(debouncedQuery, effectivePack, 8, enabledPackSlugs);
   const isQueryActive = Boolean(debouncedQuery.trim());
 
   const { data: searchPage, isLoading: searchLoading, isError: searchError, error: searchErrorObj } = useQuery<RuleSearchPage>({
-    queryKey: ['rules', 'search', debouncedQuery.trim(), effectivePack],
+    queryKey: ['rules', 'search', debouncedQuery.trim(), effectivePacksKey],
     queryFn: () => api.get<RuleSearchPage>(`${API}/rules/search?${searchParams.toString()}`),
     staleTime: 60 * 1000,
     enabled: !collapsed && isQueryActive,
@@ -260,8 +268,10 @@ export function RulesLookupPanel({ campaignId, ruleSystem, customMechanicsProfil
             <ul className="space-y-1.5 min-w-0" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {displayedResults.map((entry) => {
                 const isExpanded = expandedEntryId === entry.id;
-                const packName = !entry.isHomebrew && !effectivePack && entry.packId ? resolvePackName(entry.packId, packNameMap) : null;
-                const statblockSystem = !entry.isHomebrew && entry.packId ? (resolvePackSlug(entry.packId, packSlugMap) || ruleSystem) : ruleSystem;
+                const packName = !entry.isHomebrew && entry.packId ? resolvePackName(entry.packId, packNameMap) : null;
+                const statblockSystem = entry.isHomebrew
+                  ? ruleSystem
+                  : resolveStatblockSystem(ruleSystem, entry.packId, packMap);
                 return (
                   <li key={entry.id} className="border border-subtle rounded p-2 text-xs space-y-2 min-w-0">
                     <div
