@@ -1273,6 +1273,32 @@ export class RulesService implements OnModuleInit {
     if (base.kind !== 'base') {
       throw new BadRequestException(`extendsPackSlug "${extendsPackSlug}" must identify a base pack`);
     }
+    if (kind === 'extension') {
+      const selectedCampaigns = await this.db
+        .select({ id: campaigns.id, ruleSystem: campaigns.ruleSystem, enabledPackSlugs: campaigns.enabledPackSlugs })
+        .from(campaigns);
+      const incompatibleCampaignId = this.findCampaignMissingExtensionBase(
+        selectedCampaigns,
+        slug,
+        extendsPackSlug,
+      );
+      if (incompatibleCampaignId !== undefined) {
+        throw new ConflictException(
+          `Rule pack "${slug}" cannot become an extension of "${extendsPackSlug}" while campaign ${incompatibleCampaignId} enables it without that base pack`,
+        );
+      }
+    }
+  }
+
+  private findCampaignMissingExtensionBase(
+    campaignRows: Array<{ id: number; ruleSystem: string; enabledPackSlugs: string }>,
+    extensionSlug: string,
+    baseSlug: string,
+  ): number | undefined {
+    return campaignRows.find((campaign) => {
+      const enabled = fromJsonText<string[]>(campaign.enabledPackSlugs, []);
+      return enabled.includes(extensionSlug) && campaign.ruleSystem !== baseSlug && !enabled.includes(baseSlug);
+    })?.id;
   }
 
   private assertOpenLicense(license: string): void {
@@ -2423,6 +2449,22 @@ export class RulesService implements OnModuleInit {
           if (primaryCampaign || dependentExtension) {
             throw new ConflictException(
               `Rule pack "${before.slug}" cannot be changed from base to ${nextKind} while campaigns or installed extensions depend on it as a base`,
+            );
+          }
+        }
+        if (nextKind === 'extension' && nextExtendsPackSlug) {
+          const selectedCampaigns = tx
+            .select({ id: campaigns.id, ruleSystem: campaigns.ruleSystem, enabledPackSlugs: campaigns.enabledPackSlugs })
+            .from(campaigns)
+            .all();
+          const incompatibleCampaignId = this.findCampaignMissingExtensionBase(
+            selectedCampaigns,
+            before.slug,
+            nextExtendsPackSlug,
+          );
+          if (incompatibleCampaignId !== undefined) {
+            throw new ConflictException(
+              `Rule pack "${before.slug}" cannot become an extension of "${nextExtendsPackSlug}" while campaign ${incompatibleCampaignId} enables it without that base pack`,
             );
           }
         }

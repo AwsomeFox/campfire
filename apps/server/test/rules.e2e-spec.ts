@@ -2253,6 +2253,29 @@ describe('rules / rule packs — a campaign that already stores an importer-only
       await fake.close();
     }
   });
+
+  it('JSON import drops an installed supplement instead of selecting it as the primary rule system', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const slug = 'import-content-only-pack';
+    await db.insert(rulePacks).values({
+      slug,
+      name: 'Import Content Only Pack',
+      version: '1',
+      license: 'CC0',
+      sourceUrl: '',
+      kind: 'supplement',
+      installedAt: new Date().toISOString(),
+      entryCount: 0,
+    });
+
+    const importRes = await request(server)
+      .post('/api/v1/campaigns/import')
+      .set(preexistingDm)
+      .send({ campaign: { name: 'Imported Content Campaign', ruleSystem: slug } });
+
+    expect(importRes.status).toBe(201);
+    expect(importRes.body.ruleSystem).toBe('');
+  });
 });
 
 /**

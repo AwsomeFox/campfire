@@ -2703,13 +2703,17 @@ export class CampaignsService {
       ruleSystem = ruleSystemSrc;
       customMechanicsProfile = JSON.stringify(profileParsed.data);
     } else if (ruleSystemSrc) {
-      const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystemSrc)).limit(1);
+      const [pack] = await this.db
+        .select({ id: rulePacks.id, kind: rulePacks.kind })
+        .from(rulePacks)
+        .where(eq(rulePacks.slug, ruleSystemSrc))
+        .limit(1);
       // Issue #2081: an installed-but-importer-only pack (no ADAPTERS entry — see
       // isImporterOnlyRuleSystemSlug) is treated exactly like a dangling slug on this path —
       // dropped to '' rather than selected — matching this function's existing degrade-not-fail
       // philosophy for every other unusable ruleSystem case here (missing pack, invalid
       // narrationLanguage/aiExternalContentPolicy). The rest of the export still imports.
-      if (pack && !isImporterOnlyRuleSystemSlug(ruleSystemSrc, true)) ruleSystem = ruleSystemSrc;
+      if (pack?.kind === 'base' && !isImporterOnlyRuleSystemSlug(ruleSystemSrc, true)) ruleSystem = ruleSystemSrc;
     }
     const requestedEnabledPackSlugs = Array.isArray(campaignSrc.enabledPackSlugs)
       ? campaignSrc.enabledPackSlugs.filter((value): value is string => typeof value === 'string')

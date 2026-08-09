@@ -119,6 +119,94 @@ describe('RulesService unit coverage tests', () => {
     await expect(rulesService.enqueueUploadInstall(reclassification, adminActor)).rejects.toThrow(ConflictException);
 
     await db.update(campaigns).set({ ruleSystem: '' }).where(eq(campaigns.id, campaignId));
+    const [otherBase] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'other-core-rules',
+        name: 'Other Core Rules',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'base',
+        installedAt: nowIso(),
+        entryCount: 0,
+      })
+      .returning();
+    await db
+      .update(campaigns)
+      .set({ enabledPackSlugs: JSON.stringify([base.slug]) })
+      .where(eq(campaigns.id, campaignId));
+    await expect(
+      rulesService.enqueueUploadInstall(
+        {
+          ...reclassification,
+          pack: { ...reclassification.pack, kind: 'extension', extendsPackSlug: otherBase.slug },
+        },
+        adminActor,
+      ),
+    ).rejects.toThrow(ConflictException);
+
+    const [compatibleSupplement] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'convertible-supplement',
+        name: 'Convertible Supplement',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'supplement',
+        installedAt: nowIso(),
+        entryCount: 0,
+      })
+      .returning();
+    await db
+      .update(campaigns)
+      .set({ enabledPackSlugs: JSON.stringify([compatibleSupplement.slug]) })
+      .where(eq(campaigns.id, campaignId));
+    await expect(
+      rulesService.enqueueUploadInstall(
+        {
+          source: 'upload',
+          pack: {
+            slug: compatibleSupplement.slug,
+            name: compatibleSupplement.name,
+            license: 'CC0',
+            kind: 'extension',
+            extendsPackSlug: otherBase.slug,
+          },
+          entries: [{ slug: 'entry', name: 'Entry', type: 'other' }],
+        },
+        adminActor,
+      ),
+    ).rejects.toThrow(ConflictException);
+
+    const extensionUpload = {
+      source: 'upload' as const,
+      pack: {
+        slug: compatibleSupplement.slug,
+        name: compatibleSupplement.name,
+        license: 'CC0',
+        kind: 'extension' as const,
+        extendsPackSlug: otherBase.slug,
+      },
+      entries: [{ slug: 'entry', name: 'Entry', type: 'other' as const }],
+    };
+    await db
+      .update(campaigns)
+      .set({ enabledPackSlugs: JSON.stringify([otherBase.slug, compatibleSupplement.slug]) })
+      .where(eq(campaigns.id, campaignId));
+    await expect(
+      rulesService.installFromUpload(extensionUpload, adminActor, () => {
+        // Simulate a campaign dropping the required base after the enqueue-time
+        // relationship check but before the upload transaction commits.
+        db.update(campaigns)
+          .set({ enabledPackSlugs: JSON.stringify([compatibleSupplement.slug]) })
+          .where(eq(campaigns.id, campaignId))
+          .run();
+      }),
+    ).rejects.toThrow(ConflictException);
+
+    await db.update(campaigns).set({ enabledPackSlugs: '[]' }).where(eq(campaigns.id, campaignId));
     const [extension] = await db
       .insert(rulePacks)
       .values({
