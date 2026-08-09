@@ -31,8 +31,13 @@ deleting and re-adding it.
 ## Run the round
 
 1. **Roll initiative** — fills initiative for everyone who doesn't have one yet
-   (d20 + modifier). You can also set values by hand.
-2. **Start** — sorts by initiative and begins round 1, highlighting the current turn.
+   (d20 + modifier). You can also set values by hand. Some rule systems have no
+   initiative roll at all — Ironsworn: Starforged is the one Campfire ships — and there
+   this control isn't shown: **turn order is the roster order**, so drag a combatant (or
+   use its move-up / move-down / "move after" menu) to arrange it, and Start doesn't wait
+   on a roll.
+2. **Start** — sorts by initiative and begins round 1, highlighting the current turn. On
+   a system with no initiative roll it begins round 1 in the roster order you arranged.
 3. **Next turn** — advances the highlight; wrapping around bumps the round counter.
 4. **Deal damage / heal** — the ± buttons on each combatant adjust HP (clamped at 0
    and max). Rule-aware controls appear only for adapters that support direct-damage
