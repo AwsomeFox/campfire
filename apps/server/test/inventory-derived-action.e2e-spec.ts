@@ -1161,6 +1161,27 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(after.body.equippedActionSource).toBeNull();
   });
 
+  it('a rename never resurrects an action the owner just deleted', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'removal-race-slot' });
+
+    // Stand in for a `PATCH { equippedAction: null }` landing while a rename was deriving:
+    // the removal changes no fingerprint input, so nothing else would notice it.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems)
+      .set({ equippedAction: null, equippedActionSource: null })
+      .where(eq(inventoryItems.id, itemId))
+      .run();
+
+    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Renamed After Removal' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.name).toBe('Renamed After Removal');
+    // The human's removal stands; the rename applies with nothing to mismatch.
+    expect(renamed.body.equippedAction).toBeNull();
+    expect(renamed.body.equippedActionSource).toBeNull();
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

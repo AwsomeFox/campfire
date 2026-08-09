@@ -72,7 +72,7 @@ describe('resolveEquippedActionWrite — the whole reachable state (#2097)', () 
 
   it('always returns exactly one of the four writes', () => {
     const kinds = new Set(STATES.map((s) => resolveEquippedActionWrite(s).kind));
-    expect([...kinds].sort()).toEqual(['authored', 'clear', 'derived', 'leave']);
+    expect([...kinds].sort()).toEqual(['authored', 'clear', 'conflict', 'derived', 'leave']);
   });
 
   // ---- the invariants every round of review was really about ----
@@ -97,17 +97,29 @@ describe('resolveEquippedActionWrite — the whole reachable state (#2097)', () 
     }
   });
 
-  it('a losing rename never destroys the action a concurrent writer just derived', () => {
-    // Review (chatgpt-codex-connector P2). A rename arms nothing, so a stale one has no
-    // safety reason to clear — and clearing would erase a fresh, correct action from the
-    // writer that won, leaving the item granting nothing until someone equips again. An
-    // ownership change is excluded: discarding the action there is a privacy rule, not a
-    // safety-of-numbers one, and it outranks preserving anyone's work.
+  it('never resurrects an action a human explicitly removed mid-flight', () => {
+    // Review (chatgpt-codex-connector P2): a rename-only request changes no fingerprint
+    // input, so a concurrent `PATCH { equippedAction: null }` would otherwise pass every
+    // check and put back exactly what the user just deleted.
+    for (const s of STATES) {
+      if (!shouldDeriveEquippedAction(s)) continue;
+      if (s.moved || s.equipTransition || !s.existingHasAction || s.freshHasAction) continue;
+      expect(resolveEquippedActionWrite(s).kind).toBe('leave');
+    }
+  });
+
+  it('a losing rename is a conflict, never a silent mismatch or a silent discard', () => {
+    // A rename applies its new name whatever happens to the action, so preserving the
+    // winner's action leaves the item named C granting an action named B — permanently.
+    // Discarding the winner's fresh, correct action is no better. Neither can be chosen
+    // silently, so the caller retries. An ownership change is excluded: discarding there is
+    // a privacy rule and outranks preserving anyone's work.
     for (const s of STATES) {
       if (!shouldDeriveEquippedAction(s)) continue;
       const staleOrEmpty = !s.derivationInputsUnchanged || !s.derivationProducedAction;
       if (!staleOrEmpty || s.equipTransition || s.moved || !s.freshHasAction) continue;
-      expect(resolveEquippedActionWrite(s).kind).toBe('leave');
+      if (s.freshProvenance === 'manual') continue; // a human's action wins outright — `leave`
+      expect(resolveEquippedActionWrite(s).kind).toBe('conflict');
     }
   });
 
@@ -125,7 +137,8 @@ describe('resolveEquippedActionWrite — the whole reachable state (#2097)', () 
       // than clearing — see the case above. This invariant is about the EQUIP path, which is
       // the one that would otherwise go on to arm stale mechanics.
       const renameLosingTheRace = !s.equipTransition && !s.moved && s.freshHasAction;
-      if (staleOrEmpty && !concurrentManual && !renameLosingTheRace) expect(write.kind).toBe('clear');
+      const humanRemovedIt = !s.moved && !s.equipTransition && s.existingHasAction && !s.freshHasAction;
+      if (staleOrEmpty && !concurrentManual && !renameLosingTheRace && !humanRemovedIt) expect(write.kind).toBe('clear');
     }
   });
 
@@ -141,10 +154,23 @@ describe('resolveEquippedActionWrite — the whole reachable state (#2097)', () 
   });
 
   it('clears on every ownership change that does not author or derive', () => {
+    // A move never resolves to `leave` or `conflict`: the action is private to the character
+    // it was granted to, so an ownership change always disposes of it one way or the other.
     for (const s of STATES) {
       if (!s.moved || s.authoredProvided) continue;
       const write = resolveEquippedActionWrite(s);
       expect(['clear', 'derived']).toContain(write.kind);
+    }
+  });
+
+  it('only ever conflicts on a rename, never on an equip or a move', () => {
+    for (const s of STATES) {
+      if (resolveEquippedActionWrite(s).kind !== 'conflict') continue;
+      expect(s.equipTransition).toBe(false);
+      expect(s.moved).toBe(false);
+      expect(s.renameOfDerivedAction).toBe(true);
+      // And only when there is genuinely a competing action to reconcile against.
+      expect(s.freshHasAction).toBe(true);
     }
   });
 

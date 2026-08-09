@@ -1201,6 +1201,17 @@ export class InventoryService {
           derivationProducedAction: derivedOnEquip != null,
         });
 
+        if (actionWrite.kind === 'conflict') {
+          // A rename that lost its race — see `resolveEquippedActionWrite`. Same shape as the
+          // slot-conflict and owner-changed conflicts this transaction already raises, so the
+          // caller refetches and retries rather than committing a row whose name and granted
+          // action disagree.
+          throw new ConflictException({
+            code: 'INVENTORY_ACTION_CHANGED',
+            message: `Item ${id}'s equipped action changed after this request was read — refetch and retry the rename.`,
+          });
+        }
+
         if (actionWrite.kind === 'authored') {
           // Review (chatgpt-codex-connector P1, Copilot): an authored action's structured
           // `spec` is what the resolver ROLLS; `toHit`/`damage` are only what it shows. A

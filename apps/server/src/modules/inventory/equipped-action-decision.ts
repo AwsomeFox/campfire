@@ -31,7 +31,15 @@ export type EquippedActionWrite =
   /** Store the caller's own action and mark it `manual`. */
   | { kind: 'authored' }
   /** Store this request's derivation and mark it `derived`. */
-  | { kind: 'derived' };
+  | { kind: 'derived' }
+  /**
+   * The write cannot be reconciled — the caller must refetch and retry. Raised for a rename
+   * that lost its race: applying it would leave the item named one thing while granting an
+   * action named another, and neither silently winning nor silently discarding the other
+   * writer's work is honest. The service turns this into a 409, the way it already does for
+   * a slot conflict and an owner change.
+   */
+  | { kind: 'conflict' };
 
 /**
  * The subset of the state that decides whether a derivation is worth ATTEMPTING — known
@@ -97,6 +105,16 @@ export function resolveEquippedActionWrite(state: EquippedActionDecision): Equip
     const concurrentManual = !state.moved && state.freshHasAction && state.freshProvenance === 'manual';
     if (concurrentManual) return { kind: 'leave' };
 
+    // A concurrent EXPLICIT removal. Review (chatgpt-codex-connector P2): a rename-only
+    // request that began from a derived action does not change any fingerprint input, so a
+    // `PATCH { equippedAction: null }` landing mid-derivation would otherwise pass every
+    // check and resurrect exactly what the user just deleted. The removal is a human
+    // decision and outranks a rename's incidental re-derivation; the rename still applies,
+    // and with no action on the row there is no name to mismatch. An EQUIP is excluded —
+    // equipping is the documented way to ask for a fresh derivation.
+    const concurrentRemoval = !state.moved && !state.equipTransition && state.existingHasAction && !state.freshHasAction;
+    if (concurrentRemoval) return { kind: 'leave' };
+
     if (state.derivationInputsUnchanged && state.derivationProducedAction) return { kind: 'derived' };
 
     // The derivation cannot land. What that MEANS depends on why this request was deriving.
@@ -113,10 +131,18 @@ export function resolveEquippedActionWrite(state: EquippedActionDecision): Equip
     // exists; the rename simply loses the race for the action's title. Leave it be.
     // …but never when the item is CHANGING HANDS. An action is private to the character it
     // was granted to, so an ownership change discards it whatever else is true — that rule
-    // outranks preserving a concurrent writer's work, and the state sweep caught the carve-out
-    // violating it.
+    // outranks preserving a concurrent writer's work, and the state sweep caught an earlier
+    // version of this carve-out violating it.
+    //
+    // Review (chatgpt-codex-connector P2), correcting the previous round: this branch is
+    // only ever reached by a RENAME (the sole non-equip trigger), and a rename writes the
+    // item's new name regardless. So preserving the winner's action would leave the item
+    // named C while permanently granting an action named B — the mismatch the rename was
+    // supposed to fix, made permanent. Discarding the winner's fresh, correct action is no
+    // better. Neither side can be chosen silently, so the caller is told to refetch and
+    // retry, exactly as a slot conflict or an owner change already does here.
     const equipWouldArmIt = state.equipTransition;
-    if (!equipWouldArmIt && !state.moved && state.freshHasAction) return { kind: 'leave' };
+    if (!equipWouldArmIt && !state.moved && state.freshHasAction) return { kind: 'conflict' };
 
     return { kind: 'clear' };
   }
