@@ -154,12 +154,14 @@ export default function CampaignAuditPage() {
 
   useEffect(() => {
     if (!Number.isFinite(cid) || !isDm) {
+      trashRefreshGeneration.current += 1;
       setTrashedTimelineEventIds(null);
       return;
     }
     const onFocus = () => void refreshTrashedTimelineEventIds();
     window.addEventListener('focus', onFocus);
     return () => {
+      trashRefreshGeneration.current += 1;
       window.removeEventListener('focus', onFocus);
     };
   }, [cid, isDm, refreshTrashedTimelineEventIds]);

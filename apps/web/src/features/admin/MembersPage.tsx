@@ -111,19 +111,34 @@ export default function MembersPage() {
     isDm,
     t('admin.errors.loadAuditLog'),
   );
-  const trashPanel = usePanelData<TrashedEntity[]>(
-    useCallback(() => api.get<TrashedEntity[]>(`${API}/campaigns/${id}/trash`), [id]),
-    isDm,
-    t('errors.loadFailed'),
-  );
+  const [trashedTimelineEventIds, setTrashedTimelineEventIds] = useState<ReadonlySet<number> | null>(null);
+  const trashRefreshGeneration = useRef(0);
+  const refreshTrashedTimelineEventIds = useCallback(async () => {
+    const generation = ++trashRefreshGeneration.current;
+    setTrashedTimelineEventIds(null);
+    try {
+      const items = await api.get<TrashedEntity[]>(`${API}/campaigns/${id}/trash`);
+      if (generation === trashRefreshGeneration.current) {
+        setTrashedTimelineEventIds(new Set(items.filter((item) => item.type === 'timeline_event').map((item) => item.id)));
+      }
+    } catch {
+      if (generation === trashRefreshGeneration.current) setTrashedTimelineEventIds(null);
+    }
+  }, [id]);
   useEffect(() => {
-    if (!isDm) return;
-    const onFocus = () => trashPanel.retry();
+    if (!isDm) {
+      trashRefreshGeneration.current += 1;
+      setTrashedTimelineEventIds(null);
+      return;
+    }
+    void refreshTrashedTimelineEventIds();
+    const onFocus = () => void refreshTrashedTimelineEventIds();
     window.addEventListener('focus', onFocus);
     return () => {
+      trashRefreshGeneration.current += 1;
       window.removeEventListener('focus', onFocus);
     };
-  }, [isDm, trashPanel.retry]);
+  }, [isDm, refreshTrashedTimelineEventIds]);
   const grantsPanel = usePanelData<GuestDmGrant[]>(
     useCallback(() => api.get<GuestDmGrant[]>(`${API}/campaigns/${id}/members/grants`), [id]),
     isDm,
@@ -252,11 +267,7 @@ export default function MembersPage() {
             entries={auditPanel.data ?? []}
             members={members ?? []}
             campaignId={id}
-            trashedTimelineEventIds={
-              trashPanel.data == null || trashPanel.loading || trashPanel.error != null
-                ? null
-                : new Set(trashPanel.data.filter((item) => item.type === 'timeline_event').map((item) => item.id))
-            }
+            trashedTimelineEventIds={trashedTimelineEventIds}
           />
         )}
       </Card>
