@@ -3804,7 +3804,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       await request(server)
         .post(`/api/v1/encounters/${encounterId}/combatants`)
         .set(dm)
-        .send({ kind: 'npc', npcId, name: 'The Traitor', hpMax: 50 })
+        .send({ kind: 'npc', npcId, name: 'The Traitor', hpMax: 50, statblock: { abilityScores: { STR: 12 } } })
     ).body.id;
     const duplicateId = (
       await request(server)
@@ -3812,6 +3812,14 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
         .set(dm)
         .send({ kind: 'npc', name: 'The Traitor 2', hpMax: 50, duplicateOfCombatantId: combatantId })
     ).body.id;
+    const hiddenCreatureRoll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${duplicateId}/checks/roll`)
+      .set(dm)
+      .send({ checkId: 'ability:STR' });
+    expect(hiddenCreatureRoll.status).toBe(201);
+    const hiddenCreatureRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(JSON.stringify(hiddenCreatureRolls.body)).not.toMatch(/Traitor/);
+    expect(hiddenCreatureRolls.body).toEqual(expect.arrayContaining([expect.objectContaining({ label: UNKNOWN_COMBATANT_LABEL })]));
     // The DM still sees the real identity link + name.
     const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     const dmC = (
