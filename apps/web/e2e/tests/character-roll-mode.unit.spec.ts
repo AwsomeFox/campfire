@@ -11,7 +11,15 @@ import {
   hasInitiativeRollForAdapter,
   hasNeutralD20ChecksForAdapter,
 } from '@campfire/schema';
-import { ROLL_MODES, rollModeOptions, rollModeSummary, resolveRollMode, rollModeForClick, type RollMode } from '../../src/features/characters/rollMode';
+import {
+  ROLL_MODES,
+  rollModeOptions,
+  rollModeSummary,
+  resolveRollMode,
+  rollModeForClick,
+  showsInitiativeTile,
+  type RollMode,
+} from '../../src/features/characters/rollMode';
 
 /**
  * Issue #713 — touch + keyboard roll-mode chooser.
@@ -257,5 +265,30 @@ test.describe('neutral initiative declares the score it reads', () => {
       }
     }
     expect(mismatches).toEqual([]);
+  });
+});
+
+/**
+ * Codex review on #2115 — enforcing `hasInitiativeRoll` in the shared catalog stops the
+ * ROLL, but an absent entry renders as "Initiative —", i.e. a nonexistent mechanic shown as
+ * merely unset. The tile's own visibility therefore has to ask the capability directly; this
+ * regressed once when the capability moved into the catalog and this half was assumed to
+ * have moved with it, which is why it is a named function with its own test.
+ */
+test.describe('showsInitiativeTile — the tile asks the capability, not just the catalog', () => {
+  test('a system with no initiative roll shows no tile', () => {
+    expect(showsInitiativeTile(StarforgedAdapter)).toBe(false);
+  });
+
+  test('a group-initiative system shows no PER-CHARACTER tile, though it does roll', () => {
+    const group = OSR_VARIANT_ADAPTERS['swords-wizardry'];
+    expect(hasInitiativeRollForAdapter(group)).toBe(true);
+    expect(showsInitiativeTile(group)).toBe(false);
+  });
+
+  test('individual-initiative systems keep the tile', () => {
+    expect(showsInitiativeTile(Dnd5eAdapter)).toBe(true);
+    expect(showsInitiativeTile(BasicFantasyAdapter)).toBe(true);
+    expect(showsInitiativeTile(OpenLegendAdapter)).toBe(true);
   });
 });

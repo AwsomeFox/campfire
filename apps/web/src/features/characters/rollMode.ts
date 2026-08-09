@@ -14,6 +14,25 @@
  * notion would simply not render the chooser (the action surface gates on
  * `RollMode.isApplicable`).
  */
+import { hasInitiativeRollForAdapter, initiativeModelForAdapter, type RuleSystemAdapter } from '@campfire/schema';
+
+/**
+ * Whether the character sheet shows an initiative tile for this system.
+ *
+ * Two different questions, and `checkCatalogForAdapter` only answers the first. Whether the
+ * roll may HAPPEN is enforced there, so a system with no initiative (Starforged) contributes
+ * no catalog entry and REST/MCP cannot roll one. But an absent entry renders as
+ * "Initiative —", which reads as a real stat nobody filled in — so whether the TILE appears
+ * has to ask `hasInitiativeRoll` directly. A group-initiative system is the mirror case: its
+ * entry is legitimate (the encounter rolls once per side) and only the per-character tile
+ * would contradict it.
+ *
+ * Extracted so the rule is unit-testable against real adapters; it regressed once when the
+ * capability moved into the catalog and this half was assumed to have moved with it.
+ */
+export function showsInitiativeTile(adapter: RuleSystemAdapter): boolean {
+  return hasInitiativeRollForAdapter(adapter) && initiativeModelForAdapter(adapter).mode !== 'group';
+}
 
 /** The three roll modes a d20 check/attack can be taken with. */
 export type RollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';

@@ -61,7 +61,6 @@ import {
   checkCatalogForAdapter,
   checkRollExpr,
   hasAdapterOwnedAttackRoll,
-  initiativeModelForAdapter,
   sortCheckCatalog,
   formatCheckBreakdown,
   restOptionsForAdapter,
@@ -147,7 +146,7 @@ import {
   rollPreview,
 } from '../../lib/characterStats';
 import { RollModeChooser } from './RollModeChooser';
-import { rollModeForClick, toCheckRollMode, rollModeSummary } from './rollMode';
+import { rollModeForClick, showsInitiativeTile, toCheckRollMode, rollModeSummary } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -1532,12 +1531,9 @@ function CharacterVitalsRail({
   defenseLabel: string;
   defenseTitle: string;
 }) {
-  // A system with NO initiative roll (Starforged) already contributes no entry — that is
-  // enforced in `checkCatalogForAdapter`, so REST and MCP cannot roll it either. This adds
-  // only the DISPLAY rule the catalog cannot express: group initiative IS rolled, just once
-  // per side, so its entry is legitimate for the encounter while a per-character tile here
-  // would contradict both the adapter and the encounter's own group flow.
-  const showInitiative = initiativeModelForAdapter(adapter).mode !== 'group';
+  // See `showsInitiativeTile`: the catalog decides whether the roll may HAPPEN, this decides
+  // whether the tile appears at all — an absent entry would otherwise render "Initiative —".
+  const showInitiative = showsInitiativeTile(adapter);
   const initiative = useMemo(() => {
     const def = checkCatalogForAdapter(adapter, character).find((c) => c.category === 'initiative') ?? null;
     if (!def) return null;
