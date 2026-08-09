@@ -78,6 +78,103 @@ assert.deepStrictEqual(extractJsxTextNodes('<div>api.post</div>'), ['api.post'])
 // narrow rule (it is still not a hardcoded UI string worth flagging).
 assert.deepStrictEqual(extractJsxTextNodes('(row) => row < limit'), []);
 
+// --- extractJsxTextNodes: further non-JSX shapes beyond `=> fn(` (issue #2107) ---
+//
+// #2106 closed the concise-arrow-plus-generic shape. Two more classes of the same underlying
+// defect (the regex has no real JSX awareness) were found alongside it: comparison-operator
+// expressions, and generic/union type annotations NOT gated by `=>`.
+
+// Shape 1 — comparison-operator expression, `>=` bookend: `status >= 400 && err.status < 500`
+// reads the `>` of `>=` and the `<` of the second comparison as if they bookended JSX text.
+// The exact #2107 repro from ActionUseFlow.tsx -> MUST NOT flag.
+assert.deepStrictEqual(
+  extractJsxTextNodes('const is4xx = err instanceof ApiError && err.status >= 400 && err.status < 500;'),
+  [],
+);
+
+// Shape 1 — a PLAIN `>` (not `>=`) used as greater-than, e.g. RunSessionPage.tsx's
+// `rect.bottom > top && rect.top < bottom` -> MUST NOT flag. This confirms the exclusion is not
+// merely piggybacking on the existing `=>`-lookback gate (there is no `=` here at all).
+assert.deepStrictEqual(extractJsxTextNodes('if (rect.bottom > top && rect.top < bottom) return;'), []);
+
+// Shape 1 — `||` variant, and a longer member-access chain on both sides -> MUST NOT flag.
+assert.deepStrictEqual(
+  extractJsxTextNodes('if (num >= 1 && num <= 9) levelsSet.add(num);'),
+  [],
+);
+
+// Shape 1's exclusion must not swallow real JSX text that happens to sit on the same line as a
+// comparison -> the comparison is excluded, the real text is still flagged.
+assert.deepStrictEqual(
+  extractJsxTextNodes('if (num >= 1 && num < 9) return <span>Save Changes</span>;'),
+  ['Save Changes'],
+);
+
+// Shape 2 — generic/union type annotation NOT gated by `=>`: a `;`-separated object-literal
+// type with nested generics, the exact RunSessionPage.tsx repro (`Map<...>; stale: Map<...>;
+// emitted: Set<...>`) -> MUST NOT flag either fragment.
+assert.deepStrictEqual(
+  extractJsxTextNodes(
+    'const ref = useRef(new Map<string, { targets: Set<number>; stale: Map<number, X>; emitted: Set<number> }>());',
+  ),
+  [],
+);
+
+// Shape 2 — `new Set<...>` following a closing `)`, the exact RunSessionPage.tsx repro
+// (`(), emitted: new Set<...>`) -> MUST NOT flag.
+assert.deepStrictEqual(
+  extractJsxTextNodes(
+    'const op = { targets, stale: new Map<number, X>(), emitted: new Set<number>() };',
+  ),
+  [],
+);
+
+// Shape 2 — a `)`-gated return-type union, the exact BattleMap.tsx repro
+// (`): void | Promise<...>`) -> MUST NOT flag.
+assert.deepStrictEqual(
+  extractJsxTextNodes('function updateAoe(id: string, patch: Partial<X>): void | Promise<void> {'),
+  [],
+);
+
+// Shape 2 — a generic function declaration parameter, the exact BattleMap.tsx repro
+// (`(ref: RefObject<...>`) -> MUST NOT flag.
+assert.deepStrictEqual(
+  extractJsxTextNodes('function useElementSize<T extends HTMLElement>(ref: RefObject<T | null>) {'),
+  [],
+);
+
+// Shape 2, `=>`-gated sub-case — a union return type immediately after `=>` (this shape IS
+// preceded by a literal `=`, but #2106's own IDENTIFIER_CHAIN_RE rejects it because of the
+// space and `|`; TYPE_UNION_CHAIN_RE is the sibling that covers it), the exact BattleMap.tsx
+// repro (`=> void | Promise<...>`) -> MUST NOT flag.
+assert.deepStrictEqual(
+  extractJsxTextNodes("onUpdateAoe?: (id: string) => void | Promise<void>;"),
+  [],
+);
+
+// Shape 2's exclusion must not widen into a hole: real JSX text starting with the SAME leading
+// punctuation the exclusion gates on (`;`, `,`, `(`, `)`, `:`) must still be flagged, proving
+// the leading-punctuation + bare-identifier-tail combination is not, by itself, over-broad.
+assert.deepStrictEqual(extractJsxTextNodes('<span>: Ready</span>'), [': Ready']);
+assert.deepStrictEqual(extractJsxTextNodes('<span>(Advantage)</span>'), ['(Advantage)']);
+
+// Shape 2's exclusion must not affect ordinary JSX text immediately followed by a real closing
+// tag, even when that text is a single bare capitalized word matching a type-like name — the
+// regression case that motivated requiring the leading-punctuation gate in the first place
+// rather than a tail-only check (a bare `<th>Type</th>` MUST still be flagged).
+assert.deepStrictEqual(extractJsxTextNodes('<th>Type</th>'), ['Type']);
+
+// A genuine JSX text node elsewhere in the same source as several #2107 shapes -> MUST still
+// flag, proving the fix does not suppress real hardcoded text anywhere in the file.
+assert.deepStrictEqual(
+  extractJsxTextNodes(
+    'const ref = useRef(new Map<string, { stale: Map<number, X> }>());\n' +
+      'if (num >= 1 && num < 9) return null;\n' +
+      '<button>Save Changes</button>',
+  ),
+  ['Save Changes'],
+);
+
 // --- looksUntranslated (issue #2059) ---
 
 // English word copied verbatim into the ar slot, no Arabic script -> MUST flag

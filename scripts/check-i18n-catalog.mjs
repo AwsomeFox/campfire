@@ -227,6 +227,46 @@ function checkHardcodedSurfaces() {
 // `api.post` — the shape of a call target or return-type name, never real prose.
 const IDENTIFIER_CHAIN_RE = /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/;
 
+// Issue #2107 (extends #2106's `=>`-gated exclusion): that exclusion only recognized a BARE
+// identifier/member chain immediately after `=>` (`=> api.post<Foo>(`). A union return-type
+// annotation — `=> void | Promise<void>` — bookends the identical `=>`-then-generic shape but
+// fails the chain-only check above because of the space and `|`, so it still gets flagged. Add
+// a sibling shape: one or more identifier/member chains joined by `|`, nothing else.
+const TYPE_UNION_CHAIN_RE =
+  /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\s*\|\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)+$/;
+
+// Issue #2107 shape 1: a numeric/boolean COMPARISON expression using `>`/`>=` and `<` bookends
+// the identical `>text<` shape — e.g. `status >= 400 && err.status < 500` reads the `>` of `>=`
+// (or a plain `>` used as greater-than) and the `<` of the second comparison as if they
+// bookended JSX text, capturing "400 && err.status" (or "top && rect.top" for a bare `>`) in
+// between. Real JSX text is never a bare comparison operand joined by `&&`/`||`: the captured
+// text always reduces to EXACTLY an optional leading `=` (the second half of `>=`), an operand
+// (a number or identifier/member chain), `&&`/`||`, then another identifier/member chain —
+// nothing else — so this is safe to reject on content alone, with no position gate needed.
+const COMPARISON_EXPR_RE =
+  /^=?\s*[\w$]+(?:\.[A-Za-z_$][\w$]*)*\s*(?:&&|\|\|)\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/;
+
+// Issue #2107 shape 2: a generic/union type-annotation shape NOT gated by `=>` — e.g.
+// `; stale: Map<`, `(), emitted: new Set<`, `): void | Promise<`, `(ref: RefObject<`. The `>`
+// here closes an unrelated PRECEDING generic (`Set<number>`, `Partial<...>`) or a
+// parameter-list/return-type punctuation mark, and the following `<` opens the NEXT generic —
+// not a JSX tag. Two-sided content gate, mirroring #2106's own `=`-before-`>` reasoning: (a)
+// the captured text's first character is one of `;`, `,`, `(`, `)`, `:` — punctuation that can
+// never legally be the very first character of a real JSX text node, since a tag's `>` is
+// always followed by prose or whitespace, never a bare statement/parameter separator — and (b)
+// the text ends in a bare identifier/keyword, optionally "new "-prefixed (`new Set`) or
+// preceded by a `|` union member (`void | Promise`), confirming this is a type reference and
+// not prose that merely happens to start with that punctuation — and (c) the character
+// immediately after the closing `<` is NOT `/`. A real JSX text node is overwhelmingly followed
+// by its own closing tag (`</span>`, `</div>`, …), i.e. `<` then `/`; none of the confirmed
+// generic/union shapes are ever followed by `/` (they're followed by the generic's own type
+// argument, e.g. `number>`, `void>`, `T | null>`). Without (c), a contrived but real-shaped text
+// node like `<span>: Ready</span>` — leading `:`, trailing bare identifier "Ready" — would
+// satisfy (a) and (b) and get wrongly suppressed; (c) closes that hole because `: Ready` is
+// followed by `</span>`.
+const TYPE_ANNOTATION_LEADING_RE = /^[;,():]/;
+const TYPE_ANNOTATION_TAIL_RE = /(?:^|[\s;,:()|])(?:new\s+)?[A-Za-z_$][\w$]*$/;
+
 /**
  * Scans JSX source code for hardcoded user-facing plain text strings in text nodes (issue #1940).
  * Excludes attributes (data-testid, className, aria-*), numbers, dice notation (1d8+4, d20), punctuation, and t() calls.
@@ -256,7 +296,22 @@ export function extractJsxTextNodes(src) {
     // `={expr}` before it, never a dangling `=`) AND the captured text is nothing but such a
     // chain (no spaces, punctuation, or anything else prose would contain). This does not make
     // the scanner JSX-aware in general — it only rejects this one reported shape.
-    if (src[match.index - 1] === '=' && IDENTIFIER_CHAIN_RE.test(text)) continue;
+    if (
+      src[match.index - 1] === '=' &&
+      (IDENTIFIER_CHAIN_RE.test(text) || TYPE_UNION_CHAIN_RE.test(text))
+    )
+      continue;
+    // Issue #2107 shape 1: comparison-operator expressions (see COMPARISON_EXPR_RE above).
+    if (COMPARISON_EXPR_RE.test(text)) continue;
+    // Issue #2107 shape 2: generic/union type annotations not gated by `=>` (see
+    // TYPE_ANNOTATION_LEADING_RE / TYPE_ANNOTATION_TAIL_RE above). `match.index + raw.length + 2`
+    // is the character right after this match's closing `<` delimiter (`>` + raw + `<` + next).
+    if (
+      TYPE_ANNOTATION_LEADING_RE.test(text) &&
+      TYPE_ANNOTATION_TAIL_RE.test(text) &&
+      src[match.index + raw.length + 2] !== '/'
+    )
+      continue;
     matches.push(text);
   }
   return matches;
