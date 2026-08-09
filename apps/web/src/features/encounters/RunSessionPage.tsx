@@ -998,7 +998,15 @@ export default function RunSessionPage() {
    * picked Turn mid-combat would land on an empty Turn panel when opening a preparing
    * encounter. Comparing the stamp resolves during render, so the wrong tab never paints.
    */
-  const [panelTabChoice, setPanelTabChoice] = useState<{ eid: number; tab: PanelTab } | null>(null);
+  // Stamped with the lifecycle as well as the encounter: an explicit choice has to expire
+  // on exactly the transitions the default is re-derived on, or it outlives them. A player
+  // who clicked Turn during combat (or merely re-clicked the already-selected tab) kept
+  // `turn` after the fight ended, and the Turn section renders nothing once it is over —
+  // so the recomputed `party` default was overridden by a choice for a tab that no longer
+  // has any content.
+  const [panelTabChoice, setPanelTabChoice] = useState<{ eid: number; running: boolean; tab: PanelTab } | null>(
+    null,
+  );
   const defaultPanelTabRef = useRef<{ eid: number; running: boolean; tab: PanelTab } | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [diceTrayOpen, setDiceTrayOpen] = useState(false);
@@ -1237,7 +1245,9 @@ export default function RunSessionPage() {
     };
   }
   const panelTab: PanelTab =
-    (panelTabChoice?.eid === eid ? panelTabChoice.tab : null) ?? defaultPanelTabRef.current?.tab ?? 'party';
+    (panelTabChoice?.eid === eid && panelTabChoice.running === encounterRunning ? panelTabChoice.tab : null)
+    ?? defaultPanelTabRef.current?.tab
+    ?? 'party';
   const hpFeedbackSnapshotRef = useRef<{ encounterId: number; combatants: Map<number, HpFeedbackSnapshot> } | null>(null);
   const bulkHpFeedbackOperationsRef = useRef(new Map<string, { targets: Set<number>; stale: Map<number, HpFeedbackSnapshot>; emitted: Set<number> }>());
   const nextHpFeedbackIdRef = useRef(0);
@@ -4312,7 +4322,7 @@ export default function RunSessionPage() {
         { id: 'table', label: t('encounters.vtt.tabTable') },
       ]}
       activeTabId={panelTab}
-      onSelectTab={(id) => setPanelTabChoice({ eid, tab: id as PanelTab })}
+      onSelectTab={(id) => setPanelTabChoice({ eid, running: encounterRunning, tab: id as PanelTab })}
       panelOpen={panelOpen}
       onPanelOpenChange={setPanelOpen}
       attentionKey={attentionKey}

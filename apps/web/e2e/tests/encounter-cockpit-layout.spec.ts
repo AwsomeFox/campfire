@@ -364,6 +364,61 @@ test.describe('encounter cockpit panel collapse', () => {
       await restoreSeedEncounter(page);
     }
   });
+
+  test('each tab keeps its own scroll offset', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+
+      const body = page.locator('.cf-vtt-panel-body');
+      await openCockpitTab(page, 'table');
+      await body.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      const deep = await body.evaluate((el) => el.scrollTop);
+      test.skip(deep < 40, 'panel body is not scrollable at this viewport');
+
+      // One scroller serves all four sections, so without per-tab memory this offset
+      // carried straight over and Turn opened partway down (or at the browser's clamp).
+      await openCockpitTab(page, 'turn');
+      await expect(async () => {
+        expect(await body.evaluate((el) => el.scrollTop)).toBe(0);
+      }).toPass({ timeout: 3_000 });
+
+      // ...and coming back restores where Table was left, rather than resetting it too.
+      await openCockpitTab(page, 'table');
+      await expect(async () => {
+        expect(await body.evaluate((el) => el.scrollTop)).toBeGreaterThan(deep - 8);
+      }).toPass({ timeout: 3_000 });
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+
+  test('an explicit Turn choice expires when the fight ends', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+      await openCockpitTab(page, 'turn');
+
+      // Ending combat empties the Turn section — the summary lives under Party. An
+      // explicit choice stamped with the encounter alone survived that transition and
+      // pinned the viewer to a tab with nothing in it.
+      const ended = await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`);
+      expect(ended.ok(), `end encounter: ${await ended.text()}`).toBe(true);
+
+      await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true', {
+        timeout: 15_000,
+      });
+    } finally {
+      await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
 });
 
 test.describe('encounter cockpit across navigations', () => {

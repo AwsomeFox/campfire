@@ -12,7 +12,7 @@
  * open/closed state contract and tab semantics; it owns no encounter state, so
  * RunSessionPage keeps every permission, secrecy and sync decision it already had.
  */
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { scrollBehavior } from '../../../lib/prefersReducedMotion';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
@@ -216,6 +216,32 @@ export function EncounterVttShell({
     return () => cancelAnimationFrame(frame);
   }, [attentionKey]);
 
+  // One scroller serves all four sections, so its `scrollTop` used to carry straight
+  // across a tab change: after reading to the bottom of a long Table, selecting Turn
+  // landed on whatever happened to be at that offset — or, when the new section was
+  // shorter, on the browser's clamp of it — with the vitals and controls at the top of
+  // the panel off screen. Remember where each tab was left and restore it on the way
+  // back, which for a tab nobody has scrolled is simply the top.
+  const panelScrollRef = useRef(new Map<string, number>());
+  const renderedTabRef = useRef(activeTabId);
+  renderedTabRef.current = activeTabId;
+  const restoredTabRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const body = panelBodyRef.current;
+    if (!body) return;
+    if (restoredTabRef.current === activeTabId) return;
+    restoredTabRef.current = activeTabId;
+    body.scrollTop = panelScrollRef.current.get(activeTabId) ?? 0;
+  }, [activeTabId]);
+
+  // Recorded from the scroll event rather than saved when the tab changes: by the time a
+  // layout effect for the new tab runs, the browser has already clamped `scrollTop` to
+  // the newly visible content, so the outgoing tab's real offset is gone.
+  const onPanelBodyScroll = useCallback(() => {
+    const body = panelBodyRef.current;
+    if (body) panelScrollRef.current.set(renderedTabRef.current, body.scrollTop);
+  }, []);
+
   useEffect(() => {
     const move = pendingFocusRef.current;
     pendingFocusRef.current = null;
@@ -369,7 +395,7 @@ export function EncounterVttShell({
               </button>
           </div>
           {/* Scroll container only — each `VttPanelSection` inside is its own tabpanel. */}
-          <div className="cf-vtt-panel-body" ref={panelBodyRef}>
+          <div className="cf-vtt-panel-body" ref={panelBodyRef} onScroll={onPanelBodyScroll}>
             {panelSlot}
           </div>
         </aside>

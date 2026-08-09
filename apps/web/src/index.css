@@ -3441,7 +3441,11 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
 .cf-vtt-tray {
   position: absolute;
   right: var(--space-4);
-  bottom: 190px;
+  /* 190px clears the FAB and the initiative strip below it — but only when there IS 190px
+     of canvas. On a short canvas that offset puts the tray's own bottom edge above the
+     canvas top, so the Roll button opened a tray clipped entirely out of existence. Drop
+     the tray toward the floor as the canvas shrinks instead. */
+  bottom: min(190px, max(8px, calc(100% - 120px)));
   z-index: 13;
   width: min(320px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-4)));
   /* Bounded by the CANVAS, not the viewport: the tray is absolutely positioned inside a

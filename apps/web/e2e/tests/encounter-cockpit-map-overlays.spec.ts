@@ -13,6 +13,7 @@
  */
 import { expect, test } from '@playwright/test';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
+import { openCockpitDiceTray } from '../lib/encounterCockpit';
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAIAAAC0SDtlAAAA/klEQVR42gXBMQFAERRA0RdBAIMIRuOPYBBAhBfhBjCIYDSKYBBAhBdBhH+OiOCEIEThE7JQBRUQujCEJWzhCiY8QcTjPMETPZ8ne6pHPXi6Z3iWZ3uuxzzPI5JwiZCIiS+REzWhCRI9MRIrsRM3YYmXECm4QijEwlfIhVrQAoVeGIVV2IVbsMIriChOCUpUPiUrVVEFpStDWcpWrmLKU0QarhEasfE1cqM2tEGjN0ZjNXbjNqzxGiITNwmTOPkmeVInOmHSJ2OyJntyJzZ5E5GDO4RDPHyHfKgHPXDoh3FYh324Bzu8g4jhjGBE4zOyUQ01MLoxjGVs4xpmPOMHGqHKgaBDFtMAAAAASUVORK5CYII=',
@@ -211,6 +212,28 @@ test.describe('encounter cockpit — short canvas', () => {
       // Something rather than nothing, and never taller than the canvas holding it.
       expect(usable!.height).toBeGreaterThan(40);
       expect(usable!.height).toBeLessThanOrEqual(usable!.canvasHeight);
+
+      // Close the aside so the Roll button is unobstructed, then check the tray it opens
+      // is actually inside the canvas: a fixed 190px bottom offset on a canvas shorter
+      // than that put the tray's own bottom edge above the canvas top, so a visible Roll
+      // button opened something clipped out of existence.
+      await page.getByRole('button', { name: /Grid & fog/i }).click();
+      await openCockpitDiceTray(page);
+      const tray = await page.evaluate(() => {
+        const el = document.querySelector('.cf-vtt-tray') as HTMLElement | null;
+        const canvas = document.querySelector('.cf-vtt-main') as HTMLElement | null;
+        if (!el || !canvas) return null;
+        const a = el.getBoundingClientRect();
+        const b = canvas.getBoundingClientRect();
+        return {
+          visibleHeight: Math.round(Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)),
+          height: Math.round(a.height),
+        };
+      });
+      expect(tray, 'the dice tray must exist once opened').not.toBeNull();
+      expect(tray!.height).toBeGreaterThan(40);
+      // Essentially all of it on screen, not a sliver.
+      expect(tray!.visibleHeight).toBeGreaterThanOrEqual(tray!.height - 2);
     } finally {
       await page.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
       await restoreSeedEncounter(page);
