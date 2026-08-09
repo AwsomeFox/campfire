@@ -110,7 +110,13 @@ export function TableRail({
     // dice tray pinned under it. Only the middle row scrolls, which is what makes the tray
     // "pinned" rather than merely last: with the scroll on the rail itself the tray simply
     // scrolled away with everything else.
-    <div className="flex flex-col gap-3 min-w-0 2xl:h-full 2xl:grid 2xl:grid-rows-[auto_minmax(0,1fr)_auto] 2xl:gap-3">
+    //
+    // The bound is a viewport-relative `max-height` HERE, not `h-full`. `height:100%` resolves
+    // against the parent's HEIGHT, and the aside carries only `max-height` — so it resolved to
+    // `auto`, the grid sized to its content, `minmax(0,1fr)` never got squeezed, the overflow
+    // never engaged, and a long discussion put the tray below the fold again. `max-height` is
+    // definite enough to constrain the row while still letting a short rail stay short.
+    <div className="flex flex-col gap-3 min-w-0 2xl:grid 2xl:grid-rows-[auto_minmax(0,1fr)_auto] 2xl:gap-3 2xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)]">
       <div className="seg self-start inline-flex max-w-full" role="tablist" aria-label="Table rail sections">
         {tabs.map((t) => {
           const selected = tab === t;
