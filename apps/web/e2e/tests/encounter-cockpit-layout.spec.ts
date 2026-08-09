@@ -177,6 +177,53 @@ test.describe('encounter cockpit deep links', () => {
     }
   });
 
+  test('a tab picked during the retry window wins over the pending deep link', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {
+      data: { entityType: 'encounter', entityId: encounterId, body: 'Retry-window probe' },
+    });
+    expect(created.ok(), `create comment: ${await created.text()}`).toBe(true);
+    const commentId = ((await created.json()) as { id: number }).id;
+
+    try {
+      // Hold the comment list from the FIRST load, or the discussion has already rendered
+      // by the time we navigate and the resolver succeeds immediately — never entering the
+      // retry window this test is about.
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await page.route(`**/api/v1/campaigns/${campaignId}/comments**`, async (route) => {
+        await held;
+        await route.continue();
+      });
+
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await expect(page.locator(`#entity-comment-${commentId}`)).toHaveCount(0);
+
+      await page.evaluate(
+        ([c, e, id]) => {
+          window.history.pushState({}, '', `/c/${c}/encounters/${e}?comment=${id}#entity-comment-${id}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        },
+        [campaignId, encounterId, commentId] as const,
+      );
+
+      // The viewer answers the question themselves while the target is still loading.
+      await page.getByTestId('encounter-vtt-tab-log').click();
+      await expect(page.getByTestId('encounter-vtt-tab-log')).toHaveAttribute('aria-selected', 'true');
+
+      release();
+      // The comment arriving late must not yank them off the tab they just chose.
+      await page.waitForTimeout(3_000);
+      await expect(page.getByTestId('encounter-vtt-tab-log')).toHaveAttribute('aria-selected', 'true');
+    } finally {
+      await page.unrouteAll({ behavior: 'ignoreErrors' });
+      await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
+    }
+  });
+
   test('a deep link reopens a collapsed panel, not just its tab', async ({ page }) => {
     const { campaignId, encounterId } = seed();
     const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {

@@ -1209,6 +1209,21 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+
+  // is the opposite: the Turn tab is their sheet and their End turn. Either way the
+  // Turn tab only has content while combat is running, so a preparing or ended
+  // encounter always opens on the roster rather than on an empty panel.
+  // Resolved once, on the first render that has an encounter, and then frozen. Deriving it
+  // every render meant the tab moved under the viewer whenever an input changed — a co-DM
+  // demoted to player mid-session had the roster replaced by the turn workspace while they
+  // were reading it. A default is for the first paint, not a rule the panel keeps enforcing.
+  // Derived here rather than beside the markup: the turn-follow effect below needs to
+  // know whether the roster is actually on screen, and it runs long before render.
+  if (encounter && defaultPanelTabRef.current?.eid !== eid) {
+    defaultPanelTabRef.current = { eid, tab: !isDm && encounter?.status === 'running' ? 'turn' : 'party' };
+  }
+  const panelTab: PanelTab =
+    (panelTabChoice?.eid === eid ? panelTabChoice.tab : null) ?? defaultPanelTabRef.current?.tab ?? 'party';
   const hpFeedbackSnapshotRef = useRef<{ encounterId: number; combatants: Map<number, HpFeedbackSnapshot> } | null>(null);
   const bulkHpFeedbackOperationsRef = useRef(new Map<string, { targets: Set<number>; stale: Map<number, HpFeedbackSnapshot>; emitted: Set<number> }>());
   const nextHpFeedbackIdRef = useRef(0);
@@ -3732,7 +3747,12 @@ export default function RunSessionPage() {
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [encounter?.status, currentCombatantId]);
+    // `panelTab`/`panelOpen` are dependencies because a turn can advance while the roster
+    // is hidden — another tab, or the panel collapsed. `scrollIntoView` does nothing
+    // through a `display: none` ancestor, so without re-running when the roster comes
+    // back the new actor stays off-screen in a long list. The in-view check below makes
+    // the extra runs free when it is already visible.
+  }, [encounter?.status, currentCombatantId, panelTab, panelOpen]);
 
   // Issue #1917: `ApplyDamageBar` is now React.memo-wrapped, so its `targets`/`aoeHitContext`
   // array/object props and its `onApply`/`onApplyToAll`/`onDismiss` handlers are hoisted out
@@ -3850,18 +3870,6 @@ export default function RunSessionPage() {
   // Default tab, when the viewer has not picked one. A DM's cockpit is the roster —
   // HP, conditions and statblocks are what they touch every round, and the turn
   // controls they drive live in the header, not in the Turn tab. A player's own turn
-  // is the opposite: the Turn tab is their sheet and their End turn. Either way the
-  // Turn tab only has content while combat is running, so a preparing or ended
-  // encounter always opens on the roster rather than on an empty panel.
-  // Resolved once, on the first render that has an encounter, and then frozen. Deriving it
-  // every render meant the tab moved under the viewer whenever an input changed — a co-DM
-  // demoted to player mid-session had the roster replaced by the turn workspace while they
-  // were reading it. A default is for the first paint, not a rule the panel keeps enforcing.
-  if (defaultPanelTabRef.current?.eid !== eid) {
-    defaultPanelTabRef.current = { eid, tab: !isDm && encounter.status === 'running' ? 'turn' : 'party' };
-  }
-  const panelTab: PanelTab =
-    (panelTabChoice?.eid === eid ? panelTabChoice.tab : null) ?? defaultPanelTabRef.current.tab;
 
   // A prompt that demands a decision must not sit inside a collapsed panel. These arrive
   // unprompted — a co-DM's damage raises a concentration save, an MCP action resolves an
