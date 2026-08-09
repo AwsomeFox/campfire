@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ActionSpec, Character, Combatant, TokenSize, CustomMechanicsProfile, UsableAction } from '@campfire/schema';
-import { defaultCombatantStatblock, hasDeathSavesForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
+import { defaultCombatantStatblock, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
 import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
 import { CharacterStatCard } from '../../../components/CharacterStatCard';
@@ -733,12 +733,15 @@ export const CombatantRow = memo(function CombatantRow({
         </div>
       ) : (
         <div className="flex items-center" style={{ gap: 2 }}>
-          {combatant.initiative === null && canEditPermission && adapter.initiativeModel?.mode !== 'group' ? (
+          {combatant.initiative === null && canEditPermission && adapter.initiativeModel?.mode !== 'group' && hasInitiativeRollForAdapter(adapter) ? (
             // Issue #1904: a server-authoritative roll (crypto RNG, breakdown, combat-log
             // event, and a labeled shared dice-log row), not a client-computed value pushed
             // through the manual PATCH — a player's own die roll is now real evidence, not
             // a trusted client claim. Hidden under group initiative (issue #765): a side
-            // shares one roll, which only the DM's bulk "Roll remaining" can produce.
+            // shares one roll, which only the DM's bulk "Roll remaining" can produce. Hidden
+            // again when the system has no initiative roll at all (issue #2123) — the server
+            // 400s it, and the '–' placeholder this falls back to is the honest reading of a
+            // roster whose order comes from its position rather than a number.
             <button
               type="button"
               className="btn btn-primary cf-target-44"

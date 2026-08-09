@@ -53,9 +53,23 @@ export function rollInitiativeGateReason(input: {
 export function startRosterHintReason(input: {
   hasNoCombatants: boolean;
   needsInitiativeCount: number;
+  /**
+   * Whether this campaign's rule system has an initiative roll at all — issue #2123,
+   * `hasInitiativeRollForAdapter`. Optional and defaulting to true, exactly like the adapter
+   * capability it mirrors, so every existing caller and every existing system is unchanged.
+   *
+   * `EncountersService.start` skips its own initiative precondition for a system that has no
+   * roll (turn order is the roster order there, so every combatant legitimately stays
+   * unrolled). Left out of this resolver, the header would keep instructing the DM to roll
+   * initiative — and keep Start greyed out with that as the stated reason — for a step the
+   * server no longer asks for and the UI no longer offers a control for: a permanent dead end
+   * on a Starforged table. Claiming a gate the server would have allowed is the same defect as
+   * missing one, per this module's doc comment.
+   */
+  initiativeRollSupported?: boolean;
 }): Extract<LifecycleGateReason, 'needsCombatantsToStart' | 'needsInitiativeToStart'> | null {
   if (input.hasNoCombatants) return 'needsCombatantsToStart';
-  if (input.needsInitiativeCount > 0) return 'needsInitiativeToStart';
+  if (input.initiativeRollSupported !== false && input.needsInitiativeCount > 0) return 'needsInitiativeToStart';
   return null;
 }
 
@@ -65,6 +79,8 @@ export function startGateReason(input: {
   riskyBlocked: boolean;
   hasNoCombatants: boolean;
   needsInitiativeCount: number;
+  /** See `startRosterHintReason` — default true (issue #2123). */
+  initiativeRollSupported?: boolean;
 }): LifecycleGateReason {
   if (input.safetyHoldActive) return 'safetyHold';
   if (input.riskyBlocked) return 'syncBlocked';

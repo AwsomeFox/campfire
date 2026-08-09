@@ -4935,7 +4935,7 @@ export class McpToolsService {
       server,
       user,
       'roll_combatant_initiative',
-      'Roll server-authoritative initiative for ONE combatant. The DM may roll any combatant; a player may roll only a combatant linked to a character they own (everyone else 403s). Writes the roll + breakdown and records one shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless overwrite:true (DM only). 400 for a group-initiative rule system — a side shares one roll; use roll_initiative instead. Reuse idempotencyKey after a lost response to replay that exact outcome.',
+      'Roll server-authoritative initiative for ONE combatant. The DM may roll any combatant; a player may roll only a combatant linked to a character they own (everyone else 403s). Writes the roll + breakdown and records one shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless overwrite:true (DM only). 400 for a group-initiative rule system — a side shares one roll; use roll_initiative instead. 400 for a rule system with no initiative roll at all (issue #2123) — use reorder_combatant to set the turn order instead. Reuse idempotencyKey after a lost response to replay that exact outcome.',
       {
         encounterId: Id.describe('Encounter id'),
         combatantId: Id.describe('Combatant id — from get_encounter'),
@@ -5003,8 +5003,9 @@ export class McpToolsService {
       server,
       user,
       'reorder_combatant',
-      'DM only: manually reorder a combatant in initiative (issue #1923) — the documented answer to an unresolved tie ' +
-        'and the only mechanical expression of Delay/Ready. Moves the combatant to land immediately after ' +
+      'DM only: manually reorder a combatant in initiative (issue #1923) — the documented answer to an unresolved tie, ' +
+        'the only mechanical expression of Delay/Ready, and the whole turn-order mechanism for a rule system with no ' +
+        'initiative roll (issue #2123). Moves the combatant to land immediately after ' +
         'afterCombatantId (or the literal \'top\' to become first), matching get_encounter\'s own order. Within a tied ' +
         'initiative value only sortOrder changes; a move that crosses initiative values also sets the moved ' +
         'combatant\'s initiative between its new neighbors and clears the now-stale initiativeBreakdown. Clears ' +
@@ -5024,7 +5025,9 @@ export class McpToolsService {
       server,
       user,
       'roll_initiative',
-      'DM only: roll d20+initMod for every combatant in an encounter that does not already have an initiative set.',
+      'DM only: roll d20+initMod for every combatant in an encounter that does not already have an initiative set. ' +
+        '400 for a rule system that has no initiative roll (issue #2123, e.g. Ironsworn: Starforged) — turn order ' +
+        'there is the roster order; use reorder_combatant, and begin_encounter needs no roll at all.',
       { encounterId: Id.describe('Encounter id') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -5038,7 +5041,9 @@ export class McpToolsService {
       user,
       'begin_encounter',
       'DM only: start an encounter (status=running, round=1, turn 0). Fails with a 400 if any combatant is missing ' +
-        'initiative — roll_initiative first.',
+        'initiative — roll_initiative first. That precondition does not apply to a rule system with no initiative ' +
+        'roll (issue #2123): there the turn order is the roster order, so an all-unrolled roster starts as-is and ' +
+        'reorder_combatant is how you arrange it.',
       { encounterId: Id.describe('Encounter id') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

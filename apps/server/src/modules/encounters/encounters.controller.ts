@@ -773,10 +773,10 @@ export class EncountersController {
   @ApiOperation({
     summary: 'Roll initiative for one combatant',
     description:
-      'dm role required for any combatant; a player may roll only a combatant linked to a character they own. The server rolls adapter.initiativeDie + initMod, writes the breakdown, audits the write, and records one matching campaign-shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless the DM passes overwrite: true. 400 for a group-initiative rule system — a side shares one roll; use the bulk POST .../roll-initiative instead.',
+      'dm role required for any combatant; a player may roll only a combatant linked to a character they own. The server rolls adapter.initiativeDie + initMod, writes the breakdown, audits the write, and records one matching campaign-shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless the DM passes overwrite: true. 400 for a group-initiative rule system — a side shares one roll; use the bulk POST .../roll-initiative instead. 400 for a rule system with no initiative roll at all (issue #2123) — set the turn order with POST .../reorder instead.',
   })
   @ApiResponse({ status: 201, description: 'The updated combatant and the dice-log roll (null when the encounter is hidden).' })
-  @ApiResponse({ status: 400, description: 'The active rule system uses group initiative — roll for the whole side via the bulk endpoint instead.' })
+  @ApiResponse({ status: 400, description: 'The active rule system uses group initiative (roll for the whole side via the bulk endpoint) or has no initiative roll at all (code NO_INITIATIVE_ROLL — reorder instead).' })
   @ApiResponse({ status: 403, description: 'Not the DM or owning player.' })
   @ApiResponse({ status: 404, description: 'Encounter or combatant was deleted or does not exist.' })
   @ApiResponse({ status: 409, description: 'Initiative is already set for this combatant.' })
@@ -869,9 +869,12 @@ export class EncountersController {
     summary: 'Roll initiative for all combatants missing one',
     description:
       'dm role required. Only fills null initiatives — already-set values are untouched. ' +
-      'Returns rolledCount of how many were filled this call; a fully-rolled roster is a no-op (no write, no audit, no broadcast).',
+      'Returns rolledCount of how many were filled this call; a fully-rolled roster is a no-op (no write, no audit, no broadcast). ' +
+      '400 for a rule system with no initiative roll at all (issue #2123): turn order there is the roster order, so use POST ' +
+      '.../combatants/:cid/reorder, and POST .../start does not require initiative.',
   })
   @ApiResponse({ status: 201, description: 'Encounter with combatants plus rolledCount.' })
+  @ApiResponse({ status: 400, description: 'The active rule system has no initiative roll (code NO_INITIATIVE_ROLL) — reorder the roster instead.' })
   async rollInitiative(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
@@ -879,9 +882,20 @@ export class EncountersController {
   }
 
   @Post(':id/start')
-  @ApiOperation({ summary: 'Start the encounter', description: 'dm role required. Requires initiative to have been rolled for all combatants; sorts by initiative desc, sets round=1, turnIndex=0.' })
+  @ApiOperation({
+    summary: 'Start the encounter',
+    description:
+      'dm role required. Requires initiative to have been rolled for all combatants; sorts by initiative desc, sets round=1, turnIndex=0. ' +
+      'A rule system with no initiative roll (issue #2123) is exempt from that requirement — POST .../roll-initiative 400s there, so ' +
+      'requiring it would make the fight unstartable: the turn order is the roster order (sortOrder ascending, arranged via POST ' +
+      '.../combatants/:cid/reorder), and an entirely unrolled roster starts as-is.',
+  })
   @ApiResponse({ status: 201, description: 'Started encounter.' })
-  @ApiResponse({ status: 400, description: 'Initiative not yet rolled for all combatants.' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Initiative not yet rolled for all combatants (not raised for a rule system with no initiative roll), or the roster is empty.',
+  })
   async start(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');

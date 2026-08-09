@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   activeLifecycleStepId,
+  encounterLifecycleSteps,
   ENCOUNTER_LIFECYCLE_STEPS,
   ENCOUNTER_NAME_HELP,
   ENCOUNTER_NAME_ID,
@@ -74,6 +75,52 @@ test.describe('post-create encounter guidance (issue #431 & #1470)', () => {
     expect(activeLifecycleStepId('preparing', { partyCombatantCount: 3, enemyCombatantCount: 2, needsInitiativeCount: 5 })).toBe('initiative');
     expect(activeLifecycleStepId('running')).toBe('running');
     expect(activeLifecycleStepId('ended')).toBe('ended');
+  });
+
+  /**
+   * Issue #2123: for a rule system with no initiative roll the DM cockpit renders no roll
+   * control and the server refuses the write, so guidance that says "then roll initiative"
+   * is an instruction that cannot be carried out. Same steps, renamed to what actually
+   * establishes turn order on such a table.
+   */
+  test('guidance for a system with no initiative roll names the roster, not a roll', () => {
+    const g = preparingGuidance({
+      partyCombatantCount: 2,
+      enemyCombatantCount: 1,
+      hasMap: true,
+      campaignHasActiveParty: true,
+      campaignHasCompendium: true,
+      initiativeRollSupported: false,
+    });
+    expect(g.nextSteps.some((s) => /roll initiative/i.test(s))).toBe(false);
+    expect(g.nextSteps.some((s) => /turn order is the roster order/i.test(s))).toBe(true);
+    expect(g.nextSteps.some((s) => /Preparing → Turn order → Running → Ended/i.test(s))).toBe(true);
+
+    const noParty = preparingGuidance({
+      partyCombatantCount: 0,
+      enemyCombatantCount: 0,
+      hasMap: false,
+      campaignHasActiveParty: false,
+      campaignHasCompendium: false,
+      initiativeRollSupported: false,
+    });
+    expect(noParty.lead).toMatch(/turn order/i);
+    expect(noParty.lead.toLowerCase()).not.toMatch(/roll initiative/);
+  });
+
+  test('the lifecycle checklist relabels only its middle step, keeping the same four step ids', () => {
+    expect(encounterLifecycleSteps(true)).toEqual([...ENCOUNTER_LIFECYCLE_STEPS]);
+    expect(encounterLifecycleSteps()).toEqual([...ENCOUNTER_LIFECYCLE_STEPS]);
+
+    const noRoll = encounterLifecycleSteps(false);
+    expect(noRoll.map((s) => s.id)).toEqual(ENCOUNTER_LIFECYCLE_STEPS.map((s) => s.id));
+    const middle = noRoll.find((s) => s.id === 'initiative');
+    expect(middle?.label).toBe('Turn order');
+    expect(middle?.detail).toMatch(/roster/i);
+    // Every other step is the same object content as the rolling variant.
+    expect(noRoll.filter((s) => s.id !== 'initiative')).toEqual(
+      ENCOUNTER_LIFECYCLE_STEPS.filter((s) => s.id !== 'initiative'),
+    );
   });
 
   test('encounter name has a durable label and validation help', () => {
