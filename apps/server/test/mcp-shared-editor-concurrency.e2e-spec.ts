@@ -95,4 +95,37 @@ describe('MCP vs browser shared-editor concurrency — #881', () => {
     expect(restored.isError).toBeFalsy();
     expect(bodyOf<{ lines: string[] }>(await client.callTool({ name: 'get_session_zero', arguments: { campaignId } })).lines).toEqual(['spiders']);
   });
+
+  it('advertises and restores story arc revisions over MCP', async () => {
+    const listed = await client.listTools();
+    const restoreTool = listed.tools.find((candidate) => candidate.name === 'restore_revision');
+    const entityType = restoreTool?.inputSchema.properties?.entityType as
+      | { description?: string; enum?: string[] }
+      | undefined;
+    expect(entityType?.enum).toContain('story_arc');
+    expect(entityType?.description).toContain('story_arc');
+
+    const arc = await agent
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .send({ title: 'MCP revision arc', summary: 'The original arc summary.' });
+    expect(arc.status).toBe(201);
+    const updated = await agent
+      .patch(`/api/v1/arcs/${arc.body.id}`)
+      .send({ summary: 'The replacement arc summary.' });
+    expect(updated.status).toBe(200);
+
+    const revisions = bodyOf<Array<{ id: number; snapshot: { summary: string } }>>(await client.callTool({
+      name: 'list_revisions',
+      arguments: { entityType: 'story_arc', entityId: arc.body.id },
+    }));
+    expect(revisions[0]?.snapshot.summary).toBe('The original arc summary.');
+
+    const restored = await client.callTool({
+      name: 'restore_revision',
+      arguments: { entityType: 'story_arc', entityId: arc.body.id, revisionId: revisions[0].id },
+    });
+    expect(restored.isError).toBeFalsy();
+    const current = await agent.get(`/api/v1/arcs/${arc.body.id}`);
+    expect(current.body.summary).toBe('The original arc summary.');
+  });
 });

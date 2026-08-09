@@ -198,9 +198,13 @@ const SharedEditorRevisionType = z.enum([
   'timeline_calendar',
   'scheduled_session',
   'session_zero',
+  'story_arc',
   'story_beat',
   'comment',
-]);
+]).describe(
+  'Shared-editor revision entity type (session|quest|npc|location|faction|timeline_event|timeline_calendar|' +
+    'scheduled_session|session_zero|story_arc|story_beat|comment)',
+);
 
 interface ToolResult {
   [x: string]: unknown;
