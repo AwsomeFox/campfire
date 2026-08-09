@@ -3071,7 +3071,10 @@ export default function RunSessionPage() {
   // carries an operation id AND the combatant the DM believes holds the turn, so a lost
   // response replays and a co-DM's simultaneous advance conflicts instead of skipping.
   const nextTurn = () => {
-    if (queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) > 0 || bulkHpApplyPendingRef.current) return;
+    // Claim the synchronous ref before starting the mutation. React's pending render can
+    // lag a rapid double activation/keyboard repeat, but only this call may own and clear
+    // the shared turn/HP serialization gate.
+    if (turnAdvancePendingRef.current || queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) > 0 || bulkHpApplyPendingRef.current) return;
     turnAdvancePendingRef.current = true;
     nextTurnMut.mutate({
       expectedCurrentCombatantId: encounter?.status === 'running' ? (encounter.currentCombatantId ?? null) : null,

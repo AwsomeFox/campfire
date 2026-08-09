@@ -67,11 +67,12 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(source).toContain('optimisticHpQueueRef');
     expect(source).toContain('ctx?.encounterId === eid');
     expect(source).toContain('successful operations stay in');
-    expect(source).toContain('queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) > 0 || bulkHpApplyPendingRef.current');
+    expect(source).toContain('turnAdvancePendingRef.current || queryClient.isMutating({ mutationKey: HP_MUTATION_KEY }) > 0 || bulkHpApplyPendingRef.current');
     expect(source).toContain('const hpMutationCount = useIsMutating({ mutationKey: HP_MUTATION_KEY });');
     expect(source).toContain('runControl.isPending || nextTurnMut.isPending || hpMutationCount > 0 || bulkHpApplyPending');
     expect(source).toContain('if (turnAdvancePendingRef.current || bulkHpApplyPendingRef.current) return;');
     expect(source).toMatch(/const nextTurnMut = useKeyedMutation\([\s\S]*?turnAdvancePendingRef\.current = true;[\s\S]*?onSettled: \(\) => \{[\s\S]*?turnAdvancePendingRef\.current = false;/);
+    expect(source).toMatch(/const nextTurn = \(\) => \{\s*\/\/[\s\S]*?if \(turnAdvancePendingRef\.current \|\| queryClient\.isMutating\(\{ mutationKey: HP_MUTATION_KEY \}\) > 0 \|\| bulkHpApplyPendingRef\.current\) return;\s*turnAdvancePendingRef\.current = true;\s*nextTurnMut\.mutate/);
     expect(source).toContain('if (!pendingApply || turnAdvancePendingRef.current) return;');
     expect(source).toContain('reconcileBlocks || turnAdvancePendingRef.current');
     expect(source).toContain('rollbackOptimisticHpTargets(current, rollbackBaseline, targets)');
