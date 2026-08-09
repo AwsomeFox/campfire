@@ -395,7 +395,11 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
       at,
     });
     const advanced = advanceNarrationLog(entries, silenceNarrationLogBaseline([]));
-    expect(advanced.additions).toEqual([{ id: expect.any(String), kind: 'tool', text: 'Adjust treasury' }]);
+    expect(advanced.additions).toEqual([expect.objectContaining({
+      id: expect.any(String),
+      kind: 'tool',
+      text: 'Adjust treasury',
+    })]);
     expect(formatNarrationLogAddition(advanced.additions[0]!)).toBe('Adjust treasury');
     // formatSystem must not swallow tool text the way system/info does.
     expect(

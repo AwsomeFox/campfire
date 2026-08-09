@@ -277,7 +277,7 @@ test.describe('encounter Driver live session (#1318)', () => {
     const context = await browser.newContext({ storageState: stateFor('player') });
     const page = await context.newPage();
     try {
-      const { campaignId, encounterId } = seed();
+      const { campaignId, encounterId, navigation } = seed();
       const seat = {
         campaignId,
         mode: 'driver',
@@ -324,6 +324,7 @@ test.describe('encounter Driver live session (#1318)', () => {
         }
         if (path.endsWith('/ai-dm/session')) return json(session);
         if (path.endsWith('/ai-dm/seat') || (path.endsWith('/ai-dm') && method === 'GET')) return json(seat);
+        if (path.endsWith('/characters')) return json([{ id: navigation.characterId, name: 'Runa' }]);
         if (path.endsWith('/ai-dm/tool-confirmations')) return json([]);
         return route.fallback();
       });
