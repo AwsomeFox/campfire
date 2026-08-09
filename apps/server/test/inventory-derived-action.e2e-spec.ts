@@ -1084,6 +1084,52 @@ describe('derived equipped-item actions (issue #2097)', () => {
     }
   });
 
+  it('a derived action created after a system switch survives the switch cleanup', async () => {
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Switch Then Equip' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Late Equipper', level: 5, stats: { STR: 16 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+
+    // Switch first, THEN equip. The cleanup and the campaign write share a transaction, so an
+    // equip that follows the switch derives under the new system and must be left alone —
+    // before, a cleanup committing after the equip deleted a brand-new, perfectly valid
+    // action purely because its source was `derived`.
+    const profile = {
+      slug: 'e2e-late-equip-hack',
+      label: 'E2E Late Equip Hack',
+      mechanicsSummary: 'A homebrew hack for the switch-then-equip ordering, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+
+    const equipped = await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'late-slot' });
+    expect(equipped.status).toBe(200);
+    expect(equipped.body.equippedActionSource).toBe('derived');
+    expect(equipped.body.equippedAction).not.toBeNull();
+
+    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
+    expect(after.body.equippedActionSource).toBe('derived');
+    expect(after.body.equippedAction).not.toBeNull();
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

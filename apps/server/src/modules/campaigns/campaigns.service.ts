@@ -1137,7 +1137,7 @@ export class CampaignsService {
     // while the campaign stays active (#857 Bugbot).
     if (archiving && opts?.revokeInvites) {
       const ts = nowIso();
-      const { row, revoked, wasEnabled, pinsCleared } = this.db.transaction((tx) => {
+      const { row, revoked, wasEnabled, pinsCleared, clearedCharacterIds } = this.db.transaction((tx) => {
         const before = tx
           .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
           .from(campaigns)
@@ -1182,11 +1182,14 @@ export class CampaignsService {
           .where(eq(campaignInvites.campaignId, id))
           .returning({ id: campaignInvites.id })
           .all();
+        // In the SAME transaction as the mechanics write — see `clearDerivedEquippedActionsIn`.
+        const clearedCharacterIds = mechanicsChanged ? this.clearDerivedEquippedActionsIn(tx, id) : [];
         return {
           row,
           revoked: deleted.length,
           wasEnabled: Boolean(before?.publicInvitesEnabled),
           pinsCleared,
+          clearedCharacterIds,
         };
       });
       await this.audit.log({
@@ -1221,11 +1224,11 @@ export class CampaignsService {
       if (statusChanging) {
         await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
       }
-      // Review (chatgpt-codex-connector P2): the archive+revoke path returns HERE, so the
-      // ordinary path's cleanup never ran for a PATCH that switched systems while archiving.
-      // The stale action then reappeared, still carrying the old system's numbers, the moment
-      // the campaign was reactivated.
-      if (mechanicsChanged) await this.clearDerivedEquippedActions(id, user);
+      // The archive+revoke path returns HERE, so the ordinary path's cleanup never ran for a
+      // PATCH that switched systems while archiving; the stale action reappeared with the old
+      // system's numbers the moment the campaign was reactivated. The clear itself happened
+      // inside the transaction above; only its invalidations are emitted here.
+      this.emitClearedDerivedActions(id, clearedCharacterIds, user);
       return toDomain(row);
     }
 
@@ -1235,6 +1238,7 @@ export class CampaignsService {
     // pin in the same transaction, so an unrelated image never inherits old coordinates.
     let updatedRow: typeof campaigns.$inferSelect | undefined;
     let pinsCleared = 0;
+    let ordinaryClearedCharacterIds: number[] = [];
     if (shouldResetPins) {
       const resetResult = this.db.transaction((tx) => {
         if (campaignInput.mapAttachmentId != null) {
@@ -1267,10 +1271,15 @@ export class CampaignsService {
             ),
           )
           .run();
-        return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0 };
+        // Same transaction as the mechanics write here too — see
+        // `clearDerivedEquippedActionsIn`. This branch also persists `campaignInput`, so a
+        // map-reset PATCH that ALSO switches systems has to clear atomically as well.
+        const clearedCharacterIds = mechanicsChanged ? this.clearDerivedEquippedActionsIn(tx, id) : [];
+        return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0, clearedCharacterIds };
       });
       updatedRow = resetResult.row;
       pinsCleared = resetResult.changes;
+      ordinaryClearedCharacterIds = resetResult.clearedCharacterIds;
     }
 
     if (updatedRow === undefined) {
@@ -1290,11 +1299,20 @@ export class CampaignsService {
           );
       }
 
-      [updatedRow] = await this.db
-        .update(campaigns)
-        .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
-        .where(eq(campaigns.id, id))
-        .returning();
+      // One transaction with the cleanup — see `clearDerivedEquippedActionsIn`. An equip that
+      // starts after the new system is visible must not have its correctly-derived action
+      // deleted by a cleanup that commits afterwards.
+      const written = this.db.transaction((tx) => {
+        const row = tx
+          .update(campaigns)
+          .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .returning()
+          .get();
+        return { row, clearedCharacterIds: mechanicsChanged ? this.clearDerivedEquippedActionsIn(tx, id) : [] };
+      });
+      updatedRow = written.row;
+      ordinaryClearedCharacterIds = written.clearedCharacterIds;
     }
 
     // Issue #2097 review (chatgpt-codex-connector P1): a DERIVED equipped action is
@@ -1309,7 +1327,7 @@ export class CampaignsService {
     // than none — an empty action is visibly unfinished, a wrong one is not. `manual` actions
     // are untouched: a human wrote those and it is their call whether they still apply.
 
-    if (mechanicsChanged) await this.clearDerivedEquippedActions(id, user);
+    this.emitClearedDerivedActions(id, ordinaryClearedCharacterIds, user);
 
     await this.audit.log({
       actor: auditActor(user),
@@ -1345,8 +1363,16 @@ export class CampaignsService {
    * throw away work the system change does not necessarily invalidate. The equip state itself
    * is left alone: the sword is still worn, it just grants nothing until re-equipped.
    * Soft-deleted rows are included; see the comment on the query.
+   *
+   * Runs INSIDE the caller's transaction (chatgpt-codex-connector P2). Awaited separately
+   * after the campaign write, an equip could start once the new system was already visible,
+   * derive a perfectly valid action under it, commit, and then have this cleanup delete that
+   * brand-new action purely because its source is `derived`. Sharing the transaction means an
+   * equip either precedes the switch — and is cleaned up correctly — or follows it and is
+   * left alone. Returns the affected character ids so the caller can emit invalidations after
+   * the commit rather than inside a synchronous better-sqlite3 transaction.
    */
-  private async clearDerivedEquippedActions(campaignId: number, user: RequestUser): Promise<void> {
+  private clearDerivedEquippedActionsIn(tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0], campaignId: number): number[] {
     // TOMBSTONED rows are included deliberately. Review (chatgpt-codex-connector P2): a
     // bulk-archived equipped item keeps its action and provenance on purpose, so that
     // `CampaignLibraryService.undoBulk()` can restore the exact pre-archive equip state — and
@@ -1354,18 +1380,24 @@ export class CampaignsService {
     // trash here therefore left a loaded gun: undo the archive after a system switch and the
     // previous mechanics' spec is live again immediately. Nothing else about the tombstone
     // changes; only the action a restore would resurrect.
-    const affected = await this.db
+    const affected = tx
       .select({ characterId: inventoryItems.characterId })
       .from(inventoryItems)
-      .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')));
-    if (affected.length === 0) return;
+      .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')))
+      .all();
+    if (affected.length === 0) return [];
 
-    await this.db
-      .update(inventoryItems)
+    tx.update(inventoryItems)
       .set({ equippedAction: null, equippedActionSource: null, updatedAt: nowIso() })
-      .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')));
+      .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')))
+      .run();
 
-    for (const characterId of new Set(affected.map((row) => row.characterId).filter((cid): cid is number => cid != null))) {
+    return [...new Set(affected.map((row) => row.characterId).filter((cid): cid is number => cid != null))];
+  }
+
+  /** Emit the invalidations for a completed cleanup, after its transaction has committed. */
+  private emitClearedDerivedActions(campaignId: number, characterIds: number[], user: RequestUser): void {
+    for (const characterId of characterIds) {
       this.events.emit({ type: 'character.updated', campaignId, characterId, userId: user.id });
     }
   }

@@ -929,9 +929,9 @@ export class InventoryService {
     // The system's canonical damage-type vocabulary and id, so an edited action is held to the
     // same standard as a derived one — see `rebuildEditedActionSpec`. Resolved through
     // `adapterForCampaign` so a homebrew campaign's profile is honoured here too.
-    const editAdapter = input.equippedAction ? (await this.adapterForCampaign(existing.campaignId)).adapter : null;
-    const campaignRuleSystem = editAdapter?.id ?? '';
-    const campaignDamageTypes = editAdapter?.damageTypes;
+    const editMechanics = input.equippedAction ? await this.adapterForCampaign(existing.campaignId) : null;
+    const campaignRuleSystem = editMechanics?.adapter.id ?? '';
+    const campaignDamageTypes = editMechanics?.adapter.damageTypes;
 
     // Review (chatgpt-codex-connector P2): "should we derive?" is tracked separately from
     // "what did it produce?". A regeneration that yields NOTHING — the accepted snapshot no
@@ -1217,7 +1217,17 @@ export class InventoryService {
             campaignDamageTypes,
             persistedAction?.success ? persistedAction.data : null,
           );
-          update.equippedAction = JSON.stringify(authored);
+          // Review (chatgpt-codex-connector P2): the adapter above was resolved BEFORE this
+          // transaction, and an authored action lands as `manual` — which the mechanics-change
+          // cleanup deliberately never touches. So a campaign switch committing in that gap
+          // would leave an action validated under the OLD system permanently in place: an edit
+          // begun under a vocabulary-free homebrew system could save a noncanonical damage
+          // type, then the campaign moves to 5e and that spec bypasses exact-type defenses
+          // forever. If the mechanics moved, keep everything the human typed but drop the
+          // spec — text-only is this module's answer whenever it cannot stand behind the
+          // numbers, and the row stays fully editable.
+          const mechanicsHeld = editMechanics === null || editMechanics.mechanicsRevision === freshMechanicsRevision;
+          update.equippedAction = JSON.stringify(mechanicsHeld ? authored : { ...authored, spec: undefined });
           update.equippedActionSource = EquippedActionSource.enum.manual;
         } else if (actionWrite.kind === 'derived') {
           update.equippedAction = JSON.stringify(derivedOnEquip);
