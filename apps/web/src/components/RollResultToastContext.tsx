@@ -64,6 +64,18 @@ export interface ShowRollOptions {
 }
 
 interface OverlayState {
+  /**
+   * Identity of THIS roll, used as the overlay's React key.
+   *
+   * Without it, rolling `1d20` again while the previous `1d20` is still in the
+   * air reconciles onto the same overlay instance: the dice have the same sides,
+   * so nothing the 3D roller keys on changes, and it keeps replaying the first
+   * throw. The second roll's faces are then dropped (its handle has already been
+   * released) and the first animation hands off — dice showing the old numbers,
+   * toast reporting the new total. A per-roll key makes each roll a fresh
+   * overlay: new canvas, new throw, new settle latch.
+   */
+  id: number;
   sides: number[];
   phase: DiceRollOverlayPhase;
   values?: number[];
@@ -101,6 +113,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const overlayRef = useRef<OverlayState | null>(null);
   overlayRef.current = overlay;
   const tumbleStartedAtRef = useRef(0);
+  const rollIdRef = useRef(0);
   const pendingShowRef = useRef<{ roll: DiceRoll; options?: ShowRollOptions } | null>(null);
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -150,7 +163,8 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     );
     if (reducedMotion) return;
     tumbleStartedAtRef.current = Date.now();
-    const next: OverlayState = { sides, phase: 'tumbling' };
+    rollIdRef.current += 1;
+    const next: OverlayState = { id: rollIdRef.current, sides, phase: 'tumbling' };
     overlayRef.current = next;
     setOverlay(next);
   }, [clearSettleTimer, tableAudioLevel]);
@@ -256,6 +270,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
       {children}
       {overlay && overlayDice.length > 0 && (
         <DiceRollOverlay
+          key={overlay.id}
           dice={overlayDice}
           phase={overlay.phase}
           theme={me?.user?.diceTheme}

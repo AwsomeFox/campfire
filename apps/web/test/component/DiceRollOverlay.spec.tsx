@@ -43,6 +43,35 @@ describe('DiceRollOverlay without WebGL', () => {
     await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1), { timeout: 10_000 });
   }, 20_000);
 
+  test('a second roll needs its own key to settle at all', async () => {
+    // The overlay settles ONCE per instance: `settledRef` latches so a background
+    // tab's backstop timer and a late animation callback cannot both hand off.
+    // That latch is exactly why RollResultToastProvider keys the overlay on a
+    // per-roll id — reconciling a second roll onto the same instance (which is
+    // what happens when both rolls have the same sides) would swallow its settle
+    // and strand the result. This test pins both halves of that contract.
+    const onSettled = vi.fn();
+    const props = (value: number) => ({
+      dice: buildOverlayDice([20], [value], [value]),
+      phase: 'settling' as const,
+      onSettled,
+    });
+
+    const { rerender } = render(<DiceRollOverlay key="roll-1" {...props(13)} />);
+    await waitFor(() => expect(renderer()).toBe('css'), { timeout: 10_000 });
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+
+    // Same key: the latch holds and the second roll never settles.
+    rerender(<DiceRollOverlay key="roll-1" {...props(7)} />);
+    await new Promise((r) => setTimeout(r, 900));
+    expect(onSettled).toHaveBeenCalledTimes(1);
+
+    // New key: a fresh instance, so the roll settles on its own terms.
+    rerender(<DiceRollOverlay key="roll-2" {...props(7)} />);
+    await waitFor(() => expect(renderer()).toBe('css'), { timeout: 10_000 });
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(2), { timeout: 10_000 });
+  }, 30_000);
+
   test('shows the crit glyph only when colour-vision assist is on', async () => {
     const { rerender } = render(
       <DiceRollOverlay

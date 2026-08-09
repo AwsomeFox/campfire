@@ -74,6 +74,17 @@ test.describe('Dice roll overlay contracts (issue #1352)', () => {
     expect(cssSource).toMatch(/\.cf-dice-roll-overlay__canvas/);
   });
 
+  test('each roll gets its own overlay identity', () => {
+    // Two consecutive 1d20s reconcile onto the same overlay instance unless the
+    // provider keys them apart: same sides, so nothing the 3D roller keys on
+    // changes, and the first throw keeps replaying while the second roll's faces
+    // are dropped. The rendered half of this contract (the settle latch that
+    // makes the key load-bearing) is in test/component/DiceRollOverlay.spec.tsx.
+    expect(contextSource).toMatch(/rollIdRef/);
+    expect(contextSource).toMatch(/rollIdRef\.current \+= 1/);
+    expect(contextSource).toMatch(/key=\{overlay\.id\}/);
+  });
+
   test('a backgrounded tab still reaches the result toast', () => {
     // requestAnimationFrame is throttled to zero in a background tab, so the
     // 3D settle callback can never arrive; the toast must not be lost with it.
