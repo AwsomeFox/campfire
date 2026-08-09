@@ -59,6 +59,7 @@ import { shouldRevealInitiative } from './initiativeReveal';
 import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
 import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
 import { ActionUsePanel, legalTargets } from './ActionUseFlow';
+import { waitingPromptsKey } from './vtt/attentionKey';
 import { EncounterVttShell, VttPanelSection } from './vtt/EncounterVttShell';
 import { GroupActionRunner } from './GroupActionRunner.tsx';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -3929,15 +3930,13 @@ export default function RunSessionPage() {
   // sections in the same scroller, so a scrolled-down panel hides them just as well as a
   // collapsed one); leave the viewer's tab choice alone, since each prompt renders above
   // the tab switch and is visible whichever section is showing.
-  const attentionKey = pendingConcentrationCheck
-    ? `concentration:${pendingConcentrationCheck.id}`
-    : pendingApply
-      ? `apply:${pendingApply.id}`
-      : pendingActionUse
-        ? `action:${pendingActionUse.id}`
-        : pendingGroupActionUse
-          ? `group:${pendingGroupActionUse.id}`
-          : null;
+  // Every waiting prompt, not just the first — see `waitingPromptsKey`.
+  const attentionKey = waitingPromptsKey([
+    ['concentration', pendingConcentrationCheck],
+    ['apply', pendingApply],
+    ['action', pendingActionUse],
+    ['group', pendingGroupActionUse],
+  ]);
 
   const lifecycle = dmLifecycleActions(encounter.status);
   const deleteCopy = deleteConfirmCopy(encounter.status);

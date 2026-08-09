@@ -256,6 +256,39 @@ test.describe('encounter cockpit deep links', () => {
       await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
     }
   });
+
+  test('a deep link focuses a target that only mounts after the reveal', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/comments`, {
+      data: { entityType: 'encounter', entityId: encounterId, body: 'Async focus probe' },
+    });
+    expect(created.ok(), `create comment: ${await created.text()}`).toBe(true);
+    const commentId = ((await created.json()) as { id: number }).id;
+
+    try {
+      // A cold load, so the comment list arrives asynchronously INSIDE a hidden panel.
+      // `EntityDeepLinkFocus` takes its one shot the moment the node mounts and then
+      // disconnects — before the cockpit has revealed the owning tab — so its focus and
+      // scroll ran against an element with a `hidden` ancestor and did nothing.
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}?comment=${commentId}#entity-comment-${commentId}`);
+
+      const comment = page.locator(`#entity-comment-${commentId}`);
+      await expect(comment).toBeVisible({ timeout: 15_000 });
+      await expect(comment).toBeFocused({ timeout: 10_000 });
+      await expect(async () => {
+        const inView = await comment.evaluate((el) => {
+          const scroller = el.closest('.cf-vtt-panel-body');
+          if (!scroller) return true;
+          const a = el.getBoundingClientRect();
+          const b = scroller.getBoundingClientRect();
+          return a.bottom > b.top && a.top < b.bottom;
+        });
+        expect(inView, 'deep-link target must be within the panel scroller').toBe(true);
+      }).toPass({ timeout: 5_000 });
+    } finally {
+      await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
+    }
+  });
 });
 
 test.describe('encounter cockpit panel collapse', () => {

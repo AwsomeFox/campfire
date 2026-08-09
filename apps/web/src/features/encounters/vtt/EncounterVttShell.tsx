@@ -127,6 +127,7 @@ function useDeepLinkedPanel(
   useEffect(() => {
     let cancelled = false;
     let attempts = 0;
+    let frame = 0;
     // Whatever tab was showing when this navigation began. If the viewer picks a different
     // one while we are still waiting for the target to load, they have answered the
     // question themselves — abandon the resolve rather than yanking them back later.
@@ -137,7 +138,21 @@ function useDeepLinkedPanel(
       const hash = window.location.hash.slice(1);
       if (!hash) return true;
       if (!document.getElementById(hash)) return false;
-      revealRef.current(hash);
+      if (!revealRef.current(hash)) return true;
+      // Redo the focus and scroll ourselves. `EntityDeepLinkFocus` gets exactly one
+      // attempt: its MutationObserver fires the moment the target MOUNTS and then
+      // disconnects — and for a comment that arrives inside a hidden panel that is
+      // strictly before this poller reveals it, so its attempt ran against an element
+      // with a `hidden` ancestor, where `focus()` is refused and `scrollIntoView()` has
+      // nothing to scroll. Nothing retries it, so the notification target was left
+      // unfocused and often below the panel viewport.
+      frame = requestAnimationFrame(() => {
+        if (cancelled) return;
+        const target = document.getElementById(hash);
+        if (!target) return;
+        target.focus({ preventScroll: true });
+        target.scrollIntoView({ block: 'center', inline: 'nearest' });
+      });
       return true;
     };
 
@@ -156,6 +171,7 @@ function useDeepLinkedPanel(
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      if (frame) cancelAnimationFrame(frame);
     };
   }, [location.key, location.pathname, location.hash]);
 }
