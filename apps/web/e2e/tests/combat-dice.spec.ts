@@ -1,5 +1,6 @@
 import { test, expect, request, type APIRequestContext, type Request } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
+import { openCockpitDiceTray, openCockpitTab } from '../lib/encounterCockpit';
 import { CREDS } from '../global-setup';
 
 /**
@@ -179,6 +180,8 @@ test.describe('encounter dice — apply rolled damage', () => {
 
         await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
         await expect(page.getByText('Running', { exact: true })).toBeVisible();
+        // Character sheets hang off the roster, which the cockpit keeps in the Party tab.
+        await openCockpitTab(page, 'party');
         // Owned card auto-expands; scope the damage control to Brixi's sheet.
         const brixiCard = page.getByRole('region', { name: /Brixi Applybar character sheet/i });
         await expect(brixiCard).toBeVisible();
@@ -210,6 +213,7 @@ test.describe('encounter dice — apply rolled damage', () => {
         await expect(page.getByTestId('error-note')).toHaveCount(0);
 
         // Read the whole log textContent so chained/expandable rows still match.
+        await openCockpitTab(page, 'log');
         const combatLog = page.getByRole('log', { name: 'Combat log' });
         await expect(combatLog).toBeVisible();
         await expect
@@ -244,6 +248,9 @@ test.describe('encounter dice — apply rolled damage', () => {
       }, `campfire.dicePresets.${campaignId}`);
       await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      // The shared dice tray is the cockpit's floating Roll control now, not a card
+      // stacked under the tracker.
+      await openCockpitDiceTray(page);
 
       const rollResponse = () => page.waitForResponse((response) =>
         response.request().method() === 'POST' && response.url().endsWith(`/campaigns/${campaignId}/roll`),
@@ -346,6 +353,7 @@ test.describe('encounter dice — apply rolled damage', () => {
 
       await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      await openCockpitTab(page, 'party');
       await expect(page.getByRole('button', { name: "Expand Rival Sheet's character sheet" })).toHaveCount(0);
 
       await page.getByRole('button', { name: "Expand Brixi Applybar's character sheet" }).click();
@@ -355,6 +363,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       await expect(playerBrixiCard.getByTestId('attack-roll-control')).toHaveCount(0);
 
       await dmPage.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+      await openCockpitTab(dmPage, 'party');
       await expect(dmPage.getByRole('button', { name: "Expand Brixi Applybar's character sheet" })).toBeVisible();
       await expect(dmPage.getByRole('button', { name: "Expand Rival Sheet's character sheet" })).toBeVisible();
       await dmPage.getByRole('button', { name: "Expand Brixi Applybar's character sheet" }).click();
@@ -369,6 +378,10 @@ test.describe('encounter dice — apply rolled damage', () => {
       const advanceRes = await dm.post(`/api/v1/encounters/${drill.encounterId}/next-turn`);
       expect(advanceRes.ok(), `advance to Brixi: ${await advanceRes.text()}`).toBeTruthy();
       await expect(page.getByTestId(`combatant-row-${drill.brixiCombatantId}`)).toHaveAttribute('data-current-turn', 'true');
+      // An owned turn beat now takes the player to their Turn workspace — the cockpit
+      // reveals it rather than scrolling a panel that may be hidden. Come back to the
+      // roster, which is the surface whose controls this test is about.
+      await openCockpitTab(page, 'party');
       await expect(playerBrixiCard.getByTestId('check-roll-ability:STR')).toBeVisible();
       await expect(playerBrixiCard.getByTestId('attack-roll-control')).toBeVisible();
     } finally {
@@ -406,6 +419,7 @@ test.describe('encounter dice — apply rolled damage', () => {
 
       await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      await openCockpitTab(page, 'party');
 
       // Reject only the HP patch for Brixi's combatant; every other request is untouched.
       await page.route(`**/api/v1/encounters/${drill.encounterId}/combatants/${drill.brixiCombatantId}`, async (route) => {

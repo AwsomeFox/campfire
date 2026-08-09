@@ -200,6 +200,7 @@ export const MCP_TOOL_NAMES = [
   'generate_ai_portrait',
   'get_portrait_generation',
   'get_portrait_readiness',
+  'cancel_portrait_generation',
   'refine_ai_portrait',
   'attach_generated_portrait',
   'add_combatant',

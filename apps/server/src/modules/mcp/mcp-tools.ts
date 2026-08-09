@@ -4826,6 +4826,23 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'cancel_portrait_generation',
+      'player: cancel an in-flight AI portrait generation job (issue #1321). Aborts any provider call and marks ' +
+        'the job cancelled. Because nothing is persisted during generation, cancellation leaves no orphan files. ' +
+        'Idempotent: cancelling a finished job is a no-op that returns its final state.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('The running job to cancel (from generate_ai_portrait)'),
+      },
+      async ({ campaignId, jobId }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.aiPortrait.cancelJob(jobId as string, campaignId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'refine_ai_portrait',
       'player: refine an existing AI portrait job (issue #1321) — tweak the prompt/count (or reuse a chosen preview\'s ' +
         'seed for continuity) and regenerate a fresh set of candidates. Returns the new job. Like generate_ai_portrait, ' +

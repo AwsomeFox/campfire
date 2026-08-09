@@ -53,7 +53,7 @@ test.describe('quick fight & party bulk add (issue #1477)', () => {
     await page.getByRole('button', { name: 'Create', exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/c/${campaignId}/encounters/\\d+`));
 
-    const partyTab = page.getByRole('tab', { name: 'Party' });
+    const partyTab = page.getByTestId('add-combatant-tabs').getByRole('tab', { name: 'Party' });
     await partyTab.click();
 
     const addWholePartyBtn = page.getByTestId('add-whole-party-button');

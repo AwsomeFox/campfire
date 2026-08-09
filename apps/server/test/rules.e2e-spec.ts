@@ -2044,11 +2044,26 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       const weapons = await request(server).get('/api/v1/rules/search').query({ q: 'Weapons', type: 'section' }).set(dm);
       expect(searchItems(weapons.body).some((e: { name: string }) => e.name === 'Equipment: Weapons')).toBe(true);
 
-      // A campaign can select the installed Cepheus pack (validateRuleSystem requires it exist).
+      // Issue #2081: Cepheus is a full importer (reference text is fully usable, as proven
+      // above — search, license, attribution all work) but has no registered combat adapter,
+      // so a campaign must NOT be able to select it as its live `ruleSystem` — doing so would
+      // silently run a 2D6 campaign as D&D 5e (d20 initiative, 5e ability modifiers, 5e
+      // conditions/action economy/death saves, maxLevel 20, a concrete 5e XP suggestion).
       const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Cepheus Campaign' });
       const patchRes = await request(server).patch(`/api/v1/campaigns/${campRes.body.id}`).set(dm).send({ ruleSystem: 'cepheus-srd' });
-      expect(patchRes.status).toBe(200);
-      expect(patchRes.body.ruleSystem).toBe('cepheus-srd');
+      expect(patchRes.status).toBe(400);
+      expect(patchRes.body.message).toMatch(/importer-only/i);
+      // Still unset — the rejected write did not partially apply.
+      const afterReject = await request(server).get(`/api/v1/campaigns/${campRes.body.id}`).set(dm);
+      expect(afterReject.body.ruleSystem).toBe('');
+
+      // create() rejects it too, not just update() — both write paths run the same guard.
+      const createRejected = await request(server)
+        .post('/api/v1/campaigns')
+        .set(dm)
+        .send({ name: 'Cepheus Campaign 2', ruleSystem: 'cepheus-srd' });
+      expect(createRejected.status).toBe(400);
+      expect(createRejected.body.message).toMatch(/importer-only/i);
 
       // Cepheus has no per-statblock section vocabulary; a 5e section is rejected 400.
       const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'cepheus', url: fake.baseUrl, sections: ['spells'] });
@@ -2103,6 +2118,139 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(typeof bySource[s].note).toBe('string');
       expect(bySource[s].note.length).toBeGreaterThan(0);
       expect(typeof bySource[s].license).toBe('string');
+    }
+  });
+});
+
+/**
+ * Issue #2081: an importer-only pack (Cepheus — a full importer, no combat adapter) can no
+ * longer be SELECTED as a campaign's `ruleSystem` (see the sibling-importer-wiring test
+ * above). This suite covers the other half of the acceptance bar: a campaign that ALREADY
+ * stores such a slug — data written before this guard existed, or by direct DB repair — must
+ * not be bricked. The row is written directly via `db.update(campaigns)`, bypassing
+ * CampaignsService entirely, to simulate exactly that pre-existing-data shape rather than
+ * going through the (now-rejecting) write path.
+ *
+ * Decision this test pins: an already-stored adapterless slug keeps resolving through the
+ * same pre-existing "unrecognized ruleSystem falls back to the 5e adapter" path every other
+ * unknown/dangling slug already used (packages/schema's `ruleSystemAdapter` — unchanged by
+ * this issue) — every READ keeps working with no throw. Every WRITE that does not itself
+ * touch `ruleSystem` also keeps working unconditionally. Only a write that explicitly
+ * (re)selects the adapterless slug is rejected, matching the "selecting ... is rejected"
+ * acceptance criterion with no carve-out for "it was already selected".
+ */
+describe('rules / rule packs — a campaign that already stores an importer-only ruleSystem keeps working (issue #2081)', () => {
+  let ctx: TestAppContext;
+  let server: Server;
+  const preexistingDm = { 'x-dev-role': 'dm', 'x-dev-user': 'preexisting-cepheus-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('GET keeps working (no throw), unrelated PATCH keeps working, but re-selecting the same slug is rejected', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+
+    // Install the real Cepheus pack so 'cepheus-srd' genuinely exists in rule_packs (matching
+    // what validateRuleSystem's own pack-existence check requires for every OTHER slug it
+    // resolves, and what a real pre-existing campaign would have pointed at).
+    const { startFakeCepheus } = await import('./fake-cepheus');
+    const fake = await startFakeCepheus();
+    let campaignId: number;
+    try {
+      const install = await request(server).post('/api/v1/rules/packs/install').set(preexistingDm).send({ source: 'cepheus', url: fake.baseUrl });
+      expect(install.status).toBe(202);
+      const job = await pollJob(server, preexistingDm, install.body.id);
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('cepheus-srd');
+
+      const campRes = await request(server).post('/api/v1/campaigns').set(preexistingDm).send({ name: 'Legacy Cepheus Campaign' });
+      expect(campRes.status).toBe(201);
+      campaignId = campRes.body.id;
+
+      // Simulate pre-existing data: write the adapterless slug directly, bypassing
+      // CampaignsService.validateRuleSystem (and therefore this issue's guard) entirely.
+      await db.update(campaigns).set({ ruleSystem: 'cepheus-srd' }).where(eq(campaigns.id, campaignId));
+
+      // Read paths do not throw on the data already sitting in the database.
+      const getRes = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(preexistingDm);
+      expect(getRes.status).toBe(200);
+      expect(getRes.body.ruleSystem).toBe('cepheus-srd');
+
+      // An unrelated write (name change) that does not touch ruleSystem keeps working.
+      const renamePatch = await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(preexistingDm)
+        .send({ name: 'Legacy Cepheus Campaign (renamed)' });
+      expect(renamePatch.status).toBe(200);
+      expect(renamePatch.body.name).toBe('Legacy Cepheus Campaign (renamed)');
+      expect(renamePatch.body.ruleSystem).toBe('cepheus-srd'); // untouched, still there
+
+      // A campaign combat action against this campaign does not throw either — it resolves
+      // through the same unknown-slug 5e fallback ruleSystemAdapter has always used, exactly
+      // as it would for any other unrecognized ruleSystem string (unchanged by this issue).
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(preexistingDm)
+        .send({ name: 'Legacy Fight', hidden: false });
+      expect(encRes.status).toBe(201);
+
+      // But an explicit write that RE-SELECTS the same already-stored slug is rejected —
+      // "selecting an importer-only pack is rejected" has no carve-out for "it's already set".
+      const reselect = await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(preexistingDm).send({ ruleSystem: 'cepheus-srd' });
+      expect(reselect.status).toBe(400);
+      expect(reselect.body.message).toMatch(/importer-only/i);
+
+      // The rejected re-select did not change anything — still exactly the pre-existing value.
+      const afterReselect = await request(server).get(`/api/v1/campaigns/${campaignId}`).set(preexistingDm);
+      expect(afterReselect.body.ruleSystem).toBe('cepheus-srd');
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('JSON import (POST /campaigns/import) drops an importer-only ruleSystem instead of selecting it, matching the existing dangling-slug degrade-not-fail path', async () => {
+    // importCampaign() is a THIRD write path for `ruleSystem` — separate from create()/update()
+    // — that inserts a new campaign row directly rather than going through validateRuleSystem.
+    // An untrusted export document naming an installed-but-importer-only pack must not be able
+    // to select it through this path either.
+    const { startFakeCepheus } = await import('./fake-cepheus');
+    const fake = await startFakeCepheus();
+    try {
+      const install = await request(server).post('/api/v1/rules/packs/install').set(preexistingDm).send({ source: 'cepheus', url: fake.baseUrl });
+      expect(install.status).toBe(202);
+      const job = await pollJob(server, preexistingDm, install.body.id);
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('cepheus-srd');
+
+      const doc = {
+        campaign: {
+          name: 'Imported Cepheus Campaign',
+          ruleSystem: 'cepheus-srd',
+          dmControlsProgression: false,
+          dmControlsTurns: false,
+          requireDmTurnConfirmation: false,
+          publicRecapSharingEnabled: true,
+          catalogPrivacy: 'private',
+          aiExternalContentPolicy: 'blocked',
+          narrationLanguage: 'en',
+          status: 'active',
+        },
+      };
+      const importRes = await request(server).post('/api/v1/campaigns/import').set(preexistingDm).send(doc);
+      // The import itself is NOT rejected wholesale (unlike create()/update()) — it degrades
+      // exactly like every other unusable ruleSystem case importCampaign already handles
+      // (an uninstalled pack, an invalid narrationLanguage): the rest of the document still
+      // imports, just without selecting the adapterless slug.
+      expect(importRes.status).toBe(201);
+      expect(importRes.body.ruleSystem).toBe('');
+    } finally {
+      await fake.close();
     }
   });
 });

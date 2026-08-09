@@ -356,6 +356,10 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   supportsXpProgression: true,
   xpForLevel: starfinderXpForLevel,
   levelForXp: starfinderLevelForXp,
+  // Initiative is DEX-derived, so the catalog names the score it reads (see
+  // `initiativeAbility`) — without it a sheet whose DEX is unset offers a rollable,
+  // fabricated +0 initiative.
+  initiativeAbility: 'DEX',
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',

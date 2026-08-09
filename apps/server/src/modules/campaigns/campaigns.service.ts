@@ -22,6 +22,7 @@ import {
   normalizeOffsetIsoDateTime,
   CharacterAction,
   isRegisteredRuleSystemSlug,
+  isImporterOnlyRuleSystemSlug,
   HomebrewMechanicsProfile,
   MonsterHpDisplay,
 } from '@campfire/schema';
@@ -651,6 +652,22 @@ export class CampaignsService {
    * (checked separately by validateCustomMechanicsProfile, always in the same write) is the
    * one exception — its slug need not match an installed rule pack, since the profile IS
    * the rule system rather than imported content.
+   *
+   * Issue #2081: an installed pack that is importer-only — a real, registered install
+   * source with no combat adapter registered in `ADAPTERS` (Cepheus Engine's `cepheus-srd`
+   * is the current example) — is also rejected here, via the schema-owned
+   * `isImporterOnlyRuleSystemSlug` predicate (REST and MCP share this one definition; both
+   * write paths funnel through this same service method, so there is nothing to duplicate
+   * server-side). Selecting it as a campaign's live mechanics would otherwise silently
+   * inherit the unknown-slug 5e fallback instead of the 2D6 system the DM actually picked.
+   * The pack stays fully installable and its content stays fully usable as reference text
+   * (Compendium/search/AI rules lookups are untouched) — only becoming a campaign's
+   * `ruleSystem` is blocked. A campaign that already stores such a slug (from before this
+   * guard existed) is NOT touched by this check: every read path keeps resolving it through
+   * the pre-existing unknown-slug 5e fallback exactly as before, and every write that does
+   * not itself set `ruleSystem` (including one that only clears `customMechanicsProfile`,
+   * gated above) keeps working unconditionally — this only blocks an explicit write that
+   * (re)selects the adapterless slug going forward.
    */
   private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
     if (!ruleSystem) return;
@@ -659,6 +676,13 @@ export class CampaignsService {
     if (!pack) {
       throw new BadRequestException(
         `ruleSystem "${ruleSystem}" does not match any installed rule pack (or provide a matching customMechanicsProfile)`,
+      );
+    }
+    if (isImporterOnlyRuleSystemSlug(ruleSystem, true)) {
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" is an importer-only rule pack (reference text, no combat adapter) and cannot be ` +
+          'selected as a campaign\'s rule system. It stays installed and usable as reference text — the compendium, ' +
+          'search, and AI rules lookups are unaffected.',
       );
     }
   }
@@ -2570,7 +2594,12 @@ export class CampaignsService {
       customMechanicsProfile = JSON.stringify(profileParsed.data);
     } else if (ruleSystemSrc) {
       const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystemSrc)).limit(1);
-      if (pack) ruleSystem = ruleSystemSrc;
+      // Issue #2081: an installed-but-importer-only pack (no ADAPTERS entry — see
+      // isImporterOnlyRuleSystemSlug) is treated exactly like a dangling slug on this path —
+      // dropped to '' rather than selected — matching this function's existing degrade-not-fail
+      // philosophy for every other unusable ruleSystem case here (missing pack, invalid
+      // narrationLanguage/aiExternalContentPolicy). The rest of the export still imports.
+      if (pack && !isImporterOnlyRuleSystemSlug(ruleSystemSrc, true)) ruleSystem = ruleSystemSrc;
     }
     const narrationLanguageParsed = NarrationLanguage.safeParse(campaignSrc.narrationLanguage);
     const narrationLanguage = narrationLanguageParsed.success ? narrationLanguageParsed.data : 'en';

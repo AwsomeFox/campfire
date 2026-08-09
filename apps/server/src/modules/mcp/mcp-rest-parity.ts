@@ -93,6 +93,7 @@ export const MCP_REST_PARITY_ISSUE_683: readonly McpRestParityEntry[] = [
   { rest: 'POST /campaigns/:campaignId/ai-portraits/readiness', mcpTool: 'get_portrait_readiness' },
   { rest: 'POST /campaigns/:campaignId/ai-portraits', mcpTool: 'generate_ai_portrait' },
   { rest: 'GET /campaigns/:campaignId/ai-portraits/:jobId', mcpTool: 'get_portrait_generation' },
+  { rest: 'POST /campaigns/:campaignId/ai-portraits/:jobId/cancel', mcpTool: 'cancel_portrait_generation' },
   { rest: 'POST /campaigns/:campaignId/ai-portraits/:jobId/refine', mcpTool: 'refine_ai_portrait' },
   { rest: 'POST /campaigns/:campaignId/ai-portraits/:jobId/attach', mcpTool: 'attach_generated_portrait' },
 ] as const;

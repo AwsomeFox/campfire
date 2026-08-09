@@ -11,6 +11,8 @@ import {
   formatCheckBreakdown,
   checkRollExpr,
   filterCheckCatalog,
+  hasInitiativeRollForAdapter,
+  hasNeutralD20ChecksForAdapter,
   sortCheckCatalog,
   DND5E_SKILLS,
   type CheckCatalogCharacter,
@@ -138,15 +140,54 @@ describe('roll catalog — fixtures for every supported ruleset', () => {
     skills: { Stealth: 'proficient' },
   };
 
-  it.each(listRuleSystemAdapters().map((adapter) => [adapter.label, adapter] as const))(
+  const everyAdapter = listRuleSystemAdapters();
+  /**
+   * Split, rather than one blanket assertion, because "every ruleset has ability checks and
+   * saves" is only true of the d20 systems. Ironsworn: Starforged resolves moves on a d6
+   * action die and Open Legend rolls an exploding attribute pool, so the neutral
+   * `d20 + modifier` entries this used to require were 5e-shaped rolls those games never
+   * make — and the server resolves the catalog, so offering them PERSISTED wrong numbers to
+   * the shared dice log. They now declare `hasNeutralD20Checks: false` and contribute
+   * nothing until they have an adapter-owned `buildCheckCatalog`; this file's own premise is
+   * that non-5e systems use their own math, so an honest empty catalog is that premise
+   * enforced, not relaxed.
+   */
+  const d20Adapters = everyAdapter.filter((a) => hasNeutralD20ChecksForAdapter(a));
+  const nonD20Adapters = everyAdapter.filter((a) => !hasNeutralD20ChecksForAdapter(a));
+
+  it('covers every registered adapter between the two groups', () => {
+    expect(d20Adapters.length + nonD20Adapters.length).toBe(everyAdapter.length);
+    expect(d20Adapters.length).toBeGreaterThan(0);
+    expect(nonD20Adapters.length).toBeGreaterThan(0);
+  });
+
+  it.each(d20Adapters.map((adapter) => [adapter.label, adapter] as const))(
     '%s produces a non-empty catalog with initiative, ability checks, and saves',
     (_name, adapter) => {
       const catalog = checkCatalogForAdapter(adapter, char);
       expect(catalog.length).toBeGreaterThan(0);
-      expect(catalog.some((c) => c.category === 'initiative')).toBe(true);
+      expect(catalog.some((c) => c.category === 'initiative')).toBe(hasInitiativeRollForAdapter(adapter));
       expect(catalog.some((c) => c.category === 'ability')).toBe(true);
       expect(catalog.some((c) => c.category === 'save')).toBe(true);
       // Every entry carries a transparent breakdown that sums to its modifier (unless flagged incomplete).
+      for (const c of catalog) {
+        if (c.incomplete) continue;
+        const sum = c.breakdown.reduce((acc, b) => acc + b.value, 0);
+        expect(sum).toBe(c.modifier);
+      }
+    },
+  );
+
+  it.each(nonD20Adapters.map((adapter) => [adapter.label, adapter] as const))(
+    '%s offers no d20 ability checks or saves — its own roll is not a d20',
+    (_name, adapter) => {
+      const catalog = checkCatalogForAdapter(adapter, char);
+      expect(catalog.some((c) => c.category === 'ability')).toBe(false);
+      expect(catalog.some((c) => c.category === 'save')).toBe(false);
+      expect(catalog.some((c) => c.category === 'skill')).toBe(false);
+      // Initiative is governed separately: a system that HAS one keeps it (Open Legend is
+      // Agility-monotonic), a system with none (Starforged) contributes nothing at all.
+      expect(catalog.some((c) => c.category === 'initiative')).toBe(hasInitiativeRollForAdapter(adapter));
       for (const c of catalog) {
         if (c.incomplete) continue;
         const sum = c.breakdown.reduce((acc, b) => acc + b.value, 0);
