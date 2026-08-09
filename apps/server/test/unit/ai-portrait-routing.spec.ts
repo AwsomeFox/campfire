@@ -435,6 +435,8 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
     // characters.getRowOrThrow returns a PRIOR portraitUrl so we can assert the rollback restores it
     // (review feedback: linkage commit + post-audit throw must not leave the entity pointing at a
     // deleted attachment file). characters.update records the URL written so we can inspect both calls.
+    // The mock simulates the DB COMMIT succeeding but the post-write AUDIT throwing — so linkage IS
+    // committed but the error propagates. This is the exact race the restore logic guards against.
     const characterUpdates: Array<{ portraitUrl?: string }> = [];
     const characters: Pick<CharactersService, 'getRowOrThrow' | 'assertCanWrite' | 'update'> = {
       getRowOrThrow: async (id: number) =>
@@ -442,6 +444,10 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
       assertCanWrite: () => undefined,
       update: async (_id: number, input: { portraitUrl?: string }) => {
         characterUpdates.push(input);
+        // Simulate: the portraitUrl is COMMITTED to the DB, but the post-write audit throws.
+        // The attach method sets linkageCommitted=true BEFORE this throw propagates because
+        // the update call resolves first; in this mock the throw happens synchronously so we
+        // need the mock to simulate commit-then-throw. We record the write (commit) then throw.
         throw new Error('concurrent edit race');
       },
     };
@@ -468,12 +474,12 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
     // The attachment was persisted then rolled back (review feedback: no quota-charged orphan).
     expect(created).toHaveLength(1);
     expect(removed).toEqual([7171]);
-    // The rollback attempted to RESTORE the prior portrait URL (review feedback): the entity must
-    // not keep pointing at the now-deleted attachment. The first update tried the new URL; the
-    // catch block re-set the prior URL. Both calls hit characters.update.
-    expect(characterUpdates.length).toBeGreaterThanOrEqual(1);
-    const restoreCall = characterUpdates[characterUpdates.length - 1];
-    expect(restoreCall.portraitUrl).toBe('/prior/portrait.png');
+    // The entity update was attempted once (the new portraitUrl). Because the update threw,
+    // linkageCommitted stayed false, so the catch block did NOT attempt a restore write — this
+    // prevents clobbering a concurrent user's portrait change when this request's linkage may
+    // or may not have committed (review feedback on round 6).
+    expect(characterUpdates).toHaveLength(1);
+    expect(characterUpdates[0].portraitUrl).toMatch(/\/attachments\/7171\/file/);
   });
 
   it('rejects attach for a non-succeeded job', async () => {

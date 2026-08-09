@@ -91,6 +91,8 @@ interface JobRecord {
    * refine, or attach another caller's job.
    */
   creatorId: string;
+  /** The idempotency key this job was registered under (if any), so eviction can clean it up. */
+  idemKey?: string;
   /** Decoded preview bytes keyed by preview id (never persisted until attach). */
   bytes: Map<string, { buf: Buffer; mime: string }>;
   abort: AbortController;
@@ -150,6 +152,19 @@ export class AiPortraitService {
     const method = this.chooseMethod(config);
     const cost = this.estimateCost(method, request);
     const warnings = this.readinessWarnings(method);
+    // Review feedback: validate the effective model against the admin allowlist here too, so the
+    // UI can warn before the caller clicks generate — otherwise readiness reports `image-provider`
+    // with no warning and createJob immediately rejects the same request with 400.
+    if (method === 'image-provider') {
+      const allowed = await this.providerConfig.getServerAllowedModels();
+      const effectiveModel = request.imageModel ?? config?.model ?? '';
+      if (allowed.length > 0 && effectiveModel && !allowed.includes(effectiveModel)) {
+        warnings.push(
+          `Model '${effectiveModel}' is not in the server admin's allowlist (${allowed.join(', ')}). ` +
+          'Generation will be rejected unless an allowed model is configured or selected.',
+        );
+      }
+    }
     return {
       method,
       warnings,
@@ -233,6 +248,7 @@ export class AiPortraitService {
       creatorId: callerId,
       bytes: new Map(),
       abort: new AbortController(),
+      idemKey,
     };
     this.registerJob(record);
     if (idemKey) this.idempotency.set(idemKey, id);
@@ -260,7 +276,7 @@ export class AiPortraitService {
         method,
         prompt,
         provider: config?.providerType ?? null,
-        model: config?.model ?? null,
+        model: request.imageModel ?? config?.model ?? null,
         dimensions: method === 'image-provider' ? this.dimensionsFor(request) : null,
         moderation,
         cost: this.estimateCost(method, request),
@@ -441,6 +457,9 @@ export class AiPortraitService {
     // so authority should not fail here — but a race, concurrent edit, or audit/hide write failure
     // could still throw.
     let effectiveAttachment = attachment;
+    // Track whether the entity linkage actually committed so the catch block restores the prior
+    // portrait URL only when this request's URL is the one on the entity (review feedback).
+    let linkageCommitted = false;
     try {
       // If the target NPC is hidden, the generated portrait MUST also be hidden — otherwise a non-DM
       // member could enumerate it through the attachment list and fetch the bytes even though the NPC
@@ -476,36 +495,38 @@ export class AiPortraitService {
       } else {
         await this.npcs.update(body.entityId, { portraitUrl }, user, role);
       }
+      linkageCommitted = true;
     } catch (err) {
       // Defensive: the pre-validation should have caught authority issues, but a race, a concurrent
       // edit, or an audit-write failure could still throw after the attachment was committed. Roll
       // back the just-created attachment so the campaign is not charged quota for an unlinked portrait.
-      // If the entity linkage committed (the update may commit portraitUrl and THEN throw on its
-      // post-write audit), first restore the PRIOR portrait URL so the entity does not keep pointing
-      // at the about-to-be-deleted attachment file (review feedback). We always attempt the restore:
-      // if linkage never committed, re-setting the same prior URL is a harmless no-op write.
-      try {
-        if (body.entityType === 'character') {
-          await this.characters.update(
-            body.entityId,
-            { portraitUrl: targetVisibility.priorPortraitUrl },
-            user,
-            role,
-          );
-        } else {
-          await this.npcs.update(
-            body.entityId,
-            { portraitUrl: targetVisibility.priorPortraitUrl },
-            user,
-            role,
-          );
-        }
-      } catch (restoreErr) {
+      // Only restore the portrait URL if THIS request actually committed the linkage (review feedback):
+      // if setHidden or the audit failed before the entity update, a concurrent user may have changed
+      // the portrait, and unconditionally restoring would clobber their newer value.
+      if (linkageCommitted) {
+        try {
+          if (body.entityType === 'character') {
+            await this.characters.update(
+              body.entityId,
+              { portraitUrl: targetVisibility.priorPortraitUrl },
+              user,
+              role,
+            );
+          } else {
+            await this.npcs.update(
+              body.entityId,
+              { portraitUrl: targetVisibility.priorPortraitUrl },
+              user,
+              role,
+            );
+          }
+        } catch (restoreErr) {
         this.logger.error(
           `AI portrait attach could not restore prior portrait for ${body.entityType}:${body.entityId}: ${
             restoreErr instanceof Error ? restoreErr.message : String(restoreErr)
           }`,
         );
+        }
       }
       try {
         await this.attachments.remove(attachment.id, user, role);
@@ -746,6 +767,9 @@ export class AiPortraitService {
       const toEvict = evictable.slice(0, campaignJobs.length - MAX_JOBS_PER_CAMPAIGN);
       for (const r of toEvict) {
         this.jobs.delete(r.job.id);
+        // Clean up the idempotency ledger entry too (review feedback): otherwise the map grows
+        // unboundedly — one entry per keyed generation, even after the job itself is evicted.
+        if (r.idemKey) this.idempotency.delete(r.idemKey);
       }
     }
   }

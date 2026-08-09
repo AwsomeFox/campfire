@@ -1252,7 +1252,11 @@ export class AttachmentsService implements OnApplicationBootstrap {
     // metadata is gone (orchestrator / #727).
     const planned = await this.fsDeletion.reserveUploadPaths([filePath, ...derivativePaths], auditCtx);
 
-    const portraitSuffix = `%/attachments/${id}/file`;
+    // Match the attachment file URL with an optional cache-buster query string (e.g.
+    // `?v=...` appended to AI-generated portrait URLs). Without the trailing `%`, a versioned
+    // URL ending in `?v=abc` would not match and portraitUrl would not be cleared when the
+    // attachment is deleted (review feedback on issue #1321).
+    const portraitSuffix = `%/attachments/${id}/file%`;
     this.db.transaction((tx) => {
       tx.delete(attachments).where(eq(attachments.id, id)).run();
       tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, id)).run();
