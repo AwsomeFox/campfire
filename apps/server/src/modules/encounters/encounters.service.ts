@@ -34,7 +34,7 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationsService, type NotificationEvent } from '../notifications/notifications.service';
 import { ActionResolverService } from './action-resolver.service';
 import {
   actionEconomySlotMax,
@@ -6101,7 +6101,7 @@ export class EncountersService {
 
     if (row.kind === 'character' && row.characterId) {
       if (beforeDeath !== 'dead' && afterDeath === 'dead') {
-        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+        this.notifyCharacterStatusChange(encounterRow, row.characterId, user, {
           type: 'character_downed',
           title: 'Character died!',
           body: `${row.name} has died in combat.`,
@@ -6109,7 +6109,7 @@ export class EncountersService {
           entityId: encounterId,
         }).catch(() => {});
       } else if (beforeHp > 0 && afterHp === 0 && afterDeath !== 'dead') {
-        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+        this.notifyCharacterStatusChange(encounterRow, row.characterId, user, {
           type: 'character_downed',
           title: 'Character downed!',
           body: `${row.name} was downed in combat.`,
@@ -6121,6 +6121,36 @@ export class EncountersService {
 
     const domain = combatantToDomain(row);
     return isDm ? domain : redactMonsterHp(domain, encounterRow.monsterHpDisplay as MonsterHpDisplay, user.id);
+  }
+
+  /**
+   * Hidden encounters are wholesale DM-only to non-DMs, so a notification with
+   * their id or a character's status is itself secret. The character owner is
+   * the sole non-DM recipient entitled to that personal status; DM-role members
+   * retain their normal campaign-management visibility. Visible encounters keep
+   * the established whole-campaign fan-out.
+   */
+  private async notifyCharacterStatusChange(
+    encounterRow: Pick<typeof encounters.$inferSelect, 'campaignId' | 'hidden'>,
+    characterId: number,
+    user: RequestUser,
+    event: NotificationEvent,
+  ): Promise<void> {
+    if (!encounterRow.hidden) {
+      await this.notifications.notifyCampaign(encounterRow.campaignId, user, event);
+      return;
+    }
+
+    const [character] = await this.db
+      .select({ ownerUserId: characters.ownerUserId })
+      .from(characters)
+      .where(eq(characters.id, characterId))
+      .limit(1);
+    const roles = await this.notifications.memberRoles(encounterRow.campaignId);
+    for (const [memberId, memberRole] of roles) {
+      if (memberRole !== 'dm' && String(memberId) !== character?.ownerUserId) continue;
+      await this.notifications.notifyUser(memberId, encounterRow.campaignId, user, event);
+    }
   }
 
   async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role, idempotencyKey?: string): Promise<CombatantRemoveResult> {

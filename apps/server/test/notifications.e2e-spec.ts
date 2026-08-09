@@ -526,11 +526,15 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   let ctx: TestAppContext;
   let dm: ReturnType<typeof request.agent>; // campaign creator/dm
   let player: ReturnType<typeof request.agent>; // a player
+  let coDm: ReturnType<typeof request.agent>;
+  let spectator: ReturnType<typeof request.agent>;
   // Venue/room/template MUTATION is @ServerRoles('admin'); applying a template
   // only needs `dm` on the target campaign. Both agents are therefore needed to
   // exercise the apply path end to end.
   let admin: ReturnType<typeof request.agent>;
   let playerId: number;
+  let coDmId: number;
+  let spectatorId: number;
   let campaignId: number;
 
   type Notification = {
@@ -563,11 +567,23 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .post('/api/v1/users')
       .send({ username: 'cov-player', password: 'password-pl-1', displayName: 'Pat Player' });
     playerId = createPlayer.body.id;
+    const createCoDm = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'cov-co-dm', password: 'password-codm-1', displayName: 'Cora Co-DM' });
+    coDmId = createCoDm.body.id;
+    const createSpectator = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'cov-spectator', password: 'password-spec-1', displayName: 'Sam Spectator' });
+    spectatorId = createSpectator.body.id;
 
     dm = request.agent(server);
     await dm.post('/api/v1/auth/login').send({ username: 'cov-dm', password: 'password-dm-1' });
     player = request.agent(server);
     await player.post('/api/v1/auth/login').send({ username: 'cov-player', password: 'password-pl-1' });
+    coDm = request.agent(server);
+    await coDm.post('/api/v1/auth/login').send({ username: 'cov-co-dm', password: 'password-codm-1' });
+    spectator = request.agent(server);
+    await spectator.post('/api/v1/auth/login').send({ username: 'cov-spectator', password: 'password-spec-1' });
 
     const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Coverage Keep' });
     campaignId = campaign.body.id;
@@ -849,6 +865,94 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     const after = ofType(await listFor(player), 'quest_updated');
     expect(after.length).toBe(before + 1);
     expect(after[0].title).toContain('Secret pact');
+  });
+
+  it('keeps hidden-encounter downed and died notifications to DMs and the affected owner, while visible encounters still notify the party (#2112)', async () => {
+    const hiddenCampaign = await dm.post('/api/v1/campaigns').send({ name: 'Hidden Notification Keep' });
+    expect(hiddenCampaign.status).toBe(201);
+    const hiddenCampaignId = hiddenCampaign.body.id as number;
+
+    for (const [userId, role] of [[playerId, 'player'], [coDmId, 'dm'], [spectatorId, 'player']] as const) {
+      const add = await dm.post(`/api/v1/campaigns/${hiddenCampaignId}/members`).send({ userId, role });
+      expect(add.status).toBe(201);
+    }
+
+    const ownerCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Hidden Hero', hpCurrent: 10, hpMax: 10 });
+    expect(ownerCharacter.status).toBe(201);
+    const hiddenEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Unseen Ambush', hidden: true });
+    expect(hiddenEncounter.status).toBe(201);
+    // Encounter creation auto-seeds active characters into its roster.
+    const hiddenRoster = await dm.get(`/api/v1/encounters/${hiddenEncounter.body.id}`);
+    expect(hiddenRoster.status).toBe(200);
+    const hiddenCombatant = hiddenRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === ownerCharacter.body.id,
+    );
+    expect(hiddenCombatant).toBeDefined();
+
+    const notificationsForEncounter = async (agent: ReturnType<typeof request.agent>, encounterId: number, expected: number) => {
+      let matching: Notification[] = [];
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        matching = (await listFor(agent)).filter(
+          (notification) => notification.type === 'character_downed' && notification.entityId === encounterId,
+        );
+        if (matching.length === expected) return matching;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return matching;
+    };
+
+    const downed = await dm
+      .patch(`/api/v1/encounters/${hiddenEncounter.body.id}/combatants/${hiddenCombatant.id}`)
+      .send({ hpSet: 0 });
+    expect(downed.status).toBe(200);
+
+    const ownerDowned = await notificationsForEncounter(player, hiddenEncounter.body.id, 1);
+    const coDmDowned = await notificationsForEncounter(coDm, hiddenEncounter.body.id, 1);
+    const spectatorDowned = await notificationsForEncounter(spectator, hiddenEncounter.body.id, 0);
+    expect(ownerDowned[0].title).toBe('Character downed!');
+    expect(ownerDowned[0].body).toContain('Hidden Hero was downed');
+    expect(coDmDowned[0].entityId).toBe(hiddenEncounter.body.id);
+    expect(spectatorDowned).toEqual([]);
+
+    const died = await dm
+      .patch(`/api/v1/encounters/${hiddenEncounter.body.id}/combatants/${hiddenCombatant.id}`)
+      .send({ deathState: 'dead' });
+    expect(died.status).toBe(200);
+
+    const ownerDied = await notificationsForEncounter(player, hiddenEncounter.body.id, 2);
+    const coDmDied = await notificationsForEncounter(coDm, hiddenEncounter.body.id, 2);
+    const spectatorDied = await notificationsForEncounter(spectator, hiddenEncounter.body.id, 0);
+    const ownerDeathNotice = ownerDied.find((notification) => notification.title === 'Character died!');
+    expect(ownerDeathNotice?.body).toContain('Hidden Hero has died');
+    expect(coDmDied.some((notification) => notification.title === 'Character died!' && notification.entityId === hiddenEncounter.body.id)).toBe(true);
+    expect(spectatorDied).toEqual([]);
+
+    const visibleCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Visible Hero', hpCurrent: 10, hpMax: 10 });
+    expect(visibleCharacter.status).toBe(201);
+    const visibleEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Open Fight', hidden: false });
+    expect(visibleEncounter.status).toBe(201);
+    const visibleRoster = await dm.get(`/api/v1/encounters/${visibleEncounter.body.id}`);
+    expect(visibleRoster.status).toBe(200);
+    const visibleCombatant = visibleRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === visibleCharacter.body.id,
+    );
+    expect(visibleCombatant).toBeDefined();
+
+    const visibleDowned = await dm
+      .patch(`/api/v1/encounters/${visibleEncounter.body.id}/combatants/${visibleCombatant.id}`)
+      .send({ hpSet: 0 });
+    expect(visibleDowned.status).toBe(200);
+    const spectatorVisible = await notificationsForEncounter(spectator, visibleEncounter.body.id, 1);
+    expect(spectatorVisible[0].title).toBe('Character downed!');
+    expect(spectatorVisible[0].entityId).toBe(visibleEncounter.body.id);
   });
 
   it('sharing a note with the party notifies the party (not the author)', async () => {
