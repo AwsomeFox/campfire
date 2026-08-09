@@ -26,23 +26,23 @@ patchNestJsSwagger();
  * defense-in-depth so any future long-lived stream that races the same way is LOGGED
  * (never again "no output when it dies") rather than silently terminating the process.
  *
- * We only swallow the known-benign stream-write class (ERR_STREAM_* / write-after-end /
- * EPIPE / ECONNRESET on a disconnected client). Everything else is logged at FATAL so a
- * genuine bug is loud, not silent.
+ * We only swallow ERR_STREAM_WRITE_AFTER_END — the specific error Node raises when writing
+ * to an already-ended response stream, which is unambiguously the SSE heartbeat case. We do
+ * NOT swallow broader codes like EPIPE or ECONNRESET: those can originate from outbound HTTP
+ * clients and other unrelated streams, and swallowing a genuine programming failure would
+ * leave the process in a potentially inconsistent state (review feedback). Everything else
+ * is logged at FATAL and exits for a clean supervisor restart.
  */
 const bootstrapLogger = new Logger('Bootstrap');
-const STREAM_DISCONNECT_CODES = new Set(['ERR_STREAM_DESTROYED', 'ERR_STREAM_WRITE_AFTER_END', 'ERR_STREAM_PUSH_AFTER_EOF']);
-const STREAM_DISCONNECT_ERRNO = new Set(['EPIPE', 'ECONNRESET', 'ECONNABORTED']);
+const SSE_WRITE_AFTER_END = 'ERR_STREAM_WRITE_AFTER_END';
 
-function isBenignStreamDisconnect(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const code = (err as NodeJS.ErrnoException).code;
-  return STREAM_DISCONNECT_CODES.has(code ?? '') || STREAM_DISCONNECT_ERRNO.has(code ?? '');
+function isBenignSseWriteAfterEnd(err: unknown): boolean {
+  return err instanceof Error && (err as NodeJS.ErrnoException).code === SSE_WRITE_AFTER_END;
 }
 
 process.on('uncaughtException', (err) => {
-  if (isBenignStreamDisconnect(err)) {
-    bootstrapLogger.warn(`Benign stream-write error on a disconnected client (swallowed): ${err.message}`);
+  if (isBenignSseWriteAfterEnd(err)) {
+    bootstrapLogger.warn(`Benign SSE write-after-end on a disconnected client (swallowed): ${err.message}`);
     return;
   }
   // A non-benign uncaught exception means the process may be in an undefined state (partial
@@ -52,8 +52,8 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
-  if (isBenignStreamDisconnect(reason)) {
-    bootstrapLogger.warn(`Benign stream-write rejection on a disconnected client (swallowed): ${reason instanceof Error ? reason.message : String(reason)}`);
+  if (isBenignSseWriteAfterEnd(reason)) {
+    bootstrapLogger.warn(`Benign SSE write-after-end rejection on a disconnected client (swallowed): ${reason instanceof Error ? reason.message : String(reason)}`);
     return;
   }
   bootstrapLogger.error(

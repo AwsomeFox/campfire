@@ -628,10 +628,18 @@ describe('campaign events SSE (e2e, dev auth)', () => {
   });
 
   it('issue #2126: the server survives a client disconnecting at a heartbeat boundary', async () => {
-    // Shrink the heartbeat so the test can exercise the actual write-after-close race without
-    // waiting 25 seconds. The heartbeat fires at this cadence, so a disconnect followed by a
-    // wait past one tick proves the server did not die when the interval wrote into the
-    // destroyed response.
+    // Shrink the heartbeat so the disconnect lands within a heartbeat interval and the server
+    // has to tear down an active SSE subscription. This verifies the PRIMARY fix: the
+    // takeUntil(req/stream close) completes the Observable synchronously when the client goes,
+    // so the heartbeat interval is unsubscribed before it can write into the dead pipe.
+    //
+    // Note (review feedback): Node auto-unpipes a destroyed response, so this test cannot
+    // deterministically reproduce the exact write-after-close crash that motivated the fix —
+    // that race is inherently TOCTOU (a few-microsecond window between TCP RST and the close
+    // event). The test instead proves the observable teardown path works (the server stays up
+    // and the endpoint accepts new connections after a disconnect), which is the user-visible
+    // symptom the fix resolves. The process-level ERR_STREAM_WRITE_AFTER_END handler is the
+    // defense-in-depth for the irreproducible race.
     setHeartbeatMsForTests(200);
     try {
       const server = ctx.app.getHttpServer();
