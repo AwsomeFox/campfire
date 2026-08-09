@@ -12,8 +12,16 @@ import { projectCampaignEventForRole } from './campaign-event-projection';
 /**
  * Keepalive cadence. Long enough to be negligible traffic, short enough that
  * typical reverse-proxy idle timeouts (usually 60s+) never cut a quiet stream.
+ *
+ * Exported and mutable so the #2126 regression test can shrink the interval to
+ * exercise the heartbeat-write-after-close race without waiting 25 seconds.
  */
-const HEARTBEAT_MS = 25_000;
+export let HEARTBEAT_MS = 25_000;
+
+/** Test-only: shrink the SSE heartbeat interval so the disconnect race is exercisable. */
+export function setHeartbeatMsForTests(ms: number): void {
+  HEARTBEAT_MS = ms;
+}
 
 @ApiTags('events')
 @Controller('campaigns/:campaignId/events')
@@ -79,11 +87,15 @@ export class CampaignEventsController {
     // next tick. During that window the heartbeat interval below can still emit a ping
     // into the merged pipe, and the framework's concatMap writes it to the destroyed
     // response — an unhandled 'error' event that silently kills the process (there is
-    // no process-level uncaughtException handler). Tying the heartbeat to the request's
-    // own close event via takeUntil ensures the interval stops before that write can
-    // happen, mirroring the res.once('close') guard already used by the backup/export
-    // streaming controllers.
-    const clientDisconnected = fromEvent(req, 'close');
+    // no process-level uncaughtException handler). Listening to BOTH the request's
+    // 'close' and 'aborted' events (and the underlying socket's 'close' if present)
+    // via takeUntil ensures the interval stops before that write can happen. This
+    // mirrors the res.once('close') guard already used by the backup/export streaming
+    // controllers and covers the earlier-aborted path that 'close' alone can miss.
+    const disconnectSignals: Observable<unknown>[] = [fromEvent(req, 'close'), fromEvent(req, 'aborted')];
+    const rawSocket = (req as Request & { socket?: NodeJS.EventEmitter }).socket;
+    if (rawSocket) disconnectSignals.push(fromEvent(rawSocket, 'close'));
+    const clientDisconnected = merge(...disconnectSignals);
 
     // Drop membership.revoked / campaign.trashed frames from the data path — they
     // are internal termination signals, not a "refetch this" tick. (The web client's

@@ -45,7 +45,11 @@ process.on('uncaughtException', (err) => {
     bootstrapLogger.warn(`Benign stream-write error on a disconnected client (swallowed): ${err.message}`);
     return;
   }
-  bootstrapLogger.error(`FATAL uncaught exception: ${err.message}`, err.stack);
+  // A non-benign uncaught exception means the process may be in an undefined state (partial
+  // writes, corrupted in-memory state). Log loudly, then exit non-zero so a supervisor (Docker,
+  // systemd) restarts cleanly — matching Node's default fail-fast behavior, just no longer silent.
+  bootstrapLogger.error(`FATAL uncaught exception (exiting): ${err.message}`, err.stack);
+  process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
   if (isBenignStreamDisconnect(reason)) {
@@ -53,9 +57,10 @@ process.on('unhandledRejection', (reason) => {
     return;
   }
   bootstrapLogger.error(
-    `FATAL unhandled promise rejection: ${reason instanceof Error ? reason.message : String(reason)}`,
+    `FATAL unhandled promise rejection (exiting): ${reason instanceof Error ? reason.message : String(reason)}`,
     reason instanceof Error ? reason.stack : undefined,
   );
+  process.exit(1);
 });
 
 /**
