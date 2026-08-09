@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Resolving an AI tool confirmation FROM THE ENCOUNTER PANEL (issue #1494).
@@ -95,6 +96,8 @@ test.describe('encounter panel tool confirmations (#1494)', () => {
     await mockAiDm(page, campaignId, resolved);
 
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    // The AI-DM driver dock is table-wide, so it lives in the cockpit's Table tab.
+    await openCockpitTab(page, 'table');
 
     // The dock starts collapsed; a DM supervising the AI opens it. The confirmation lives inside
     // the disclosure region, so it must be opened before the panel can render.
@@ -130,6 +133,8 @@ test.describe('encounter panel tool confirmations (#1494)', () => {
     const { campaignId, encounterId } = seed();
     await mockAiDm(page, campaignId, []);
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    // The AI-DM driver dock is table-wide, so it lives in the cockpit's Table tab.
+    await openCockpitTab(page, 'table');
     // The endpoint is DM-only and the query is disabled for anyone else, so even with the dock
     // open there is nothing to render and no 403 drip.
     const toggle = page.getByTestId('encounter-ai-driver-toggle');
