@@ -1080,9 +1080,8 @@ export class CampaignsService {
     // A primary-system switch can also change whether an extension still has its
     // required base. Revalidate the stored list even when the PATCH only mentions
     // ruleSystem, and remove a newly-primary slug from the supplemental set.
-    const enabledPackSlugsToValidate =
-      enabledPackSlugsInput ?? (input.ruleSystem !== undefined ? existing.enabledPackSlugs : undefined);
-    const nextEnabledPackSlugs = await this.validateEnabledPackSlugs(enabledPackSlugsToValidate, effectiveRuleSystem);
+    const nextEnabledPackSlugs = await this.validateEnabledPackSlugs(enabledPackSlugsInput, effectiveRuleSystem);
+    const shouldWritePackSelection = enabledPackSlugsInput !== undefined || input.ruleSystem !== undefined;
     // #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule pack, so
     // the rule-pack requirement has to be satisfied by the profile the campaign will actually
     // have after this write — not only by one re-sent in the same request. Without the second
@@ -1131,10 +1130,24 @@ export class CampaignsService {
     const revalidatePackSelectionTx = (
       tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
     ): { enabledPackSlugs?: string } => {
-      if (nextEnabledPackSlugs === undefined) return {};
+      if (!shouldWritePackSelection) return {};
       let transactionRuleSystem = effectiveRuleSystem;
+      let transactionEnabledPackSlugs = nextEnabledPackSlugs ?? [];
       if (input.ruleSystem !== undefined) {
         this.validateRuleSystemTx(tx, effectiveRuleSystem, profileBacksEffectiveRuleSystem);
+        if (enabledPackSlugsInput === undefined) {
+          // A primary-only PATCH must preserve the supplemental selection current when
+          // this transaction reserves the writer slot. Another PATCH may have changed
+          // that list since this request's preflight snapshot.
+          const current = tx
+            .select({ enabledPackSlugs: campaigns.enabledPackSlugs })
+            .from(campaigns)
+            .where(eq(campaigns.id, id))
+            .limit(1)
+            .get();
+          if (!current) throw new NotFoundException(`Campaign ${id} not found`);
+          transactionEnabledPackSlugs = fromJsonText<string[]>(current.enabledPackSlugs, []);
+        }
       } else {
         // An enabled-pack-only PATCH must validate against the primary that is current
         // after this transaction reserves the writer slot, not the stale preflight row.
@@ -1149,8 +1162,8 @@ export class CampaignsService {
         if (!current) throw new NotFoundException(`Campaign ${id} not found`);
         transactionRuleSystem = current.ruleSystem;
       }
-      const transactionEnabledPackSlugs = this.normalizeEnabledPackSlugs(
-        nextEnabledPackSlugs,
+      transactionEnabledPackSlugs = this.normalizeEnabledPackSlugs(
+        transactionEnabledPackSlugs,
         transactionRuleSystem,
       );
       this.validateEnabledPackSlugsTx(tx, transactionEnabledPackSlugs, transactionRuleSystem);

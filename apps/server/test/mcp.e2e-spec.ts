@@ -989,6 +989,23 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(matches[0].body).toContain('bright streak');
   });
 
+  it('lookup_rule accepts one primary plus 50 supplemental packs in an explicit union', async () => {
+    const client = await mcpClient(viewerToken);
+    const campaignMaximum = Array.from({ length: 51 }, (_, i) => `missing-pack-${i}`);
+    const accepted = await client.callTool({
+      name: 'lookup_rule',
+      arguments: { query: 'no matching rule', packs: campaignMaximum },
+    });
+    expect(accepted.isError).toBeFalsy();
+    expect(parseResult(accepted)).toEqual([]);
+
+    const rejected = await client.callTool({
+      name: 'lookup_rule',
+      arguments: { query: 'no matching rule', packs: [...campaignMaximum, 'missing-pack-51'] },
+    });
+    expect(rejected.isError).toBe(true);
+  });
+
   it('lookup_rule ranks the exact-name match first (issue #33)', async () => {
     const client = await mcpClient(viewerToken);
     // "poisoned" matches both the Poisoned condition (by name) and Petrified (whose

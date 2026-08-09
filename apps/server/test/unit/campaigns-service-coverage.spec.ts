@@ -376,6 +376,51 @@ describe('CampaignsService unit coverage tests', () => {
       ruleSystem: otherBase.slug,
       enabledPackSlugs: [],
     });
+
+    const [concurrentSupplement] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'transaction-concurrent-supplement',
+        name: 'Transaction Concurrent Supplement',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'supplement',
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+    db.update(campaignsTable)
+      .set({ ruleSystem: base.slug, enabledPackSlugs: '[]' })
+      .where(eq(campaignsTable.id, target.id))
+      .run();
+
+    const supplementRaceOriginal = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const supplementRaceTransaction = orm.transaction.bind(orm);
+    let supplementalSelectionChanged = false;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      if (!supplementalSelectionChanged) {
+        supplementalSelectionChanged = true;
+        // Simulate an enabled-pack PATCH committing after this primary-only request
+        // read the campaign, but before its write transaction begins. The requested
+        // primary is included so transaction-time normalization is covered too.
+        db.update(campaignsTable)
+          .set({ enabledPackSlugs: JSON.stringify([otherBase.slug, concurrentSupplement.slug]) })
+          .where(eq(campaignsTable.id, target.id))
+          .run();
+      }
+      return supplementRaceTransaction(fn);
+    };
+    try {
+      await campaignsService.update(target.id, { ruleSystem: otherBase.slug }, creatorActor);
+    } finally {
+      if (supplementRaceOriginal) Object.defineProperty(orm, 'transaction', supplementRaceOriginal);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
+    expect(await campaignsService.getOrThrow(target.id)).toMatchObject({
+      ruleSystem: otherBase.slug,
+      enabledPackSlugs: [concurrentSupplement.slug],
+    });
   });
 
   it('previews and executes campaign cloning', async () => {

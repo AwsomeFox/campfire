@@ -1345,7 +1345,7 @@ export class McpToolsService {
           ),
         packs: z
           .array(z.string().min(1).max(80))
-          .max(50)
+          .max(51)
           .optional()
           .describe('Search a union of installed rule-pack slugs. Omit with campaignId to use that campaign\'s configured content packs.'),
         campaignId: z
