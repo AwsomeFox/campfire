@@ -18,6 +18,7 @@ import type { DiceTheme } from '@campfire/schema';
 import type { Dice3dHandle, Dice3dSettleDie } from '../features/dice/dice3d';
 // Value import, so it must stay three.js-free — see the module doc there.
 import { MAX_ANIMATION_MS } from '../features/dice/dice3dTiming';
+import { natFlourish } from '../features/dice/natFlourish';
 import { prefersReducedMotion } from '../lib/prefersReducedMotion';
 
 /**
@@ -104,16 +105,23 @@ export function DiceRollOverlay({
   colorVisionAssist?: boolean;
   onSettled: () => void;
 }) {
-  const activeTheme: DiceTheme = theme || 'nocturne';
+  // Locked for this roll. The overlay is keyed per roll, so a preference change
+  // mid-flight belongs to the NEXT one — and letting it through here would tear
+  // the throw down and restart it in mid-air.
+  const [activeTheme] = useState<DiceTheme>(() => theme || 'nocturne');
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const handleRef = useRef<Dice3dHandle | null>(null);
-  const pendingSettleRef = useRef<Dice3dSettleDie[] | null>(null);
   const settledRef = useRef(false);
   /** True once the 3D path has been ruled out — no WebGL, or the chunk failed. */
   const [cssFallback, setCssFallback] = useState(false);
 
   const onSettledRef = useRef(onSettled);
   onSettledRef.current = onSettled;
+  // Read by the effect that creates the roller, which cannot depend on either
+  // without tearing the throw down and restarting it every time they change.
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+  const settleResultsRef = useRef<Dice3dSettleDie[]>([]);
   const settleOnce = useCallback(() => {
     if (settledRef.current) return;
     settledRef.current = true;
@@ -137,6 +145,7 @@ export function DiceRollOverlay({
         }),
     [resultKey],
   );
+  settleResultsRef.current = settleResults;
 
   // --- 3D path -------------------------------------------------------------
 
@@ -162,11 +171,13 @@ export function DiceRollOverlay({
           return;
         }
         handleRef.current = handle;
-        const pending = pendingSettleRef.current;
-        if (pending) {
-          pendingSettleRef.current = null;
-          handle.settle(pending);
-        }
+        // A handle can be born into an already-settling roll: the chunk may still
+        // have been loading when the server answered, or the roll's dice changed
+        // at settle time (`animationSides`) and restarted this effect. Either way
+        // the settle effect will not run again — its inputs did not change — so a
+        // fresh handle that did not ask for the faces here would hold its dice in
+        // the air until the backstop gave up on them.
+        if (phaseRef.current === 'settling') handle.settle(settleResultsRef.current);
       })
       .catch(() => {
         if (!cancelled) setCssFallback(true);
@@ -181,8 +192,7 @@ export function DiceRollOverlay({
 
   useEffect(() => {
     if (cssFallback || phase !== 'settling') return;
-    if (handleRef.current) handleRef.current.settle(settleResults);
-    else pendingSettleRef.current = settleResults;
+    handleRef.current?.settle(settleResults);
 
     const backstop = window.setTimeout(settleOnce, DICE_ROLL_MAX_SETTLE_MS);
     return () => window.clearTimeout(backstop);
@@ -216,11 +226,9 @@ export function DiceRollOverlay({
   // The crit/fumble glyph badge rides on top of the canvas in the 3D path (the
   // flourish there is a gold or red flash, which is exactly the distinction
   // colorVisionAssist exists to back up) and on the die itself in the fallback.
-  const critFumble =
-    phase === 'settling'
-      ? dice.find((d) => d.sides === 20 && d.kept && (d.value === 20 || d.value === 1))
-      : undefined;
-  const overlayResult = critFumble ? (critFumble.value === 20 ? 'crit' : 'fumble') : null;
+  // Read through ./natFlourish so it always names the flourish the roller is
+  // actually playing.
+  const overlayResult = phase === 'settling' ? natFlourish(dice) : null;
 
   return (
     <div

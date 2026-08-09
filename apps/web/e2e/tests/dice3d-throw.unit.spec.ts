@@ -4,6 +4,9 @@ import { DICE_ROLL_MAX_SETTLE_MS } from '../../src/components/DiceRollOverlay';
 import {
   dieFaceNormals,
   dieScaleFor,
+  dieSupportRadius,
+  dieVertices,
+  MAX_RENDERED_DICE,
   separateRestingPlaces,
   separationGap,
   simulate,
@@ -140,10 +143,46 @@ test.describe('timing budget', () => {
   });
 });
 
+test.describe('resting height', () => {
+  test('every solid rests ON the tray, not above or through it', () => {
+    // The support distance is NOT the footprint radius — they are only equal for a
+    // sphere. Sharing one number floated the d8 a quarter of a radius off the tray
+    // and sank the d4, whose numbered face up leaves a VERTEX down.
+    for (const sides of SERVER_SIDES) {
+      const support = dieSupportRadius(sides);
+      expect(support, `d${sides} support`).toBeGreaterThan(0);
+      const normals = dieFaceNormals(sides);
+      // With the landing face rotated flat, the die's lowest point must touch the
+      // floor exactly: no gap to hover over, no overlap to sink into.
+      for (const [i, n] of normals.entries()) {
+        const q = new THREE.Quaternion().setFromUnitVectors(n, new THREE.Vector3(0, 1, 0));
+        let lowest = Infinity;
+        for (const v of dieVertices(sides)) {
+          lowest = Math.min(lowest, v.clone().applyQuaternion(q).y);
+        }
+        expect(support + lowest, `d${sides} on face ${i}`).toBeCloseTo(0, 6);
+      }
+    }
+  });
+});
+
+test.describe('render budget', () => {
+  test('a legal roll can never ask for an unbounded number of rigs', () => {
+    // `expr` allows 40 characters and dice are capped per TERM, not per roll, so
+    // `20d6+20d6+...` eight times over is a legal 160-die roll. Every die is a
+    // mesh, an edge pass and a shadow quad, and separation is all-pairs.
+    const worstCaseExpr = Array.from({ length: 8 }, () => '20d6').join('+');
+    expect(worstCaseExpr.length).toBeLessThanOrEqual(40);
+    expect(Math.min(160, MAX_RENDERED_DICE)).toBe(MAX_RENDERED_DICE);
+    // Still generous enough that the rolls people actually make are drawn whole.
+    expect(MAX_RENDERED_DICE).toBeGreaterThanOrEqual(20);
+  });
+});
+
 test.describe('resting-place separation', () => {
   const at = (x: number, z: number) => ({
     traj: [{ p: new THREE.Vector3(x, REST, z), q: new THREE.Quaternion() }],
-    rest: REST,
+    radius: REST,
   });
 
   test('keeps every frame inside the walls, not just the resting one', () => {
@@ -155,7 +194,7 @@ test.describe('resting-place separation', () => {
         { p: new THREE.Vector3(-WALL_X, 1.6, -WALL_Z), q: new THREE.Quaternion() },
         { p: new THREE.Vector3(3.0, REST, 1.2), q: new THREE.Quaternion() },
       ],
-      rest: REST,
+      radius: REST,
     };
     separateRestingPlaces([subject, at(3.05, 1.25)]);
 
@@ -214,7 +253,7 @@ test.describe('resting-place separation', () => {
       const rest = radius * dieScaleFor(count, radius);
       const thrown = Array.from({ length: count }, (_, i) => ({
         traj: simulate(throwN(i * 7 + count), rest),
-        rest,
+        radius: rest,
       }));
       separateRestingPlaces(thrown);
 

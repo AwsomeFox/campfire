@@ -26,6 +26,7 @@
 import * as THREE from 'three';
 import type { DiceTheme } from '@campfire/schema';
 import { d6Values, faceValues } from './dice3dFaces';
+import { natFlourish, natFlourishDieIndex } from './natFlourish';
 import {
   ALIGN_MS,
   ALIGN_MS_REDUCED,
@@ -62,9 +63,76 @@ const WALL_Z = 1.5;
 
 const DROPPED_OPACITY = 0.3;
 
-/** Resting radius of each solid before the roll's scale is applied. */
+/**
+ * Footprint radius of each solid before the roll's scale is applied — how much
+ * floor a settled die claims, which is what spacing and the tray walls care
+ * about. Deliberately NOT the same as how high the die sits: see
+ * `dieSupportRadius`.
+ */
 const DIE_RADIUS = 0.96;
 const D6_RADIUS = 0.86;
+/** Half the d6 box edge (BoxGeometry(1.62)) — its face-down support distance. */
+const D6_SUPPORT = 0.81;
+
+/**
+ * Most dice a roll draws.
+ *
+ * The grammar caps dice per TERM at 20 and does not cap terms, and `expr` allows
+ * 40 characters — so `20d6+20d6+...` eight times over is a legal 160-die roll.
+ * Every die is a mesh, an edge pass and a shadow quad, and separation is
+ * all-pairs, so drawing all 160 costs over a thousand draw calls a frame and a
+ * five-million-iteration relaxation before the first one. That is a frozen phone
+ * in exchange for a pile nobody can count anyway.
+ *
+ * The overlay is decorative — `role="presentation"`, `aria-hidden` — and the
+ * authoritative faces are in the result toast and the shared dice log, which
+ * both report the full roll. So past this many, it shows a handful and lets
+ * those surfaces carry the result.
+ */
+export const MAX_RENDERED_DICE = 24;
+
+const supportRadii = new Map<number, number>();
+
+/**
+ * Distance from a die's centre to the tray when its numbered face is UP — i.e.
+ * how high the settled die's centre sits.
+ *
+ * Measured off the real geometry rather than shared with the footprint radius,
+ * because the two are only equal for a sphere. A d8 supported on the face
+ * opposite the one showing sits at 0.693, not 0.96, and hovered a quarter of a
+ * radius above the tray; a d4 has the opposite problem, since a face up leaves a
+ * VERTEX down at the full circumradius of 1.15, and it sank into the floor.
+ *
+ * One value per shape is exact here: these solids are face-transitive, so every
+ * face gives the same answer (verified in dice3d-throw.unit.spec.ts).
+ */
+/** Every vertex of the solid a die of `sides` is drawn on, in local space. */
+export function dieVertices(sides: number): THREE.Vector3[] {
+  const geo = sides === 6 ? new THREE.BoxGeometry(1.62, 1.62, 1.62) : geometryFor(sides);
+  const pos = geo.getAttribute('position');
+  const out: THREE.Vector3[] = [];
+  for (let i = 0; i < pos.count; i++) out.push(new THREE.Vector3().fromBufferAttribute(pos, i));
+  geo.dispose();
+  return out;
+}
+
+export function dieSupportRadius(sides: number): number {
+  const cached = supportRadii.get(sides);
+  if (cached != null) return cached;
+  if (sides === 6) {
+    supportRadii.set(6, D6_SUPPORT);
+    return D6_SUPPORT;
+  }
+  const geo = geometryFor(sides);
+  const vertices = dieVertices(sides);
+  let support = 0;
+  for (const face of facesFor(sides, geo)) {
+    for (const vertex of vertices) support = Math.max(support, -vertex.dot(face.normal));
+  }
+  geo.dispose();
+  supportRadii.set(sides, support);
+  return support;
+}
 /** How far apart two resting dice must sit, as a multiple of their radii. */
 const SEPARATION = 1.15;
 /**
@@ -554,12 +622,13 @@ export function simulate(init: ThrowInit, rest: number): Frame[] {
 
 export interface RestingThrow {
   traj: Frame[];
-  rest: number;
+  /** Footprint radius — the floor this die claims once settled. */
+  radius: number;
 }
 
 /** Centre distance two resting dice need before they stop intersecting. */
-export function separationGap(restA: number, restB: number): number {
-  return (restA + restB) * SEPARATION;
+export function separationGap(radiusA: number, radiusB: number): number {
+  return (radiusA + radiusB) * SEPARATION;
 }
 
 /**
@@ -591,14 +660,14 @@ export function separateRestingPlaces(throws: readonly RestingThrow[]): void {
   const startZ = throws.map((t) => t.traj[t.traj.length - 1].p.z);
   const x = [...startX];
   const z = [...startZ];
-  const limitX = throws.map((t) => Math.max(0, WALL_X - t.rest));
-  const limitZ = throws.map((t) => Math.max(0, WALL_Z - t.rest));
+  const limitX = throws.map((t) => Math.max(0, WALL_X - t.radius));
+  const limitZ = throws.map((t) => Math.max(0, WALL_Z - t.radius));
 
   /** True while any pair is still closer than the gap they need. */
   function stillOverlapping(): boolean {
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
-        const gap = separationGap(throws[i].rest, throws[j].rest);
+        const gap = separationGap(throws[i].radius, throws[j].radius);
         if (Math.hypot(x[i] - x[j], z[i] - z[j]) < gap) return true;
       }
     }
@@ -615,7 +684,7 @@ export function separateRestingPlaces(throws: readonly RestingThrow[]): void {
   function relaxPass(pass: number): void {
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
-        const gap = separationGap(throws[i].rest, throws[j].rest);
+        const gap = separationGap(throws[i].radius, throws[j].radius);
         let dx = x[i] - x[j];
         let dz = z[i] - z[j];
         let dist = Math.hypot(dx, dz);
@@ -647,10 +716,10 @@ export function separateRestingPlaces(throws: readonly RestingThrow[]): void {
     // the floor has slots for them — and relaxing from there rounds off the
     // regularity. Dice keep their left-to-right order, so the pile still broadly
     // reflects where the throw put them.
-    const maxRest = Math.max(...throws.map((t) => t.rest));
-    const gap = separationGap(maxRest, maxRest) + SEPARATION_EPS;
-    const spanX = 2 * Math.max(0, WALL_X - maxRest);
-    const spanZ = 2 * Math.max(0, WALL_Z - maxRest);
+    const widest = Math.max(...throws.map((t) => t.radius));
+    const gap = separationGap(widest, widest) + SEPARATION_EPS;
+    const spanX = 2 * Math.max(0, WALL_X - widest);
+    const spanZ = 2 * Math.max(0, WALL_Z - widest);
     const cols = Math.max(1, Math.floor(spanX / gap) + 1);
     const rows = Math.max(1, Math.ceil(n / cols));
     const stepX = cols > 1 ? spanX / (cols - 1) : 0;
@@ -740,11 +809,14 @@ export function startDiceRoll(
   scene.add(flash);
 
   const group = new THREE.Group();
-  const n = sides.length;
+  // Drawn dice only — see MAX_RENDERED_DICE. The roll's real faces still arrive in
+  // full through settle(); the ones past the cap simply are not drawn.
+  const drawn = sides.slice(0, MAX_RENDERED_DICE);
+  const n = drawn.length;
   const spread = n > 1 ? Math.min(2.5, 5.4 / n) : 0;
   // Sized against the widest solid in the roll, so a mixed 1d20+8d6 is judged by
   // the d20 it has to make room for rather than by the d6 average.
-  const scale = dieScaleFor(n, sides.some((s) => s !== 6) ? DIE_RADIUS : D6_RADIUS);
+  const scale = dieScaleFor(n, drawn.some((s) => s !== 6) ? DIE_RADIUS : D6_RADIUS);
   const shadowTex = tex.shadow();
   const shadowGeos: THREE.BufferGeometry[] = [];
   const shadowMats: THREE.Material[] = [];
@@ -753,8 +825,12 @@ export function startDiceRoll(
   // Every throw is recorded first, then the whole set is slid apart, and only then
   // are the dice built. Separation has to see all the resting places at once — it
   // cannot be done while they arrive one at a time (see separateRestingPlaces).
-  const thrown = sides.map((dieSides, i) => {
-    const rest = (dieSides === 6 ? D6_RADIUS : DIE_RADIUS) * scale;
+  const thrown = drawn.map((dieSides, i) => {
+    // Two different radii, because a die's footprint and its ride height are only
+    // the same for a sphere: `radius` is the floor it claims (spacing, walls),
+    // `rest` is how high its centre sits once the numbered face is up.
+    const radius = (dieSides === 6 ? D6_RADIUS : DIE_RADIUS) * scale;
+    const rest = dieSupportRadius(dieSides) * scale;
     const init: ThrowInit = {
       pos: new THREE.Vector3(
         (i - (n - 1) / 2) * spread + (Math.random() - 0.5) * 0.3,
@@ -775,7 +851,7 @@ export function startDiceRoll(
         (Math.random() - 0.5) * 22,
       ),
     };
-    return { sides: dieSides, init, rest, traj: simulate(init, rest) };
+    return { sides: dieSides, init, rest, radius, traj: simulate(init, rest) };
   });
   separateRestingPlaces(thrown);
 
@@ -1015,21 +1091,19 @@ export function startDiceRoll(
         d.rig.faceNormal = d.rig.normals[upIdx].clone();
         if (!result.kept) d.rig.fade();
       }
-      // The flourish belongs to the first KEPT natural 20 (or natural 1) on a
-      // d20 — a discarded advantage die must not set off the crit.
+      // Which flourish, and whose, comes from ./natFlourish — the same rule the
+      // overlay's colour-vision badge reads, so the badge can never describe a
+      // different outcome from the one being animated.
       if (!reducedMotion) {
-        const critAt = dice.findIndex(
-          (d, i) => d.rig.sides === 20 && results[i]?.kept && results[i]?.value === 20,
-        );
-        const fumbleAt = dice.findIndex(
-          (d, i) => d.rig.sides === 20 && results[i]?.kept && results[i]?.value === 1,
-        );
-        if (critAt >= 0) {
-          hero = dice[critAt];
-          flourish = 'crit';
-        } else if (fumbleAt >= 0) {
-          hero = dice[fumbleAt];
-          flourish = 'fumble';
+        const rolled = dice.map((d, i) => ({
+          sides: d.rig.sides,
+          value: results[i]?.value,
+          kept: results[i]?.kept ?? false,
+        }));
+        const heroAt = natFlourishDieIndex(rolled);
+        if (heroAt >= 0) {
+          hero = dice[heroAt];
+          flourish = natFlourish(rolled);
         }
       }
       released = true;

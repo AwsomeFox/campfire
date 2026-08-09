@@ -85,6 +85,26 @@ test.describe('Dice roll overlay contracts (issue #1352)', () => {
     expect(contextSource).toMatch(/key=\{overlay\.id\}/);
   });
 
+  test('a handle created mid-settle is told the faces', () => {
+    // The settle effect fires once, when the phase flips. A roller born after that
+    // — chunk still loading, or the effect restarted because the roll's dice
+    // changed — would otherwise never be given the faces and would hold its dice
+    // in the air until the backstop gave up on them.
+    expect(overlaySource).toMatch(/phaseRef\.current === 'settling'/);
+    // The theme is locked for the roll so a preference landing mid-flight cannot
+    // restart the throw in mid-air.
+    expect(overlaySource).toMatch(/useState<DiceTheme>\(\(\) => theme \|\| 'nocturne'\)/);
+  });
+
+  test('the crit badge and the crit animation read the same rule', () => {
+    const rollerSource3d = readFileSync(resolve(ROOT, 'src/features/dice/dice3d.ts'), 'utf8');
+    expect(overlaySource).toMatch(/natFlourish\(dice\)/);
+    expect(rollerSource3d).toMatch(/natFlourishDieIndex\(rolled\)/);
+    // Neither may re-derive it: a second copy is how they came to disagree.
+    expect(overlaySource).not.toMatch(/value === 20/);
+    expect(rollerSource3d).not.toMatch(/results\[i\]\?\.value === 20/);
+  });
+
   test('a backgrounded tab still reaches the result toast', () => {
     // requestAnimationFrame is throttled to zero in a background tab, so the
     // 3D settle callback can never arrive; the toast must not be lost with it.
