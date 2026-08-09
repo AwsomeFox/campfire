@@ -880,6 +880,8 @@ export const auditLog = sqliteTable('audit_log', {
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
   detail: text('detail').notNull().default(''),
+  // Versioned, structured audit payload. Null preserves legacy rows unchanged.
+  payloadJson: text('payload_json'),
   requestId: text('request_id'),
   createdAt: text('created_at').notNull(),
 });

@@ -792,6 +792,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   entity_type TEXT,
   entity_id INTEGER,
   detail TEXT NOT NULL DEFAULT '',
+  payload_json TEXT,
   request_id TEXT,
   created_at TEXT NOT NULL
 );

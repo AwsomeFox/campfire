@@ -1,7 +1,9 @@
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import type { AuditActorRole, AuditEntry, CampaignMember } from '@campfire/schema';
 import { GameIcon } from '../../components/GameIcon';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { entityHref } from '../../lib/entityLinks';
 
 export const ACTOR_ICON: Record<AuditActorRole, string> = {
   dm: 'top-hat',
@@ -61,6 +63,16 @@ export function AuditEntryRow({
 }) {
   const { t } = useTranslation();
   const { label, isToken } = resolveActorLabel(entry.actor, members);
+  const timelineTarget =
+    entry.campaignId != null && entry.payload?.kind === 'timeline_event'
+      ? {
+          label: entry.payload.entity.label,
+          href: entityHref(entry.campaignId, {
+            type: entry.payload.entity.navigation.route,
+            id: entry.payload.entity.id,
+          }),
+        }
+      : null;
   return (
     <div
       id={`audit-${entry.id}`}
@@ -78,9 +90,17 @@ export function AuditEntryRow({
       <code className="text-[10px] text-amber-400">{entry.action}</code>
       {entry.entityType && (
         <span className="text-secondary">
-          {' '}
-          on {entry.entityType}
-          {entry.entityId != null ? ` #${entry.entityId}` : ''}
+          {' '}on{' '}
+          {timelineTarget ? (
+            <Link to={timelineTarget.href} className="text-amber-300 hover:text-amber-200 underline-offset-2 hover:underline">
+              {timelineTarget.label}
+            </Link>
+          ) : (
+            <>
+              {entry.entityType}
+              {entry.entityId != null ? ` #${entry.entityId}` : ''}
+            </>
+          )}
         </span>
       )}
       {entry.detail && <span className="text-secondary"> — {entry.detail}</span>}

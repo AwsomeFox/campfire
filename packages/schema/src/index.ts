@@ -12682,6 +12682,69 @@ export type AttachmentKind = z.infer<typeof AttachmentKind>;
 export const AuditActorRole = z.enum(['dm', 'player', 'viewer', 'admin']);
 export type AuditActorRole = z.infer<typeof AuditActorRole>;
 
+/**
+ * A primitive preserved in an audit field change. Audit payloads deliberately
+ * record values, rather than a patch request, so a later reader can see the
+ * state that actually committed (including defaults and concurrent writes).
+ */
+export const AuditFieldValue = z.union([z.string().max(50_000), z.number(), z.boolean(), z.null()]);
+export type AuditFieldValue = z.infer<typeof AuditFieldValue>;
+
+/** Visibility is attached to each changed field, not inferred from its name. */
+export const AuditFieldChange = z.object({
+  field: z.string().min(1).max(80),
+  before: AuditFieldValue,
+  after: AuditFieldValue,
+  visibility: z.enum(['member', 'dm']).default('member'),
+});
+export type AuditFieldChange = z.infer<typeof AuditFieldChange>;
+
+const TimelineEventAuditSnapshot = z.object({
+  title: z.string().max(200),
+  inWorldDate: z.string().max(200),
+  body: z.string().max(50_000),
+  era: z.string().max(120),
+  sortIndex: z.number().int(),
+  dmSecret: z.string().max(20_000),
+  hidden: z.boolean(),
+});
+
+/**
+ * First versioned structured audit payload. The union intentionally contains
+ * only delivered action families; adding a domain means adding its explicit
+ * member here rather than treating opaque JSON as a shared extension surface.
+ */
+export const TimelineEventAuditPayload = z.object({
+  version: z.literal(1),
+  kind: z.literal('timeline_event'),
+  action: z.enum([
+    'timeline.event.create',
+    'timeline.event.update',
+    'timeline.event.delete',
+    'timeline.event.restore',
+  ]),
+  actor: z.object({ id: z.string().max(200), role: AuditActorRole }),
+  source: z.object({
+    transport: z.enum(['rest', 'mcp', 'system']),
+    requestId: z.string().max(128).nullable(),
+  }),
+  entity: z.object({
+    type: z.literal('timeline_event'),
+    id: Id,
+    label: z.string().min(1).max(200),
+    navigation: z.object({ route: z.literal('timeline'), query: z.literal('event') }),
+  }),
+  changes: z.array(AuditFieldChange).min(1).max(8),
+  // Delete/restore need a durable state reference in addition to the visibility
+  // transition; create/update can be understood entirely from `changes`.
+  snapshot: TimelineEventAuditSnapshot.nullable(),
+  reason: z.string().max(500).nullable(),
+});
+export type TimelineEventAuditPayload = z.infer<typeof TimelineEventAuditPayload>;
+
+export const AuditPayload = z.discriminatedUnion('kind', [TimelineEventAuditPayload]);
+export type AuditPayload = z.infer<typeof AuditPayload>;
+
 export const AuditEntry = z.object({
   id: Id,
   campaignId: Id.nullable(),
@@ -12691,6 +12754,8 @@ export const AuditEntry = z.object({
   entityType: z.string().max(40).nullable(),
   entityId: Id.nullable(),
   detail: z.string().max(2000).default(''),
+  // Null for legacy rows written before issue #810's structured payload column.
+  payload: AuditPayload.nullable().default(null),
   requestId: z.string().max(128).nullable().optional(),
   createdAt: IsoDate,
 });

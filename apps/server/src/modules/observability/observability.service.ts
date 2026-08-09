@@ -167,6 +167,9 @@ export class ObservabilityService {
       entityType: r.entityType ?? null,
       entityId: r.entityId ?? null,
       detail: r.detail,
+      // Recent activity intentionally remains a compact operational feed. Raw
+      // forensic payloads are available only through the DM audit surface.
+      payload: null,
       requestId: r.requestId ?? null,
       createdAt: r.createdAt,
     }));
