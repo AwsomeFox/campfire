@@ -182,8 +182,8 @@
       "xpManual": "XP guidance: {{label}} — award manually for this ruleset."
     },
     "driver": {
-      "toggle": "AI Driver",
-      "panelLabel": "AI Driver controls",
+      "toggle": "Live session chat",
+      "panelLabel": "Live session chat controls",
       "transcriptLabel": "Driver transcript",
       "openTable": "Open full table"
     },

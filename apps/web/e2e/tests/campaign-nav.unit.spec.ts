@@ -14,7 +14,6 @@ test.describe('campaign nav IA (#643)', () => {
   test('groups routes into Play, Prepare, World, Records, Manage', () => {
     const groups = buildCampaignNavGroups(t, 42, {
       isDm: true, canCast: true,
-      aiDriverActive: true,
       inboxCount: 2,
       pendingProposals: 1,
       trashCount: 3,
@@ -26,7 +25,6 @@ test.describe('campaign nav IA (#643)', () => {
       'inventory',
       'encounters',
       'screen',
-      'table',
       'notes',
     ]);
     expect(groups.find((g) => g.key === 'manage')?.items.map((i) => i.key)).toEqual([
@@ -45,7 +43,6 @@ test.describe('campaign nav IA (#643)', () => {
   test('player Manage group exposes my proposals and your data', () => {
     const groups = buildCampaignNavGroups(t, 7, {
       isDm: false, canCast: false,
-      aiDriverActive: false,
       inboxCount: 0,
       pendingProposals: 0,
       trashCount: 0,
@@ -64,7 +61,6 @@ test.describe('campaign nav IA (#643)', () => {
   test('More sheet omits tab-bar duplicates', () => {
     const groups = buildCampaignNavGroups(t, 1, {
       isDm: true, canCast: true,
-      aiDriverActive: false,
       inboxCount: 0,
       pendingProposals: 0,
       trashCount: 0,

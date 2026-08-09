@@ -3,7 +3,7 @@
  * in this campaign BEFORE it ever speaks, so players aren't surprised by an AI at the table.
  *
  *   - off (or seat unreadable): renders nothing.
- *   - driver: a link to the Table, where the AI-run session is played.
+ *   - driver: a link to Encounters, where the AI-run session is played.
  *   - co_dm: a disclosure that expands the "what the AI can do here" transparency note —
  *     players see what data it sees and that canon changes still need the DM.
  *
@@ -79,7 +79,7 @@ export function AiModeBadge({ campaignId }: { campaignId: number }) {
     return (
       <span className="inline-flex items-center gap-1">
         <Link
-          to={`/c/${campaignId}/table`}
+          to={`/c/${campaignId}/encounters`}
           className="tag tag-accent"
           style={{ whiteSpace: 'nowrap', cursor: 'pointer', textDecoration: 'none' }}
           aria-label={t('aiOnboarding.badge.driverAria')}

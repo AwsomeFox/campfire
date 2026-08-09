@@ -6,7 +6,6 @@
  * context so supervising a Driver DM does not require leaving the combat tracker.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, Combatant, EncounterWithCombatants } from '@campfire/schema';
@@ -16,6 +15,7 @@ import { queryKeys, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { aiDmPauseRequest } from './aiDmPause';
 import { speakerPrefix } from './transcript';
 import { StuckLadder } from './StuckLadder';
+import { AiPathGuide } from './AiSetupChecklist';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
 import { TranscriptRow } from './AiDmTranscriptUi';
 import { useAiDmLiveActivity } from './useAiDmLiveActivity';
@@ -299,13 +299,6 @@ export function EncounterAiDriverPanel({
             {statusLabel}
           </Chip>
         </Btn>
-        <div className="flex-1" />
-        <Link
-          to={`/c/${campaignId}/table`}
-          className="text-xs text-[var(--color-accent)] no-underline hover:underline"
-        >
-          {t('encounters.driver.openTable')} →
-        </Link>
       </div>
 
       {open && (
@@ -320,6 +313,8 @@ export function EncounterAiDriverPanel({
             the transcript scrolls it out of view.
           */}
           <ToolConfirmationsPanel campaignId={campaignId} isDm={isDm} knownEntities={confirmationEntities} />
+
+          <AiPathGuide compact />
 
           <div className="flex flex-wrap items-center gap-2 justify-between">
             <p className="text-xs text-secondary m-0 truncate flex-1 min-w-0">
@@ -439,4 +434,3 @@ export function EncounterAiDriverPanel({
     </Card>
   );
 }
-

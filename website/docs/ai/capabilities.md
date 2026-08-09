@@ -75,6 +75,11 @@ The seat has three modes, set in the web UI:
   calls and any admin/destructive tool (deletes, `update_campaign`,
   `uninstall_rule_pack`, `withdraw_proposal`).
 
+These are distinct from an **external MCP agent**. An MCP client uses the token's
+own read scope and write mode to operate Campfire tools; it does not supply
+narration to the built-in Driver transcript. The built-in Driver lives beside a
+running encounter under **Encounters**; Co-DM has no live transcript at all.
+
 ### Encounter authoring, and its two limits
 
 A Driver can **originate a fight**, not just run one you built: it calls
@@ -192,12 +197,14 @@ budget field as you type a number.
 
 ### The shipped provider still makes no vendor call
 
-The **default provider is a no-op scaffold** — it contacts no LLM and returns a
-clearly-labelled placeholder. **Campfire never calls an LLM vendor from the server by
+With no configured provider, Campfire falls back to a **no-op scaffold** that contacts
+no LLM. Driver mode therefore remains unavailable until a configured provider and
+credential pass readiness. **Campfire never calls an LLM vendor from the server by
 default.** Real narration comes from one of two places:
 
-- a **connected MCP agent** (for example, Claude on a dm-scoped PAT) that authors the
-  narration and drives the write tools — exactly the loop described above; **or**
+- a **connected MCP agent** (for example, Claude on a dm-scoped PAT) that authors its
+  own narration and drives the write tools — this is separate from the built-in Driver
+  transcript; **or**
 - a **per-campaign provider** you configure with your own key (above), or a self-hoster's
   own provider bound to the `AI_DM_PROVIDER` seam for server-side generation.
 
@@ -240,7 +247,7 @@ except turning it off gives the AI back the authority to change the board on its
 
 !!! tip "Approving the waiting actions"
     Deferred calls land in the AI's pending tool-confirmation queue, which appears at the top of
-    the **AI Table** as soon as something is queued — see [Approving what the AI asks
+    the **live session chat on the running encounter** as soon as something is queued — see [Approving what the AI asks
     to do](#approving-what-the-ai-asks-to-do) below. Each waiting action is shown as a decision
     with its arguments one click away, and the campaign's DMs are notified even when nobody is
     looking at the table.
@@ -317,7 +324,7 @@ Some actions the AI proposes do not run straight away — they wait for the DM. 
 always does, and so do the irreversible ones (ending a fight, removing a combatant, awarding XP,
 levelling a character, moving treasury or inventory).
 
-**Waiting actions appear on the AI Table, at the top, as soon as they are queued.** Each one is
+**Waiting actions appear at the top of the live session chat on the running encounter as soon as they are queued.** Each one is
 shown as a decision rather than a function call — "Deal 7 damage to Thorne", not
 `update_character_hp` — with the full arguments one click away. Approve runs it; Reject discards
 it. Names come only from what your browser already loaded, so an entity you cannot see shows as
@@ -328,7 +335,7 @@ narrating, so the scene keeps moving. That is what makes several waiting actions
 rather than an unusual one — under collaborative handoff a single combat turn can queue four —
 and why the panel is a list.
 
-**If you are not on the AI Table, you still get told.** A pending action raises a notification for
+**If you are not on the running encounter, you still get told.** A pending action raises a notification for
 the campaign's DMs, which is delivered immediately and cannot be muted or batched into a digest.
 Players are not notified: they cannot act on it, and the queue is DM-only.
 
@@ -342,8 +349,8 @@ Players are not notified: they cannot act on it, and the queue is DM-only.
 
 ### Session pacing: start and wrap up
 
-By default the AI answers when someone talks to it and does nothing otherwise. Two controls on
-the AI Table give a session a shape:
+By default the AI answers when someone talks to it and does nothing otherwise. Two controls in
+the live session chat on the running encounter give a session a shape:
 
 - **Start Session** — available to **anyone at the table**, because sitting down to play is a
   group act, not something everyone should wait on the DM for. The AI greets the players and

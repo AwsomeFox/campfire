@@ -4511,8 +4511,8 @@ export default function RunSessionPage() {
           >
             {encounterSyncChip}
           </span>
-          {/* AI-DM presence chip (#344) — the seat is in Driver mode, so it may act on
-              this encounter from the Table page without anyone here having it open. */}
+          {/* AI-DM presence chip (#344) — the Driver's live session chat is available
+              on this running encounter. */}
           {liveActivity.mode === 'driver' && <AiDmPresenceTag turnActive={liveActivity.turnActive} />}
           <button
             type="button"

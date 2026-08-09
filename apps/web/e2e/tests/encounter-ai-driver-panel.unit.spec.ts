@@ -25,7 +25,7 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/StuckLadder/);
     expect(panel).toMatch(/useAiDmLiveActivity/);
     expect(panel).toMatch(/onTogglePause/);
-    expect(panel).toMatch(/openTable/);
+    expect(panel).toMatch(/AiPathGuide/);
   });
 
   test('shared live activity carries transcript for the dock', () => {

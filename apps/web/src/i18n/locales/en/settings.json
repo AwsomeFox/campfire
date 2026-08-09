@@ -110,7 +110,7 @@
         "scopeNoteCampaign": "This campaign overrides the server default below.",
         "scopeNoteServer": "Inherited from the server default set by your server admin.",
         "missingDetail": "The provider settings exist, but no usable credential is available. Ask the server admin to set a key or environment credential.",
-        "noneConfigured": "No AI provider configured — ask your server admin to set one in the AI console. You can also set a campaign-specific override below.",
+        "noneConfigured": "No AI provider configured — Campfire will use its built-in no-op scaffold, so Driver cannot narrate a live session. Ask your server admin to set one in the AI console, or set a campaign-specific override below.",
         "advancedToggle": "Advanced: override provider for this campaign",
         "advancedIntro": "Optional. Most campaigns leave this blank and use the server default. Set a provider here to override it for this table only (a key is optional — a keyless override still uses the server key with the server's endpoint)."
       },

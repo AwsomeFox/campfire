@@ -112,7 +112,7 @@ export function AiSetupChecklist({
       body: mode === 'driver' ? t('aiOnboarding.checklist.steps.table.driver') : t('aiOnboarding.checklist.steps.table.notYet'),
       done: mode === 'driver' ? true : null,
       actor: 'dm',
-      fix: mode === 'driver' ? { label: t('aiOnboarding.checklist.openTable'), to: `/c/${campaignId}/table` } : undefined,
+      fix: mode === 'driver' ? { label: t('aiOnboarding.checklist.openEncounters'), to: `/c/${campaignId}/encounters` } : undefined,
     },
   ]);
 
@@ -195,6 +195,7 @@ export function AiSetupChecklist({
       </ol>
 
       <AiTransparencyNote />
+      <AiPathGuide />
     </div>
   );
 }
@@ -270,6 +271,33 @@ export function AiTransparencyNote({ className = '' }: { className?: string }) {
         {t('aiOnboarding.transparency.title')}
       </p>
       <p className="text-xs text-[var(--color-neutral-400)] mt-1">{t('aiOnboarding.transparency.body')}</p>
+    </div>
+  );
+}
+
+/**
+ * Names the three separate AI paths in one place. In particular, an external MCP
+ * connection can use Campfire tools but it cannot drive the built-in Driver transcript.
+ */
+export function AiPathGuide({ compact = false }: { compact?: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className={`cf-inset p-3 ${compact ? 'space-y-1.5' : 'space-y-2'}`} data-testid="ai-path-guide">
+      <p className="text-[11px] font-bold uppercase tracking-widest text-[var(--color-neutral-400)]">
+        {t('aiOnboarding.paths.title')}
+      </p>
+      <p className="text-xs text-[var(--color-neutral-400)] m-0">
+        <strong className="text-[var(--color-neutral-200)]">{t('aiOnboarding.paths.coDm.label')}:</strong>{' '}
+        {t('aiOnboarding.paths.coDm.body')}
+      </p>
+      <p className="text-xs text-[var(--color-neutral-400)] m-0">
+        <strong className="text-[var(--color-neutral-200)]">{t('aiOnboarding.paths.driver.label')}:</strong>{' '}
+        {t('aiOnboarding.paths.driver.body')}
+      </p>
+      <p className="text-xs text-[var(--color-neutral-400)] m-0">
+        <strong className="text-[var(--color-neutral-200)]">{t('aiOnboarding.paths.mcp.label')}:</strong>{' '}
+        {t('aiOnboarding.paths.mcp.body')}
+      </p>
     </div>
   );
 }
