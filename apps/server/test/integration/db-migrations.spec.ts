@@ -2936,7 +2936,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const seeded = openDatabase(dataDir);
     try {
       const ts = '2026-08-09T00:00:00.000Z';
-      seeded.sqlite.prepare('INSERT INTO campaigns (name, created_at, updated_at) VALUES (?, ?, ?)').run('Legacy hidden status', ts, ts);
+      seeded.sqlite.prepare('INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, ?, ?, ?)').run('Legacy hidden status', ts, ts);
       seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 1, ?, ?)').run('Now hidden', ts, ts);
       seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 0, ?, ?)').run('Visible at upgrade', ts, ts);
       const notification = seeded.sqlite.prepare(
