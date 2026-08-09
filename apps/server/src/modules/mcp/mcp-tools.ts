@@ -4763,12 +4763,14 @@ export class McpToolsService {
         'monster statblock id from lookup_rule/get_rule_entry) to pull name/hp/DEX-derived initMod from the ' +
         'compendium, or characterId to pull from a character sheet, when name/hpMax/initMod are omitted. For kind="npc" ' +
         'pass npcId to link a campaign NPC (its name is used); give hpMax or a ruleEntryId statblock for its HP. Pass ' +
-        '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N". Optional `tokenSize` controls the token footprint.',
+        '`count` (>1) to add several distinguishable copies at once, auto-suffixed "Goblin 1".."Goblin N". Optional `tokenSize` controls the token footprint. ' +
+        'Pass `controllerUserId` (user id) to grant delegated control of this combatant to a player.',
       {
         encounterId: Id.describe('Encounter id — from list_encounters'),
         ...CombatantCreate.shape,
         // Same constraints as CombatantCreate (Id, optional) but described for tools/list.
         characterId: Id.optional().describe('Character id — links a party member and pulls name/hp/initMod from their sheet when omitted'),
+        controllerUserId: Id.nullable().optional().describe('User id of player to grant delegated control of this combatant (summons, mounts, companions)'),
         npcId: Id.optional().describe('NPC id (kind="npc") — links a campaign NPC as the combatant identity; its name is used when name is omitted'),
         ruleEntryId: Id.optional().describe('Monster statblock rule entry id — from lookup_rule/get_rule_entry'),
         count: z.number().int().min(1).max(50).optional().describe('Add this many copies at once (monsters), names auto-suffixed 1..N so duplicates are distinguishable'),
@@ -4795,7 +4797,7 @@ export class McpToolsService {
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
-        'fields: initiative, the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat), and ' +
+        'fields: initiative, controllerUserId (set or clear player delegation), the identity edits name / hpMax / initMod (rename a duplicate, fix a mistyped stat), ' +
         'statblockRevealed (reveals/hides this monster or npc\'s statblock to players; a non-DM read genuinely omits ' +
         'the statblock until this is true — logs a combat-log note event and an audit row), and actionUses (issue ' +
         '#1921 — force a limited-use/recharge action\'s spend to an exact value: { actionIndex or actionName, spent }, ' +
@@ -4803,7 +4805,7 @@ export class McpToolsService {
         'logs a combat-log resource_changed event and an audit row). ' +
         'Battle-map token position tokenX/tokenY (0–100 percent overlay, clamped) moves the combatant\'s token on the ' +
         'encounter map. DM may modify any combatant; a player may only touch hp/temp-hp/death-saves/conditions/token ' +
-        'on a combatant linked to a character they own. When sending statblock, pass expectedStatblock (the statblock ' +
+        'on a combatant linked to a character they own or a combatant where controllerUserId matches their user id. When sending statblock, pass expectedStatblock (the statblock ' +
         'get_encounter last showed for THIS combatant, issue #1992) to opt into a content-based optimistic-concurrency ' +
         'check: it 409s only when the currently STORED statblock no longer matches what you started from, so an ' +
         'unrelated hp/condition/position change to this same combatant never invalidates the edit, while a genuine ' +

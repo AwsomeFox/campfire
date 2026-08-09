@@ -1809,6 +1809,7 @@ CREATE TABLE IF NOT EXISTS combatants (
   encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
   character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+  controller_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   npc_id INTEGER REFERENCES npcs(id) ON DELETE SET NULL,
   npc_disposition_snapshot TEXT,
   npc_identity_source_id INTEGER,

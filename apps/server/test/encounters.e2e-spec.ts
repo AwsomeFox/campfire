@@ -59,6 +59,7 @@ describe('encounters (e2e)', () => {
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
       .send({ name: 'Aria', stats: { DEX: 16 }, hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' });
+    console.log('CHAR_RES_ERROR:', charRes.status, charRes.body);
     expect(charRes.status).toBe(201);
     ownedCharacterId = charRes.body.id;
 
@@ -10440,6 +10441,111 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       expect(res.body.escalationDieOverride).toBe(4);
     });
   });
+
+  describe('delegated combatant controllerUserId (issue #1941)', () => {
+    it('allows DM to assign and clear controllerUserId, granting combatant rights to player', async () => {
+      const realCtx = await createTestAppNoDevAuth();
+      const server = realCtx.app.getHttpServer();
+      try {
+        const adminAgent = request.agent(server);
+        const setup = await adminAgent
+          .post('/api/v1/auth/setup')
+          .send({ username: 'controller-admin-1941', password: 'controller-admin-password-1' });
+        expect(setup.status).toBe(201);
+
+        // Dev-auth identities are not persisted users, so create a real account and
+        // cookie session for the delegated controller.
+        const createdPlayer = await adminAgent
+          .post('/api/v1/users')
+          .send({
+            username: 'controller-player-1941',
+            displayName: 'Controller Player',
+            password: 'controller-password-1',
+            serverRole: 'user',
+          });
+        expect(createdPlayer.status).toBe(201);
+        const playerUserId = createdPlayer.body.id;
+        const controllerAgent = request.agent(server);
+        const login = await controllerAgent
+          .post('/api/v1/auth/login')
+          .send({ username: 'controller-player-1941', password: 'controller-password-1' });
+        expect(login.status).toBe(201);
+
+        const camp = await adminAgent
+          .post('/api/v1/campaigns')
+          .send({ name: 'Delegated Control Campaign' });
+        const campaignId = camp.body.id;
+
+        const membership = await adminAgent
+          .post(`/api/v1/campaigns/${campaignId}/members`)
+          .send({ userId: playerUserId, role: 'player' });
+        expect(membership.status).toBe(201);
+
+        // DM creates encounter and adds a summoned creature combatant
+        const enc = await adminAgent
+          .post(`/api/v1/campaigns/${campaignId}/encounters`)
+          .send({ name: 'Summon Fight', hidden: false });
+        const encounterId = enc.body.id;
+
+        const summonRes = await adminAgent
+          .post(`/api/v1/encounters/${encounterId}/combatants`)
+          .send({
+            kind: 'monster',
+            name: 'Fire Elemental Companion',
+            hpMax: 50,
+            controllerUserId: playerUserId,
+            statblock: {
+              ac: 13,
+              notes: 'DM-only elemental notes',
+              abilityScores: {},
+              resources: {},
+              spellSlots: {},
+              actions: [],
+              traits: [],
+            },
+          });
+        expect(summonRes.status).toBe(201);
+        expect(summonRes.body.controllerUserId).toBe(playerUserId);
+        const summonId = summonRes.body.id;
+
+        // Non-DM cannot assign controllerUserId (403)
+        const failAssign = await controllerAgent
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
+          .send({ controllerUserId: playerUserId });
+        expect(failAssign.status).toBe(403);
+
+        // Non-member assignment fails with 400
+        const failNonMember = await adminAgent
+          .post(`/api/v1/encounters/${encounterId}/combatants`)
+          .send({ kind: 'monster', name: 'Wolf', hpMax: 20, controllerUserId: 999999 });
+        expect(failNonMember.status).toBe(400);
+
+        // Delegated controller player can update HP/conditions on their controlled combatant
+        const playerUpdate = await controllerAgent
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
+          .send({ hpDelta: -10 });
+        expect(playerUpdate.status).toBe(200);
+        expect(playerUpdate.body.statblock).toBeNull();
+
+        // Delegated controller sees exact HP when viewing encounter while statblock remains hidden
+        const playerEncounterView = await controllerAgent.get(`/api/v1/encounters/${encounterId}`);
+        expect(playerEncounterView.status).toBe(200);
+        const controlledCombatantView = playerEncounterView.body.combatants.find((c: any) => c.id === summonId);
+        expect(controlledCombatantView.hpCurrent).toBe(40);
+        expect(controlledCombatantView.hpMax).toBe(50);
+        expect(controlledCombatantView.statblock).toBeNull();
+
+        // DM can clear controllerUserId
+        const clearRes = await adminAgent
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${summonId}`)
+          .send({ controllerUserId: null });
+        expect(clearRes.status).toBe(200);
+        expect(clearRes.body.controllerUserId).toBeNull();
+      } finally {
+        await closeTestApp(realCtx);
+      }
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -10486,7 +10592,6 @@ describe('encounters — turn timer (issue #1935, e2e)', () => {
     const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ turnTimerSeconds: 60 });
     expect(res.status).toBe(403);
 
-    // Unchanged — the rejected caller's value never landed.
     const got = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     expect(got.body.turnTimerSeconds).toBe(90);
   });
@@ -10510,8 +10615,6 @@ describe('encounters — turn timer (issue #1935, e2e)', () => {
     const server = ctx.app.getHttpServer();
     const start = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
     expect(start.status).toBe(201);
-    // Typed assertions, not just "not null" — an absent (undefined) field would
-    // otherwise pass a bare `.not.toBeNull()` check just as well as a real stamp.
     expect(typeof start.body.turnStartedAt).toBe('string');
     expect(Number.isNaN(Date.parse(start.body.turnStartedAt))).toBe(false);
 

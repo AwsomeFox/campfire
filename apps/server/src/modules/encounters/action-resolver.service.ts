@@ -630,7 +630,11 @@ export class ActionResolverService {
     return { stats: {}, level: 1 };
   }
 
-  private isCharacterOwnedBy(row: typeof combatants.$inferSelect, user: RequestUser): boolean {
+  private isCombatantControlledBy(row: typeof combatants.$inferSelect, user: RequestUser, role?: Role): boolean {
+    if (role !== undefined && !roleAtLeast(role, 'player')) return false;
+    if (row.controllerUserId !== null && String(row.controllerUserId) === String(user.id)) {
+      return true;
+    }
     const character = this.linkedCharacter(row);
     return character !== null && character.ownerUserId === user.id;
   }
@@ -739,14 +743,16 @@ export class ActionResolverService {
    * hand-authored sheet actions PLUS any equipped inventory item's action (merged, in
    * that order — equipping a longsword adds an attack without touching the manually
    * authored list); monsters/NPCs use inline statblocks or expanded compendium actions.
-   * A player may list only their own character's actions; the DM may list any.
+   * A player may list their own character's actions. A delegated controller may list
+   * monster/NPC actions only after the DM reveals that combatant's statblock; those
+   * actions contain the same to-hit, damage, notes, and structured specs as the source.
    */
   listUsableActions(encounterId: number, combatantId: number, user: RequestUser, role: Role): UsableAction[] {
     const encounter = this.encounterRowOrThrow(encounterId);
     const combatant = this.combatantRowOrThrow(encounterId, combatantId);
     const isDm = role === 'dm';
-    if (!isDm && !this.isCharacterOwnedBy(combatant, user)) {
-      throw new ForbiddenException('You may only list actions for your own character.');
+    if (!isDm && !this.isCombatantControlledBy(combatant, user, role)) {
+      throw new ForbiddenException('You may only list actions for your own character or a controlled combatant.');
     }
     const character = this.linkedCharacter(combatant);
     if (character) {
@@ -771,6 +777,7 @@ export class ActionResolverService {
         });
       });
     }
+    if (!isDm && !combatant.statblockRevealed) return [];
     return this.combatantActions(combatant, encounter.campaignId).map((a, index) => this.actionToUsable(a, index, combatant.actionUses));
   }
 
@@ -811,10 +818,15 @@ export class ActionResolverService {
     const actor = this.combatantRowOrThrow(encounterId, req.actorCombatantId);
     const isDm = role === 'dm';
 
-    // Authorization: monster/NPC actions are DM-only; a player may act only with their own PC.
+    // Authorization: monster/NPC actions are DM-only; a player may act only with their own PC or controlled combatant.
     if (!isDm) {
-      if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
-        throw new ForbiddenException('Only the DM may resolve a monster/NPC action; a player may act only with their own character.');
+      if (!this.isCombatantControlledBy(actor, user, role)) {
+        throw new ForbiddenException(
+          'Only the DM may resolve a monster/NPC action unless you control it; a player may act only with their own character or a controlled combatant.',
+        );
+      }
+      if (!this.linkedCharacter(actor) && !actor.statblockRevealed && req.spec === undefined) {
+        throw new ForbiddenException('The DM must reveal this combatant’s statblock before its listed actions can be resolved.');
       }
       this.assertPlayerActiveTurn(encounter, actor, role);
     }
@@ -1636,9 +1648,9 @@ export class ActionResolverService {
             this.auditRejectedApply(encounter, req.chainId, user, role, 'not_original_applier');
             throw new ForbiddenException('Only the original applier or a DM may replay an action resolution.');
           }
-          if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
+          if (!this.isCombatantControlledBy(actor, user, role)) {
             this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
-            throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
+            throw new ForbiddenException('Only the DM or controlling player may apply an action.');
           }
           if (!this.policyFor(encounter.campaignId, actor, user, role).canApply) {
             this.auditRejectedApply(encounter, req.chainId, user, role, 'declaration_only_policy');
@@ -1679,9 +1691,9 @@ export class ActionResolverService {
     const actor = this.combatantRowOrThrow(encounterId, pending.actorCombatantId);
     const isDm = role === 'dm';
     if (!isDm) {
-      if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
+      if (!this.isCombatantControlledBy(actor, user, role)) {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'not_actor_owner');
-        throw new ForbiddenException('Only the DM may apply a monster/NPC action.');
+        throw new ForbiddenException('Only the DM or controlling player may apply an action.');
       }
       if (!this.isPlayerActiveTurn(encounter, actor, role)) {
         this.auditRejectedApply(encounter, req.chainId, user, role, 'not_active_turn');
@@ -2442,9 +2454,9 @@ export class ActionResolverService {
         this.auditRejectedUndo(encounter, token, user, role, 'viewer_role');
         throw new ForbiddenException('Viewers may not undo combat actions.');
       }
-      if (actor.kind !== 'character' || !this.isCharacterOwnedBy(actor, user)) {
+      if (!this.isCombatantControlledBy(actor, user, role)) {
         this.auditRejectedUndo(encounter, token, user, role, 'not_actor_owner');
-        throw new ForbiddenException('Only the DM may undo a monster/NPC action.');
+        throw new ForbiddenException('Only the DM or controlling player may undo an action.');
       }
     }
 

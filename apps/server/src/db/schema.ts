@@ -2136,6 +2136,8 @@ export const combatants = sqliteTable('combatants', {
   encounterId: integer('encounter_id').notNull(),
   kind: text('kind').notNull(), // 'character' | 'monster' | 'npc'
   characterId: integer('character_id'), // set when kind='character' — links back to characters.id
+  // Issue #1941: delegated controller player (user id). Added by migration on older DBs.
+  controllerUserId: integer('controller_user_id').references(() => users.id, { onDelete: 'set null' }),
   npcId: integer('npc_id'), // set when kind='npc' — links back to npcs.id (identity). Added by migration on older DBs.
   npcIdentitySourceId: integer('npc_identity_source_id'), // internal redaction source for unlinked duplicate NPCs
   npcDispositionSnapshot: text('npc_disposition_snapshot'), // encounter-time NPC disposition; nullable for legacy rows

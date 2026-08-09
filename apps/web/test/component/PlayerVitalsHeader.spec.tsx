@@ -31,6 +31,7 @@ function combatantWithCondition(condition: string): Combatant {
     characterId: null,
     npcId: null,
     name: 'Aria',
+    controllerUserId: null,
     initiative: 12,
     initMod: 0,
     initiativeBreakdown: null,

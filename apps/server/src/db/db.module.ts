@@ -5091,6 +5091,20 @@ function migrateCombatantRemovalRevision1469(sqlite: Database.Database): void {
   `);
 }
 
+function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare("PRAGMA table_info(combatants)").all() as Array<{ name: string }>;
+    if (!columns.some((c) => c.name === "controller_user_id")) {
+      sqlite.exec(
+        "ALTER TABLE combatants ADD COLUMN controller_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL",
+      );
+    }
+  }
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -5455,6 +5469,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // #1319 landed after main claimed 0177 above. This migration has not shipped under
   // its former branch-local ordinal, so renumbering it to the next free slot is safe.
   { name: '0178_rule_pack_relationships_1319', run: migrateRulePackRelationships1319 },
+  // #1319 claimed 0178 on main before #1941 shipped, so controller delegation uses 0179.
+  { name: '0179_combatants_controller_user_id_1941', run: migrateCombatantsTableForControllerUserId },
 ];
 
 /**

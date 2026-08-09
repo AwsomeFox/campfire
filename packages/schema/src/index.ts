@@ -11038,6 +11038,9 @@ export const Combatant = z.object({
   encounterId: Id,
   kind: CombatantKind,
   characterId: Id.nullable().default(null),
+  // Issue #1941: delegated controller player (user id). DM-only to assign; gives this player
+  // token movement, HP/condition adjustment, and action rights on their turn. Null for DM-managed.
+  controllerUserId: Id.nullable().default(null),
   // Set for kind==='npc': the campaign NPC this combatant represents (identity/icon;
   // its NPC page + dmSecret stay DM-gated as usual). Null for characters/monsters.
   npcId: Id.nullable().default(null),
@@ -11212,6 +11215,8 @@ export const CombatantCreate = z.object({
   duplicateOfCombatantId: Id.optional(),
   name: z.string().min(1).max(120).optional(), // required unless resolvable from ruleEntryId
   characterId: Id.optional(), // link a late-joining party member
+  // Issue #1941: delegated controller player (user id) — DM only
+  controllerUserId: Id.nullable().optional(),
   npcId: Id.optional(), // link a campaign NPC as an 'npc' combatant (identity/icon)
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
@@ -11343,6 +11348,8 @@ export const CombatantUpdate = z.object({
   // only, enforced server-side (rejected outright for a non-DM patch, same list as
   // statblockRevealed above). Audit-logged; does not touch action-economy or spell slots.
   actionUses: CombatantActionUsesPatch.optional(),
+  // Issue #1941: delegate token/action/HP control to a player — DM only, enforced server-side.
+  controllerUserId: Id.nullable().optional(),
   // Issue #580: per-intent operation id. `hpDelta` / `spDelta` / `rpDelta` are
   // relative writes — replaying one double-damages. Send a key
   // minted at the click and a retry after a lost response replays the ORIGINAL

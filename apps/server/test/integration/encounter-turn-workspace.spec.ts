@@ -1636,7 +1636,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
         player2,
         'player',
       ),
-    ).rejects.toThrow(/own character/i);
+    ).rejects.toThrow(/own or controlled combatant/i);
 
     const passedCheckId = state.pendingConcentrationChecks[0].id;
     await service.updateCombatantTurnState(

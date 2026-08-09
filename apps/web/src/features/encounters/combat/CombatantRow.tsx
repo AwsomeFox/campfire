@@ -195,7 +195,6 @@ export type CombatantRowProps = {
   isDm?: boolean;
   myUserId?: string | number;
   /**
-  /**
    * Issue #1939: campaign id for condition-tag rules-hint popovers' "Full rule" link.
    * Deliberately separate from `campaignId` above, which goes `undefined` whenever the
    * viewer lacks edit permission or sheets are stale — the rules-hint popover is public
@@ -229,6 +228,8 @@ export type CombatantRowProps = {
     isDropTarget: boolean;
     busy: boolean;
   } | null;
+  members?: readonly { userId: number; displayName?: string; username?: string }[];
+  onSetControllerUserId?: (userId: number | null) => void;
 };
 
 export const CombatantRow = memo(function CombatantRow({
@@ -291,9 +292,20 @@ export const CombatantRow = memo(function CombatantRow({
   rulesHintCampaignId,
   rulesHintCompendiumAvailable = false,
   reorder = null,
+  members,
+  onSetControllerUserId,
 }: CombatantRowProps) {
   const { t } = useTranslation();
   const [showWhisper, setShowWhisper] = useState(false);
+  const controllerMember = useMemo(
+    () => (combatant.controllerUserId != null ? members?.find((m) => m.userId === combatant.controllerUserId) : null),
+    [combatant.controllerUserId, members],
+  );
+  const controllerLabel = useMemo(() => {
+    if (combatant.controllerUserId == null) return null;
+    const name = controllerMember?.displayName || controllerMember?.username || `User #${combatant.controllerUserId}`;
+    return t("encounters.controller.controlledBy", { name });
+  }, [combatant.controllerUserId, controllerMember, t]);
   // Issue #1746: one shared reason string for every write control this row disables while
   // the sync gate blocks — kept as a single computed value so every site stays in agreement
   // rather than re-deriving (and risking drift on) the same condition. Exposed to assistive
@@ -835,6 +847,30 @@ export const CombatantRow = memo(function CombatantRow({
                 ))}
               </select>
             </div>
+            {canEditIdentity && members && members.length > 0 && (
+              <div className="field" style={{ minWidth: 150 }}>
+                <label htmlFor={`controller-${combatant.id}`}>{t('encounters.controller.giveControl')}</label>
+                <select
+                  id={`controller-${combatant.id}`}
+                  data-testid={`controller-select-${combatant.id}`}
+                  aria-label={`Controller for ${combatant.name}`}
+                  value={combatant.controllerUserId ?? ''}
+                  disabled={busy}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    onSetControllerUserId?.(val ? Number(val) : null);
+                  }}
+                  style={{ height: 32, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+                >
+                  <option value="">{t('encounters.controller.clearControl')}</option>
+                  {members.map((m) => (
+                    <option key={m.userId} value={m.userId}>
+                      {m.displayName || m.username || `User #${m.userId}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <Btn onClick={commitIdentity} disabled={busy}>Save</Btn>
             <button className="btn btn-ghost" style={{ fontSize: 'var(--type-label)' }} onClick={() => { setEditingIdentity(false); setNameDraft(combatant.name); setHpMaxDraft(combatant.hpMax?.toString() ?? ''); }}>Cancel</button>
           </div>
@@ -847,6 +883,15 @@ export const CombatantRow = memo(function CombatantRow({
                 style={{ color: 'var(--color-accent)', fontSize: 12 }}
               >
                 ▸
+              </span>
+            )}
+            {controllerLabel != null && (
+              <span
+                className="tag tag-neutral"
+                data-testid={`controlled-tag-${combatant.id}`}
+                title={controllerLabel}
+              >
+                🎮 {controllerLabel}
               </span>
             )}
             <span style={down ? { textDecoration: 'line-through' } : undefined}>

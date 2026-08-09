@@ -95,7 +95,7 @@ import { prefersReducedMotion, scrollBehavior } from '../../lib/prefersReducedMo
 import { deleteConfirmCopy, dmLifecycleActions, isLifecycleConfirmValid } from './encounterLifecycleActions';
 import { CONNECTING_GRACE_MS, confirmEncounterOverride, deriveEncounterSyncState, ENCOUNTER_OVERRIDE_INACTIVE, encounterActionsBlocked, encounterOverrideAuthorized, encounterOverrideOfferable, encounterSyncBannerMessage, encounterSyncChipClass, encounterSyncChipLabel, encounterSyncOverrideBannerKey, encounterSyncRevisionFromUpdatedAt, ENCOUNTER_SYNC_CHIP_TESTID, gateForWrite, isConnectingGraceElapsed, revokeEncounterOverrideIfUnauthorized, settleEncounterOverride, type EncounterOverrideAuthority, type EncounterOverrideState, type EncounterSyncRevision } from './encounterSyncState';
 import { activeLifecycleStepId, encounterLifecycleSteps, playerGuidance, preparingGuidance } from './postCreateGuidance';
-import { tokenIdentityBackground, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH, pingIdentityColor } from './tokenIdentity';
+import { tokenIdentityBackground, tokenIdentityColor, tokenIdentityShape, TOKEN_IDENTITY_SHAPE_CLIP_PATH, pingIdentityColor } from './tokenIdentity';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export { BattleMap } from './map/BattleMap';
@@ -449,6 +449,7 @@ const InitiativeStrip = memo(function InitiativeStrip({
   combatants,
   currentCombatantId,
   charactersById,
+  memberNamesByUserId,
   turnPulse = false,
   hpFeedbackByCombatant,
   colorVisionAssist = false,
@@ -459,6 +460,7 @@ const InitiativeStrip = memo(function InitiativeStrip({
   combatants: readonly Combatant[];
   currentCombatantId: number | null;
   charactersById: Map<number, Character>;
+  memberNamesByUserId: ReadonlyMap<string, string>;
   turnPulse?: boolean;
   hpFeedbackByCombatant: ReadonlyMap<number, readonly (HpFeedbackEvent & { id: number })[]>;
   /** Issue #1942: adds a non-color identity shape + current-turn chevron alongside color. */
@@ -743,6 +745,35 @@ const InitiativeStrip = memo(function InitiativeStrip({
                     boxShadow: '0 0 0 1px rgba(15,23,42,.7)',
                   }}
                 />
+              )}
+              {c.controllerUserId != null && (
+                <span
+                  data-testid={`strip-controller-badge-${c.id}`}
+                  title={t('encounters.controller.controlledBy', {
+                    name:
+                      memberNamesByUserId.get(String(c.controllerUserId)) ??
+                      t('encounters.controller.unknownController'),
+                  })}
+                  style={{
+                    position: 'absolute',
+                    top: -3,
+                    left: -3,
+                    width: 16,
+                    height: 16,
+                    borderRadius: '50%',
+                    background: tokenIdentityColor(c.controllerUserId),
+                    border: '1.5px solid var(--color-surface)',
+                    fontSize: 9,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#fff',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.5)',
+                    zIndex: 2,
+                  }}
+                >
+                  🎮
+                </span>
               )}
             </div>
             <FloatingNumbers events={feedback} />
@@ -2236,9 +2267,11 @@ export default function RunSessionPage() {
       if (encounter?.status === 'ended') return false;
       if (canDmWrite) return true;
       if (!canPlayerWrite) return false;
-      return c.characterId != null && ownedCharacterIds.has(c.characterId);
+      if (c.characterId != null && ownedCharacterIds.has(c.characterId)) return true;
+      if (c.controllerUserId != null && myUserId != null && String(c.controllerUserId) === String(myUserId)) return true;
+      return false;
     },
-    [encounter?.status, canDmWrite, canPlayerWrite, ownedCharacterIds],
+    [encounter?.status, canDmWrite, canPlayerWrite, ownedCharacterIds, myUserId],
   );
 
   const canEditCombatant = useCallback(
@@ -4218,7 +4251,11 @@ export default function RunSessionPage() {
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
-  const myCombatants = orderedCombatants.filter(c => c.characterId != null && ownedCharacterIds.has(c.characterId));
+  const myCombatants = orderedCombatants.filter(
+    (c) =>
+      (c.characterId != null && ownedCharacterIds.has(c.characterId)) ||
+      (c.controllerUserId != null && myUserId != null && String(c.controllerUserId) === String(myUserId)),
+  );
   // The Turn section holds exactly three things: the viewer's own vitals, and two blocks
   // gated on `status === 'running'`. Outside combat it is therefore empty for a DM, and
   // for any player with no combatant of their own — and the tab was still selectable, so
@@ -4609,6 +4646,7 @@ export default function RunSessionPage() {
                 combatants={orderedCombatants}
                 currentCombatantId={encounter.currentCombatantId}
                 charactersById={charactersById}
+                memberNamesByUserId={aoeDeclarerNames}
                 turnPulse={turnPulse}
                 hpFeedbackByCombatant={hpFeedbackByCombatant}
                 colorVisionAssist={me?.user.colorVisionAssist ?? false}
@@ -5205,6 +5243,8 @@ export default function RunSessionPage() {
                       onSetHpMax={(value) => patchCombatant(eid, c.id, { hpMax: value })}
                       onSetTokenSize={(size) => setTokenSize(c.id, size)}
                       onPatchCombatant={(patch, targetEncounterId) => patchCombatant(targetEncounterId, c.id, patch)}
+                      members={membersQuery.data}
+                      onSetControllerUserId={canDmWrite ? (userId) => patchCombatant(eid, c.id, { controllerUserId: userId }) : undefined}
                       onPatchSourceTurnState={
                         canDmWrite || c.id === currentCombatantId
                           ? (sourceCombatantId, patch) => patchCombatantTurnState(sourceCombatantId, patch)
