@@ -140,6 +140,10 @@ export function EncounterAiDriverPanel({
     setNarrationAnnouncements([]);
     setNarrationStatus('');
     composerA11yRef.current = null;
+    // A successful message POST can settle after this dock unmounts. Clearing this
+    // owner marker makes that old continuation discard its local echo instead of
+    // dispatching it into the Layout provider for the next campaign/viewer.
+    return () => { narrationOwnerRef.current = ''; };
   }, [campaignId, isDm, liveActivity.mode, liveActivity.transcriptGeneration, me?.user.id, myMembership?.role]);
 
   useEffect(() => {
@@ -225,6 +229,7 @@ export function EncounterAiDriverPanel({
     setSubmitting(true);
     setSubmitError(null);
     const clientRef = newClientRef();
+    const submissionOwner = narrationOwnerRef.current;
     const body: {
       input: string;
       scene?: string;
@@ -242,6 +247,7 @@ export function EncounterAiDriverPanel({
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
+      if (narrationOwnerRef.current !== submissionOwner) return;
       dispatchTranscript({ type: 'localPlayer', memberName, characterName, text, clientRef });
       setInput('');
       setSceneField('');

@@ -37,6 +37,9 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/displayText: text/);
     expect(panel).toMatch(/role="alert"/);
     expect(panel).toMatch(/narrationOwnerRef/);
+    expect(panel).toMatch(/return \(\) => \{ narrationOwnerRef\.current = ''; \}/);
+    expect(panel).toMatch(/const submissionOwner = narrationOwnerRef\.current/);
+    expect(panel).toMatch(/narrationOwnerRef\.current !== submissionOwner/);
     expect(panel).toMatch(/liveActivity\.transcriptFetched/);
     expect(panel).toMatch(/beginNarrationLogLive/);
     expect(panel).toMatch(/preHydrationLiveEntryIds/);
