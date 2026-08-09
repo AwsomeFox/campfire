@@ -15,9 +15,19 @@ interface RollContextMenuProps extends React.ButtonHTMLAttributes<HTMLButtonElem
    * `rollModeForClick` in features/characters/rollMode.ts. Keep the asymmetry.
    */
   onRoll: (mode: RollMode, event?: React.MouseEvent) => void;
+  /**
+   * Whether the menu offers "Critical Hit". Default true.
+   *
+   * `crit` only means something for a DAMAGE roll, where the caller doubles the dice. A
+   * catalog CHECK has no critical variant — `checkRollExpr` and the server's `rollCheck`
+   * both treat the mode as an ordinary single die — so offering it on a save, skill, ability
+   * or initiative control let the user pick a command that silently produced a plain roll.
+   * Those call sites pass false.
+   */
+  allowCrit?: boolean;
 }
 
-export function RollContextMenu({ children, onRoll, className, disabled, onClick, onContextMenu, onPointerDown, onPointerUp, onPointerCancel, ...rest }: RollContextMenuProps) {
+export function RollContextMenu({ children, onRoll, allowCrit = true, className, disabled, onClick, onContextMenu, onPointerDown, onPointerUp, onPointerCancel, ...rest }: RollContextMenuProps) {
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const pressTimer = useRef<NodeJS.Timeout | null>(null);
 
@@ -128,9 +138,11 @@ export function RollContextMenu({ children, onRoll, className, disabled, onClick
           <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => { onRoll('disadvantage'); closeMenu(); }}>
             ❌ Disadvantage
           </button>
-          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--cf-crit, #fbbf24)' }} onClick={() => { onRoll('crit'); closeMenu(); }}>
-            💥 Critical Hit
-          </button>
+          {allowCrit && (
+            <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--cf-crit, #fbbf24)' }} onClick={() => { onRoll('crit'); closeMenu(); }}>
+              💥 Critical Hit
+            </button>
+          )}
         </div>,
         document.body
       )}

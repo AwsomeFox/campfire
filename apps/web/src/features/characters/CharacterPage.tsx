@@ -1466,6 +1466,7 @@ function AbilityScoresCard({
           return (
             <div key={key} className="cf-inset text-center py-2.5 px-1.5">
               <RollContextMenu
+                allowCrit={false}
                 className="w-full h-full block"
                 onRoll={(m) => {
                   const resolved = toCheckRollMode(def.supportsAdvantage ? m : 'normal');
@@ -1712,6 +1713,7 @@ function VitalsBlock({
         {initiative && canRoll ? (
           <div className={tile}>
             <RollContextMenu
+              allowCrit={false}
               className="w-full h-full block"
               onRoll={(m) => {
                 const resolved = toCheckRollMode(initiative.supportsAdvantage ? m : 'normal');
@@ -1942,6 +1944,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
             <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
               {canEdit ? (
                 <RollContextMenu
+                  allowCrit={false}
                   className="w-full h-full block"
                   onRoll={(m, e) => {
                     const resolved = toCheckRollMode(def.supportsAdvantage ? rollModeForClick(m, mode, e) : 'normal');
@@ -2079,6 +2082,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
               )}
               {canEdit ? (
                 <RollContextMenu
+                  allowCrit={false}
                   className="flex-1 flex items-center gap-1.5 min-w-0"
                   onRoll={(m) => {
                     const resolved = toCheckRollMode(def.supportsAdvantage ? m : 'normal');

@@ -58,6 +58,13 @@ test.describe('character sheet play surface', () => {
       const response = await rolled;
       expect(response.ok()).toBeTruthy();
       expect(JSON.parse(response.request().postData() ?? '{}')).toMatchObject({ checkId: 'ability:DEX' });
+
+      // A check has no critical variant — `checkRollExpr` and the server both treat `crit`
+      // as an ordinary single die — so the attack-only command must not be offered here.
+      await dex.click({ button: 'right' });
+      const menu = page.getByRole('menu');
+      await expect(menu.getByRole('menuitem', { name: /Advantage/ })).toBeVisible();
+      await expect(menu.getByRole('menuitem', { name: /Critical/ })).toHaveCount(0);
     } finally {
       await ctx.delete(`/api/v1/characters/${characterId}`);
       await ctx.dispose();
