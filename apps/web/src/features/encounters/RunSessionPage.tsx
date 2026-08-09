@@ -21,7 +21,7 @@ import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
-import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
+import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, hasCriticalHitsForAdapter, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { rulesetCapabilitiesForSelection } from '../../lib/rules';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -4683,6 +4683,7 @@ export default function RunSessionPage() {
 
       {pendingActionUse && (
         <ActionUsePanel
+          allowCrit={hasCriticalHitsForAdapter(activeAdapter)}
           key={pendingActionUse.id}
           encounterId={eid}
           actorCombatantId={pendingActionUse.combatantId}

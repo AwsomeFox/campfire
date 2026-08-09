@@ -31,6 +31,7 @@ import {
   CombatantTurnState,
   ConditionInstance,
   criticalDamageRuleForAdapter,
+  hasCriticalHitsForAdapter,
   expandStatblockActions,
   hpModelForAdapter,
   isResolvableSpec,
@@ -917,7 +918,14 @@ export class ActionResolverService {
       const rollModeForAttack = rollMode === 'advantage' || rollMode === 'disadvantage' ? rollMode : undefined;
       const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll, rollMode: rollModeForAttack });
       const { total, naturalRoll: nat, outcome: resolvedOutcome } = attackResult;
-      outcome = rollMode === 'crit' ? 'crit' : resolvedOutcome;
+      // A forced `crit` is only honoured where the system HAS critical hits (#2115 review).
+      // The client names the mode, so without this an OSR or Open Legend caller could ask for
+      // one through REST or MCP and have the resolver mint an outcome the adapter's own
+      // `resolveAttack` can never return — then commit its doubled damage. Enforced here, in
+      // the shared resolver, so both surfaces are covered by one check rather than each UI
+      // remembering to hide the control.
+      const critRequestable = rollMode === 'crit' && hasCriticalHitsForAdapter(adapter);
+      outcome = critRequestable ? 'crit' : resolvedOutcome;
       // #1598: attack crit — see the save/check branch below for the #1600 counterpart.
       critical = outcome === 'crit';
       base.attackTotal = total;
