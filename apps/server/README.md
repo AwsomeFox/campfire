@@ -563,7 +563,10 @@ see `modules/mcp/mcp-rest-parity.ts` for the issue #683 parity matrix.
   a combatant linked to a character they own), `remove_combatant`,
   `roll_initiative`, `begin_encounter`, `next_turn`, `end_encounter` — mirrors
   the REST `/encounters` state machine, including its
-  `preparing -> running -> ended` guards.
+  `preparing -> running -> ended` guards. Both initiative-roll tools 400 on a
+  campaign whose rule system declares no initiative roll (issue #2123, e.g.
+  Ironsworn: Starforged): the turn order there is the roster order, so
+  `reorder_combatant` sets it and `begin_encounter` needs no roll.
 
 **Agent workflow:**
 

@@ -475,3 +475,31 @@ describe('CombatantRow reorder controls (issue #1923)', () => {
     expect(dragHandleProps.onPointerDown).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Issue #2123: the per-combatant "Roll initiative" button must be absent for a rule system
+ * that declares `hasInitiativeRoll: false` (Ironsworn: Starforged). The server 400s that
+ * write, and turn order on such a table is the roster order, not a rolled number.
+ *
+ * Rendered rather than source-scanned for the reason this file exists: the gate is one more
+ * `&&` on a condition that already had two, and only a real render proves the button is gone
+ * for Starforged while still there for the default system with the same props.
+ */
+describe('CombatantRow initiative roll gate (issue #2123)', () => {
+  const unrolled = () => baseCombatant({ initiative: null });
+
+  test('a system with no initiative roll renders no Roll initiative button', () => {
+    renderRow({ combatant: unrolled(), canEditPermission: true, ruleSystem: 'starforged' });
+    expect(screen.queryByTestId('roll-initiative-101')).toBeNull();
+  });
+
+  test('the same unrolled row under the default system DOES offer the roll (contrast case)', () => {
+    renderRow({ combatant: unrolled(), canEditPermission: true, ruleSystem: null });
+    expect(screen.getByTestId('roll-initiative-101')).toBeTruthy();
+  });
+
+  test('the placeholder the Starforged row falls back to reads as no value, not a fabricated 0', () => {
+    renderRow({ combatant: unrolled(), canEditPermission: true, ruleSystem: 'starforged' });
+    expect(screen.getByText('–')).toBeTruthy();
+  });
+});

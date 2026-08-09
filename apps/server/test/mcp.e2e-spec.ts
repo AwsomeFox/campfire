@@ -1307,6 +1307,51 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(ended.status).toBe('ended');
   });
 
+  it('roll_initiative / roll_combatant_initiative refuse a system with no initiative roll, and begin_encounter needs neither (issue #2123)', async () => {
+    const client = await mcpClient(dmToken);
+    // MCP parity for the REST behaviour asserted in encounters.e2e-spec.ts: the refusal lives
+    // in EncountersService, so the two transports cannot drift apart.
+    const camp = parseResult(
+      await client.callTool({ name: 'create_campaign', arguments: { name: 'MCP Starforged Table' } }),
+    ) as { id: number };
+    // `update_campaign` validates ruleSystem against an INSTALLED pack slug and no Starforged
+    // pack is installed in this fixture, so write the column directly (same approach as the
+    // REST suite) — the adapter resolves from the string alone.
+    await ctx.app
+      .get<DrizzleDb>(DB)
+      .update(campaigns)
+      .set({ ruleSystem: 'starforged' })
+      .where(eq(campaigns.id, camp.id));
+
+    const enc = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId: camp.id, name: 'MCP Boarding Action' } }),
+    ) as { id: number };
+    await client.callTool({ name: 'add_combatant', arguments: { encounterId: enc.id, kind: 'monster', name: 'MCP Sentinel', hpMax: 6 } });
+
+    const bulk = await client.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    expect(bulk.isError).toBe(true);
+    expect(parseResult(bulk)).toMatchObject({ error: { status: 400 } });
+
+    const fetched = parseResult(
+      await client.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { combatants: Array<{ id: number; initiative: number | null }> };
+    expect(fetched.combatants.every((c) => c.initiative === null)).toBe(true);
+
+    const perCombatant = await client.callTool({
+      name: 'roll_combatant_initiative',
+      arguments: { encounterId: enc.id, combatantId: fetched.combatants[0].id, idempotencyKey: 'mcp-no-initiative-roll' },
+    });
+    expect(perCombatant.isError).toBe(true);
+    expect(parseResult(perCombatant)).toMatchObject({ error: { status: 400 } });
+
+    // …and the fight still starts, ordered by the roster, with nothing rolled.
+    const begun = await client.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
+    expect(begun.isError).toBeFalsy();
+    const running = parseResult(begun) as { status: string; combatants: Array<{ id: number; initiative: number | null }> };
+    expect(running.status).toBe('running');
+    expect(running.combatants.every((c) => c.initiative === null)).toBe(true);
+  });
+
   it('declare_aoe_template creates or patches without caller-controlled attribution and remove_aoe_template shares REST lifecycle semantics', async () => {
     const client = await mcpClient(dmToken);
     const encounter = parseResult(

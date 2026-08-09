@@ -3,7 +3,7 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
   // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
   // the turn tick, the same pure math the resolver uses so this service can never decide a
   // pool recharges differently than an apply/reject message described it.
@@ -1038,6 +1038,29 @@ export class EncountersService {
     if (encounterRow.status === 'ended') {
       throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before making changes`);
     }
+  }
+
+  /**
+   * Refuse an initiative ROLL for a rule system that declares it has none (issue #2123) —
+   * `RuleSystemAdapter.hasInitiativeRoll: false`, today only Ironsworn: Starforged.
+   *
+   * Both roll paths (`rollInitiative`, `rollCombatantInitiative`) read `adapter.initiativeDie`,
+   * and every adapter reports a die because the generic roller seam demands one — Starforged's
+   * is its d6 action die, present purely to satisfy that seam. So the seam happily produced,
+   * PERSISTED, and logged a turn-order roll for a game that has no such roll, on the same
+   * table whose character sheet (via `checkCatalogForAdapter`) correctly offers none. Refusing
+   * in the service rather than in either transport is what keeps REST and MCP aligned.
+   *
+   * Turn order is NOT removed by this: it comes from the roster instead. See the capability's
+   * own doc comment in `@campfire/schema` for the full model.
+   */
+  private assertInitiativeRollSupported(adapter: Pick<RuleSystemAdapter, 'hasInitiativeRoll'>): void {
+    if (hasInitiativeRollForAdapter(adapter)) return;
+    throw new BadRequestException({
+      code: 'NO_INITIATIVE_ROLL',
+      message:
+        'This rule system has no initiative roll — turn order follows the roster, so drag a combatant (or set a number by hand) to change it.',
+    });
   }
 
   /**
@@ -6584,6 +6607,10 @@ export class EncountersService {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    // Issue #2123: before anything reads `adapter.initiativeDie`. A no-initiative system's die
+    // exists only for the roller seam, so rolling it here filled the tracker (and the shared
+    // dice log) with a turn-order roll the game does not have.
+    this.assertInitiativeRollSupported(adapter);
     const initModel = initiativeModelForAdapter(adapter);
     let rolled: Array<{ id: number; initiative: number; breakdown: CombatantInitiativeBreakdown; name: string }> = [];
     let freshEncounter = encounterRow;
@@ -6938,6 +6965,11 @@ export class EncountersService {
       // side (and with whatever the DM's bulk roll later assigns everyone else on it).
       // That side-wide roll stays exclusively the bulk `rollInitiative` path; this
       // single-combatant action is for individual-initiative systems only.
+      // Issue #2123: a system with no initiative roll at all refuses BOTH paths. Checked
+      // beside the group check (after authorization, so an unauthorized caller still learns
+      // nothing about the campaign's rule system) and before the group check, because
+      // "individual or group" is a question only a system that HAS an initiative roll answers.
+      this.assertInitiativeRollSupported(adapter);
       if (initModel.mode === 'group') {
         throw new BadRequestException(
           'This rule system uses group initiative — ask the DM to roll for the whole side (Roll remaining).',
@@ -7452,13 +7484,23 @@ export class EncountersService {
       // (issue #469). At least one combatant must exist before Start is meaningful.
       throw new BadRequestException('Cannot start an encounter with no combatants — add at least one combatant first');
     }
-    if (rows.some((r) => r.initiative === null)) {
+    // Hoisted above the initiative precondition (issue #2123) — whether that precondition
+    // applies at all is an adapter question.
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    // Issue #2123: a system with no initiative roll can never satisfy this, and refusing the
+    // two roll endpoints without lifting it here would have left such a table unable to start
+    // a fight at all except by hand-typing a number per combatant. Its turn order comes from
+    // the roster: every combatant stays at `initiative === null`, and `sortCombatants` resolves
+    // an all-null roster to `sortOrder` ascending — the order the DM already sees and
+    // rearranges by drag. Still enforced for every other system, which DOES have a roll to
+    // make: starting a 5e fight with unrolled combatants would silently sink them below
+    // everyone who rolled (nulls sort last) instead of placing them in the order.
+    if (hasInitiativeRollForAdapter(adapter) && rows.some((r) => r.initiative === null)) {
       throw new BadRequestException('All combatants must have initiative rolled before starting the encounter');
     }
 
     // The first actor is the top of the initiative order — pin it by identity (issue
     // #49), not just position, so later add/remove can't slide the pointer off it.
-    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
     const statblocks = await this.statblockMapForCombatants(encounterRow.campaignId, sorted);
     const hasLairSlot = encounterHasLairSlotFromStatblocks(statblocks);

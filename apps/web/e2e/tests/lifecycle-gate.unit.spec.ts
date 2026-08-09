@@ -98,6 +98,35 @@ test.describe('startRosterHintReason (issue #1933) — standing, not priority-ra
       }
     }
   });
+
+  /**
+   * Issue #2123: a rule system with no initiative roll (Starforged) never satisfies
+   * "everyone has rolled", and `EncountersService.start` no longer asks it to — turn order
+   * there is the roster order. Without this, Start stayed permanently greyed out with
+   * "Roll initiative for all combatants before starting" beside it, pointing at a control
+   * the cockpit no longer renders and a write the server refuses.
+   */
+  test('an unrolled roster is not a setup step for a system with no initiative roll', () => {
+    const roster = { hasNoCombatants: false, needsInitiativeCount: 4, initiativeRollSupported: false };
+    expect(startRosterHintReason(roster)).toBeNull();
+    expect(startGateReason({ ...roster, safetyHoldActive: false, riskyBlocked: false })).toBeNull();
+  });
+  test('an EMPTY roster still blocks Start for such a system — that gate is not about initiative', () => {
+    const roster = { hasNoCombatants: true, needsInitiativeCount: 0, initiativeRollSupported: false };
+    expect(startRosterHintReason(roster)).toBe('needsCombatantsToStart');
+    expect(startGateReason({ ...roster, safetyHoldActive: false, riskyBlocked: false })).toBe('needsCombatantsToStart');
+  });
+  test('omitting the flag means the system DOES roll, so every existing caller is unchanged', () => {
+    expect(startRosterHintReason({ hasNoCombatants: false, needsInitiativeCount: 4 })).toBe('needsInitiativeToStart');
+    expect(
+      startRosterHintReason({ hasNoCombatants: false, needsInitiativeCount: 4, initiativeRollSupported: true }),
+    ).toBe('needsInitiativeToStart');
+  });
+  test('the transient gates still outrank it — a hold is what the server would reject first', () => {
+    const roster = { hasNoCombatants: false, needsInitiativeCount: 4, initiativeRollSupported: false };
+    expect(startGateReason({ ...roster, safetyHoldActive: true, riskyBlocked: false })).toBe('safetyHold');
+    expect(startGateReason({ ...roster, safetyHoldActive: false, riskyBlocked: true })).toBe('syncBlocked');
+  });
 });
 
 /**
@@ -115,7 +144,11 @@ test.describe('DmLifecycleHeader adoption (issue #1933)', () => {
       'utf8',
     );
 
-    expect(code).toMatch(/const standingHintKey = startRosterHintReason\(\{ hasNoCombatants, needsInitiativeCount \}\)/);
+    // `initiativeRollSupported` joined the call in issue #2123 — the paragraph and the
+    // tooltip have to agree about whether an unrolled roster is a step the DM still owes.
+    expect(code).toMatch(
+      /const standingHintKey = startRosterHintReason\(\{ hasNoCombatants, needsInitiativeCount, initiativeRollSupported \}\)/,
+    );
     // The paragraph renders off the standing key; only the GatedControl reason uses the
     // priority-ranked one.
     expect(code).toMatch(/\{standingHint && \(/);

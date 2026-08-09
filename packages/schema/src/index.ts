@@ -4701,6 +4701,20 @@ export interface RuleSystemAdapter {
    *
    * Read through {@link hasInitiativeRollForAdapter} so an adapter that omits it keeps the
    * true default, exactly as {@link hasDeathSaves} works.
+   *
+   * An encounter still needs a TURN ORDER, so declaring this false does not remove ordering —
+   * it selects a different source for it (issue #2123). Such a system orders combatants by
+   * their explicit roster position: every combatant keeps `initiative === null`, and
+   * `sortCombatants` already resolves an all-null roster to `sortOrder` ascending, which is
+   * exactly the order the DM sees and rearranges by drag (`reorderCombatant`). That is also
+   * why these adapters declare `initiativeTiebreak: sortOrderAscTiebreak` — roster position
+   * IS the decision, not a fallback from a comparison that never happens. Concretely:
+   * `EncountersService.rollInitiative` / `rollCombatantInitiative` refuse (400) rather than
+   * persist a placeholder face, `start` does not demand a rolled initiative it cannot
+   * produce, and the DM cockpit renders no roll controls. A DM may still type an explicit
+   * initiative number if they want one — that is manual ordering, not a roll — which is what
+   * keeps an EXISTING table's already-persisted values working unchanged: nothing migrates or
+   * clears them, and a roster that holds them keeps sorting by them exactly as before.
    */
   readonly hasInitiativeRoll?: boolean;
   /**

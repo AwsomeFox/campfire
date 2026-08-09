@@ -6529,6 +6529,131 @@ describe('encounters — issue #1904: bulk dice-log rows use one entry per SIDE 
 });
 
 // ---------------------------------------------------------------------------
+// Issue #2123 — a rule system that declares `hasInitiativeRoll: false` has no
+// turn-order roll at all, so the encounter lifecycle takes its order from the
+// roster instead. #2115 enforced the capability only in the shared roll catalog
+// (character sheet / checks), leaving the encounter subsystem rolling and
+// persisting the placeholder d6 that exists solely for the roller seam.
+// ---------------------------------------------------------------------------
+
+describe('encounters — issue #2123: a system with no initiative roll orders by roster', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let combatantIds: number[] = [];
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Starforged Table' })).body.id;
+    // 'starforged' resolves to StarforgedAdapter (hasInitiativeRoll: false) from the
+    // ruleSystem string alone. Written directly for the same reason as the group-initiative
+    // fixture above: PATCH /campaigns validates ruleSystem against an installed pack slug.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'starforged' }).where(eq(campaigns.id, campaignId));
+
+    encounterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Boarding Action', hidden: false })
+    ).body.id;
+    for (const name of ['Vanguard', 'Sentinel', 'Harrier']) {
+      await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name, hpMax: 6 });
+    }
+    const enc = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    combatantIds = (enc.body.combatants as Array<{ id: number }>).map((c) => c.id);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('the bulk roll-initiative endpoint 400s and writes nothing — no initiative, no dice-log row, no combat-log event', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(res.status).toBe(400);
+    expect(res.body.message?.code ?? res.body.code).toBe('NO_INITIATIVE_ROLL');
+
+    const enc = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    for (const c of enc.body.combatants as Array<{ initiative: number | null }>) {
+      expect(c.initiative).toBeNull();
+    }
+    // The refusal happens before the transaction, so neither shared surface the bulk roll
+    // normally writes to (issue #1904) picks anything up.
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
+    expect((after.body as unknown[]).length).toBe((before.body as unknown[]).length);
+    const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    expect((events.body as Array<{ type: string }>).some((e) => e.type === 'roll')).toBe(false);
+  });
+
+  it('the per-combatant roll-initiative endpoint 400s for the DM too — nobody has a personal turn-order roll here', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantIds[0]}/roll-initiative`)
+      .set(dm)
+      .send({ idempotencyKey: 'no-initiative-roll-per-combatant-rejected' });
+    expect(res.status).toBe(400);
+    expect(res.body.message?.code ?? res.body.code).toBe('NO_INITIATIVE_ROLL');
+  });
+
+  it('start succeeds with every initiative still null, and the turn order is the roster order', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('running');
+    expect(res.body.round).toBe(1);
+    expect(res.body.turnIndex).toBe(0);
+    // Roster order, not a reshuffle: `sortCombatants` resolves an all-null roster by
+    // `sortOrder` ascending, and the first actor is pinned by identity.
+    expect((res.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual(combatantIds);
+    expect(res.body.currentCombatantId).toBe(combatantIds[0]);
+  });
+
+  it('a manual reorder moves a combatant in the live order without inventing an initiative for it', async () => {
+    const server = ctx.app.getHttpServer();
+    // Move the LAST combatant to the top; the first one currently holds the turn and
+    // reorderCombatant refuses to move the acting combatant (403).
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${combatantIds[2]}/reorder`)
+      .set(dm)
+      .send({ afterCombatantId: 'top' });
+    expect(res.status).toBe(201);
+    expect(res.body.initiative).toBeNull();
+
+    const enc = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((enc.body.combatants as Array<{ id: number }>).map((c) => c.id)).toEqual([
+      combatantIds[2],
+      combatantIds[0],
+      combatantIds[1],
+    ]);
+    // Identity pointer untouched; the positional index follows the new order (issue #49).
+    expect(enc.body.currentCombatantId).toBe(combatantIds[0]);
+    expect(enc.body.turnIndex).toBe(1);
+    for (const c of enc.body.combatants as Array<{ initiative: number | null }>) {
+      expect(c.initiative).toBeNull();
+    }
+  });
+
+  it('an initiative value a table already holds still orders the roster — nothing migrates or clears it', async () => {
+    const server = ctx.app.getHttpServer();
+    // The shape an existing Starforged encounter is in after rolling the placeholder d6
+    // under the old behaviour, reproduced through the manual PATCH that is still allowed.
+    const patched = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${combatantIds[1]}`)
+      .set(dm)
+      .send({ initiative: 4 });
+    expect(patched.status).toBe(200);
+    expect(patched.body.initiative).toBe(4);
+
+    const enc = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    // A rolled row still sorts ahead of every unrolled one, exactly as before this change.
+    expect((enc.body.combatants as Array<{ id: number }>)[0].id).toBe(combatantIds[1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Issue #114 — combatant identity: count-add distinguishable copies, and
 // rename / hpMax / initMod edits via CombatantUpdate.
 // ---------------------------------------------------------------------------
