@@ -625,6 +625,36 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     expect(campaignEvents).toHaveLength(0);
     conn.close();
   });
+
+  it('issue #2126: the server survives a client disconnecting mid-stream (heartbeat write-after-close)', async () => {
+    const server = ctx.app.getHttpServer();
+    // Open a stream then immediately destroy the underlying socket — this is exactly what
+    // the dashboard rail panel unmount does (sseReconnect dispose → fetch reader cancel).
+    // Before the fix, the heartbeat interval kept writing to the destroyed response in the
+    // TOCTOU window before Nest's request.on('close') fired, emitting an unhandled 'error'
+    // that silently killed the process.
+    const conn = await openStream(campaignId, player);
+    conn.close();
+
+    // Give the server a beat to process the disconnect. The takeUntil(req 'close') fix
+    // completes the Observable synchronously on the close event, so the heartbeat interval
+    // is unsubscribed before it can write into the dead pipe. We don't wait a full 25s
+    // heartbeat cycle — the process-level uncaughtException handler is the defense-in-depth
+    // that catches a heartbeat racing past the takeUntil; this shorter wait proves the
+    // immediate teardown path works and the server stays up.
+    await sleep(500);
+
+    // The server must still be alive and serving requests — this 200 proves it did not crash.
+    const healthRes = await request(server).get('/api/v1/me').set(player);
+    expect(healthRes.status).toBe(200);
+
+    // Open a SECOND stream after the disconnect to prove the SSE endpoint itself still works
+    // (not just non-streaming routes). This catches a half-dead state where the endpoint
+    // throws on reconnect because of stale Observable state.
+    const conn2 = await openStream(campaignId, player);
+    expect(conn2.status).toBe(200);
+    conn2.close();
+  });
 });
 
 describe('campaign events SSE (e2e, real auth)', () => {

@@ -18,6 +18,47 @@ import { registerErrorSchemas } from './common/openapi-error-schemas';
 patchNestJsSwagger();
 
 /**
+ * Issue #2126: a process-level safety net so a stray unhandled stream-write error on a
+ * destroyed SSE response can never silently kill the server. Without this, writing to a
+ * closed socket after a client disconnect emits an 'error' with no listener, which Node
+ * treats as a fatal uncaught exception — tearing the process down with zero log output.
+ * The SSE controller's takeUntil(req 'close') is the primary fix; this handler is
+ * defense-in-depth so any future long-lived stream that races the same way is LOGGED
+ * (never again "no output when it dies") rather than silently terminating the process.
+ *
+ * We only swallow the known-benign stream-write class (ERR_STREAM_* / write-after-end /
+ * EPIPE / ECONNRESET on a disconnected client). Everything else is logged at FATAL so a
+ * genuine bug is loud, not silent.
+ */
+const bootstrapLogger = new Logger('Bootstrap');
+const STREAM_DISCONNECT_CODES = new Set(['ERR_STREAM_DESTROYED', 'ERR_STREAM_WRITE_AFTER_END', 'ERR_STREAM_PUSH_AFTER_EOF']);
+const STREAM_DISCONNECT_ERRNO = new Set(['EPIPE', 'ECONNRESET', 'ECONNABORTED']);
+
+function isBenignStreamDisconnect(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as NodeJS.ErrnoException).code;
+  return STREAM_DISCONNECT_CODES.has(code ?? '') || STREAM_DISCONNECT_ERRNO.has(code ?? '');
+}
+
+process.on('uncaughtException', (err) => {
+  if (isBenignStreamDisconnect(err)) {
+    bootstrapLogger.warn(`Benign stream-write error on a disconnected client (swallowed): ${err.message}`);
+    return;
+  }
+  bootstrapLogger.error(`FATAL uncaught exception: ${err.message}`, err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  if (isBenignStreamDisconnect(reason)) {
+    bootstrapLogger.warn(`Benign stream-write rejection on a disconnected client (swallowed): ${reason instanceof Error ? reason.message : String(reason)}`);
+    return;
+  }
+  bootstrapLogger.error(
+    `FATAL unhandled promise rejection: ${reason instanceof Error ? reason.message : String(reason)}`,
+    reason instanceof Error ? reason.stack : undefined,
+  );
+});
+
+/**
  * CORS origin resolution:
  *  - ORIGIN env (comma-split, e.g. "https://campfire.example.com,https://alt.example.com")
  *    takes priority whenever set, in any environment.

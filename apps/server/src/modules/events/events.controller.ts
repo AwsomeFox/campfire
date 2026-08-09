@@ -1,7 +1,8 @@
-import { Controller, Param, ParseIntPipe, Sse, type MessageEvent } from '@nestjs/common';
+import { Controller, Param, ParseIntPipe, Req, Sse, type MessageEvent } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger';
-import { interval, merge, map, type Observable } from 'rxjs';
+import { fromEvent, interval, merge, map, type Observable } from 'rxjs';
 import { filter, takeUntil } from 'rxjs/operators';
+import type { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -53,6 +54,7 @@ export class CampaignEventsController {
   async stream(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
+    @Req() req: Request,
   ): Promise<Observable<MessageEvent>> {
     const role = await this.access.requireMember(user, campaignId);
 
@@ -69,6 +71,19 @@ export class CampaignEventsController {
           || event.type === 'campaign.trashed',
       ),
     );
+
+    // Issue #2126: complete the stream the instant the HTTP client disconnects. Nest's
+    // @Sse() framework registers its own `request.on('close')` to unsubscribe and end
+    // the response, but there is a TOCTOU window between the underlying socket closing
+    // (TCP RST received, response.destroyed=true) and the close event firing in the
+    // next tick. During that window the heartbeat interval below can still emit a ping
+    // into the merged pipe, and the framework's concatMap writes it to the destroyed
+    // response — an unhandled 'error' event that silently kills the process (there is
+    // no process-level uncaughtException handler). Tying the heartbeat to the request's
+    // own close event via takeUntil ensures the interval stops before that write can
+    // happen, mirroring the res.once('close') guard already used by the backup/export
+    // streaming controllers.
+    const clientDisconnected = fromEvent(req, 'close');
 
     // Drop membership.revoked / campaign.trashed frames from the data path — they
     // are internal termination signals, not a "refetch this" tick. (The web client's
@@ -89,6 +104,6 @@ export class CampaignEventsController {
     return merge(
       dataStream,
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
-    ).pipe(takeUntil(closed));
+    ).pipe(takeUntil(merge(closed, clientDisconnected)));
   }
 }
