@@ -245,7 +245,7 @@
         },
         "surfaceAriaLabel": "أشر إلى مركز الخريطة للجميع. {{hint}} العرض: +/− للتكبير، 0 لإعادة التعيين، مفاتيح الأسهم للتحريك عند التكبير.",
         "toolHelp": "انقر على مكان في الخريطة أو اضغط Enter/Space عندما تكون الخريطة مركزة للإشارة إليه للجميع. {{hint}}",
-"log": {
+        "log": {
           "unknownSender": "شخص ما",
           "labeled": "أشار {{name}} إلى: {{label}}",
           "plain": "أشار {{name}} إلى الخريطة"
@@ -305,7 +305,14 @@
         "pending": "Reopening encounter…"
       },
       "addCombatant": "Add combatant",
-      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here."
+      "addCombatantHint": "Add manually, search monsters and hazards, or drop a compendium monster/hazard here.",
+      "library": {
+        "hpNotSet": "لم يتم تحديد نقاط الحياة",
+        "hpValue": "{{hp}} نقطة حياة",
+        "hpOverrideLabel": "تحديد نقاط الحياة قبل الإضافة",
+        "hpOverridePlaceholder": "نقاط الحياة",
+        "addWithHp": "إضافة"
+      }
     },
     "checks": {
       "requestCheck": "Request a check",
@@ -446,7 +453,9 @@
       "revealedSummary": "بطاقة الإحصائيات (مكشوفة للاعبين)",
       "killPrompt": "وصل {{name}} إلى 0 نقطة حياة — هل تريد كشف بطاقة إحصائياته للاعبين؟",
       "dismiss": "تجاهل",
-      "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات"
+      "dismissKillPrompt": "تجاهل تنبيه كشف بطاقة الإحصائيات",
+      "maxHp": "الحد الأقصى لنقاط الحياة",
+      "hpUnknown": "غير معروف"
     },
     "whisper": {
       "button": "همس",
@@ -505,6 +514,20 @@
       "spentToast": "تم استخدام {{name}}",
       "available": "{{available}} من {{max}} من {{name}} متاح",
       "receivedAnnounce": "لقد حصلت على {{name}}!"
+    },
+    "vtt": {
+      "panelLabel": "لوحة المواجهة",
+      "showPanel": "إظهار لوحة المواجهة",
+      "hidePanel": "إخفاء لوحة المواجهة",
+      "tabTurn": "الدور",
+      "tabParty": "المجموعة",
+      "tabLog": "السجل",
+      "tabTable": "الطاولة",
+      "turnBar": "شريط الأدوار",
+      "turnBarToggle": "طيّ شريط الأدوار أو توسيعه",
+      "roll": "ارمِ أي نرد — تظهر النتيجة على كل شاشة حول الطاولة",
+      "noMapTitle": "لا توجد خريطة معركة بعد",
+      "noMapHint": "لم يشارك سيد اللعبة خريطة لهذه المواجهة. ترتيب الأدوار وشخصيتك موجودان في اللوحة الجانبية."
     }
   }
 }

@@ -1,6 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import request from 'supertest';
+import { setHeartbeatMsForTests } from '../src/modules/events/events.controller';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
@@ -421,6 +422,113 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     conn.close();
   });
 
+  it('issue #2097: deleting an equipped weapon ticks even though its action was never stored', async () => {
+    const server = ctx.app.getHttpServer();
+    const conn = await openStream(campaignId, player);
+
+    const characterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Delete Tick PC', ownerUserId: 'dev:dm-1', level: 5, stats: { STR: 16 } })
+    ).body.id as number;
+    const itemId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Doomed Blade', ownerType: 'character', characterId })
+    ).body.id as number;
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'delete-slot' });
+    // Drain the setup's own ticks (character create, equip) before sampling a baseline —
+    // otherwise an in-flight frame lands after `seenBeforeDelete` and the assertions below
+    // read it as the delete's.
+    await conn.waitFor((e) => e.type === 'character.updated' && e.characterId === characterId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Review (chatgpt-codex-connector P2): this used to be gated on the stored
+    // `equippedAction` being non-null. With derived actions computed on read that column is
+    // null for exactly the compendium weapons whose action IS derived, so the gate excluded
+    // the common case and an open encounter card kept offering a deleted attack.
+    const seenBeforeDelete = conn.events.length;
+    const deleteRes = await request(server).delete(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(deleteRes.status).toBe(200);
+    const deleteTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId && conn.events.indexOf(e) >= seenBeforeDelete,
+    );
+    expect(deleteTick.campaignId).toBe(campaignId);
+
+    conn.close();
+  });
+
+  it("issue #2097: switching the campaign's rule system ticks every character holding a derived action", async () => {
+    const server = ctx.app.getHttpServer();
+    // A campaign of its own: this switches mechanics, which every other spec in this file
+    // would otherwise inherit.
+    const ownCampaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Mechanics Tick' })).body.id as number;
+    const conn = await openStream(ownCampaignId, dm);
+
+    const characterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${ownCampaignId}/characters`)
+        .set(dm)
+        .send({ name: 'System Tick PC', level: 5, stats: { STR: 16 } })
+    ).body.id as number;
+    const itemId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${ownCampaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'System Blade', ownerType: 'character', characterId })
+    ).body.id as number;
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'system-slot' });
+    // Drain the setup's own ticks (character create, equip) before sampling a baseline.
+    await conn.waitFor((e) => e.type === 'character.updated' && e.characterId === characterId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Review (chatgpt-codex-connector P2): read-time derivation removed the invalidation
+    // WORK (there are no stored actions to clear) but not the need to announce — every
+    // derived action changes the instant this commits, and RunSessionPage refreshes its
+    // merged-action cache only on `character.updated`.
+    const profile = {
+      slug: 'sse-tick-hack',
+      label: 'SSE Tick Hack',
+      mechanicsSummary: 'A homebrew system used to switch a campaign mid-test.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const seenBeforeSwitch = conn.events.length;
+    const switched = await request(server)
+      .patch(`/api/v1/campaigns/${ownCampaignId}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(switched.status).toBe(200);
+    const switchTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId && conn.events.indexOf(e) >= seenBeforeSwitch,
+    );
+    expect(switchTick.campaignId).toBe(ownCampaignId);
+
+    // Resending the SAME mechanics is a no-op and must stay silent — a full-object REST or
+    // MCP client resends `customMechanicsProfile` on every PATCH, and treating that as a
+    // change would invalidate every open card on an unrelated edit.
+    const seenBeforeNoop = conn.events.length;
+    const noop = await request(server)
+      .patch(`/api/v1/campaigns/${ownCampaignId}`)
+      .set(dm)
+      .send({ name: 'Mechanics Tick Renamed', ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(noop.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(conn.events.slice(seenBeforeNoop).some((e) => (e as { type?: string }).type === 'character.updated')).toBe(false);
+
+    conn.close();
+  });
+
   it('invalidates the authoritative next-session projection on create, reschedule, RSVP, and cancellation', async () => {
     const server = ctx.app.getHttpServer();
     const conn = await openStream(campaignId, player);
@@ -517,6 +625,51 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     );
     expect(campaignEvents).toHaveLength(0);
     conn.close();
+  });
+
+  it('issue #2126: the server survives a client disconnecting at a heartbeat boundary', async () => {
+    // Shrink the heartbeat so the disconnect lands within a heartbeat interval and the server
+    // has to tear down an active SSE subscription. This verifies the PRIMARY fix: the
+    // takeUntil(req/stream close) completes the Observable synchronously when the client goes,
+    // so the heartbeat interval is unsubscribed before it can write into the dead pipe.
+    //
+    // Note (review feedback): Node auto-unpipes a destroyed response, so this test cannot
+    // deterministically reproduce the exact write-after-close crash that motivated the fix —
+    // that race is inherently TOCTOU (a few-microsecond window between TCP RST and the close
+    // event). The test instead proves the observable teardown path works (the server stays up
+    // and the endpoint accepts new connections after a disconnect), which is the user-visible
+    // symptom the fix resolves. The process-level ERR_STREAM_WRITE_AFTER_END handler is the
+    // defense-in-depth for the irreproducible race.
+    setHeartbeatMsForTests(200);
+    try {
+      const server = ctx.app.getHttpServer();
+      // Open a stream, wait for at least one heartbeat to confirm the interval is live, then
+      // destroy the socket — this is exactly what the dashboard rail panel unmount does
+      // (sseReconnect dispose → fetch reader cancel). Before the fix, the heartbeat interval
+      // kept writing to the destroyed response in the TOCTOU window before Nest's
+      // request.on('close') fired, emitting an unhandled 'error' that silently killed the process.
+      const conn = await openStream(campaignId, player);
+      await conn.waitFor((e) => (e as Record<string, unknown>).type === 'ping', 5000);
+      conn.close();
+
+      // Wait past TWO heartbeat ticks so the interval has fired into the dead pipe at least
+      // once after the disconnect. If the takeUntil(req 'close') fix is absent, the process is
+      // dead by this point (the process-level uncaughtException handler is defense-in-depth).
+      await sleep(500);
+
+      // The server must still be alive and serving requests — this 200 proves it did not crash.
+      const healthRes = await request(server).get('/api/v1/me').set(player);
+      expect(healthRes.status).toBe(200);
+
+      // Open a SECOND stream after the disconnect to prove the SSE endpoint itself still works
+      // (not just non-streaming routes). This catches a half-dead state where the endpoint
+      // throws on reconnect because of stale Observable state.
+      const conn2 = await openStream(campaignId, player);
+      expect(conn2.status).toBe(200);
+      conn2.close();
+    } finally {
+      setHeartbeatMsForTests(25_000);
+    }
   });
 });
 

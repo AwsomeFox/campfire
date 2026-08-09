@@ -4,7 +4,8 @@ import type { RuleEntry, RulePack, RuleSearchPage, CustomMechanicsProfile } from
 import { api, API, translateApiError } from '../../lib/api';
 import { Card, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
-import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
+import { StatBlock, entryRendersMonsterStatblock } from '../../components/StatBlock';
+import { EntryFacts, hasEntryFacts } from '../../components/EntryFacts';
 import { useTranslation } from 'react-i18next';
 
 export interface RulesLookupPanelProps {
@@ -292,11 +293,17 @@ export function RulesLookupPanel({ campaignId, ruleSystem, customMechanicsProfil
 
                     {isExpanded && (
                       <div className="pt-2 border-t border-subtle reading-supporting overflow-x-auto text-xs space-y-2">
+                        {/* Non-creature entries keep their mechanics in `dataJson`; the
+                            statblock branch below is creature-only, so a looked-up item or
+                            spell would otherwise show prose with no stats at all. */}
+                        {!entryRendersMonsterStatblock(entry.type, entry.dataJson, statblockSystem, customMechanicsProfile) && hasEntryFacts(entry.dataJson) && (
+                          <EntryFacts data={entry.dataJson} compact />
+                        )}
                         {entry.body && entry.body.trim() ? (
                           <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
-                        ) : hasMonsterStatblock(entry.dataJson, statblockSystem, customMechanicsProfile) ? (
+                        ) : entryRendersMonsterStatblock(entry.type, entry.dataJson, statblockSystem, customMechanicsProfile) ? (
                           <StatBlock data={entry.dataJson} ruleSystem={statblockSystem} customMechanicsProfile={customMechanicsProfile} headingLevel={3} />
-                        ) : entry.summary ? (
+                        ) : hasEntryFacts(entry.dataJson) ? null : entry.summary ? (
                           <p className="text-muted" style={{ margin: 0 }}>{entry.summary}</p>
                         ) : (
                           <p className="text-muted" style={{ margin: 0 }}>

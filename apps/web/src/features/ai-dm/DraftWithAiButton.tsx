@@ -33,6 +33,7 @@ const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'ques
 const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
   npc: 'NPC',
   location: 'location',
+  arc: 'story arc',
   beat: 'story beat',
   recap: 'session recap',
   encounter: 'encounter',
@@ -44,6 +45,7 @@ const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
 const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
   npc: 'NPCs',
   location: 'locations',
+  arc: 'story arcs',
   beat: 'story beats',
   recap: 'session recaps',
   encounter: 'encounters',
@@ -55,6 +57,7 @@ const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
 const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
   npc: 'Draft an NPC with AI',
   location: 'Draft a location with AI',
+  arc: 'Edit a story arc with AI',
   beat: 'Draft a story beat with AI',
   recap: 'Draft a session recap with AI',
   encounter: 'Draft an encounter with AI',
@@ -66,6 +69,7 @@ const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
 const TARGET_EXAMPLE: Record<CoDmDraftTarget, string> = {
   npc: 'a shady fence with a soft spot for stray cats, tied to the thieves guild',
   location: 'a half-flooded shrine the locals avoid after dark',
+  arc: 'make the central mystery more urgent and tighten the summary',
   beat: 'the next story beat once the party learns the mayor is a doppelganger',
   recap: 'summarize tonight: the ambush at the bridge, losing Kira, the truce offer',
   encounter: 'a level-3 ambush on a forest road, bandits with a hidden archer',
@@ -95,6 +99,8 @@ export function DraftWithAiButton({
   // row opt into xs explicitly instead of it being baked in for everyone.
   density = 'compact',
   arcId,
+  entityId,
+  currentContent,
   disabled = false,
   disabledTitle,
   open: openProp,
@@ -109,6 +115,10 @@ export function DraftWithAiButton({
   density?: UiDensity;
   /** When target is `beat`, pin drafted beat(s) to this arc (#1307). */
   arcId?: number;
+  /** Existing arc/beat id to rewrite through an update proposal (#1311). */
+  entityId?: number;
+  /** Current content shown read-only in the rewrite dialog; the server reloads authority. */
+  currentContent?: { title: string; prose: string };
   disabled?: boolean;
   disabledTitle?: string;
   open?: boolean;
@@ -149,7 +159,15 @@ export function DraftWithAiButton({
         </Btn>
       )}
       {open && (
-        <DraftWithAiModal id={dialogId} campaignId={campaignId} target={target} arcId={arcId} onClose={() => setOpen(false)} />
+        <DraftWithAiModal
+          id={dialogId}
+          campaignId={campaignId}
+          target={target}
+          arcId={arcId}
+          entityId={entityId}
+          currentContent={currentContent}
+          onClose={() => setOpen(false)}
+        />
       )}
     </>
   );
@@ -160,16 +178,21 @@ function DraftWithAiModal({
   campaignId,
   target,
   arcId,
+  entityId,
+  currentContent,
   onClose,
 }: {
   id: string;
   campaignId: number;
   target: CoDmDraftTarget;
   arcId?: number;
+  entityId?: number;
+  currentContent?: { title: string; prose: string };
   onClose: () => void;
 }) {
   const [prompt, setPrompt] = useState('');
   const [count, setCount] = useState(1);
+  const [includeCampaignSecrets, setIncludeCampaignSecrets] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorIsForbidden, setErrorIsForbidden] = useState(false);
@@ -185,7 +208,8 @@ function DraftWithAiModal({
   const quantityLabelId = useId();
   const quantityValueId = useId();
 
-  const multi = MULTI_TARGETS.has(target);
+  const editing = entityId != null;
+  const multi = !editing && MULTI_TARGETS.has(target);
   const noun = TARGET_NOUN[target];
   const plural = TARGET_PLURAL[target];
   const dialogRef = useDialog<HTMLDivElement>({
@@ -205,6 +229,8 @@ function DraftWithAiModal({
       const body: Record<string, unknown> = { target, prompt: prompt.trim() };
       if (multi) body.count = count;
       if (target === 'beat' && arcId != null) body.arcId = arcId;
+      if (entityId != null) body.entityId = entityId;
+      if (editing) body.includeCampaignSecrets = includeCampaignSecrets;
       const draft = await api.post<CoDmDraftResult>(`${API}/campaigns/${campaignId}/ai-dm/draft`, body);
       setResult(draft);
     } catch (err) {
@@ -244,18 +270,19 @@ function DraftWithAiModal({
         <div className="flex items-start justify-between gap-2">
           <div>
             <h2 id={titleId} className="flex items-center gap-2 text-base font-extrabold text-white m-0">
-              <GameIcon slug="sparkles" size={UI_ICON_SIZE.sm} /> {TARGET_TITLE[target]}
+              <GameIcon slug="sparkles" size={UI_ICON_SIZE.sm} /> {editing ? `Edit ${noun} with AI` : TARGET_TITLE[target]}
             </h2>
             <p id={descriptionId} className="text-muted text-xs m-0 mt-1">
-              Describe what you want — the AI DM drafts it and files {multi ? 'pending proposals' : 'a pending proposal'} for
-              your review. Nothing touches canon until you approve.
+              {editing
+                ? 'Add rewrite instructions. The AI DM receives the current storyline context and files an update proposal against this same entity. Nothing touches canon until you approve.'
+                : <>Describe what you want — the AI DM drafts it and files {multi ? 'pending proposals' : 'a pending proposal'} for your review. Nothing touches canon until you approve.</>}
             </p>
           </div>
           <button
             type="button"
             className="text-secondary hover:text-white leading-none disabled:opacity-50"
             onClick={onClose}
-            aria-label="Close AI drafting dialog"
+            aria-label={editing ? 'Close AI editing dialog' : 'Close AI drafting dialog'}
             disabled={busy}
           >
             <UIIcon name="close" size="sm" />
@@ -266,9 +293,30 @@ function DraftWithAiModal({
           <DraftResultCard campaignId={campaignId} result={result} onClose={onClose} />
         ) : (
           <>
+            {editing && currentContent && (
+              <fieldset className="space-y-1.5" disabled={busy}>
+                <legend className="text-xs font-semibold text-slate-300">Current content</legend>
+                <label className="block text-[11px] text-slate-400" htmlFor={`${promptId}-current-title`}>Title</label>
+                <input
+                  id={`${promptId}-current-title`}
+                  className="input"
+                  value={currentContent.title}
+                  readOnly
+                />
+                <label className="block text-[11px] text-slate-400" htmlFor={`${promptId}-current-prose`}>
+                  {target === 'arc' ? 'Summary' : 'Body'}
+                </label>
+                <TextArea
+                  id={`${promptId}-current-prose`}
+                  rows={3}
+                  value={currentContent.prose}
+                  readOnly
+                />
+              </fieldset>
+            )}
             <div className="space-y-1.5">
               <label htmlFor={promptId} className="block text-xs font-semibold text-slate-300">
-                Describe the {noun} you want to draft
+                {editing ? 'Rewrite instructions' : `Describe the ${noun} you want to draft`}
               </label>
               <TextArea
                 id={promptId}
@@ -282,9 +330,24 @@ function DraftWithAiModal({
                 disabled={busy}
               />
               <p id={promptHelpId} className="text-[11px] text-slate-400 m-0">
-                Include the details, tone, and connections the AI should use. Example: {TARGET_EXAMPLE[target]}
+                {editing ? 'Explain what to preserve and what to change.' : 'Include the details, tone, and connections the AI should use.'} Example: {TARGET_EXAMPLE[target]}
               </p>
             </div>
+
+            {editing && (
+              <label className="flex items-start gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={includeCampaignSecrets}
+                  onChange={(event) => setIncludeCampaignSecrets(event.target.checked)}
+                  disabled={busy}
+                />
+                <span>
+                  Include the current DM-only storyline prep in this AI request. It may be sent to the configured external provider.
+                </span>
+              </label>
+            )}
 
             {multi && (
               <div className="flex items-center gap-2.5" role="group" aria-labelledby={quantityLabelId}>
@@ -345,8 +408,8 @@ function DraftWithAiModal({
               <Btn density="compact" ghost className="text-xs" onClick={onClose} disabled={busy}>
                 Cancel
               </Btn>
-              <Btn density="compact" className="text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim()}>
-                {busy ? 'Drafting…' : `Draft ${multi && count > 1 ? `${count} ${noun}s` : noun}`}
+              <Btn density="compact" className="text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim() || (editing && !includeCampaignSecrets)}>
+                {busy ? (editing ? 'Rewriting…' : 'Drafting…') : editing ? 'File rewrite proposal' : `Draft ${multi && count > 1 ? `${count} ${noun}s` : noun}`}
               </Btn>
             </div>
           </>

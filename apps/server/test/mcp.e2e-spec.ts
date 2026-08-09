@@ -11,6 +11,7 @@ import { OPEN_LEGEND_PACK_SLUG, PF2E_PACK_SLUG } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { auditLog, campaigns } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
+import { MockAiProvider } from '../src/modules/ai-dm/providers';
 
 interface TextContent {
   type: 'text';
@@ -769,6 +770,55 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(denied.isError).toBe(true);
   });
 
+  it('update_campaign MCP tool rejects an importer-only ruleSystem — REST/MCP parity (issue #2081)', async () => {
+    const dmClient = await mcpClient(dmToken);
+
+    // An installed pack under the 'cepheus-srd' slug — the real Cepheus importer's pack slug
+    // (see rules.e2e-spec.ts's sibling-importer-wiring suite) — but, like the archmage fixture
+    // above, uploaded directly rather than run through the live importer; the guard cares only
+    // about the slug's ADAPTERS registration, not how the pack got installed.
+    const cepheusPackUpload = await dmAgent.post('/api/v1/rules/packs/upload').send({
+      source: 'upload',
+      pack: { slug: 'cepheus-srd', name: 'MCP Cepheus Fixture', version: '1', license: 'OGL v1.0a' },
+      entries: [{ slug: 'mcp-cepheus-fixture', name: 'MCP Cepheus Fixture Section', type: 'section', body: 'Cepheus fixture reference text.' }],
+    });
+    expect(cepheusPackUpload.status).toBe(202);
+    const cepheusJobId = cepheusPackUpload.body.id as string;
+    const cepheusJobStart = Date.now();
+    for (;;) {
+      const jobRes = await dmAgent.get(`/api/v1/rules/packs/install-jobs/${cepheusJobId}`);
+      if (jobRes.body.status === 'completed' || jobRes.body.status === 'failed') {
+        expect(jobRes.body.status).toBe('completed');
+        break;
+      }
+      if (Date.now() - cepheusJobStart > 10_000) throw new Error(`cepheus pack install job did not finish (last ${jobRes.body.status})`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const createCampRaw = await dmClient.callTool({
+      name: 'create_campaign',
+      arguments: { name: 'MCP Cepheus Table' },
+    });
+    expect(createCampRaw.isError).toBeFalsy();
+    const createCamp = parseResult(createCampRaw) as { id: number };
+
+    // update_campaign is the MCP write path for ruleSystem (see the archmage test above,
+    // which asserts the positive case — an adapter-having slug succeeds through this same
+    // tool). Here the pack IS installed (validateRuleSystem's pack-existence check alone
+    // would pass) but has no registered combat adapter, so the importer-only guard must
+    // reject it — the same 400 REST already returns from campaigns.controller (see
+    // rules.e2e-spec.ts), because both write paths funnel through
+    // CampaignsService.validateRuleSystem.
+    const setRuleSystemRaw = await dmClient.callTool({
+      name: 'update_campaign',
+      arguments: { campaignId: createCamp.id, ruleSystem: 'cepheus-srd' },
+    });
+    expect(setRuleSystemRaw.isError).toBe(true);
+    expect(parseResult(setRuleSystemRaw)).toMatchObject({ error: { status: 400, code: 'bad_request' } });
+    const errorResult = parseResult(setRuleSystemRaw) as { error: { message: string } };
+    expect(errorResult.error.message).toMatch(/importer-only/i);
+  });
+
   it('roll catalog (issue #415): list_checks surfaces unproficient skills; roll_check resolves server-side', async () => {
     const client = await mcpClient(dmToken);
     const created = parseResult(
@@ -1256,6 +1306,51 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(endResult.isError).toBeFalsy();
     const ended = parseResult(endResult) as { status: string };
     expect(ended.status).toBe('ended');
+  });
+
+  it('roll_initiative / roll_combatant_initiative refuse a system with no initiative roll, and begin_encounter needs neither (issue #2123)', async () => {
+    const client = await mcpClient(dmToken);
+    // MCP parity for the REST behaviour asserted in encounters.e2e-spec.ts: the refusal lives
+    // in EncountersService, so the two transports cannot drift apart.
+    const camp = parseResult(
+      await client.callTool({ name: 'create_campaign', arguments: { name: 'MCP Starforged Table' } }),
+    ) as { id: number };
+    // `update_campaign` validates ruleSystem against an INSTALLED pack slug and no Starforged
+    // pack is installed in this fixture, so write the column directly (same approach as the
+    // REST suite) — the adapter resolves from the string alone.
+    await ctx.app
+      .get<DrizzleDb>(DB)
+      .update(campaigns)
+      .set({ ruleSystem: 'starforged' })
+      .where(eq(campaigns.id, camp.id));
+
+    const enc = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId: camp.id, name: 'MCP Boarding Action' } }),
+    ) as { id: number };
+    await client.callTool({ name: 'add_combatant', arguments: { encounterId: enc.id, kind: 'monster', name: 'MCP Sentinel', hpMax: 6 } });
+
+    const bulk = await client.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    expect(bulk.isError).toBe(true);
+    expect(parseResult(bulk)).toMatchObject({ error: { status: 400 } });
+
+    const fetched = parseResult(
+      await client.callTool({ name: 'get_encounter', arguments: { encounterId: enc.id } }),
+    ) as { combatants: Array<{ id: number; initiative: number | null }> };
+    expect(fetched.combatants.every((c) => c.initiative === null)).toBe(true);
+
+    const perCombatant = await client.callTool({
+      name: 'roll_combatant_initiative',
+      arguments: { encounterId: enc.id, combatantId: fetched.combatants[0].id, idempotencyKey: 'mcp-no-initiative-roll' },
+    });
+    expect(perCombatant.isError).toBe(true);
+    expect(parseResult(perCombatant)).toMatchObject({ error: { status: 400 } });
+
+    // …and the fight still starts, ordered by the roster, with nothing rolled.
+    const begun = await client.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
+    expect(begun.isError).toBeFalsy();
+    const running = parseResult(begun) as { status: string; combatants: Array<{ id: number; initiative: number | null }> };
+    expect(running.status).toBe('running');
+    expect(running.combatants.every((c) => c.initiative === null)).toBe(true);
   });
 
   it('declare_aoe_template creates or patches without caller-controlled attribution and remove_aoe_template shares REST lifecycle semantics', async () => {
@@ -3072,7 +3167,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
           kind: 'monster',
           name: 'MCP Troll',
           hpMax: 20,
-          statblock: { ac: 14, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
+          statblock: { ac: 14, hp: 20, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
         },
       }),
     ) as { id: number };
@@ -3104,11 +3199,13 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const afterReveal = parseResult(
       await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
-    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number } | null }> };
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number; hp: number | null } | null }> };
     const afterBoss = afterReveal.combatants.find((c) => c.id === added.id)!;
     expect(afterBoss.statblockRevealed).toBe(true);
     expect(afterBoss.statblock).not.toBeNull();
     expect(afterBoss.statblock!.ac).toBe(14);
+    expect(afterBoss.statblock!.hp).toBeNull();
+    expect(JSON.stringify(afterBoss)).not.toContain('"hp":20');
   });
 
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {
@@ -4454,6 +4551,69 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(provenance.consent!.includedInboxCount).toBe(0);
       expect(provenance.consent!.excludedInboxByConsent).toBe(0);
       expect(provenance.consent!.excludedInboxPrivate).toBe(0);
+    });
+
+    it('does not send DM-only storyline context externally without per-request opt-in', async () => {
+      const arc = await dmAgent
+        .post(`/api/v1/campaigns/${consentCampaignId}/arcs`)
+        .send({ title: 'Private MCP Arc', summary: 'A secret betrayal waits below.' });
+      expect(arc.status).toBe(201);
+      const generate = jest.spyOn(MockAiProvider.prototype, 'generate');
+      try {
+        const client = await mcpClient(dmToken);
+        const result = await client.callTool({
+          name: 'draft_content',
+          arguments: {
+            campaignId: consentCampaignId,
+            target: 'arc',
+            entityId: arc.body.id,
+            prompt: 'Make this arc more urgent.',
+          },
+        });
+        expect(result.isError).toBe(true);
+        expect(generate).not.toHaveBeenCalled();
+        expect(JSON.stringify(result.content)).toContain('includeCampaignSecrets');
+      } finally {
+        generate.mockRestore();
+      }
+    });
+
+    it('files an opted-in existing story arc rewrite as an update proposal through draft_content', async () => {
+      const arc = await dmAgent
+        .post(`/api/v1/campaigns/${consentCampaignId}/arcs`)
+        .send({ title: 'MCP Rewrite Arc', summary: 'The old summary.' });
+      expect(arc.status).toBe(201);
+      const generate = jest.spyOn(MockAiProvider.prototype, 'generate').mockResolvedValueOnce({
+        text: JSON.stringify({ title: 'MCP Rewrite Arc', summary: 'The deadline closes in.' }),
+        toolCalls: [],
+        usage: { promptTokens: 10, completionTokens: 8, totalTokens: 18 },
+        finishReason: 'stop',
+        model: 'mock-1',
+      });
+      try {
+        const client = await mcpClient(dmToken);
+        const result = await client.callTool({
+          name: 'draft_content',
+          arguments: {
+            campaignId: consentCampaignId,
+            target: 'arc',
+            entityId: arc.body.id,
+            prompt: 'Make this arc more urgent.',
+            includeCampaignSecrets: true,
+          },
+        });
+        expect(result.isError).toBeFalsy();
+        const proposal = (parseResult(result) as {
+          proposals: Array<{ action: string; entityType: string; entityId: number }>;
+        }).proposals[0];
+        expect(proposal).toMatchObject({
+          action: 'update',
+          entityType: 'story_arc',
+          entityId: arc.body.id,
+        });
+      } finally {
+        generate.mockRestore();
+      }
     });
 
     /**

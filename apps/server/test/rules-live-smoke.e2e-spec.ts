@@ -106,10 +106,32 @@ interface SmokeEntry {
   type: string;
   body: string;
   license: string;
+  /** Optional so a probe can return any importer's entry type without widening them all. */
+  dataJson?: string | null;
 }
 
 interface ProbeSectionResult {
   entries: SmokeEntry[];
+  /** Optional so a probe can return any importer's result type; only the AoN probes read it. */
+  truncated?: boolean;
+}
+
+/**
+ * A second, cheap section fetched purely to prove the MECHANICAL fields still land.
+ *
+ * The prose checks above (`minBodyRatio`) cannot see this class of drift: an upstream that
+ * renames `price_raw`, or starts serving `size` as a bare string instead of a one-element
+ * array, still returns full prose for every row. The importer keeps producing entries that
+ * look healthy and are quietly missing their stats — which is exactly how PF2e/SF2e items
+ * shipped for months with no price, range, or weapon block at all while this file was green
+ * (its only AoN probe was `conditions`, which is prose and carries no mechanics).
+ */
+interface FactProbe {
+  section: string;
+  /** Each key must appear in `dataJson` on at least `minRatio` of the section's entries. */
+  requiredFactKeys: string[];
+  minRatio: number;
+  run: () => Promise<ProbeSectionResult>;
 }
 
 /**
@@ -153,6 +175,8 @@ interface LiveProbe extends BaseProbe {
   minBodyRatio: number;
   rawChecks: RawUrlCheck[];
   run: () => Promise<ProbeSectionResult>;
+  /** Optional mechanical-field probe; see {@link FactProbe} for why prose alone isn't enough. */
+  facts?: FactProbe;
 }
 
 /**
@@ -234,6 +258,15 @@ const RULE_SOURCE_PROBES: RuleSourceProbe[] = [
       },
     ],
     run: () => fetchPf2eSection(PF2E_DEFAULT_BASE_URL, 'conditions', quietLogger),
+    // `vehicles` is the cheapest AoN section that carries real mechanics (~137 rows) and it
+    // exercises both shape traps at once: `price`/`passengers` are number + `_raw` display
+    // pairs, and `size` is a one-element array.
+    facts: {
+      section: 'vehicles',
+      requiredFactKeys: ['price', 'ac', 'hp', 'speed', 'crew', 'size'],
+      minRatio: 0.8,
+      run: () => fetchPf2eSection(PF2E_DEFAULT_BASE_URL, 'vehicles', quietLogger),
+    },
   },
   {
     kind: 'live',
@@ -254,6 +287,13 @@ const RULE_SOURCE_PROBES: RuleSourceProbe[] = [
       },
     ],
     run: () => fetchSf2eSection(SF2E_DEFAULT_BASE_URL, 'conditions', quietLogger),
+    // SF2e vehicles publish no `hp`; the rest of the mechanical block is the same shape.
+    facts: {
+      section: 'vehicles',
+      requiredFactKeys: ['price', 'ac', 'speed', 'crew', 'size'],
+      minRatio: 0.8,
+      run: () => fetchSf2eSection(SF2E_DEFAULT_BASE_URL, 'vehicles', quietLogger),
+    },
   },
   {
     kind: 'live',
@@ -564,6 +604,60 @@ liveSmoke('rules — live rule-source smoke (issue #568)', () => {
         },
         LIVE_TIMEOUT_MS,
       );
+
+      const facts = probe.facts;
+      if (facts) {
+        it(
+          `section "${facts.section}" still yields its mechanical fields, not just prose`,
+          async () => {
+            const label = where(probe, `section "${facts.section}"`);
+            let result: ProbeSectionResult;
+            try {
+              result = await facts.run();
+            } catch (err) {
+              throw new Error(`${label}: importer failed against the live source — ${(err as Error).message}`, { cause: err });
+            }
+            const entries = result.entries;
+            if (entries.length === 0) throw new Error(`${label}: imported 0 entries — nothing to check facts against`);
+
+            const parsed = entries.map((entry) => {
+              try {
+                const value: unknown = entry.dataJson ? JSON.parse(entry.dataJson) : null;
+                return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+              } catch {
+                return {};
+              }
+            });
+
+            const missing = facts.requiredFactKeys
+              .map((key) => ({ key, present: parsed.filter((d) => d[key] !== undefined && d[key] !== null).length }))
+              .filter(({ present }) => present / entries.length < facts.minRatio);
+
+            // A live section that cannot prove it saw every row is a real regression even
+            // though it imports fine: `truncated` is what stops rules.service from treating
+            // the fetch as a complete manifest, so it silently disables removal on every
+            // subsequent re-import. It is set here only when the scan actually lost rows
+            // (see the row-count check in the importer) or hit a cap this section is nowhere
+            // near, so on a healthy upstream it must be false.
+            if (result.truncated) {
+              throw new Error(
+                `${label}: the scan could not account for every row the source reported (truncated) — ` +
+                  'paging lost rows, or the section outgrew its cap. Pack re-imports will refuse to remove stale entries until this is fixed.',
+              );
+            }
+
+            if (missing.length > 0) {
+              throw new Error(
+                `${label}: dataJson is missing expected mechanical fields on most rows — ` +
+                  missing.map((m) => `"${m.key}" on ${m.present}/${entries.length}`).join(', ') +
+                  ` (need >= ${Math.round(facts.minRatio * 100)}% each). The upstream field was renamed, ` +
+                  'changed type (a number where a string is read, or a bare scalar where a one-element array is read), or moved.',
+              );
+            }
+          },
+          LIVE_TIMEOUT_MS,
+        );
+      }
     });
   }
 });

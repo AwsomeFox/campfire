@@ -89,6 +89,12 @@ test.describe('External AI provider privacy copy (#455)', () => {
     ).toEqual([]);
   });
 
+  test('provider privacy notice requires per-request opt-in for DM-only storyline prep', () => {
+    const notice = privacyNoticeText().toLowerCase();
+    expect(notice).toContain('storyline');
+    expect(notice).toMatch(/opt in per rewrite request|opt in.*storyline rewrite/);
+  });
+
   test('provider privacy notice documents retention and provider responsibility', () => {
     const notice = privacyNoticeText().toLowerCase();
     expect(notice, 'notice must mention retention').toMatch(/retention/);

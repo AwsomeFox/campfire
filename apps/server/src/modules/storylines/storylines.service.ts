@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, max } from 'drizzle-orm';
+import crypto from 'node:crypto';
+import { and, asc, eq, inArray, max } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   StoryArcCreate,
@@ -30,6 +31,32 @@ type StoryBeatUpdateInput = z.infer<typeof StoryBeatUpdate>;
 type StoryBeatStatusPatchInput = z.infer<typeof StoryBeatStatusPatch>;
 type StoryBranchCreateInput = z.infer<typeof StoryBranchCreate>;
 type StoryBranchUpdateInput = z.infer<typeof StoryBranchUpdate>;
+type StorylineTx = Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+type StorylineReader = DrizzleDb | StorylineTx;
+type StorylineUpdateOptions = {
+  expectedUpdatedAt?: string;
+  /** Rewrite-context hash captured when the proposal was generated. */
+  expectedContextHash?: string;
+  /** Revision authorship may differ from the human who approves and audits a proposal. */
+  revisionUser?: RequestUser;
+};
+
+/** Signals that a proposal's storyline dependencies changed before its atomic write. */
+export class StorylineRewriteContextChangedError extends Error {
+  constructor() {
+    super('Storyline rewrite context changed before the update could be applied');
+    this.name = 'StorylineRewriteContextChangedError';
+  }
+}
+
+/** Keep multi-beat arc context useful without letting 50k prose fields multiply unboundedly. */
+const ARC_BEAT_BODY_CONTEXT_CHARS = 2_000;
+
+type LinkedPlayContext = {
+  sessions: Map<number, Pick<typeof sessions.$inferSelect, 'id' | 'number' | 'title'>>;
+  quests: Map<number, Pick<typeof quests.$inferSelect, 'id' | 'title' | 'status'>>;
+  encounters: Map<number, Pick<typeof encounters.$inferSelect, 'id' | 'name' | 'status'>>;
+};
 
 function arcToDomain(row: typeof storyArcs.$inferSelect): StoryArc {
   return {
@@ -130,28 +157,257 @@ export class StorylinesService {
     return { ...arcToDomain(row), beats: await this.beatsForArc(id) };
   }
 
+  /**
+   * Build the authoritative context used for storyline rewrites. Keeping this in the
+   * domain service lets generation and proposal approval hash the exact same shape,
+   * including child beats, branches, and linked play-record labels.
+   */
+  getRewriteContext(campaignId: number, target: 'arc' | 'beat', entityId: number) {
+    return this.getRewriteContextInDb(this.db, campaignId, target, entityId);
+  }
+
+  /** Synchronous so approval can compare this hash and mutate inside one SQLite transaction. */
+  private getRewriteContextInDb(
+    db: StorylineReader,
+    campaignId: number,
+    target: 'arc' | 'beat',
+    entityId: number,
+  ) {
+    if (target === 'arc') {
+      const arcRow = db
+        .select()
+        .from(storyArcs)
+        .where(and(eq(storyArcs.id, entityId), notDeleted(storyArcs.deletedAt)))
+        .get();
+      if (!arcRow) throw new NotFoundException(`Story arc ${entityId} not found`);
+      const arc = arcToDomain(arcRow);
+      if (arc.campaignId !== campaignId) {
+        throw new BadRequestException(`Story arc ${entityId} does not belong to this campaign`);
+      }
+      const beatRows = db
+        .select()
+        .from(storyBeats)
+        .where(and(eq(storyBeats.arcId, entityId), notDeleted(storyBeats.deletedAt)))
+        .orderBy(asc(storyBeats.sortOrder), asc(storyBeats.id))
+        .all();
+      const beats = this.beatsWithBranchesInDb(db, beatRows);
+      const linkedPlay = this.loadLinkedPlayContextInDb(db, beats, campaignId);
+      const providerContext = {
+        target: 'arc' as const,
+        arc: {
+          id: arc.id,
+          title: arc.title,
+          summary: arc.summary,
+          status: arc.status,
+          beats: beats.map((beat) =>
+            this.storyBeatRewriteContext(beat, linkedPlay, ARC_BEAT_BODY_CONTEXT_CHARS),
+          ),
+        },
+      };
+      return {
+        providerContext,
+        contextHash: this.rewriteContextHash(providerContext),
+        baseSnapshot: {
+          id: arc.id,
+          campaignId: arc.campaignId,
+          title: arc.title,
+          summary: arc.summary,
+          status: arc.status,
+          sortOrder: arc.sortOrder,
+          createdAt: arc.createdAt,
+          updatedAt: arc.updatedAt,
+        },
+      };
+    }
+
+    const beatRow = db
+      .select()
+      .from(storyBeats)
+      .where(and(eq(storyBeats.id, entityId), notDeleted(storyBeats.deletedAt)))
+      .get();
+    if (!beatRow) throw new NotFoundException(`Story beat ${entityId} not found`);
+    const beat = this.beatsWithBranchesInDb(db, [beatRow])[0];
+    if (beat.campaignId !== campaignId) {
+      throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
+    }
+    const arcRow = db
+      .select()
+      .from(storyArcs)
+      .where(and(eq(storyArcs.id, beat.arcId), notDeleted(storyArcs.deletedAt)))
+      .get();
+    if (!arcRow) throw new NotFoundException(`Story arc ${beat.arcId} not found`);
+    if (arcRow.campaignId !== campaignId) {
+      throw new BadRequestException(`Story beat ${entityId} does not belong to this campaign`);
+    }
+    const linkedPlay = this.loadLinkedPlayContextInDb(db, [beat], campaignId);
+    const providerContext = {
+      target: 'beat' as const,
+      arc: { id: arcRow.id, title: arcRow.title, summary: arcRow.summary, status: arcRow.status },
+      beat: this.storyBeatRewriteContext(beat, linkedPlay),
+    };
+    return {
+      providerContext,
+      contextHash: this.rewriteContextHash(providerContext),
+      baseSnapshot: {
+        id: beat.id,
+        campaignId: beat.campaignId,
+        arcId: beat.arcId,
+        title: beat.title,
+        body: beat.body,
+        status: beat.status,
+        sortOrder: beat.sortOrder,
+        sessionId: beat.sessionId,
+        questId: beat.questId,
+        encounterId: beat.encounterId,
+        createdAt: beat.createdAt,
+        updatedAt: beat.updatedAt,
+      },
+    };
+  }
+
+  private beatsWithBranchesInDb(
+    db: StorylineReader,
+    beatRows: Array<typeof storyBeats.$inferSelect>,
+  ): StoryBeatWithBranches[] {
+    const beatIds = beatRows.map((beat) => beat.id);
+    const branchRows = beatIds.length === 0
+      ? []
+      : db
+          .select()
+          .from(storyBranches)
+          .where(inArray(storyBranches.beatId, beatIds))
+          .orderBy(asc(storyBranches.sortOrder), asc(storyBranches.id))
+          .all();
+    const branchesByBeat = new Map<number, StoryBranch[]>();
+    for (const branchRow of branchRows) {
+      const branches = branchesByBeat.get(branchRow.beatId) ?? [];
+      branches.push(branchToDomain(branchRow));
+      branchesByBeat.set(branchRow.beatId, branches);
+    }
+    return beatRows.map((beatRow) => ({
+      ...beatToDomain(beatRow),
+      branches: branchesByBeat.get(beatRow.id) ?? [],
+    }));
+  }
+
+  /** Resolve all live linked play records in at most one query per table. */
+  private loadLinkedPlayContextInDb(
+    db: StorylineReader,
+    beats: StoryBeatWithBranches[],
+    campaignId: number,
+  ): LinkedPlayContext {
+    const sessionIds = [...new Set(beats.flatMap((beat) => beat.sessionId == null ? [] : [beat.sessionId]))];
+    const questIds = [...new Set(beats.flatMap((beat) => beat.questId == null ? [] : [beat.questId]))];
+    const encounterIds = [...new Set(beats.flatMap((beat) => beat.encounterId == null ? [] : [beat.encounterId]))];
+    const sessionRows = sessionIds.length === 0
+      ? []
+      : db
+          .select({ id: sessions.id, number: sessions.number, title: sessions.title })
+          .from(sessions)
+          .where(and(
+            eq(sessions.campaignId, campaignId),
+            inArray(sessions.id, sessionIds),
+            notDeleted(sessions.deletedAt),
+          ))
+          .all();
+    const questRows = questIds.length === 0
+      ? []
+      : db
+          .select({ id: quests.id, title: quests.title, status: quests.status })
+          .from(quests)
+          .where(and(
+            eq(quests.campaignId, campaignId),
+            inArray(quests.id, questIds),
+            notDeleted(quests.deletedAt),
+          ))
+          .all();
+    const encounterRows = encounterIds.length === 0
+      ? []
+      : db
+          .select({ id: encounters.id, name: encounters.name, status: encounters.status })
+          .from(encounters)
+          .where(and(
+            eq(encounters.campaignId, campaignId),
+            inArray(encounters.id, encounterIds),
+            notDeleted(encounters.deletedAt),
+          ))
+          .all();
+    return {
+      sessions: new Map(sessionRows.map((row) => [row.id, row])),
+      quests: new Map(questRows.map((row) => [row.id, row])),
+      encounters: new Map(encounterRows.map((row) => [row.id, row])),
+    };
+  }
+
+  private storyBeatRewriteContext(
+    beat: StoryBeatWithBranches,
+    linkedPlay: LinkedPlayContext,
+    bodyLimit?: number,
+  ) {
+    const bodyTruncated = bodyLimit != null && beat.body.length > bodyLimit;
+    const truncationNotice = '\n[truncated for arc rewrite context]';
+    const body = bodyTruncated
+      ? `${beat.body.slice(0, Math.max(0, bodyLimit - truncationNotice.length))}${truncationNotice}`
+      : beat.body;
+    return {
+      id: beat.id,
+      title: beat.title,
+      body,
+      ...(bodyTruncated ? { bodyTruncated: true } : {}),
+      status: beat.status,
+      branches: beat.branches.map((branch) => ({
+        id: branch.id,
+        label: branch.label,
+        toBeatId: branch.toBeatId,
+        sortOrder: branch.sortOrder,
+      })),
+      linkedPlayRecords: {
+        session: beat.sessionId == null ? null : linkedPlay.sessions.get(beat.sessionId) ?? null,
+        quest: beat.questId == null ? null : linkedPlay.quests.get(beat.questId) ?? null,
+        encounter: beat.encounterId == null ? null : linkedPlay.encounters.get(beat.encounterId) ?? null,
+      },
+    };
+  }
+
+  private rewriteContextHash(providerContext: unknown): string {
+    return crypto.createHash('sha256').update(JSON.stringify(providerContext)).digest('hex');
+  }
+
   async createArc(campaignId: number, input: StoryArcCreateInput, user: RequestUser, role: Role): Promise<StoryArc> {
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(storyArcs)
-      .values({
+    const row = this.db.transaction((tx) => {
+      const row = tx
+        .insert(storyArcs)
+        .values({
+          campaignId,
+          title: input.title,
+          summary: input.summary ?? '',
+          status: input.status ?? 'planned',
+          sortOrder: input.sortOrder ?? 0,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .get();
+      this.revisions.commitProseVersionInTx(tx, {
+        entityType: 'story_arc',
+        entityId: row.id,
         campaignId,
-        title: input.title,
-        summary: input.summary ?? '',
-        status: input.status ?? 'planned',
-        sortOrder: input.sortOrder ?? 0,
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'storyline.arc.create',
-      entityType: 'story_arc',
-      entityId: row.id,
-      campaignId,
-    });
+        priorProse: '',
+        nextProse: row.summary,
+        user,
+        ts,
+      });
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'storyline.arc.create',
+        entityType: 'story_arc',
+        entityId: row.id,
+        campaignId,
+      });
+      return row;
+    }, { behavior: 'immediate' });
     return arcToDomain(row);
   }
 
@@ -160,31 +416,52 @@ export class StorylinesService {
     input: StoryArcUpdateInput,
     user: RequestUser,
     role: Role,
-    opts?: { expectedUpdatedAt?: string },
+    opts?: StorylineUpdateOptions,
   ): Promise<StoryArc> {
-    const existing = await this.getArcRowOrThrow(id);
-    const updated = await this.db
-      .update(storyArcs)
-      .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
-      .where(
-        opts?.expectedUpdatedAt
-          ? and(eq(storyArcs.id, id), eq(storyArcs.updatedAt, opts.expectedUpdatedAt))
-          : eq(storyArcs.id, id),
-      )
-      .returning();
-    if (!updated[0]) {
-      const current = await this.getArcRowOrThrow(id);
-      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
-    }
-    const row = updated[0];
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'storyline.arc.update',
-      entityType: 'story_arc',
-      entityId: id,
-      campaignId: existing.campaignId,
-    });
+    const row = this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(storyArcs)
+        .where(and(eq(storyArcs.id, id), notDeleted(storyArcs.deletedAt)))
+        .get();
+      if (!existing) throw new NotFoundException(`Story arc ${id} not found`);
+      if (opts?.expectedContextHash) {
+        const current = this.getRewriteContextInDb(tx, existing.campaignId, 'arc', id);
+        if (current.contextHash !== opts.expectedContextHash) {
+          throw new StorylineRewriteContextChangedError();
+        }
+      }
+      const row = tx
+        .update(storyArcs)
+        .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(storyArcs.id, id), eq(storyArcs.updatedAt, opts.expectedUpdatedAt))
+            : eq(storyArcs.id, id),
+        )
+        .returning()
+        .get();
+      if (!row) throw staleWrite(opts?.expectedUpdatedAt, existing.updatedAt);
+      if (input.summary !== undefined && input.summary !== existing.summary) {
+        this.revisions.commitProseVersionInTx(tx, {
+          entityType: 'story_arc',
+          entityId: id,
+          campaignId: existing.campaignId,
+          priorProse: existing.summary,
+          nextProse: input.summary,
+          user: opts?.revisionUser ?? user,
+        });
+      }
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'storyline.arc.update',
+        entityType: 'story_arc',
+        entityId: id,
+        campaignId: existing.campaignId,
+      });
+      return row;
+    }, { behavior: 'immediate' });
     return arcToDomain(row);
   }
 
@@ -364,46 +641,58 @@ export class StorylinesService {
     input: StoryBeatUpdateInput,
     user: RequestUser,
     role: Role,
-    opts?: { expectedUpdatedAt?: string },
+    opts?: StorylineUpdateOptions,
   ): Promise<StoryBeat> {
-    const existing = await this.getBeatRowOrThrow(id);
+    const preflight = await this.getBeatRowOrThrow(id);
     // Validate any play-record links being SET (non-null) belong to the beat's campaign
     // (issue #264). `null` clears a link; an omitted field leaves it unchanged.
-    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, existing.campaignId);
-    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, existing.campaignId);
-    if (input.encounterId != null) await this.assertEntityInCampaign('encounter', input.encounterId, existing.campaignId);
-    const updated = await this.db
-      .update(storyBeats)
-      .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
-      .where(
-        opts?.expectedUpdatedAt
-          ? and(eq(storyBeats.id, id), eq(storyBeats.updatedAt, opts.expectedUpdatedAt))
-          : eq(storyBeats.id, id),
-      )
-      .returning();
-    if (!updated[0]) {
-      const current = await this.getBeatRowOrThrow(id);
-      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
-    }
-    const row = updated[0];
-    if (input.body !== undefined && input.body !== existing.body) {
-      await this.revisions.commitProseVersion({
+    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, preflight.campaignId);
+    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, preflight.campaignId);
+    if (input.encounterId != null) await this.assertEntityInCampaign('encounter', input.encounterId, preflight.campaignId);
+    const row = this.db.transaction((tx) => {
+      const currentExisting = tx
+        .select()
+        .from(storyBeats)
+        .where(and(eq(storyBeats.id, id), notDeleted(storyBeats.deletedAt)))
+        .get();
+      if (!currentExisting) throw new NotFoundException(`Story beat ${id} not found`);
+      if (opts?.expectedContextHash) {
+        const current = this.getRewriteContextInDb(tx, currentExisting.campaignId, 'beat', id);
+        if (current.contextHash !== opts.expectedContextHash) {
+          throw new StorylineRewriteContextChangedError();
+        }
+      }
+      const row = tx
+        .update(storyBeats)
+        .set({ ...input, updatedAt: nextUpdatedAt(currentExisting.updatedAt) })
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(storyBeats.id, id), eq(storyBeats.updatedAt, opts.expectedUpdatedAt))
+            : eq(storyBeats.id, id),
+        )
+        .returning()
+        .get();
+      if (!row) throw staleWrite(opts?.expectedUpdatedAt, currentExisting.updatedAt);
+      if (input.body !== undefined && input.body !== currentExisting.body) {
+        this.revisions.commitProseVersionInTx(tx, {
+          entityType: 'story_beat',
+          entityId: id,
+          campaignId: currentExisting.campaignId,
+          priorProse: currentExisting.body,
+          nextProse: input.body,
+          user: opts?.revisionUser ?? user,
+        });
+      }
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'storyline.beat.update',
         entityType: 'story_beat',
         entityId: id,
-        campaignId: existing.campaignId,
-        priorProse: existing.body,
-        nextProse: input.body,
-        user,
+        campaignId: currentExisting.campaignId,
       });
-    }
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'storyline.beat.update',
-      entityType: 'story_beat',
-      entityId: id,
-      campaignId: existing.campaignId,
-    });
+      return row;
+    }, { behavior: 'immediate' });
     return beatToDomain(row);
   }
 

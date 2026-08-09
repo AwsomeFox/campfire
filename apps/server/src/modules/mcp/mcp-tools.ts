@@ -198,9 +198,13 @@ const SharedEditorRevisionType = z.enum([
   'timeline_calendar',
   'scheduled_session',
   'session_zero',
+  'story_arc',
   'story_beat',
   'comment',
-]);
+]).describe(
+  'Shared-editor revision entity type (session|quest|npc|location|faction|timeline_event|timeline_calendar|' +
+    'scheduled_session|session_zero|story_arc|story_beat|comment)',
+);
 
 interface ToolResult {
   [x: string]: unknown;
@@ -4937,7 +4941,7 @@ export class McpToolsService {
       server,
       user,
       'roll_combatant_initiative',
-      'Roll server-authoritative initiative for ONE combatant. The DM may roll any combatant; a player may roll only a combatant linked to a character they own (everyone else 403s). Writes the roll + breakdown and records one shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless overwrite:true (DM only). 400 for a group-initiative rule system — a side shares one roll; use roll_initiative instead. Reuse idempotencyKey after a lost response to replay that exact outcome.',
+      'Roll server-authoritative initiative for ONE combatant. The DM may roll any combatant; a player may roll only a combatant linked to a character they own (everyone else 403s). Writes the roll + breakdown and records one shared dice-log entry (skipped for a hidden encounter). 409 if initiative is already set unless overwrite:true (DM only). 400 for a group-initiative rule system — a side shares one roll; use roll_initiative instead. 400 for a rule system with no initiative roll at all (issue #2123) — use reorder_combatant to set the turn order instead. Reuse idempotencyKey after a lost response to replay that exact outcome.',
       {
         encounterId: Id.describe('Encounter id'),
         combatantId: Id.describe('Combatant id — from get_encounter'),
@@ -5005,8 +5009,9 @@ export class McpToolsService {
       server,
       user,
       'reorder_combatant',
-      'DM only: manually reorder a combatant in initiative (issue #1923) — the documented answer to an unresolved tie ' +
-        'and the only mechanical expression of Delay/Ready. Moves the combatant to land immediately after ' +
+      'DM only: manually reorder a combatant in initiative (issue #1923) — the documented answer to an unresolved tie, ' +
+        'the only mechanical expression of Delay/Ready, and the whole turn-order mechanism for a rule system with no ' +
+        'initiative roll (issue #2123). Moves the combatant to land immediately after ' +
         'afterCombatantId (or the literal \'top\' to become first), matching get_encounter\'s own order. Within a tied ' +
         'initiative value only sortOrder changes; a move that crosses initiative values also sets the moved ' +
         'combatant\'s initiative between its new neighbors and clears the now-stale initiativeBreakdown. Clears ' +
@@ -5026,7 +5031,9 @@ export class McpToolsService {
       server,
       user,
       'roll_initiative',
-      'DM only: roll d20+initMod for every combatant in an encounter that does not already have an initiative set.',
+      'DM only: roll d20+initMod for every combatant in an encounter that does not already have an initiative set. ' +
+        '400 for a rule system that has no initiative roll (issue #2123, e.g. Ironsworn: Starforged) — turn order ' +
+        'there is the roster order; use reorder_combatant, and begin_encounter needs no roll at all.',
       { encounterId: Id.describe('Encounter id') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -5040,7 +5047,9 @@ export class McpToolsService {
       user,
       'begin_encounter',
       'DM only: start an encounter (status=running, round=1, turn 0). Fails with a 400 if any combatant is missing ' +
-        'initiative — roll_initiative first.',
+        'initiative — roll_initiative first. That precondition does not apply to a rule system with no initiative ' +
+        'roll (issue #2123): there the turn order is the roster order, so an all-unrolled roster starts as-is and ' +
+        'reorder_combatant is how you arrange it.',
       { encounterId: Id.describe('Encounter id') },
       async ({ encounterId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
@@ -5385,12 +5394,14 @@ export class McpToolsService {
         'location, beat (a story beat filed as story_beat — pass arcId to pin it to an arc), quest (a full quest draft), faction, recap ' +
         '(filed as a session), encounter (reuses generate_encounter #304), or map (reuses generate_map #306). `count` ' +
         '(npc/location/beat/quest/faction only) drafts several at once; recap/encounter/map ignore count. `arcId` (beat only) ' +
-        'pins drafted beats to a story arc. Returns the ' +
+        'pins drafted beats to a story arc. To rewrite an existing storyline entity, use target arc or beat with entityId; ' +
+        'the server supplies its current arc/beat, branches, and linked-play context and files an update proposal. That DM-only ' +
+        'context is not sent to an external provider unless includeCampaignSecrets:true is explicitly passed per request. Returns the ' +
         'created proposal ids; approve/reject them with approve_proposal / reject_proposal. Metered against the seat ' +
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | quest | faction | recap | encounter | map'),
+        target: CoDmDraftTarget.describe('What to draft or rewrite: npc | location | arc | beat | quest | faction | recap | encounter | map'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
         count: z
           .number()
@@ -5401,8 +5412,12 @@ export class McpToolsService {
           .describe('How many to draft (npc/location/beat/quest/faction only; ignored for recap/encounter/map)'),
         narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)'),
         arcId: Id.optional().describe('When target is beat, pin drafted beat(s) to this story arc id'),
+        entityId: Id.optional().describe('When target is arc or beat, rewrite this existing entity and file an update proposal'),
+        includeCampaignSecrets: z.boolean().default(false).describe(
+          'Storyline rewrites only: explicitly allow DM-only arc/beat context to be sent when the configured provider is external',
+        ),
       },
-      async ({ campaignId, target, prompt, count, narrationLanguage, arcId }) => {
+      async ({ campaignId, target, prompt, count, narrationLanguage, arcId, entityId, includeCampaignSecrets }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.coDm.draft(
           campaignId as number,
@@ -5412,6 +5427,8 @@ export class McpToolsService {
             ...(count !== undefined ? { count: count as number } : {}),
             ...(narrationLanguage !== undefined ? { narrationLanguage: narrationLanguage as z.infer<typeof NarrationLanguage> } : {}),
             ...(arcId !== undefined ? { arcId: arcId as number } : {}),
+            ...(entityId !== undefined ? { entityId: entityId as number } : {}),
+            includeCampaignSecrets: includeCampaignSecrets as boolean,
           },
           user,
           role,

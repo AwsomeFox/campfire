@@ -2,11 +2,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { and, count, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
   CAMPAIGN_PURGE_CONFIRM_TOKEN,
+  canonicalJson,
   CampaignClone,
   CampaignCloneMode,
   CampaignCreate,
@@ -22,10 +23,11 @@ import {
   normalizeOffsetIsoDateTime,
   CharacterAction,
   isRegisteredRuleSystemSlug,
+  isImporterOnlyRuleSystemSlug,
   HomebrewMechanicsProfile,
   MonsterHpDisplay,
 } from '@campfire/schema';
-import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
+import type { Campaign, CampaignClonePreview, CampaignStatus, CampaignStatusTransition, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { fromJsonText } from '../../common/json';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -78,10 +80,12 @@ import {
   auditLog,
   participantSupportPreferences,
   campaignPurgeTombstones,
+  campaignStatusTransitions,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { persistedFogConcealsPixels } from '../../common/fog';
+import { charactersWithDerivedActions } from '../inventory/derived-action-invalidation';
 import { AuditService } from '../audit/audit.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -436,6 +440,16 @@ const characterConditionWriteSetForImport = (row: Rec): { conditions: string; co
   return sheetConditionWriteSetFromInstances(readConditionInstances(instancesText, '[]'));
 };
 
+/** Parse JSON without throwing — a malformed stored value compares as null rather than crashing. */
+function safeJson(text: string | null): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function toDomain(row: typeof campaigns.$inferSelect): Campaign {
   return {
     id: row.id,
@@ -650,6 +664,22 @@ export class CampaignsService {
    * (checked separately by validateCustomMechanicsProfile, always in the same write) is the
    * one exception — its slug need not match an installed rule pack, since the profile IS
    * the rule system rather than imported content.
+   *
+   * Issue #2081: an installed pack that is importer-only — a real, registered install
+   * source with no combat adapter registered in `ADAPTERS` (Cepheus Engine's `cepheus-srd`
+   * is the current example) — is also rejected here, via the schema-owned
+   * `isImporterOnlyRuleSystemSlug` predicate (REST and MCP share this one definition; both
+   * write paths funnel through this same service method, so there is nothing to duplicate
+   * server-side). Selecting it as a campaign's live mechanics would otherwise silently
+   * inherit the unknown-slug 5e fallback instead of the 2D6 system the DM actually picked.
+   * The pack stays fully installable and its content stays fully usable as reference text
+   * (Compendium/search/AI rules lookups are untouched) — only becoming a campaign's
+   * `ruleSystem` is blocked. A campaign that already stores such a slug (from before this
+   * guard existed) is NOT touched by this check: every read path keeps resolving it through
+   * the pre-existing unknown-slug 5e fallback exactly as before, and every write that does
+   * not itself set `ruleSystem` (including one that only clears `customMechanicsProfile`,
+   * gated above) keeps working unconditionally — this only blocks an explicit write that
+   * (re)selects the adapterless slug going forward.
    */
   private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
     if (!ruleSystem) return;
@@ -658,6 +688,13 @@ export class CampaignsService {
     if (!pack) {
       throw new BadRequestException(
         `ruleSystem "${ruleSystem}" does not match any installed rule pack (or provide a matching customMechanicsProfile)`,
+      );
+    }
+    if (isImporterOnlyRuleSystemSlug(ruleSystem, true)) {
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" is an importer-only rule pack (reference text, no combat adapter) and cannot be ` +
+          'selected as a campaign\'s rule system. It stays installed and usable as reference text — the compendium, ' +
+          'search, and AI rules lookups are unaffected.',
       );
     }
   }
@@ -833,6 +870,72 @@ export class CampaignsService {
     return toDomain(row);
   }
 
+  /**
+   * Issue #846: list this campaign's lifecycle-status transitions, newest first. The
+   * newest row is the current provenance surfaced in the archived banner/settings;
+   * older rows are the history that survives reactivation. Member-readable (actor +
+   * status + time are shown to players; `reason` is DM-only and the caller redacts it
+   * for non-DM viewers — see the controller).
+   */
+  async listStatusTransitions(id: number): Promise<CampaignStatusTransition[]> {
+    const rows = await this.db
+      .select()
+      .from(campaignStatusTransitions)
+      .where(eq(campaignStatusTransitions.campaignId, id))
+      .orderBy(desc(campaignStatusTransitions.createdAt), desc(campaignStatusTransitions.id));
+    return rows.map((r) => ({
+      id: r.id,
+      campaignId: r.campaignId,
+      actorUserId: r.actorUserId,
+      actorName: r.actorName,
+      fromStatus: r.fromStatus as CampaignStatus,
+      toStatus: r.toStatus as CampaignStatus,
+      reason: r.reason,
+      createdAt: r.createdAt,
+    }));
+  }
+
+  /**
+   * Issue #846: append a durable status-transition provenance row + an audit entry.
+   * Append-only by design — reactivation and re-archiving accumulate history rather
+   * than overwrite it, so the newest row is always the current provenance. `reason`
+   * is DM operational text and never reaches players; the audit `detail` carries it
+   * for incident reviewers. Best-effort on the audit side (a failed audit write must
+   * not unwind a successful status change), mirroring the auditBestEffort pattern.
+   */
+  private async recordStatusTransition(
+    id: number,
+    fromStatus: string,
+    toStatus: string,
+    reason: string,
+    user: RequestUser,
+  ): Promise<void> {
+    const cleanReason = (reason ?? '').trim().slice(0, 500);
+    await this.db.insert(campaignStatusTransitions).values({
+      campaignId: id,
+      actorUserId: auditActor(user).slice(0, 120),
+      actorName: (user.name ?? '').slice(0, 200),
+      fromStatus,
+      toStatus,
+      reason: cleanReason,
+      createdAt: nowIso(),
+    });
+    await auditBestEffort(
+      this.audit,
+      this.logger,
+      {
+        actor: auditActor(user),
+        actorRole: auditActorRole(user),
+        action: 'campaign.status_change',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: JSON.stringify({ from: fromStatus, to: toStatus, ...(cleanReason ? { reason: cleanReason } : {}) }),
+      },
+      (e) => `audit campaign.status_change failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
   async update(
     id: number,
     input: CampaignUpdateInput,
@@ -844,20 +947,25 @@ export class CampaignsService {
     // customMechanicsProfile is pulled out too (issue #1502) — it needs cross-field validation
     // against the EFFECTIVE ruleSystem and JSON serialization before it can join campaignInput,
     // which is spread directly into `.set()` below.
-    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, ...campaignInput } = input;
+    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, statusChangeReason, ...campaignInput } = input;
     const shouldResetPins =
       mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
     // or paused <-> completed) — any other field requires un-archiving first.
     if (existing.status !== 'active') {
-      const extraKeys = Object.keys(input).filter((k) => k !== 'status' && input[k as keyof CampaignUpdateInput] !== undefined);
+      const extraKeys = Object.keys(input).filter(
+        (k) => k !== 'status' && k !== 'statusChangeReason' && input[k as keyof CampaignUpdateInput] !== undefined,
+      );
       if (extraKeys.length > 0) {
         throw new ForbiddenException(
           `Campaign is ${existing.status} (read-only) — only 'status' can be changed; set it back to 'active' first (rejected: ${extraKeys.join(', ')})`,
         );
       }
     }
+    // Issue #846: a genuine status change (active<->paused<->completed) records durable
+    // provenance via recordStatusTransition in each status-flipping return path below.
+    const statusChanging = input.status !== undefined && existing.status !== input.status;
     // Issue #1502: resolve the EFFECTIVE ruleSystem this write applies against — the incoming
     // value, or the campaign's existing one when this request doesn't touch ruleSystem — so a
     // customMechanicsProfile write is validated against the slug it will actually pair with.
@@ -994,6 +1102,9 @@ export class CampaignsService {
         entityId: id,
         campaignId: id,
       });
+      if (statusChanging) {
+        await this.recordStatusTransition(id, existing.status, 'active', statusChangeReason ?? '', user);
+      }
       return toDomain(updatedRow);
     }
 
@@ -1086,6 +1197,9 @@ export class CampaignsService {
         campaignId: id,
         detail: JSON.stringify({ revoked }),
       });
+      if (statusChanging) {
+        await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
+      }
       return toDomain(row);
     }
 
@@ -1095,8 +1209,25 @@ export class CampaignsService {
     // pin in the same transaction, so an unrelated image never inherits old coordinates.
     let updatedRow: typeof campaigns.$inferSelect | undefined;
     let pinsCleared = 0;
+    /**
+     * The campaign's mechanics as they stood INSIDE the transaction that overwrote them
+     * (issue #2097 review). Sampled there rather than from the pre-read domain object for two
+     * reasons: two overlapping PATCHes would otherwise compare against state neither of them
+     * wrote, and the domain object has been through Zod, so a defaulted field makes an
+     * identical profile look different from its own stored JSON.
+     */
+    let mechanicsBefore: { ruleSystem: string; profile: string | null } | undefined;
+    const sampleMechanics = (tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0]) => {
+      const row = tx
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+        .from(campaigns)
+        .where(eq(campaigns.id, id))
+        .get();
+      mechanicsBefore = { ruleSystem: row?.ruleSystem ?? '', profile: row?.customMechanicsProfile ?? null };
+    };
     if (shouldResetPins) {
       const resetResult = this.db.transaction((tx) => {
+        sampleMechanics(tx);
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
             .set({ hidden: false, updatedAt: ts })
@@ -1150,11 +1281,41 @@ export class CampaignsService {
           );
       }
 
-      [updatedRow] = await this.db
-        .update(campaigns)
-        .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
-        .where(eq(campaigns.id, id))
-        .returning();
+      const written = this.db.transaction((tx) => {
+        sampleMechanics(tx);
+        const row = tx
+          .update(campaigns)
+          .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .returning()
+          .get();
+        return { row };
+      });
+      updatedRow = written.row;
+    }
+
+    // Issue #2097 review (chatgpt-codex-connector P2): a derived equipped action is computed
+    // on read from the campaign's CURRENT adapter, so switching the rule system or the
+    // homebrew profile changes every one of them the instant this commits — no rows to clear,
+    // but the change still has to be announced. `RunSessionPage` refreshes its merged-action
+    // and turn caches only on `character.updated`; without this an open encounter card keeps
+    // offering the previous system's attack and resolving it fails the expected-spec check.
+    //
+    // Compared by EFFECTIVE VALUE (chatgpt-codex-connector P2, from an earlier round on the
+    // clearing version of this): a full-object REST or MCP client resends
+    // `customMechanicsProfile` unchanged on every update, and treating that as a change would
+    // announce an invalidation on every no-op PATCH. Canonical (key-sorted) form is what makes
+    // "unchanged" mean unchanged — the incoming object's key order is the client's, the stored
+    // one's is whatever was serialized before.
+    const mechanicsChanged =
+      updatedRow !== undefined &&
+      mechanicsBefore !== undefined &&
+      (updatedRow.ruleSystem !== mechanicsBefore.ruleSystem ||
+        canonicalJson(safeJson(updatedRow.customMechanicsProfile)) !== canonicalJson(safeJson(mechanicsBefore.profile)));
+    if (mechanicsChanged) {
+      for (const characterId of charactersWithDerivedActions(this.db, id)) {
+        this.events.emit({ type: 'character.updated', campaignId: id, characterId, userId: user.id });
+      }
     }
 
     await this.audit.log({
@@ -1166,6 +1327,12 @@ export class CampaignsService {
       campaignId: id,
       detail: shouldResetPins ? JSON.stringify({ mapAlignment: 'reset', pinsCleared }) : undefined,
     });
+    // Issue #846: record durable status-transition provenance for any genuine change
+    // reaching this path (paused<->completed, and the plain archive path without
+    // ?revokeInvites). Reactivating and archive+revoke recorded theirs above.
+    if (statusChanging) {
+      await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
+    }
     // Archive (active → paused/completed) suspends public invites. Restore/
     // unarchive never flips the flag back — deliberate reactivation required (#857).
     if (archiving) {
@@ -2229,6 +2396,7 @@ export class CampaignsService {
           faction: factionMap,
           note: noteMap,
           timeline_event: timelineEventMap,
+          story_arc: arcMap,
           story_beat: beatMap,
           comment: commentMap,
         };
@@ -2486,7 +2654,12 @@ export class CampaignsService {
       customMechanicsProfile = JSON.stringify(profileParsed.data);
     } else if (ruleSystemSrc) {
       const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystemSrc)).limit(1);
-      if (pack) ruleSystem = ruleSystemSrc;
+      // Issue #2081: an installed-but-importer-only pack (no ADAPTERS entry — see
+      // isImporterOnlyRuleSystemSlug) is treated exactly like a dangling slug on this path —
+      // dropped to '' rather than selected — matching this function's existing degrade-not-fail
+      // philosophy for every other unusable ruleSystem case here (missing pack, invalid
+      // narrationLanguage/aiExternalContentPolicy). The rest of the export still imports.
+      if (pack && !isImporterOnlyRuleSystemSlug(ruleSystemSrc, true)) ruleSystem = ruleSystemSrc;
     }
     const narrationLanguageParsed = NarrationLanguage.safeParse(campaignSrc.narrationLanguage);
     const narrationLanguage = narrationLanguageParsed.success ? narrationLanguageParsed.data : 'en';
@@ -3045,6 +3218,9 @@ export class CampaignsService {
             compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
             equipped: grantEquip,
             equipSlot: grantEquip ? trimmedSlot : null,
+            // Only the HUMAN-authored action is imported; a derived one is recomputed on
+            // read in the importing campaign, under ITS rule system and ITS characters'
+            // numbers (issue #2097), so there is nothing to carry across an install.
             equippedAction: importedActionParse?.success ? JSON.stringify(importedActionParse.data) : null,
             createdAt: ts,
             updatedAt: ts,
@@ -3336,6 +3512,27 @@ export class CampaignsService {
         insertImportedComment(c, commentMap.get(parentSrc) ?? null);
       }
 
+      // Arcs must exist before prose revisions are imported so story_arc revision
+      // entity ids can be remapped to this campaign instead of being dropped.
+      const arcMap = new Map<number, number>();
+      for (const arc of storyArcRows) {
+        const srcId = intOrNull(arc.id);
+        const [row] = tx
+          .insert(storyArcs)
+          .values({
+            campaignId: cid,
+            title: str(arc.title, 'Untitled Arc'),
+            summary: str(arc.summary),
+            status: str(arc.status, 'planned'),
+            sortOrder: intOr(arc.sortOrder, 0),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        if (srcId != null) arcMap.set(srcId, row.id);
+      }
+
       // Issue #813: prose revision versions (author + replacer provenance). Entity ids and
       // restoredFromRevisionId are remapped; dangling entity links are dropped. Author
       // user ids are install-local provenance strings and travel as-is (like comment names).
@@ -3346,6 +3543,7 @@ export class CampaignsService {
         location: locMap,
         faction: factionMap,
         note: noteMap,
+        story_arc: arcMap,
       };
       const revisionSourceKinds = new Set(['human', 'ai', 'tool']);
       const revisionSource = (value: unknown): 'human' | 'ai' | 'tool' =>
@@ -3403,27 +3601,10 @@ export class CampaignsService {
         tx.update(entityRevisions).set({ restoredFromRevisionId: remapped }).where(eq(entityRevisions.id, newId)).run();
       }
 
-      // Storylines (issue #27/#266): the arc→beat→branch graph. Arcs first (arcMap),
-      // then ALL beats (beatMap, arcId remapped), then branches — a branch's toBeatId
+      // Storylines (issue #27/#266): finish the arc→beat→branch graph. Arcs were
+      // inserted above so their revisions could be remapped. Insert ALL beats next
+      // (beatMap, arcId remapped), then branches — a branch's toBeatId
       // may point at a beat that appears later, so branches run after every beat exists.
-      const arcMap = new Map<number, number>();
-      for (const arc of storyArcRows) {
-        const srcId = intOrNull(arc.id);
-        const [row] = tx
-          .insert(storyArcs)
-          .values({
-            campaignId: cid,
-            title: str(arc.title, 'Untitled Arc'),
-            summary: str(arc.summary),
-            status: str(arc.status, 'planned'),
-            sortOrder: intOr(arc.sortOrder, 0),
-            createdAt: ts,
-            updatedAt: ts,
-          })
-          .returning()
-          .all();
-        if (srcId != null) arcMap.set(srcId, row.id);
-      }
       const beatMap = new Map<number, number>();
       const pendingBranches: Rec[] = [];
       for (const arc of storyArcRows) {
@@ -3702,6 +3883,39 @@ export class CampaignsService {
     // transaction, so nothing told the in-memory proactive watcher it exists. An archive
     // carrying `proactiveSettings.enabled: true` would otherwise import as ON-but-inert.
     await this.aiDm.syncProactiveWatcher(newId);
+
+    // Issue #846: re-insert lifecycle-status provenance. Best-effort and per-row defensive
+    // (provenance is non-critical): a malformed entry is skipped, never failing the import.
+    // Imported campaigns start 'active', but their transition HISTORY is preserved so the
+    // archived banner/settings can still show who paused/completed it and when.
+    const importedTransitions = Array.isArray(input.statusTransitions) ? input.statusTransitions : [];
+    for (const entry of importedTransitions) {
+      const t = (entry ?? {}) as Record<string, unknown>;
+      const fromStatus = str(t.fromStatus);
+      const toStatus = str(t.toStatus);
+      // Defensive (#846 review): an export is a loose document — only accept rows whose
+      // from/to are real campaign statuses and whose timestamp parses as ISO, so a malformed
+      // or hand-edited export can't plant invalid statuses/non-ISO times that break ordering
+      // and UI formatting. Skipped rows carry no provenance and never fail the import.
+      const VALID_STATUSES = new Set(['active', 'paused', 'completed']);
+      if (!VALID_STATUSES.has(fromStatus) || !VALID_STATUSES.has(toStatus)) continue;
+      const rawCreated = str(t.createdAt);
+      const parsedCreatedAt = rawCreated ? Date.parse(rawCreated) : NaN;
+      if (Number.isNaN(parsedCreatedAt)) continue;
+      try {
+        await this.db.insert(campaignStatusTransitions).values({
+          campaignId: newId,
+          actorUserId: str(t.actorUserId).slice(0, 120) || auditActor(user),
+          actorName: str(t.actorName).slice(0, 200) || (user.name ?? ''),
+          fromStatus,
+          toStatus,
+          reason: str(t.reason).slice(0, 500),
+          createdAt: new Date(parsedCreatedAt).toISOString(),
+        });
+      } catch {
+        // skip a single bad provenance row; never fail the import over it
+      }
+    }
 
     const campaign = await this.getOrThrow(newId);
     return {

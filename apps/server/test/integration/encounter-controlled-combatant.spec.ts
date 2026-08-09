@@ -251,6 +251,7 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
           ac: 13,
           notes: 'DM-only construct notes',
           abilityScores: {},
+          hp: null,
           resources: { charges: { max: 3, used: 0, name: 'Charges' } },
           spellSlots: {},
           actions: [],
@@ -292,6 +293,47 @@ describe('Encounter controlled combatant (controllerUserId)', () => {
         'player',
       ),
     ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('withholds controlled monster actions from the turn workspace until the statblock is revealed', async () => {
+    const combatant = await encountersService.addCombatant(
+      encounterId,
+      {
+        kind: 'monster',
+        name: 'Secret Companion',
+        hpMax: 18,
+        controllerUserId: player1UserId,
+        statblock: {
+          ac: 13,
+          notes: '',
+          abilityScores: {},
+          hp: null,
+          resources: {},
+          spellSlots: {},
+          actions: [{ name: 'Secret Claw', kind: 'action', toHit: '+5', damage: '1d8+3', notes: '', targetAc: '' }],
+          traits: [],
+        },
+      },
+      dmActor,
+      'dm',
+    );
+    await encountersService.updateCombatant(encounterId, combatant.id, { initiative: 20 }, dmActor, 'dm');
+    await encountersService.start(encounterId, dmActor, 'dm');
+
+    const hidden = await encountersService.getTurnWorkspace(encounterId, player1Actor, 'player');
+    expect(hidden.isYourTurn).toBe(true);
+    expect(hidden.suggestedActions).toEqual([]);
+
+    await encountersService.updateCombatant(
+      encounterId,
+      combatant.id,
+      { statblockRevealed: true },
+      dmActor,
+      'dm',
+    );
+    const revealed = await encountersService.getTurnWorkspace(encounterId, player1Actor, 'player');
+    expect(revealed.suggestedActions).toHaveLength(1);
+    expect(revealed.suggestedActions[0].name).toBe('Secret Claw');
   });
 
   it('allows controller player to roll initiative for controlled combatant', async () => {

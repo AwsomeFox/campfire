@@ -94,10 +94,29 @@
       "slotHelp": "أين يُرتدى أو يُستخدم — أي تسمية تصلح.",
       "slotRequired": "الموضع مطلوب لتجهيز العنصر.",
       "grantsAction": "يمنح إجراء قتالي: {{name}}",
+      "equipToUse": "جهّز {{name}} لاستخدام هذا الإجراء.",
       "conflictTitle": "الموضع مشغول",
       "conflictBody": "\"{{incumbent}}\" مُجهَّز بالفعل في \"{{slot}}\" على هذه الشخصية.",
       "swapButton": "استبدال {{incumbent}}",
       "swapping": "جارٍ الاستبدال…",
+      "derivedBadge": "مُشتق تلقائيًا",
+      "derivedHelp": "مبني من مدخل هذا العنصر في الموسوعة ومن شخصيتك، ويظل متوافقًا معهما. عدّله فيبقى تعديلك ثابتًا بدلًا من ذلك.",
+      "editAction": "تعديل الإجراء",
+      "editActionAria": "تعديل الإجراء القتالي الذي يمنحه {{name}}",
+      "addAction": "إضافة إجراء قتالي",
+      "addActionAria": "إضافة إجراء قتالي لـ {{name}}",
+      "actionName": "الاسم",
+      "actionKind": "النوع",
+      "actionKindPlaceholder": "التحام، بعيد المدى، تعويذة…",
+      "actionToHit": "الإصابة",
+      "actionToHitPlaceholder": "+6",
+      "actionDamage": "الضرر",
+      "actionDamagePlaceholder": "1d8+3 تقطيع",
+      "actionNotes": "ملاحظات",
+      "actionNameRequired": "الإجراء يحتاج إلى اسم.",
+      "removeAction": "إعادة التعيين إلى الاشتقاق التلقائي",
+      "saveAction": "حفظ الإجراء",
+      "savingAction": "جارٍ الحفظ…",
       "slotSuggestions": {
         "mainHand": "اليد الرئيسية",
         "offHand": "اليد الثانوية",
@@ -113,6 +132,10 @@
         "ring2": "الخاتم 2",
         "wondrous": "غرض عجائبي"
       }
+    },
+    "compendium": {
+      "statsLabel": "الإحصائيات",
+      "sourceDetails": "تفاصيل المصدر"
     }
   }
 }

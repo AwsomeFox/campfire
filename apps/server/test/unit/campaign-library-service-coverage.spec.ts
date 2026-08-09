@@ -66,6 +66,7 @@ describe('CampaignLibraryService unit coverage tests', () => {
         name: 'Dire Wolf',
         statblock: {
           ac: 14,
+          hp: 45,
           abilityScores: { str: 16, dex: 14, con: 14, int: 3, wis: 12, cha: 7 },
           notes: '', resources: {}, spellSlots: {},
           actions: [],

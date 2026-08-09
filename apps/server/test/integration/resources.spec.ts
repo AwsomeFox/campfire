@@ -1845,6 +1845,13 @@ describe('inline spell slots & character resources (issue #422)', () => {
     it('a race-marker thrown by recordEncounterOp makes adjustCombatantResource resolve with the WINNER\'s replayed response, not reject', async () => {
       const { user, enc, comb } = await seedStatblockEncounter();
 
+      // Simulate the winner having already committed their write (used: 1) to DB
+      const winnerStatblock = { ...JSON.parse(comb.statblockJson!), resources: { kiPoints: { max: 3, used: 1 } }, spellSlots: {} };
+      db.update(combatants)
+        .set({ statblockJson: JSON.stringify(winnerStatblock) })
+        .where(eq(combatants.id, comb.id))
+        .run();
+
       const claim = {
         actorId: String(user.id),
         operation: 'combatant.resource_adjust' as const,
@@ -1853,7 +1860,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
         campaignId: enc.campaignId,
         fingerprint: 'irrelevant-for-this-stub',
       };
-      const winnerResponse = { id: comb.id, statblock: { resources: { kiPoints: { max: 3, used: 999 } }, spellSlots: {} } };
+      const winnerResponse = { id: comb.id, statblock: winnerStatblock };
 
       const recordSpy = jest
         .spyOn(encounterIdempotency, 'recordEncounterOp')
@@ -1862,7 +1869,7 @@ describe('inline spell slots & character resources (issue #422)', () => {
         });
       const raceSpy = jest
         .spyOn(encounterIdempotency, 'readEncounterOpAfterRace')
-        .mockResolvedValue({ response: winnerResponse, responseRole: 'dm' });
+        .mockResolvedValue({ response: winnerResponse as any, responseRole: 'dm' });
 
       try {
         const result = await encountersService.adjustCombatantResource(
@@ -1872,18 +1879,259 @@ describe('inline spell slots & character resources (issue #422)', () => {
           user,
           'dm',
         );
-        // The WINNER's stubbed body, not the loser's own would-be effect (used: 1) and not
-        // a rejection.
-        expect(result).toEqual(winnerResponse);
+        // The WINNER's committed state (used: 1), not the loser's would-be second increment (used: 2) and not a rejection.
+        expect(result.statblock.resources.kiPoints.used).toBe(1);
         expect(raceSpy).toHaveBeenCalledTimes(1);
 
         // The loser's own write must have rolled back with the transaction — nothing was
         // actually persisted from THIS call.
         const [row] = db.select().from(combatants).where(eq(combatants.id, comb.id)).all();
-        expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(0);
+        expect(JSON.parse(row.statblockJson!).resources.kiPoints.used).toBe(1);
       } finally {
         recordSpy.mockRestore();
         raceSpy.mockRestore();
+      }
+    });
+  });
+
+  // Issue #1998: the two branches of `adjustCombatantResource` — character-linked (resource
+  // lives on the `characters` row) and statblock (resource lives on the combatant's
+  // `statblockJson`) — implement the identical contract for four invariants: entry existence,
+  // integer `used`/`max`, delta bounds, and the encounter-scoping check on the in-transaction
+  // combatant re-read. Three separate PR #1983 review rounds each found a guard present on ONE
+  // of the two branches and missing on its twin (issue #1909 review findings 11, 12, 13) — and
+  // the `describe('issue #1909: statblock combatants')` block above, sitting next to scattered
+  // top-level character tests, is part of why: statblock coverage reads as complete in review
+  // while the character twin gets whatever it happened to have.
+  //
+  // This suite runs the SAME test body against BOTH branches via `describe.each` instead. A
+  // guard added to one branch's call into `assertAdjustableResourceEntry`/
+  // `assertFreshCombatantInEncounter` (`encounters.service.ts`) without updating its twin's
+  // call fails exactly one iteration of every test below — there is no longer a "the other
+  // branch just doesn't have a test for this" gap for a guard to hide behind.
+  describe.each(['character', 'statblock'] as const)('issue #1998: %s branch — shared adjustCombatantResource invariants', (kind) => {
+    // Seeds one combatant of the given kind with the given starting resources/spell slots.
+    // `readEntry` re-reads the entry from whichever row actually owns it for THIS branch (the
+    // linked character's row for 'character', the combatant's own `statblockJson` for
+    // 'statblock') so every test below can assert "nothing was written" without branching on
+    // `kind` itself.
+    async function seedPaired(opts: { resources?: Record<string, unknown>; spellSlots?: Record<string, unknown> } = {}) {
+      const user = { id: '1', username: 'dm_user', displayName: 'DM', serverRole: 'user' as const };
+      const ts = new Date().toISOString();
+      const [camp] = db.insert(campaigns).values({ name: `Paired ${kind} Test`, ruleSystem: 'dnd5e', createdAt: ts, updatedAt: ts }).returning().all();
+      const [enc] = db.insert(encounters).values({ campaignId: camp.id, name: `Paired ${kind} Fight`, status: 'running', createdAt: ts, updatedAt: ts }).returning().all();
+
+      let comb: typeof combatants.$inferSelect;
+      let characterId: number | null = null;
+      if (kind === 'character') {
+        const [c] = db
+          .insert(characters)
+          .values({
+            campaignId: camp.id,
+            name: 'Paired PC',
+            ownerUserId: '1',
+            resources: JSON.stringify(opts.resources ?? {}),
+            spellSlots: JSON.stringify(opts.spellSlots ?? {}),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        characterId = c.id;
+        [comb] = db
+          .insert(combatants)
+          .values({ encounterId: enc.id, kind: 'character', characterId: c.id, name: 'Paired PC', sortOrder: 1 })
+          .returning()
+          .all();
+      } else {
+        [comb] = db
+          .insert(combatants)
+          .values({
+            encounterId: enc.id,
+            kind: 'monster',
+            characterId: null,
+            name: 'Paired Monster',
+            sortOrder: 1,
+            statblockJson: JSON.stringify({ resources: opts.resources ?? {}, spellSlots: opts.spellSlots ?? {} }),
+          })
+          .returning()
+          .all();
+      }
+
+      const readEntry = (type: 'resource' | 'spellSlot', key: string): { used?: unknown; max?: unknown } | undefined => {
+        const store =
+          kind === 'character'
+            ? JSON.parse(
+                (db.select().from(characters).where(eq(characters.id, characterId!)).all()[0] as any)[
+                  type === 'resource' ? 'resources' : 'spellSlots'
+                ],
+              )
+            : JSON.parse((db.select().from(combatants).where(eq(combatants.id, comb.id)).all()[0] as any).statblockJson)[
+                type === 'resource' ? 'resources' : 'spellSlots'
+              ];
+        return store[key];
+      };
+
+      return { user, camp, enc, comb, characterId, readEntry };
+    }
+
+    it('an unknown resource key 400s naming it, and nothing is written', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ resources: { known: { max: 3, used: 0 } } });
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'nope', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(readEntry('resource', 'nope')).toBeUndefined();
+      expect(readEntry('resource', 'known')!.used).toBe(0);
+    });
+
+    it('an out-of-range spell level 400s naming it, and nothing is written', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ spellSlots: { '1': { max: 2, used: 0 } } });
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 3, delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(readEntry('spellSlot', '1')!.used).toBe(0);
+    });
+
+    it('a resource entry missing `used` 400s naming it, instead of silently persisting used: NaN', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ resources: { flaky: { max: 3 } } });
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'flaky', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(readEntry('resource', 'flaky')!.used).toBeUndefined();
+    });
+
+    it("a resource entry with a non-numeric `max` 400s instead of silently disabling the upper bound", async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ resources: { flaky: { max: 'three', used: 0 } } });
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'flaky', delta: 1000 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(readEntry('resource', 'flaky')!.used).toBe(0);
+    });
+
+    it("a spell-slot entry with a non-numeric `max` 400s, since a string max sails past the positive-max existence check", async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ spellSlots: { '2': { max: 'three', used: 0 } } });
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 2, delta: 1000 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(readEntry('spellSlot', '2')!.used).toBe(0);
+    });
+
+    it('spending past max 400s and nothing is written', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ resources: { pool: { max: 2, used: 2 } } });
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'pool', delta: 1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(readEntry('resource', 'pool')!.used).toBe(2);
+    });
+
+    it('restoring below 0 400s and nothing is written', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ resources: { pool: { max: 2, used: 0 } } });
+
+      await expect(
+        encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'pool', delta: -1 }, user, 'dm'),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(readEntry('resource', 'pool')!.used).toBe(0);
+    });
+
+    it('a delta within bounds persists the new used value on the resource', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ resources: { pool: { max: 3, used: 0 } } });
+
+      await encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'pool', delta: 2 }, user, 'dm');
+
+      expect(readEntry('resource', 'pool')!.used).toBe(2);
+    });
+
+    it('a delta within bounds persists the new used value on a spell slot', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ spellSlots: { '1': { max: 3, used: 0 } } });
+
+      await encountersService.adjustCombatantResource(enc.id, comb.id, { spellLevel: 1, delta: 2 }, user, 'dm');
+
+      expect(readEntry('spellSlot', '1')!.used).toBe(2);
+    });
+
+    // Issue #1909 review, Devin's twelfth finding: the statblock branch's in-transaction
+    // re-read used to check only that the combatant row still existed, not that it still
+    // belonged to THIS encounter — a combatant moved to another encounter inside the
+    // read/transaction window kept its row and passed every remaining guard, writing against
+    // an encounter the request was never scoped to. The character branch already had this
+    // check; only the statblock branch was missing it, and (before this issue) there was no
+    // character-branch test of this exact scenario to make that asymmetry visible — the
+    // statblock-only test that existed for it read as "this is covered" in review.
+    it('a combatant moved to another encounter mid-request 404s instead of being written unscoped', async () => {
+      const { user, camp, enc, comb, readEntry } = await seedPaired({ resources: { pool: { max: 3, used: 0 } } });
+      const ts = new Date().toISOString();
+      const [otherEnc] = db
+        .insert(encounters)
+        .values({ campaignId: camp.id, name: 'Other Fight', status: 'running', createdAt: ts, updatedAt: ts })
+        .returning()
+        .all();
+
+      const original = encountersService.getCombatantRowOrThrow.bind(encountersService);
+      const spy = jest.spyOn(encountersService, 'getCombatantRowOrThrow').mockImplementation(async (...args: unknown[]) => {
+        const result = await original(...(args as [number, number]));
+        db.update(combatants).set({ encounterId: otherEnc.id }).where(eq(combatants.id, comb.id)).run();
+        return result;
+      });
+
+      try {
+        await expect(
+          encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'pool', delta: 1 }, user, 'dm'),
+        ).rejects.toThrow(NotFoundException);
+
+        expect(readEntry('resource', 'pool')!.used).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    // Counterpart to the moved-encounter test above: the row itself is gone, not merely
+    // rescoped. Both are the same `assertFreshCombatantInEncounter` guard's two ways of
+    // failing (`!fresh` vs. `fresh.encounterId !== encounterId`) — pairing both here means a
+    // future guard that only checks ONE of the two conditions on one branch still fails a
+    // test on that branch's iteration.
+    it('a combatant removed between the outer read and the transaction 404s instead of writing to an orphaned row', async () => {
+      const { user, enc, comb, readEntry } = await seedPaired({ resources: { pool: { max: 3, used: 0 } } });
+
+      const original = encountersService.getCombatantRowOrThrow.bind(encountersService);
+      const spy = jest.spyOn(encountersService, 'getCombatantRowOrThrow').mockImplementation(async (...args: unknown[]) => {
+        const result = await original(...(args as [number, number]));
+        db.delete(combatants).where(eq(combatants.id, comb.id)).run();
+        return result;
+      });
+
+      try {
+        await expect(
+          encountersService.adjustCombatantResource(enc.id, comb.id, { key: 'pool', delta: 1 }, user, 'dm'),
+        ).rejects.toThrow(NotFoundException);
+
+        const events = db.select().from(encounterEvents).where(eq(encounterEvents.encounterId, enc.id)).all();
+        expect(events.some((e: any) => e.type === 'resource_changed')).toBe(false);
+
+        // The absent event is NOT sufficient on its own (Copilot review on #2087). The
+        // historical bug on the character branch is "the write still lands on the linked
+        // character sheet even though the combatant row is gone" — a regression that updates
+        // the sheet and merely skips the event would satisfy the assertion above. Only the
+        // character branch can be checked here: the statblock lives ON the combatant row that
+        // this test deletes, so for that branch the row's absence IS the state, and
+        // a re-read would hit a row that no longer exists.
+        if (kind === 'character') {
+          expect(readEntry('resource', 'pool')?.used).toBe(0);
+        }
+      } finally {
+        spy.mockRestore();
       }
     });
   });

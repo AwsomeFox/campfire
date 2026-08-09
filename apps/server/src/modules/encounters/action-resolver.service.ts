@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import {
+  deriveEquippedItemAction,
   ActionApplyPolicy,
   ActionApplyRequest,
   ActionResolution,
@@ -31,6 +32,7 @@ import {
   CombatantTurnState,
   ConditionInstance,
   criticalDamageRuleForAdapter,
+  hasCriticalHitsForAdapter,
   expandStatblockActions,
   hpModelForAdapter,
   isResolvableSpec,
@@ -391,14 +393,32 @@ export class ActionResolverService {
    * equipping item's name (issue #1901) so callers can label it "equipped: <item>"
    * without a second inventory lookup.
    */
-  private equippedItemActionRows(characterId: number, campaignId: number): Array<{ action: CharacterAction; itemName: string }> {
+  /**
+   * The actions this character's equipped items grant (issues #1326, #1901, #2097).
+   *
+   * An item's stored `equippedAction` is only ever a HUMAN-authored one. When there is none,
+   * the action is DERIVED here, at read time, from the item's accepted compendium snapshot and
+   * this wielder — the same computation `InventoryService` runs when it serves the item, so
+   * the encounter and the inventory sheet cannot disagree about what a weapon does. Nothing is
+   * cached: the derivation's inputs (snapshot, stats, level, rule system, item name) belong to
+   * four different modules, and computing on the way out is what makes a stale action
+   * unrepresentable rather than merely unlikely.
+   */
+  private equippedItemActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'stats' | 'level'>,
+  ): Array<{ action: CharacterAction; itemName: string }> {
     const rows = this.db
-      .select({ name: inventoryItems.name, equippedAction: inventoryItems.equippedAction })
+      .select({
+        name: inventoryItems.name,
+        equippedAction: inventoryItems.equippedAction,
+        compendiumSnapshot: inventoryItems.compendiumSnapshot,
+        ruleEntryId: inventoryItems.ruleEntryId,
+      })
       .from(inventoryItems)
       .where(
         and(
-          eq(inventoryItems.characterId, characterId),
-          eq(inventoryItems.campaignId, campaignId),
+          eq(inventoryItems.characterId, character.id),
+          eq(inventoryItems.campaignId, character.campaignId),
           eq(inventoryItems.equipped, true),
           isNull(inventoryItems.deletedAt),
         ),
@@ -406,12 +426,40 @@ export class ActionResolverService {
       .orderBy(inventoryItems.id)
       .all();
     const actions: Array<{ action: CharacterAction; itemName: string }> = [];
+    let adapter: RuleSystemAdapter | null = null;
+    const wielder = { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level };
     for (const row of rows) {
-      if (!row.equippedAction) continue;
-      const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
-      if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
+      if (row.equippedAction) {
+        const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
+        if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
+        continue;
+      }
+      const data = this.equippedItemCompendiumData(row.compendiumSnapshot, row.ruleEntryId);
+      if (!data) continue;
+      // Resolved lazily and reused: an inventory of non-weapons should not cost a campaign
+      // lookup, and one with ten weapons should not cost ten.
+      adapter ??= this.adapterForCampaign(character.campaignId);
+      const derived = deriveEquippedItemAction({ itemName: row.name, data, character: wielder, adapter });
+      if (derived) actions.push({ action: derived, itemName: row.name });
     }
     return actions;
+  }
+
+  /**
+   * An equipped item's compendium payload: its ACCEPTED snapshot first, falling back to the
+   * live rule entry only for an item that never took one. The snapshot is authoritative for
+   * the same reason it exists — a compendium edit nobody has accepted must not silently change
+   * what a character's weapon does mid-encounter.
+   */
+  private equippedItemCompendiumData(snapshotJson: string | null, ruleEntryId: number | null): Record<string, unknown> | null {
+    const snapshot = fromJsonText<{ dataJson?: string } | null>(snapshotJson, null);
+    const dataJson =
+      snapshot?.dataJson ??
+      (ruleEntryId != null
+        ? (this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, ruleEntryId)).get()?.dataJson ?? null)
+        : null);
+    if (!dataJson) return null;
+    return fromJsonText<Record<string, unknown> | null>(dataJson, null);
   }
 
   /**
@@ -424,10 +472,10 @@ export class ActionResolverService {
    * of the merge for a caller that wants to label the source (issue #1901).
    */
   characterUsableActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level'>,
   ): Array<{ row: Record<string, unknown>; itemName: string | null }> {
     const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
-    const equipped = this.equippedItemActionRows(character.id, character.campaignId);
+    const equipped = this.equippedItemActionRows(character);
     // Issue #1901 review (chatgpt-codex-connector P2): `character.actions` is itself capped
     // at 100 entries (packages/schema `actions: z.array(CharacterAction).max(100)`), and
     // `ActionResolveRequest.actionIndex` only accepts 0-99 — so a character already at the
@@ -443,7 +491,7 @@ export class ActionResolverService {
   }
 
   private characterActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level'>,
   ): Array<Record<string, unknown>> {
     return this.characterUsableActionRows(character).map((x) => x.row);
   }
@@ -695,9 +743,9 @@ export class ActionResolverService {
    * hand-authored sheet actions PLUS any equipped inventory item's action (merged, in
    * that order — equipping a longsword adds an attack without touching the manually
    * authored list); monsters/NPCs use inline statblocks or expanded compendium actions.
-   * A player may list only their own character's or delegated combatant's actions;
-   * the DM may list any. Delegated access intentionally exposes the action contract
-   * needed to take a turn, but never the combatant's full statblock response.
+   * A player may list their own character's actions. A delegated controller may list
+   * monster/NPC actions only after the DM reveals that combatant's statblock; those
+   * actions contain the same to-hit, damage, notes, and structured specs as the source.
    */
   listUsableActions(encounterId: number, combatantId: number, user: RequestUser, role: Role): UsableAction[] {
     const encounter = this.encounterRowOrThrow(encounterId);
@@ -729,6 +777,7 @@ export class ActionResolverService {
         });
       });
     }
+    if (!isDm && !combatant.statblockRevealed) return [];
     return this.combatantActions(combatant, encounter.campaignId).map((a, index) => this.actionToUsable(a, index, combatant.actionUses));
   }
 
@@ -775,6 +824,9 @@ export class ActionResolverService {
         throw new ForbiddenException(
           'Only the DM may resolve a monster/NPC action unless you control it; a player may act only with their own character or a controlled combatant.',
         );
+      }
+      if (!this.linkedCharacter(actor) && !actor.statblockRevealed && req.spec === undefined) {
+        throw new ForbiddenException('The DM must reveal this combatant’s statblock before its listed actions can be resolved.');
       }
       this.assertPlayerActiveTurn(encounter, actor, role);
     }
@@ -925,7 +977,14 @@ export class ActionResolverService {
       const rollModeForAttack = rollMode === 'advantage' || rollMode === 'disadvantage' ? rollMode : undefined;
       const attackResult = resolveAttackForAdapter(adapter, { modifier, targetAc: ac, roll, rollMode: rollModeForAttack });
       const { total, naturalRoll: nat, outcome: resolvedOutcome } = attackResult;
-      outcome = rollMode === 'crit' ? 'crit' : resolvedOutcome;
+      // A forced `crit` is only honoured where the system HAS critical hits (#2115 review).
+      // The client names the mode, so without this an OSR or Open Legend caller could ask for
+      // one through REST or MCP and have the resolver mint an outcome the adapter's own
+      // `resolveAttack` can never return — then commit its doubled damage. Enforced here, in
+      // the shared resolver, so both surfaces are covered by one check rather than each UI
+      // remembering to hide the control.
+      const critRequestable = rollMode === 'crit' && hasCriticalHitsForAdapter(adapter);
+      outcome = critRequestable ? 'crit' : resolvedOutcome;
       // #1598: attack crit — see the save/check branch below for the #1600 counterpart.
       critical = outcome === 'crit';
       base.attackTotal = total;

@@ -1,7 +1,8 @@
-import { Controller, Param, ParseIntPipe, Sse, type MessageEvent } from '@nestjs/common';
+import { Controller, Param, ParseIntPipe, Req, Sse, type MessageEvent } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger';
-import { interval, merge, map, type Observable } from 'rxjs';
+import { fromEvent, interval, merge, map, type Observable } from 'rxjs';
 import { filter, takeUntil } from 'rxjs/operators';
+import type { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -11,8 +12,16 @@ import { projectCampaignEventForRole } from './campaign-event-projection';
 /**
  * Keepalive cadence. Long enough to be negligible traffic, short enough that
  * typical reverse-proxy idle timeouts (usually 60s+) never cut a quiet stream.
+ *
+ * Exported and mutable so the #2126 regression test can shrink the interval to
+ * exercise the heartbeat-write-after-close race without waiting 25 seconds.
  */
-const HEARTBEAT_MS = 25_000;
+export let HEARTBEAT_MS = 25_000;
+
+/** Test-only: shrink the SSE heartbeat interval so the disconnect race is exercisable. */
+export function setHeartbeatMsForTests(ms: number): void {
+  HEARTBEAT_MS = ms;
+}
 
 @ApiTags('events')
 @Controller('campaigns/:campaignId/events')
@@ -53,6 +62,7 @@ export class CampaignEventsController {
   async stream(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
+    @Req() req: Request,
   ): Promise<Observable<MessageEvent>> {
     const role = await this.access.requireMember(user, campaignId);
 
@@ -69,6 +79,23 @@ export class CampaignEventsController {
           || event.type === 'campaign.trashed',
       ),
     );
+
+    // Issue #2126: complete the stream the instant the HTTP client disconnects. Nest's
+    // @Sse() framework registers its own `request.on('close')` to unsubscribe and end
+    // the response, but there is a TOCTOU window between the underlying socket closing
+    // (TCP RST received, response.destroyed=true) and the close event firing in the
+    // next tick. During that window the heartbeat interval below can still emit a ping
+    // into the merged pipe, and the framework's concatMap writes it to the destroyed
+    // response — an unhandled 'error' event that silently kills the process (there is
+    // no process-level uncaughtException handler). Listening to BOTH the request's
+    // 'close' and 'aborted' events (and the underlying socket's 'close' if present)
+    // via takeUntil ensures the interval stops before that write can happen. This
+    // mirrors the res.once('close') guard already used by the backup/export streaming
+    // controllers and covers the earlier-aborted path that 'close' alone can miss.
+    const disconnectSignals: Observable<unknown>[] = [fromEvent(req, 'close'), fromEvent(req, 'aborted')];
+    const rawSocket = (req as Request & { socket?: NodeJS.EventEmitter }).socket;
+    if (rawSocket) disconnectSignals.push(fromEvent(rawSocket, 'close'));
+    const clientDisconnected = merge(...disconnectSignals);
 
     // Drop membership.revoked / campaign.trashed frames from the data path — they
     // are internal termination signals, not a "refetch this" tick. (The web client's
@@ -89,6 +116,6 @@ export class CampaignEventsController {
     return merge(
       dataStream,
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
-    ).pipe(takeUntil(closed));
+    ).pipe(takeUntil(merge(closed, clientDisconnected)));
   }
 }

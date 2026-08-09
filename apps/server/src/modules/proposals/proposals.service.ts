@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import type { z } from 'zod';
 import {
   QuestCreate,
@@ -15,8 +15,11 @@ import {
   GenerateMapParams,
   FactionCreate,
   FactionUpdate,
+  StoryArcCreate,
+  StoryArcUpdate,
   StoryBeatProposalCreate,
   StoryBeatUpdate,
+  AiGenerationProvenance,
   ProposalApprove,
   ProposalResolve,
   HomebrewRuleEntryInput,
@@ -36,13 +39,45 @@ import { CharactersService } from '../characters/characters.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
 import { FactionsService } from '../factions/factions.service';
-import { StorylinesService } from '../storylines/storylines.service';
+import {
+  StorylineRewriteContextChangedError,
+  StorylinesService,
+} from '../storylines/storylines.service';
 import { RulesService } from '../rules/rules.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
-import { assertProposalTargetFresh } from './proposal-snapshot';
+import { assertProposalTargetFresh, staleProposalTarget } from './proposal-snapshot';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
 type ProposalApproveInput = z.infer<typeof ProposalApprove>;
+type ProposalStorylinesService = Pick<
+  StorylinesService,
+  | 'createArc'
+  | 'updateArc'
+  | 'removeArc'
+  | 'getArcRowOrThrow'
+  | 'addBeat'
+  | 'updateBeat'
+  | 'removeBeat'
+  | 'getRewriteContext'
+>;
+
+function revisionUserForApprovedProposal(
+  proposal: Pick<Proposal, 'proposer' | 'proposerUserId' | 'proposerToken'>,
+  approver: RequestUser,
+  amended: boolean,
+): RequestUser {
+  if (amended || !proposal.proposerUserId?.startsWith('ai-dm:')) return approver;
+  return {
+    id: proposal.proposerUserId,
+    name: proposal.proposer || 'AI Dungeon Master',
+    serverRole: 'user',
+    proposalAttribution: {
+      proposer: proposal.proposer || 'AI Dungeon Master',
+      proposerUserId: proposal.proposerUserId,
+      proposerToken: proposal.proposerToken,
+    },
+  };
+}
 
 /** One entry in a batch approve/reject result — success carries the resolved proposal, failure the reason. */
 export type BatchResolveResult =
@@ -65,6 +100,7 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   session: SessionCreate.strict(),
   character: CharacterCreate.strict(),
   faction: FactionCreate.strict(),
+  story_arc: StoryArcCreate.strict(),
   story_beat: StoryBeatProposalCreate.strict(),
   // Co-DM (issue #313): an encounter/map proposal's payload is the (seeded) GENERATOR
   // request, not a persisted row — approve re-runs generate_encounter (#304) /
@@ -81,6 +117,7 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   session: SessionUpdate.strict(),
   character: CharacterUpdate.strict(),
   faction: FactionUpdate.strict(),
+  story_arc: StoryArcUpdate.strict(),
   story_beat: StoryBeatUpdate.strict(),
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
@@ -101,7 +138,7 @@ export class ProposalsService {
     private readonly encounters: EncountersService,
     private readonly maps: MapsService,
     private readonly factions: FactionsService,
-    private readonly storylines: StorylinesService,
+    @Inject(StorylinesService) private readonly storylines: ProposalStorylinesService,
     private readonly rules?: RulesService,
   ) {}
 
@@ -216,6 +253,31 @@ export class ProposalsService {
           update: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
           remove: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
         };
+      case 'story_arc':
+        return {
+          create: (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+            this.storylines.createArc(
+              campaignId,
+              payload as Parameters<StorylinesService['createArc']>[1],
+              user,
+              role,
+            ),
+          update: (
+            id: number,
+            payload: Record<string, unknown>,
+            user: RequestUser,
+            role: Role,
+            opts?: Parameters<StorylinesService['updateArc']>[4],
+          ) =>
+            this.storylines.updateArc(
+              id,
+              payload as Parameters<StorylinesService['updateArc']>[1],
+              user,
+              role,
+              opts,
+            ),
+          remove: (id: number, user: RequestUser, role: Role) => this.storylines.removeArc(id, user, role),
+        };
       case 'story_beat':
         return {
           create: async (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) => {
@@ -234,12 +296,19 @@ export class ProposalsService {
             }
             return this.storylines.addBeat(resolvedArcId, beatInput, user, role);
           },
-          update: (id: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+          update: (
+            id: number,
+            payload: Record<string, unknown>,
+            user: RequestUser,
+            role: Role,
+            opts?: Parameters<StorylinesService['updateBeat']>[4],
+          ) =>
             this.storylines.updateBeat(
               id,
               payload as Parameters<StorylinesService['updateBeat']>[1],
               user,
               role,
+              opts,
             ),
           remove: (id: number, user: RequestUser, role: Role) => this.storylines.removeBeat(id, user, role),
         };
@@ -293,6 +362,8 @@ export class ProposalsService {
       existing.snapshot == null
         ? null
         : fromJsonText<Record<string, unknown> | null>(existing.snapshot, null);
+    let expectedRewriteContextHash: string | null = null;
+    let currentSnapshotForConflict: Record<string, unknown> | null = null;
     if (action === 'update' || action === 'delete') {
       const currentSnapshot = await this.records.getCurrentAuthorizedSnapshot(
         existing.campaignId,
@@ -300,12 +371,30 @@ export class ProposalsService {
         existing.entityId!,
         role,
       );
+      currentSnapshotForConflict = currentSnapshot;
+      const provenance = AiGenerationProvenance.nullable()
+        .catch(null)
+        .parse(fromJsonText<unknown>(existing.generationProvenance, null));
+      const isStorylineRewrite =
+        action === 'update' &&
+        (existing.entityType === 'story_arc' || existing.entityType === 'story_beat');
+      expectedRewriteContextHash = isStorylineRewrite ? provenance?.sourceContextHash ?? null : null;
+      const currentContextHash =
+        expectedRewriteContextHash !== null && currentSnapshot !== null && isStorylineRewrite
+          ? (await this.storylines.getRewriteContext(
+              existing.campaignId,
+              existing.entityType === 'story_arc' ? 'arc' : 'beat',
+              existing.entityId!,
+            )).contextHash
+          : null;
       assertProposalTargetFresh({
         action,
         baseSnapshot,
         baseSnapshotHash: existing.baseSnapshotHash ?? null,
         currentSnapshot,
         proposed: action === 'delete' ? null : (validated ?? payload),
+        baseContextHash: expectedRewriteContextHash,
+        currentContextHash,
       });
     }
 
@@ -341,8 +430,24 @@ export class ProposalsService {
           }
         }
       } else {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await (service as any).update(existing.entityId, validated, user, role);
+        if (existing.entityType === 'story_arc' || existing.entityType === 'story_beat') {
+          // The freshness read above and the domain write are separate operations. Pass
+          // the proposal's original row token into Storylines' compare-and-set so an edit
+          // landing in that gap cannot be silently overwritten. For an unamended AI draft,
+          // revision history credits the AI while Storylines still audits `user`, the human
+          // approver who authorized the domain write.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (service as any).update(existing.entityId, validated, user, role, {
+            expectedUpdatedAt: existing.baseUpdatedAt ?? undefined,
+            ...(expectedRewriteContextHash === null
+              ? {}
+              : { expectedContextHash: expectedRewriteContextHash }),
+            revisionUser: revisionUserForApprovedProposal(existing, user, amended),
+          });
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (service as any).update(existing.entityId, validated, user, role);
+        }
       }
     } catch (err) {
       // The entity write failed — undo the claim so the proposal returns to pending
@@ -361,6 +466,13 @@ export class ProposalsService {
             detail: String(revertErr),
           })
           .catch(() => {});
+      }
+      if (err instanceof StorylineRewriteContextChangedError) {
+        throw staleProposalTarget({
+          base: baseSnapshot,
+          current: currentSnapshotForConflict,
+          proposed: action === 'delete' ? null : (validated ?? payload),
+        });
       }
       throw err;
     }

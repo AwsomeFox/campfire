@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { MONSTERS } from '../global-setup';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
+import { cockpitPanel, openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Combat tracker cross-role checks (issue #81):
@@ -41,7 +42,9 @@ test.describe('combat tracker — DM view', () => {
     await expect(page.getByText(/Round\s*1/).first()).toBeVisible();
 
     // Both monsters present with exact HP "current / max" (issue #81 HP math).
-    await expect(page.getByText(boss.name).first()).toBeVisible();
+    // The ended-encounter summary in the Turn panel lists the same names, so scope to
+              // the roster rather than taking whichever copy comes first in the DOM.
+    await expect(cockpitPanel(page, 'party').getByText(boss.name).first()).toBeVisible();
     await expect(page.getByText(`${boss.hpMax} / ${boss.hpMax}`).first()).toBeVisible();
     await expect(page.getByText(`${skirmisher.hpMax} / ${skirmisher.hpMax}`).first()).toBeVisible();
 
@@ -53,17 +56,22 @@ test.describe('combat tracker — DM view', () => {
     // workspace also exposes an end-of-turn Next turn button (issue #1456).
     await expect(page.getByTestId('encounter-header-next-turn')).toBeVisible();
     await expect(page.getByRole('button', { name: 'End', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open display', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Reconnect/focus', exact: true })).toBeVisible();
 
     // On the RUNNING encounter the DM's per-combatant HP controls are present — this is the
     // interactive marker the ended-encounter test below asserts is gone (issue #368).
     await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) }).first()).toBeVisible();
+
+    // Player-display (Cast) is table-wide setup, so the cockpit keeps it in the Table tab
+    // rather than in the header beside the turn controls.
+    await openCockpitTab(page, 'table');
+    await expect(page.getByRole('button', { name: 'Open display', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reconnect/focus', exact: true })).toBeVisible();
   });
 
   test('keeps keyboard-opened display lifecycle and encounter updates in the DM cockpit (#762)', async ({ page }) => {
     await openEncounter(page);
+    await openCockpitTab(page, 'table');
     const { campaignId } = seed();
     const openDisplay = page.getByRole('button', { name: 'Open display', exact: true });
     const popupPromise = page.waitForEvent('popup');
@@ -99,6 +107,7 @@ test.describe('combat tracker — DM view', () => {
     });
     const page = await context.newPage();
     await openEncounter(page);
+    await openCockpitTab(page, 'table');
     for (const name of ['Open display', 'Copy link', 'Reconnect/focus']) {
       const control = page.getByRole('button', { name, exact: true });
       await expect(control).toBeVisible();
@@ -171,11 +180,12 @@ test.describe('combat tracker — DM view', () => {
   test('an ENDED encounter renders read-only: combatant visible but no interactive controls (#368)', async ({ page }) => {
     await page.goto(endedEncounterUrl());
     await expect(page.getByRole('heading', { name: 'Aftermath at the Ember Hearth' })).toBeVisible();
+    await openCockpitTab(page, 'party');
 
     // The encounter is over — the combatant still shows (read-only), but none of the
     // per-combatant mutation controls that fire a PATCH the server rejects (assertMutable)
     // are rendered: no HP +/- buttons and no editable initiative input.
-    await expect(page.getByText(boss.name).first()).toBeVisible();
+    await expect(cockpitPanel(page, 'party').getByText(boss.name).first()).toBeVisible();
     await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) })).toHaveCount(0);
     await expect(page.getByLabel(`Initiative for ${boss.name}`)).toHaveCount(0);
 
@@ -192,9 +202,11 @@ test.describe('combat tracker — non-DM views', () => {
 
       test('monster HP is redacted to a band and no DM controls show', async ({ page }) => {
         await openEncounter(page);
+        // A player lands on the Turn tab while combat runs; the roster is Party.
+        await openCockpitTab(page, 'party');
 
         // The monster is visible in the order...
-        await expect(page.getByText(boss.name).first()).toBeVisible();
+        await expect(cockpitPanel(page, 'party').getByText(boss.name).first()).toBeVisible();
         // ...but its exact HP number is NOT — the client shows a coarse band label.
         await expect(page.getByText(`${boss.hpMax} / ${boss.hpMax}`)).toHaveCount(0);
         await expect(page.getByText('Healthy').first()).toBeVisible();

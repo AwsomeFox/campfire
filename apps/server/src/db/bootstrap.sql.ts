@@ -156,6 +156,23 @@ CREATE TABLE IF NOT EXISTS campaigns (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #846: append-only lifecycle-status provenance. One row per status change
+-- (active<->paused<->completed); the newest row is the current provenance shown in
+-- the archived banner/settings. actor_user_id is durable; actor_name is a snapshot.
+-- reason is DM-only and never shown to players. Cascades with the campaign.
+CREATE TABLE IF NOT EXISTS campaign_status_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  actor_user_id TEXT NOT NULL,
+  actor_name TEXT NOT NULL,
+  from_status TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_status_transitions_campaign
+  ON campaign_status_transitions(campaign_id, created_at);
+
 CREATE TABLE IF NOT EXISTS characters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,

@@ -165,7 +165,7 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(() => service.listUsableActions(encounterId, actor, bob, 'player')).toThrow(/your own character/i);
   });
 
-  it('#1941 intentionally lets a delegated controller list only the combat action contract', () => {
+  it('#1941 withholds delegated statblock actions until the DM reveals the statblock', () => {
     const { orm, service, encounterId, drake } = seed();
     const controller: RequestUser = { id: '101', name: 'Controller', serverRole: 'user', devRole: 'player' };
     const ts = new Date().toISOString();
@@ -196,10 +196,30 @@ describe('action resolver (real SQLite, service layer)', () => {
       .where(eq(combatants.id, drake))
       .run();
 
-    const actions = service.listUsableActions(encounterId, drake, controller, 'player');
-    expect(actions).toHaveLength(1);
-    expect(actions[0].name).toBe('Delegated Claw');
-    expect(actions[0]).not.toHaveProperty('dmNotes');
+    expect(service.listUsableActions(encounterId, drake, controller, 'player')).toEqual([]);
+    expect(() =>
+      service.resolve(
+        encounterId,
+        ActionResolveRequest.parse({
+          actorCombatantId: drake,
+          actionIndex: 0,
+          targetIds: [],
+          commit: false,
+        }),
+        controller,
+        'player',
+      ),
+    ).toThrow(/reveal.*statblock/i);
+
+    orm.update(combatants)
+      .set({ statblockRevealed: true })
+      .where(eq(combatants.id, drake))
+      .run();
+
+    const revealedActions = service.listUsableActions(encounterId, drake, controller, 'player');
+    expect(revealedActions).toHaveLength(1);
+    expect(revealedActions[0].name).toBe('Delegated Claw');
+    expect(revealedActions[0]).not.toHaveProperty('dmNotes');
     expect(() => service.listUsableActions(encounterId, drake, bob, 'player')).toThrow(/your own character/i);
   });
 

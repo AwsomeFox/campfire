@@ -91,6 +91,36 @@ export const campaigns = sqliteTable('campaigns', {
   updatedAt: text('updated_at').notNull(),
 });
 
+/**
+ * Append-only lifecycle-status transition provenance for a campaign (issue #846).
+ * Every status change (active<->paused<->completed) inserts a row, so reactivation
+ * (back to active) and re-archiving keep the full history; the newest row is the
+ * current provenance surfaced in the archived banner and settings.
+ *
+ * `actorUserId` is the durable install-local id; `actorName` is a display-name
+ * snapshot captured at transition time (a later rename does not rewrite history).
+ * `reason` is DM operational text and is NOT shown to players. Cascades with the
+ * campaign so a purge cleans its provenance too.
+ */
+export const campaignStatusTransitions = sqliteTable(
+  'campaign_status_transitions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id')
+      .notNull()
+      .references(() => campaigns.id, { onDelete: 'cascade' }),
+    actorUserId: text('actor_user_id').notNull(),
+    actorName: text('actor_name').notNull(),
+    fromStatus: text('from_status').notNull(),
+    toStatus: text('to_status').notNull(),
+    reason: text('reason').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    campaignTransitionsIdx: index('idx_campaign_status_transitions_campaign').on(t.campaignId, t.createdAt),
+  }),
+);
+
 export const characters = sqliteTable('characters', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),

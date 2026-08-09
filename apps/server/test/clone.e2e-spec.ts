@@ -692,6 +692,7 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
   let battleMapAttachmentId: number;
   let equippedCharacterId: number;
   let equippedItemId: number;
+  let arcId: number;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -732,6 +733,8 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
       .send({ body: 'Encounter prep note', visibility: 'party_shared', entityType: 'encounter', entityId: encounterId });
 
     const arcRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/arcs`).send({ title: 'Main arc', summary: 'Arc summary' });
+    arcId = arcRes.body.id;
+    await dmAgent.patch(`/api/v1/arcs/${arcId}`).send({ summary: 'Arc summary, revised.' });
     const beat1 = await dmAgent.post(`/api/v1/arcs/${arcRes.body.id}/beats`).send({ title: 'Opening' });
     const beat2 = await dmAgent.post(`/api/v1/arcs/${arcRes.body.id}/beats`).send({ title: 'Climax' });
     await dmAgent.post(`/api/v1/beats/${beat1.body.id}/branches`).send({ label: 'go north', toBeatId: beat2.body.id });
@@ -868,6 +871,11 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     const clonedRevisions = await dmAgent.get(`/api/v1/revisions/quest/${clonedQuestId}`);
     expect(clonedRevisions.body.length).toBe(sourceRevisions.body.length);
     expect(clonedRevisions.body[0].snapshot.body).toBe(sourceRevisions.body[0].snapshot.body);
+
+    const sourceArcRevisions = await dmAgent.get(`/api/v1/revisions/story_arc/${arcId}`);
+    const clonedArcRevisions = await dmAgent.get(`/api/v1/revisions/story_arc/${arcs.body[0].id}`);
+    expect(clonedArcRevisions.body.length).toBe(sourceArcRevisions.body.length);
+    expect(clonedArcRevisions.body[0].snapshot.summary).toBe(sourceArcRevisions.body[0].snapshot.summary);
   });
 
   // Issue #1326 review (coordinator): when an equipped item's character does NOT survive

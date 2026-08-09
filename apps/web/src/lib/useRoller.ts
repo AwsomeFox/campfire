@@ -30,7 +30,20 @@ export interface Roller {
    * mode + optional dc), so proficiency math is never invented client-side. Returns the full
    * resolved response (breakdown + persisted roll + optional degree of success).
    */
-  rollCheck: (characterId: number, checkId: string, mode?: CheckRollMode, dc?: number) => Promise<CheckRollResponse | null>;
+  rollCheck: (
+    characterId: number,
+    checkId: string,
+    mode?: CheckRollMode,
+    dc?: number,
+    /**
+     * The dice expression the SERVER will roll for this check, for the pre-flight
+     * animation only. Callers holding the catalog entry should pass
+     * `checkRollExpr(def, mode)`: without it the animation assumes a d20, so a system whose
+     * initiative or checks use another die (Starforged, OSRIC: `die: 6`) visibly tumbled a
+     * d20 and then reported a d6 result.
+     */
+    animationExpr?: string,
+  ) => Promise<CheckRollResponse | null>;
   rolling: boolean;
 }
 
@@ -73,10 +86,17 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
   );
 
   const rollCheck = useCallback(
-    async (characterId: number, checkId: string, mode: CheckRollMode = 'normal', dc?: number): Promise<CheckRollResponse | null> => {
+    async (
+      characterId: number,
+      checkId: string,
+      mode: CheckRollMode = 'normal',
+      dc?: number,
+      animationExpr?: string,
+    ): Promise<CheckRollResponse | null> => {
       setRolling(true);
       onError(null);
-      beginRollAnimation(mode === 'advantage' || mode === 'disadvantage' ? '2d20kh1' : '1d20');
+      // The d20 fallback is only right for callers that do not hold the catalog entry.
+      beginRollAnimation(animationExpr ?? (mode === 'advantage' || mode === 'disadvantage' ? '2d20kh1' : '1d20'));
       try {
         const res = await api.post<CheckRollResponse>(`${API}/characters/${characterId}/checks/roll`, {
           checkId,

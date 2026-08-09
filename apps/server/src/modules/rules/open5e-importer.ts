@@ -30,7 +30,15 @@ import type { RuleEntryType } from '@campfire/schema';
  *     entry (Open5e's data is community-maintained and not 100% uniform).
  *   - `desc` is the long-form text (spells, magicitems); `descriptions[].desc`
  *     is used instead for conditions (an array, since some conditions have
- *     multiple source-specific write-ups — we join them).
+ *     multiple source-specific write-ups — we join them). `/v2/weapons/` and
+ *     `/v2/armor/` carry NO `desc` at all (verified live 2026-08-08): they are
+ *     pure structured stat rows, so their bodies are rendered from those stats.
+ *   - `/v2/magicitems/` contains only MAGIC items — no Longsword, no Chain Mail.
+ *     Mundane gear lives at `/v2/weapons/` (75 rows) and `/v2/armor/` (25 rows),
+ *     imported as separate sections that both map to ruleEntry.type 'item'
+ *     (issue #2096). Weapon `damage_dice` is not reliably a dice expression (the
+ *     SRD Net arrives as "0") and `range` is 0/0 for melee but a real 20/60 for a
+ *     thrown melee weapon, so neither field is interpreted here.
  *   - License isn't per-entry; it's derived from `document.licenses[].name`
  *     (documents endpoint) or, more simply, from the known SRD/CC-BY-4.0
  *     baseline license all `results[].document` entries carry via their own
@@ -41,7 +49,7 @@ import type { RuleEntryType } from '@campfire/schema';
 
 export const OPEN5E_DEFAULT_BASE_URL = 'https://api.open5e.com/v2';
 /** Importer schema revision. Reinstalling an older pack deterministically refreshes its rows. */
-export const OPEN5E_PACK_VERSION = 'open5e-v2-defenses-1';
+export const OPEN5E_PACK_VERSION = 'open5e-v2-gear-1';
 export const MAX_ENTRIES_PER_SECTION = 2000;
 // Live sections are large: creatures ~3.5k, magicitems ~2.3k, spells ~2k entries
 // (verified against api.open5e.com 2026-07). Open5e's DRF pagination honours large
@@ -69,7 +77,7 @@ const FETCH_TIMEOUT_MS = 30_000;
 // response is a real problem with the request/upstream shape and retrying won't help.
 const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 
-export type Open5eSection = 'spells' | 'monsters' | 'items' | 'conditions' | 'classes' | 'races' | 'feats';
+export type Open5eSection = 'spells' | 'monsters' | 'items' | 'conditions' | 'classes' | 'races' | 'feats' | 'weapons' | 'armor';
 
 /**
  * Campfire section → Open5e v2 URL path. EXPORTED (issue #568) so the nightly live-source
@@ -86,6 +94,8 @@ export const OPEN5E_SECTION_TO_PATH: Record<Open5eSection, string> = {
   classes: 'classes',
   races: 'species', // v2 has no /races/ route either — see file header note.
   feats: 'feats',
+  weapons: 'weapons',
+  armor: 'armor',
 };
 
 const SECTION_TO_ENTRY_TYPE: Record<Open5eSection, RuleEntryType> = {
@@ -96,6 +106,10 @@ const SECTION_TO_ENTRY_TYPE: Record<Open5eSection, RuleEntryType> = {
   classes: 'class',
   races: 'race',
   feats: 'feat',
+  // Weapons and armour are Campfire `item` entries like magic items — the distinction
+  // upstream is which endpoint they came from, not what kind of thing they are.
+  weapons: 'item',
+  armor: 'item',
 };
 
 export interface ImportedEntry {
@@ -459,6 +473,134 @@ function mapMagicItem(row: Record<string, unknown>): ImportedEntry {
   };
 }
 
+/**
+ * One entry from a weapon's `properties[]` (issue #2096). Upstream nests the property
+ * itself and keeps the per-weapon particulars beside it:
+ *
+ *   { "property": { "name": "Versatile", "type": null, "desc": "…" }, "detail": "1d10" }
+ *
+ * `detail` is where the facts that vary per weapon live — Versatile's two-handed die
+ * ("1d10"), Thrown's range ("Range 20/60") — so dropping it would lose exactly the part a
+ * consumer needs. `type` is `"Mastery"` for a 2024 weapon mastery (Sap, Vex, Nick, Topple,
+ * …), which is a different axis from a physical property like Finesse or Two-Handed and
+ * must stay distinguishable; the `desc` is left behind because it is boilerplate rules text
+ * repeated verbatim on every weapon that has the property, and the entry body already
+ * carries prose.
+ */
+function weaponProperties(v: unknown): Array<{ name: string; type: string | null; detail: string | null }> {
+  if (!Array.isArray(v)) return [];
+  const out: Array<{ name: string; type: string | null; detail: string | null }> = [];
+  for (const raw of v as Array<Record<string, unknown>>) {
+    const prop = raw?.property;
+    const name = nestedName(prop) || asString(raw?.name);
+    if (!name) continue;
+    const type = prop && typeof prop === 'object' ? asString((prop as Record<string, unknown>).type) : '';
+    const detail = asString(raw?.detail);
+    out.push({ name, type: type || null, detail: detail || null });
+  }
+  return out;
+}
+
+/**
+ * Mundane weapons from `/v2/weapons/` (issue #2096) — the SRD's Longsword, Longbow, Dagger,
+ * and so on, which `/v2/magicitems/` has never contained.
+ *
+ * Faithful ingestion, no interpretation: `damage_dice` is stored exactly as upstream sent it
+ * and is NOT validated as a dice expression here, because it is not always one (the SRD Net
+ * arrives as the string `"0"`). Whoever builds an attack out of this data is the layer that
+ * has to decide what an unusable value means; silently dropping or "fixing" it here would
+ * hide a real upstream shape from every consumer at once. Same reasoning for `range` —
+ * melee weapons report `0/0`, while a thrown melee weapon like the Dagger reports a real
+ * `20/60`, so range alone does not classify a weapon as ranged and this mapper does not
+ * pretend otherwise.
+ */
+export function mapWeapon(row: Record<string, unknown>): ImportedEntry {
+  const damageDice = asString(row.damage_dice);
+  const damageType = nestedName(row.damage_type);
+  const properties = weaponProperties(row.properties);
+  const isSimple = typeof row.is_simple === 'boolean' ? row.is_simple : null;
+  const range = numberOrNull(row.range);
+  const longRange = numberOrNull(row.long_range);
+  const distanceUnit = asString(row.distance_unit);
+  const physical = properties.filter((p) => p.type !== 'Mastery');
+  const masteries = properties.filter((p) => p.type === 'Mastery');
+  const damageLine = [damageDice, damageType.toLowerCase()].filter(Boolean).join(' ');
+  const summaryBits = [
+    isSimple === null ? '' : isSimple ? 'simple weapon' : 'martial weapon',
+    damageLine,
+    physical.map((p) => p.name).join(', '),
+  ].filter(Boolean);
+  // These rows carry NO `desc` (verified live 2026-08-08) — unlike spells and magic items,
+  // an Open5e weapon is pure structured data. Rendering the stats as the body keeps the
+  // compendium reader from showing a blank page, the same way mapClass/mapSpecies render
+  // their `features`/`traits` arrays into markdown instead of leaving an empty `desc`.
+  const bodyLines = [
+    damageLine ? `**Damage:** ${damageLine}` : '',
+    range !== null && range > 0 ? `**Range:** ${range}/${longRange ?? range} ${distanceUnit || 'feet'}` : '',
+    physical.length ? `**Properties:** ${physical.map((p) => (p.detail ? `${p.name} (${p.detail})` : p.name)).join(', ')}` : '',
+    masteries.length ? `**Mastery:** ${masteries.map((p) => p.name).join(', ')}` : '',
+  ].filter(Boolean);
+  return {
+    slug: asString(row.key) || asString(row.name),
+    name: asString(row.name),
+    type: 'item',
+    summary: truncate(summaryBits.join(' · '), 300),
+    body: bodyLines.join('\n\n'),
+    dataJson: JSON.stringify({
+      // Discriminator for a consumer reading a mixed bag of `item` entries. Deliberately
+      // NOT called `category`: mapMagicItem already uses that key for the upstream magic-item
+      // category ("Wondrous Item", "Weapon", …), and overloading it would make
+      // `data.category === 'weapon'` mean two different things depending on which endpoint
+      // the row came from.
+      itemKind: 'weapon',
+      damageDice: damageDice || null,
+      damageType: damageType || null,
+      range,
+      longRange,
+      distanceUnit: distanceUnit || null,
+      isSimple,
+      isImprovised: typeof row.is_improvised === 'boolean' ? row.is_improvised : null,
+      properties,
+    }),
+    license: licenseOf(row),
+    source: sourceOf(row),
+  };
+}
+
+/** Mundane armour and shields from `/v2/armor/` (issue #2096). Same no-`desc` shape as weapons. */
+export function mapArmor(row: Record<string, unknown>): ImportedEntry {
+  const acDisplay = asString(row.ac_display);
+  const category = asString(row.category);
+  const stealth = typeof row.grants_stealth_disadvantage === 'boolean' ? row.grants_stealth_disadvantage : null;
+  const strengthRequired = numberOrNull(row.strength_score_required);
+  const summaryBits = [category, acDisplay ? `AC ${acDisplay}` : ''].filter(Boolean);
+  const bodyLines = [
+    acDisplay ? `**Armor Class:** ${acDisplay}` : '',
+    category ? `**Category:** ${category}` : '',
+    strengthRequired !== null ? `**Strength:** ${strengthRequired}` : '',
+    stealth === true ? '**Stealth:** disadvantage' : '',
+  ].filter(Boolean);
+  return {
+    slug: asString(row.key) || asString(row.name),
+    name: asString(row.name),
+    type: 'item',
+    summary: truncate(summaryBits.join(' · '), 300),
+    body: bodyLines.join('\n\n'),
+    dataJson: JSON.stringify({
+      itemKind: 'armor',
+      armorCategory: category || null,
+      acDisplay: acDisplay || null,
+      acBase: numberOrNull(row.ac_base),
+      acAddDex: typeof row.ac_add_dexmod === 'boolean' ? row.ac_add_dexmod : null,
+      acCapDex: numberOrNull(row.ac_cap_dexmod),
+      grantsStealthDisadvantage: stealth,
+      strengthScoreRequired: strengthRequired,
+    }),
+    license: licenseOf(row),
+    source: sourceOf(row),
+  };
+}
+
 function mapCondition(row: Record<string, unknown>): ImportedEntry {
   const descriptions = row.descriptions as Array<Record<string, unknown>> | undefined;
   const desc = Array.isArray(descriptions) ? descriptions.map((d) => asString(d.desc)).filter(Boolean).join('\n\n') : asString(row.desc);
@@ -561,6 +703,8 @@ const SECTION_MAPPER: Record<Open5eSection, (row: Record<string, unknown>) => Im
   classes: mapClass,
   races: mapSpecies,
   feats: mapFeat,
+  weapons: mapWeapon,
+  armor: mapArmor,
 };
 
 async function fetchWithTimeout(url: string): Promise<Response> {
@@ -754,4 +898,4 @@ export function entryTypeForSection(section: Open5eSection): RuleEntryType {
   return SECTION_TO_ENTRY_TYPE[section];
 }
 
-export const ALL_OPEN5E_SECTIONS: Open5eSection[] = ['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'];
+export const ALL_OPEN5E_SECTIONS: Open5eSection[] = ['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats', 'weapons', 'armor'];

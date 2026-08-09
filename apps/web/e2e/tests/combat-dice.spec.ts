@@ -1,5 +1,6 @@
 import { test, expect, request, type APIRequestContext, type Request } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
+import { openCockpitDiceTray, openCockpitTab } from '../lib/encounterCockpit';
 import { CREDS } from '../global-setup';
 
 /**
@@ -179,6 +180,8 @@ test.describe('encounter dice — apply rolled damage', () => {
 
         await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
         await expect(page.getByText('Running', { exact: true })).toBeVisible();
+        // Character sheets hang off the roster, which the cockpit keeps in the Party tab.
+        await openCockpitTab(page, 'party');
         // Owned card auto-expands; scope the damage control to Brixi's sheet.
         const brixiCard = page.getByRole('region', { name: /Brixi Applybar character sheet/i });
         await expect(brixiCard).toBeVisible();
@@ -210,6 +213,7 @@ test.describe('encounter dice — apply rolled damage', () => {
         await expect(page.getByTestId('error-note')).toHaveCount(0);
 
         // Read the whole log textContent so chained/expandable rows still match.
+        await openCockpitTab(page, 'log');
         const combatLog = page.getByRole('log', { name: 'Combat log' });
         await expect(combatLog).toBeVisible();
         await expect
@@ -223,6 +227,80 @@ test.describe('encounter dice — apply rolled damage', () => {
         await playerCtx.dispose();
         await dm.dispose();
       }
+  });
+
+  test('the roll toast never covers the cockpit tabs on a phone', async ({ page }) => {
+    // The toast is bottom-anchored and grows upward, and its meta row wraps — so a
+    // roll with enough dice to need a second line made the toast a line taller,
+    // tall enough to sit over the cockpit's side-panel tab strip. Those tabs then
+    // could not be tapped for the toast's full 15s life, and a Playwright click on
+    // one landed on the toast instead. That is how this surfaced: as an
+    // intermittent failure in the target-size spec, because whether the row
+    // wrapped depended on what the dice happened to roll.
+    //
+    // Rolled through the tray with a fixed 8d6 so the row is ALWAYS over-long —
+    // the bug reproduces every run rather than on the rolls that happened to wrap.
+    // Asserted by hit-testing, because what matters is what a tap actually reaches.
+    const { baseURL, campaignId } = seed();
+    const playerCtx = await request.newContext({ baseURL });
+    const dm = await request.newContext({ baseURL });
+    let drill: Drill | null = null;
+    try {
+      await playerCtx.post('/api/v1/auth/login', { data: CREDS.player });
+      const me = await (await playerCtx.get('/api/v1/me')).json();
+      await dm.post('/api/v1/auth/login', { data: CREDS.dm });
+      drill = await startDrill(dm, campaignId, String(me.user.id), OWN_TURN);
+
+      await page.addInitScript((key) => {
+        localStorage.setItem(key, JSON.stringify([
+          { label: 'Fireball', pool: { 6: 8 }, modifier: 0, advMode: 'flat', persisted: true },
+        ]));
+      }, `campfire.dicePresets.${campaignId}`);
+      await page.setViewportSize({ width: 320, height: 720 });
+      await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+      await expect(page.getByText('Running', { exact: true })).toBeVisible();
+
+      await openCockpitDiceTray(page);
+      await page.getByRole('button', { name: 'Fireball', exact: true }).click();
+      await page.getByRole('button', { name: 'Roll 8d6', exact: true }).click();
+      await expect(page.getByTestId('roll-result-toast')).toBeVisible();
+      // Close the tray again: it lifts the panel while open, and the tab strip only
+      // sits low enough to be reachable by the toast once the tray is out of the way.
+      await page.getByTestId('encounter-vtt-roll').click();
+      await expect(page.getByTestId('encounter-vtt-dice-tray')).toBeHidden();
+
+      // The height is the invariant the fix establishes, and it is what makes the
+      // overlap possible at all: 8d6 gives the meta row far more chips than fit on
+      // one line at 320px, so an unclipped row wraps and the toast grows a line
+      // taller. How far up that reaches then depends on how much campaign chrome
+      // has pushed the cockpit down — which is exactly why the collision showed up
+      // as a coin-flip in another spec instead of failing honestly here.
+      const toastBox = await page.getByTestId('roll-result-toast').boundingBox();
+      expect(toastBox, 'roll toast bounding box').not.toBeNull();
+      expect(
+        toastBox!.height,
+        'the roll toast must stay one compact row on a phone',
+      ).toBeLessThanOrEqual(72);
+
+      // And, in this layout, nothing may stand between a tap and the cockpit tabs.
+      for (const tab of ['turn', 'party', 'log', 'table'] as const) {
+        const testId = `encounter-vtt-tab-${tab}`;
+        const box = await page.getByTestId(testId).boundingBox();
+        if (!box) continue;
+        const reached = await page.evaluate(
+          ({ x, y }) => {
+            const el = document.elementFromPoint(x, y);
+            return el?.closest('[data-testid]')?.getAttribute('data-testid') ?? null;
+          },
+          { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+        );
+        expect(reached, `a tap on the ${tab} tab reached ${reached}`).toBe(testId);
+      }
+    } finally {
+      await teardownDrill(dm, drill);
+      await playerCtx.dispose();
+      await dm.dispose();
+    }
   });
 
   test('the dice tray labels presets, clears that label after an edit, and posts a mixed pool once', async ({ page }) => {
@@ -244,6 +322,9 @@ test.describe('encounter dice — apply rolled damage', () => {
       }, `campfire.dicePresets.${campaignId}`);
       await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      // The shared dice tray is the cockpit's floating Roll control now, not a card
+      // stacked under the tracker.
+      await openCockpitDiceTray(page);
 
       const rollResponse = () => page.waitForResponse((response) =>
         response.request().method() === 'POST' && response.url().endsWith(`/campaigns/${campaignId}/roll`),
@@ -315,8 +396,11 @@ test.describe('encounter dice — apply rolled damage', () => {
       await expect(page.getByTestId('shared-dice-log').getByText('2d6+1d8+3', { exact: false })).toBeVisible();
       const overlay = page.getByTestId('dice-roll-overlay');
       await expect(overlay).toBeVisible();
-      await expect(overlay.locator('[data-sides="6"]')).toHaveCount(2);
-      await expect(overlay.locator('[data-sides="8"]')).toHaveCount(1);
+      // The 3D roller draws the dice into a canvas, and whether this machine
+      // gets WebGL at all decides which renderer runs — so assert on the
+      // overlay's own record of the dice rather than on per-die elements that
+      // only the CSS fallback emits.
+      await expect(overlay).toHaveAttribute('data-dice', '6,6,8');
     } finally {
       await teardownDrill(dm, drill);
       await playerCtx.dispose();
@@ -346,6 +430,7 @@ test.describe('encounter dice — apply rolled damage', () => {
 
       await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      await openCockpitTab(page, 'party');
       await expect(page.getByRole('button', { name: "Expand Rival Sheet's character sheet" })).toHaveCount(0);
 
       await page.getByRole('button', { name: "Expand Brixi Applybar's character sheet" }).click();
@@ -355,6 +440,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       await expect(playerBrixiCard.getByTestId('attack-roll-control')).toHaveCount(0);
 
       await dmPage.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+      await openCockpitTab(dmPage, 'party');
       await expect(dmPage.getByRole('button', { name: "Expand Brixi Applybar's character sheet" })).toBeVisible();
       await expect(dmPage.getByRole('button', { name: "Expand Rival Sheet's character sheet" })).toBeVisible();
       await dmPage.getByRole('button', { name: "Expand Brixi Applybar's character sheet" }).click();
@@ -369,6 +455,10 @@ test.describe('encounter dice — apply rolled damage', () => {
       const advanceRes = await dm.post(`/api/v1/encounters/${drill.encounterId}/next-turn`);
       expect(advanceRes.ok(), `advance to Brixi: ${await advanceRes.text()}`).toBeTruthy();
       await expect(page.getByTestId(`combatant-row-${drill.brixiCombatantId}`)).toHaveAttribute('data-current-turn', 'true');
+      // An owned turn beat now takes the player to their Turn workspace — the cockpit
+      // reveals it rather than scrolling a panel that may be hidden. Come back to the
+      // roster, which is the surface whose controls this test is about.
+      await openCockpitTab(page, 'party');
       await expect(playerBrixiCard.getByTestId('check-roll-ability:STR')).toBeVisible();
       await expect(playerBrixiCard.getByTestId('attack-roll-control')).toBeVisible();
     } finally {
@@ -406,6 +496,7 @@ test.describe('encounter dice — apply rolled damage', () => {
 
       await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      await openCockpitTab(page, 'party');
 
       // Reject only the HP patch for Brixi's combatant; every other request is untouched.
       await page.route(`**/api/v1/encounters/${drill.encounterId}/combatants/${drill.brixiCombatantId}`, async (route) => {
