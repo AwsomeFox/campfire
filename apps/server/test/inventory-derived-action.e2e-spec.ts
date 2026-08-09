@@ -1182,6 +1182,54 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(renamed.body.equippedActionSource).toBeNull();
   });
 
+  it('a refresh whose item changed hands mid-flight applies nothing at all', async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 'player', role: 'player' });
+
+    const mine = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Half Apply Owner', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player' });
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: mine.body.id, duplicateMode: 'separate' });
+    const itemId = acquired.body.id;
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'half-apply-slot' });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const before = db
+      .select({ snap: inventoryItems.compendiumSnapshot, action: inventoryItems.equippedAction })
+      .from(inventoryItems)
+      .where(eq(inventoryItems.id, itemId))
+      .get()!;
+
+    // The DM hands the character to someone else mid-request.
+    db.update(characters).set({ ownerUserId: 'dev:not-the-caller' }).where(eq(characters.id, mine.body.id)).run();
+
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '3d12', damageType: 'Slashing', properties: [] });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(player);
+      // 403 from the up-front owner check, which is the ordering reachable over HTTP; the
+      // conditional snapshot write returns 409 for the genuine race, where the handoff lands
+      // AFTER that check and before the write. Either way the request is refused.
+      expect([403, 409]).toContain(refreshed.status);
+
+      // The property that matters and holds under both: neither half landed. Accepting a new
+      // snapshot while refusing to regenerate the action would leave the item's accepted
+      // revision and its granted attack describing different versions of the same weapon.
+      const after = db
+        .select({ snap: inventoryItems.compendiumSnapshot, action: inventoryItems.equippedAction })
+        .from(inventoryItems)
+        .where(eq(inventoryItems.id, itemId))
+        .get()!;
+      expect(after.snap).toBe(before.snap);
+      expect(after.action).toBe(before.action);
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

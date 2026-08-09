@@ -1014,9 +1014,28 @@ export class CampaignsService {
       nextCustomMechanicsProfile === undefined
         ? undefined
         : canonicalJson(nextCustomMechanicsProfile ? (safeJson(nextCustomMechanicsProfile) ?? null) : null);
-    const mechanicsChanged =
-      (campaignInput.ruleSystem !== undefined && campaignInput.ruleSystem !== existing.ruleSystem) ||
-      (nextProfileCanonical !== undefined && nextProfileCanonical !== canonicalJson(existing.customMechanicsProfile ?? null));
+    /**
+     * Answered INSIDE the transaction, against the row as it stands there (chatgpt-codex-
+     * connector P2). Comparing against the pre-transaction `existing` gets it wrong whenever
+     * two campaign PATCHes overlap: request A reads 5e and intends to write 5e, request B
+     * switches to PF2e, an item is equipped and derives under PF2e, then A commits 5e with
+     * `mechanicsChanged = false` and leaves that PF2e action in place under 5e rules. What
+     * matters is whether this write CHANGES the mechanics the row actually has, which only
+     * the transaction can know.
+     */
+    const mechanicsWillChange = (tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0]): boolean => {
+      const current = tx
+        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+        .from(campaigns)
+        .where(eq(campaigns.id, id))
+        .get();
+      const ruleSystemChanges =
+        campaignInput.ruleSystem !== undefined && campaignInput.ruleSystem !== (current?.ruleSystem ?? '');
+      const profileChanges =
+        nextProfileCanonical !== undefined &&
+        nextProfileCanonical !== canonicalJson(current?.customMechanicsProfile ? safeJson(current.customMechanicsProfile) : null);
+      return ruleSystemChanges || profileChanges;
+    };
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of
@@ -1119,6 +1138,9 @@ export class CampaignsService {
     if (archiving && opts?.revokeInvites) {
       const ts = nowIso();
       const { row, revoked, wasEnabled, pinsCleared, clearedCharacterIds } = this.db.transaction((tx) => {
+        // Sampled BEFORE this transaction's own update — otherwise it reads back the value
+        // it is about to write and never sees a change.
+        const willChangeMechanics = mechanicsWillChange(tx);
         const before = tx
           .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
           .from(campaigns)
@@ -1164,7 +1186,7 @@ export class CampaignsService {
           .returning({ id: campaignInvites.id })
           .all();
         // In the SAME transaction as the mechanics write — see `clearDerivedEquippedActionsIn`.
-        const clearedCharacterIds = mechanicsChanged ? this.clearDerivedEquippedActionsIn(tx, id) : [];
+        const clearedCharacterIds = willChangeMechanics ? this.clearDerivedEquippedActionsIn(tx, id) : [];
         return {
           row,
           revoked: deleted.length,
@@ -1222,6 +1244,8 @@ export class CampaignsService {
     let ordinaryClearedCharacterIds: number[] = [];
     if (shouldResetPins) {
       const resetResult = this.db.transaction((tx) => {
+        // Sampled before this transaction's own update — see the archive path above.
+        const willChangeMechanics = mechanicsWillChange(tx);
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
             .set({ hidden: false, updatedAt: ts })
@@ -1255,7 +1279,7 @@ export class CampaignsService {
         // Same transaction as the mechanics write here too — see
         // `clearDerivedEquippedActionsIn`. This branch also persists `campaignInput`, so a
         // map-reset PATCH that ALSO switches systems has to clear atomically as well.
-        const clearedCharacterIds = mechanicsChanged ? this.clearDerivedEquippedActionsIn(tx, id) : [];
+        const clearedCharacterIds = willChangeMechanics ? this.clearDerivedEquippedActionsIn(tx, id) : [];
         return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0, clearedCharacterIds };
       });
       updatedRow = resetResult.row;
@@ -1284,13 +1308,15 @@ export class CampaignsService {
       // starts after the new system is visible must not have its correctly-derived action
       // deleted by a cleanup that commits afterwards.
       const written = this.db.transaction((tx) => {
+        // Sampled before this transaction's own update — see the archive path above.
+        const willChangeMechanics = mechanicsWillChange(tx);
         const row = tx
           .update(campaigns)
           .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
-        return { row, clearedCharacterIds: mechanicsChanged ? this.clearDerivedEquippedActionsIn(tx, id) : [] };
+        return { row, clearedCharacterIds: willChangeMechanics ? this.clearDerivedEquippedActionsIn(tx, id) : [] };
       });
       updatedRow = written.row;
       ordinaryClearedCharacterIds = written.clearedCharacterIds;

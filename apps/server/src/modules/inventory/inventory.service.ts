@@ -640,7 +640,31 @@ export class InventoryService {
     const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
     const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
     if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
-    let [row] = await this.db.update(inventoryItems).set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() }).where(eq(inventoryItems.id, id)).returning();
+    // Review (chatgpt-codex-connector P2, authorization): the SNAPSHOT write carries the same
+    // owner predicate as the regeneration below, so the two cannot half-apply. Keyed on the id
+    // alone it accepted the new revision even when a DM had moved and equipped the item onto
+    // another player mid-request — and the regeneration then correctly refused to touch that
+    // player's action, leaving the item with a NEW accepted snapshot and an action derived
+    // from the OLD one. Either both land or neither does; a predicate miss is a conflict the
+    // caller retries, exactly like the slot and owner conflicts elsewhere in this service.
+    let [row] = await this.db
+      .update(inventoryItems)
+      .set({ compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', updatedAt: nowIso() })
+      .where(
+        and(
+          eq(inventoryItems.id, id),
+          role === 'dm'
+            ? undefined
+            : sql`(${inventoryItems.characterId} is null or (select owner_user_id from characters where id = ${inventoryItems.characterId}) = ${user.id})`,
+        ),
+      )
+      .returning();
+    if (!row) {
+      throw new ConflictException({
+        code: 'INVENTORY_OWNER_CHANGED',
+        message: `Item ${id} changed hands after this request was authorized — refetch and retry.`,
+      });
+    }
 
     // Issue #2097 review (chatgpt-codex-connector P2): accepting an upstream revision is
     // precisely the moment a DERIVED action becomes stale — the whole point of this endpoint
