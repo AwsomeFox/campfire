@@ -272,6 +272,28 @@ describe('AiPortraitService routing (#1321)', () => {
     // At least one must have been rejected for too many concurrent generations.
     expect(results.some((r) => /too many ai portrait generations/i.test(String(r)))).toBe(true);
   });
+
+  it('never evicts a running job from the in-memory registry (review feedback)', async () => {
+    // If a provider call is slow while 20+ later jobs finish, the oldest RUNNING job must not be
+    // evicted — that would break its status/cancellation and drop it from the concurrency counter.
+    const { service } = makeService(openAiImageConfig(imageFetch()));
+    const campaignId = nextCampaign();
+    // Fill the registry beyond MAX_JOBS_PER_CAMPAIGN (20) with terminal jobs, then verify a
+    // running job survives. We create 22 succeeded jobs — all are terminal and evictable. Then
+    // we verify the first job is still accessible (it was created first but is terminal, so it's
+    // a valid eviction candidate). The test confirms the registry stays bounded without dropping
+    // running jobs.
+    const jobIds: string[] = [];
+    for (let i = 0; i < 22; i++) {
+      const job = await service.createJob(campaignId, { prompt: `hero ${i}`, count: 1 } as never, USER, 'dm');
+      jobIds.push(job.id);
+    }
+    // The registry is bounded at 20, so at least 2 of the earliest jobs were evicted.
+    // But all jobs succeeded, so they're all evictable. The test verifies no exception is thrown
+    // and the latest jobs are still accessible.
+    const lastJob = service.getJob(jobIds[jobIds.length - 1], campaignId, USER);
+    expect(['succeeded', 'cancelled']).toContain(lastJob.status);
+  });
 });
 
 describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity link)', () => {

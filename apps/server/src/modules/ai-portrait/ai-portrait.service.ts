@@ -272,6 +272,16 @@ export class AiPortraitService {
         createdAt: ts,
         updatedAt: ts,
       });
+
+      // Review feedback (#1321): if a concurrent cancel arrived while safeResolveConfig was
+      // pending (an idempotent retry received the queued placeholder and cancelled it), do NOT
+      // replace the cancelled job with a fresh `running` object. The abort already fired;
+      // overwriting would leave the job permanently `running` because runGeneration returns
+      // early on the aborted signal without touching the replacement. Bail out to cancelled.
+      if (record.job.status === 'cancelled' || record.abort.signal.aborted) {
+        record.abort.abort();
+        return record.job;
+      }
       record.job = base;
 
       if (moderation.flagged) {
@@ -430,15 +440,18 @@ export class AiPortraitService {
     // quota-charged orphan (issue #1321 review feedback). The target was already validated above,
     // so authority should not fail here — but a race, concurrent edit, or audit/hide write failure
     // could still throw.
-    const portraitUrl = `/api/v1/attachments/${attachment.id}/file?v=${this.attachments.versionToken(attachment)}`;
+    let effectiveAttachment = attachment;
     try {
       // If the target NPC is hidden, the generated portrait MUST also be hidden — otherwise a non-DM
       // member could enumerate it through the attachment list and fetch the bytes even though the NPC
       // itself returns 404 (issue #1321 review feedback). Portraits default to visible, so hide it
-      // explicitly here when the target is hidden.
+      // explicitly here when the target is hidden. Retain the UPDATED attachment (review feedback):
+      // setHidden returns the hidden row with a newer updatedAt, and the versioned portraitUrl must
+      // be derived from it so REST/MCP consumers receive the actual stored state.
       if (targetVisibility.hidden) {
-        await this.attachments.setHidden(attachment.id, true, user, role);
+        effectiveAttachment = await this.attachments.setHidden(attachment.id, true, user, role);
       }
+      const portraitUrl = `/api/v1/attachments/${effectiveAttachment.id}/file?v=${this.attachments.versionToken(effectiveAttachment)}`;
 
       // Durable provenance: record the (excerpted) prompt + honest provenance label so the origin
       // of a genuine-AI portrait is always attributable from the log. This is inside the rollback
@@ -506,7 +519,7 @@ export class AiPortraitService {
       throw err;
     }
 
-    return { attachment, entity: { type: body.entityType, id: body.entityId }, provenance: preview.provenance };
+    return { attachment: effectiveAttachment, entity: { type: body.entityType, id: body.entityId }, provenance: preview.provenance };
   }
 
   /**
@@ -720,13 +733,20 @@ export class AiPortraitService {
 
   private registerJob(record: JobRecord): void {
     this.jobs.set(record.job.id, record);
-    // Evict oldest jobs for this campaign beyond the cap.
+    // Evict oldest TERMINAL jobs for this campaign beyond the cap (review feedback). We must NOT
+    // evict a running/queued job: if a slow provider call outlasts 20 later jobs, evicting it would
+    // break status/cancellation and drop it from the concurrency counter, allowing more than
+    // MAX_CONCURRENT_PER_CAMPAIGN paid calls to run simultaneously. Only terminal jobs (failed,
+    // succeeded, cancelled) are safe to evict.
     const campaignJobs = [...this.jobs.values()].filter((r) => r.job.campaignId === record.job.campaignId);
     if (campaignJobs.length > MAX_JOBS_PER_CAMPAIGN) {
-      campaignJobs
-        .sort((a, b) => a.job.createdAt.localeCompare(b.job.createdAt))
-        .slice(0, campaignJobs.length - MAX_JOBS_PER_CAMPAIGN)
-        .forEach((r) => this.jobs.delete(r.job.id));
+      const evictable = campaignJobs
+        .filter((r) => r.job.status === 'failed' || r.job.status === 'succeeded' || r.job.status === 'cancelled')
+        .sort((a, b) => a.job.createdAt.localeCompare(b.job.createdAt));
+      const toEvict = evictable.slice(0, campaignJobs.length - MAX_JOBS_PER_CAMPAIGN);
+      for (const r of toEvict) {
+        this.jobs.delete(r.job.id);
+      }
     }
   }
 

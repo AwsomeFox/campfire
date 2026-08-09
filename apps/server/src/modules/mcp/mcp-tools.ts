@@ -4846,16 +4846,20 @@ export class McpToolsService {
       'refine_ai_portrait',
       'player: refine an existing AI portrait job (issue #1321) — tweak the prompt/count (or reuse a chosen preview\'s ' +
         'seed for continuity) and regenerate a fresh set of candidates. Returns the new job. Like generate_ai_portrait, ' +
-        'nothing is persisted until attach_generated_portrait.',
+        'nothing is persisted until attach_generated_portrait. Pass idempotencyKey to make a retried refine replay the ' +
+        'same job instead of starting a second paid generation (matching REST\'s Idempotency-Key header).',
       {
         campaignId: CampaignIdArg,
         jobId: z.string().min(1).max(80).describe('The job to refine (from generate_ai_portrait)'),
         ...AiPortraitRefineRequest.shape,
+        idempotencyKey: z.string().min(1).max(200).optional().describe(
+          'Optional idempotency key: a retried refine with the same key replays the same job instead of starting a second paid generation.',
+        ),
       },
-      async ({ campaignId, jobId, ...fields }) => {
+      async ({ campaignId, jobId, idempotencyKey, ...fields }) => {
         const refine = AiPortraitRefineRequest.parse(fields);
         const role = await this.access.requireRole(user, campaignId as number, 'player');
-        return this.aiPortrait.refine(campaignId as number, jobId as string, refine, user, role);
+        return this.aiPortrait.refine(campaignId as number, jobId as string, refine, user, role, { idempotencyKey: idempotencyKey as string | undefined });
       },
     );
 
