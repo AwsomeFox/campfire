@@ -6274,7 +6274,7 @@ export class AiDriverService {
       if (tool?.mutating && call.name === 'roll_creature_check') {
         const combatantId = typeof args.combatantId === 'number' ? args.combatantId : null;
         const approval = combatantId != null ? this.findApproval(session, 'list_creature_checks', combatantId) : null;
-        if (!approval) {
+        if (!approval?.creatureCatalogListed) {
           appendUntrustedToolResult(
             messages,
             call,

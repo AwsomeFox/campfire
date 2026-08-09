@@ -227,6 +227,20 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
       .send({ action: 'grant', tool: 'list_creature_checks', entityId: combatantId });
     expect(grant.status).toBe(201);
 
+    // The read approval is not itself permission to make a guessed roll: discovery must
+    // succeed first so the one bounded capability cannot become a write authorization.
+    h.script({
+      text: 'Skipping discovery…',
+      toolCalls: [{ id: 'roll-before-list', name: 'roll_creature_check', arguments: rollArgs }],
+    });
+    const blockedBeforeList = await h.sendMessage(campaignId, { input: 'roll the guessed stealth check' });
+    expect(blockedBeforeList.status).toBe(201);
+    expect(blockedBeforeList.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: true, proposed: false, encounterId }]);
+    const blockedBeforeListResult = toolResultFor(h, 'roll-before-list') ?? '';
+    expect(blockedBeforeListResult).toContain('forbidden_secret_read');
+    expect(blockedBeforeListResult).not.toMatch(/"modifier":\s*6/);
+    expect((await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approvals`).set(dm)).body).toHaveLength(1);
+
     // The same combatant-scoped grant permits exactly one catalog discovery, so the model learns
     // a valid check id before its one allowed private roll.
     h.script(
