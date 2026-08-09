@@ -125,6 +125,7 @@ export default function CampaignAuditPage() {
   const [error, setError] = useState<string | null>(null);
   const [retention, setRetention] = useState<{ days: number | null; autoPrune: boolean } | null>(null);
   const fetchGeneration = useRef(0);
+  const trashRefreshGeneration = useRef(0);
   const highlightId = Number(searchParams.get('entry'));
 
   useEffect(() => {
@@ -138,27 +139,30 @@ export default function CampaignAuditPage() {
     void api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`).then(setMembers).catch(() => setMembers([]));
   }, [cid, isDm]);
 
+  const refreshTrashedTimelineEventIds = useCallback(async () => {
+    const generation = ++trashRefreshGeneration.current;
+    setTrashedTimelineEventIds(null);
+    try {
+      const items = await api.get<TrashedEntity[]>(`${API}/campaigns/${cid}/trash`);
+      if (generation === trashRefreshGeneration.current) {
+        setTrashedTimelineEventIds(new Set(items.filter((item) => item.type === 'timeline_event').map((item) => item.id)));
+      }
+    } catch {
+      if (generation === trashRefreshGeneration.current) setTrashedTimelineEventIds(null);
+    }
+  }, [cid]);
+
   useEffect(() => {
-    let active = true;
     if (!Number.isFinite(cid) || !isDm) {
       setTrashedTimelineEventIds(null);
-      return () => {
-        active = false;
-      };
+      return;
     }
-    setTrashedTimelineEventIds(null);
-    void api
-      .get<TrashedEntity[]>(`${API}/campaigns/${cid}/trash`)
-      .then((items) => {
-        if (active) setTrashedTimelineEventIds(new Set(items.filter((item) => item.type === 'timeline_event').map((item) => item.id)));
-      })
-      .catch(() => {
-        if (active) setTrashedTimelineEventIds(null);
-      });
+    const onFocus = () => void refreshTrashedTimelineEventIds();
+    window.addEventListener('focus', onFocus);
     return () => {
-      active = false;
+      window.removeEventListener('focus', onFocus);
     };
-  }, [cid, isDm]);
+  }, [cid, isDm, refreshTrashedTimelineEventIds]);
 
   const loadPage = useCallback(
     async (activeFilters: AuditFilters, cursor?: string | null, append = false) => {
@@ -176,6 +180,7 @@ export default function CampaignAuditPage() {
           days: days === 'unlimited' ? null : days != null && Number.isFinite(Number(days)) ? Number(days) : null,
           autoPrune: headers.get('X-Audit-Auto-Prune') === '1',
         });
+        void refreshTrashedTimelineEventIds();
         setItems((prev) => (append ? [...prev, ...page.items] : page.items));
         setTotal(page.total);
         setHasMore(page.hasMore);
@@ -191,7 +196,7 @@ export default function CampaignAuditPage() {
         }
       }
     },
-    [cid, t],
+    [cid, refreshTrashedTimelineEventIds, t],
   );
 
   useEffect(() => {

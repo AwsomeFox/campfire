@@ -116,6 +116,14 @@ export default function MembersPage() {
     isDm,
     t('errors.loadFailed'),
   );
+  useEffect(() => {
+    if (!isDm) return;
+    const onFocus = () => trashPanel.retry();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [isDm, trashPanel.retry]);
   const grantsPanel = usePanelData<GuestDmGrant[]>(
     useCallback(() => api.get<GuestDmGrant[]>(`${API}/campaigns/${id}/members/grants`), [id]),
     isDm,
@@ -245,7 +253,7 @@ export default function MembersPage() {
             members={members ?? []}
             campaignId={id}
             trashedTimelineEventIds={
-              trashPanel.data == null
+              trashPanel.data == null || trashPanel.loading || trashPanel.error != null
                 ? null
                 : new Set(trashPanel.data.filter((item) => item.type === 'timeline_event').map((item) => item.id))
             }
