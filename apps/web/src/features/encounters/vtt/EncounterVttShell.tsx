@@ -71,6 +71,16 @@ type Props = {
    * generate controls makes the ones near the bottom unclickable however far you scroll.
    */
   mapStacked?: boolean;
+  /**
+   * Names WHICH surface the panel is currently showing, beyond the route.
+   *
+   * The panel remembers a scroll offset per tab, and those offsets are only meaningful
+   * while the content under them is the same. A route change invalidates them, but so
+   * does content changing under an unchanged route — a fight ending prepends its
+   * aftermath to Party without moving the pathname. Pass anything that changes exactly
+   * when the panel's contents are re-composed; it is compared, never parsed.
+   */
+  contentKey?: string;
   /** Extra classes for the root (print hooks live here). */
   className?: string;
   /** Spread onto the root — RunSessionPage passes its entity-target props. */
@@ -214,6 +224,7 @@ export function EncounterVttShell({
   attentionKey = null,
   children,
   mapStacked = false,
+  contentKey,
   className,
   rootProps,
 }: Props) {
@@ -268,17 +279,24 @@ export function EncounterVttShell({
   // below never ran and the new roster inherited the old offset. Keyed on the pathname,
   // which is exactly "which encounter is on screen"; declared before the restore so a
   // navigation clears first and the restore then finds nothing, i.e. the top.
-  const panelPathRef = useRef(pathname);
+  // Two things invalidate them, and the pathname only catches one. The other is the
+  // surface CHANGING UNDER the same route: when a fight ends, an aftermath summary is
+  // prepended to Party while the pathname never moves, so a DM already sitting on Party
+  // stays at their old offset with the new summary above the fold, and a player coming
+  // back from Turn has that offset restored for them. The caller names that transition
+  // through `contentKey`.
+  const panelSurfaceKey = `${pathname}\u0000${contentKey ?? ''}`;
+  const panelSurfaceRef = useRef(panelSurfaceKey);
   useLayoutEffect(() => {
-    if (panelPathRef.current === pathname) return;
-    panelPathRef.current = pathname;
+    if (panelSurfaceRef.current === panelSurfaceKey) return;
+    panelSurfaceRef.current = panelSurfaceKey;
     panelScrollRef.current.clear();
     restoredTabRef.current = null;
-    // The live offset has to go too, not only the remembered ones: when both encounters
-    // open on the same tab `activeTabId` never changes, so the restore below does not run
-    // and the scroller simply kept the previous fight's position.
+    // The live offset has to go too, not only the remembered ones: when the tab does not
+    // change either — the same encounter ending, or two fights that both open on Party —
+    // the restore below never runs and the scroller simply kept its old position.
     if (panelBodyRef.current) panelBodyRef.current.scrollTop = 0;
-  }, [pathname]);
+  }, [panelSurfaceKey]);
 
   useLayoutEffect(() => {
     const body = panelBodyRef.current;

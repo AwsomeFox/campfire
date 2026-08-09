@@ -578,6 +578,45 @@ test.describe('encounter cockpit across navigations', () => {
     }
   });
 
+  test('panel scroll resets when the fight ends under an unchanged route', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      // A roster big enough that Party is STILL scrollable once combat is over. With the
+      // seed's handful of combatants the ended panel collapses shorter than the viewport
+      // and the browser clamps the offset to zero on its own — the test would pass
+      // against an unfixed build for a reason that has nothing to do with the fix.
+      const bulk = await page.request.post(`/api/v1/encounters/${fixture.encounterId}/combatants`, {
+        data: { kind: 'monster', name: 'Aftermath bulk', hpMax: 10, count: 20 },
+      });
+      expect(bulk.ok(), `add combatants: ${await bulk.text()}`).toBe(true);
+
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+      await openCockpitTab(page, 'party');
+
+      const body = page.locator('.cf-vtt-panel-body');
+      await body.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      const deep = await body.evaluate((el) => el.scrollTop);
+      test.skip(deep < 40, 'panel body is not scrollable at this viewport');
+
+      // Ending prepends the aftermath summary to Party. The pathname never moves and the
+      // tab does not change, so nothing invalidated the offset and the new summary landed
+      // above the fold on a panel the DM was already reading.
+      const ended = await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`);
+      expect(ended.ok(), `end encounter: ${await ended.text()}`).toBe(true);
+
+      await expect(async () => {
+        expect(await body.evaluate((el) => el.scrollTop)).toBe(0);
+      }).toPass({ timeout: 15_000 });
+    } finally {
+      await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+
   test('the dice tray follows its toggle in tab order', async ({ page }) => {
     const { campaignId, encounterId } = seed();
     try {

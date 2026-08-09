@@ -4366,6 +4366,9 @@ export default function RunSessionPage() {
       panelOpen={panelOpen}
       onPanelOpenChange={setPanelOpen}
       attentionKey={attentionKey}
+      // Ending a fight re-composes the panel under an unchanged route — the aftermath
+      // summary lands on top of Party — so the remembered offsets stop meaning anything.
+      contentKey={`${eid}:${encounterRunning ? 'running' : encounter.status}`}
       panelSlot={
         <>
           {/* Transient, high-priority prompts. Deliberately outside the tab switch: an
