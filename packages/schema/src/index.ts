@@ -11406,26 +11406,6 @@ export const CombatantReorderRequest = z.object({
 export type CombatantReorderRequest = z.infer<typeof CombatantReorderRequest>;
 
 /**
- * Response for the reorder endpoint above (issue #2116). The moved combatant, plus the
- * encounter's `turnVersion` AS OF the same transaction that performed the move — the
- * freshest possible read, since the write path already holds the row. A reorder never
- * bumps `turnVersion` itself (only a turn advance does), so echoing it here is not "the
- * new value produced by this write" but "the true current value this write observed",
- * closing the gap a caller would otherwise have to wait out via a GET/refetch.
- *
- * Exists because gating a second drag on `reorderCombatant.isPending` alone (see
- * `handleReorderDrop` in RunSessionPage.tsx) clears the moment the POST resolves — before
- * the follow-up refetch lands — so a drag issued in that window used to CAS against
- * whatever `turnVersion` the client had cached before this response existed, which could
- * already be stale if the turn advanced concurrently. Seeding the client's cache straight
- * from this field, instead of waiting on the refetch, closes that window at the source.
- */
-export const CombatantReorderResult = Combatant.extend({
-  turnVersion: z.number().int().nonnegative(),
-});
-export type CombatantReorderResult = z.infer<typeof CombatantReorderResult>;
-
-/**
  * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
  * When the sheet advanced after /end, the DM must choose a resync direction before
  * reopening — never silently overwrite intervening healing/rest.

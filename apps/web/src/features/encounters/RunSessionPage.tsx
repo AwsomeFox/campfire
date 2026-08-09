@@ -4,7 +4,7 @@ import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay, type CombatantRowProps } from './combat/CombatantRow';
 import { combatantPatchUrl } from './combat/combatantPatchUrl';
 import { useCombatantDragReorder } from './combat/useCombatantDragReorder';
-import { afterCombatantIdForMoveDown, afterCombatantIdForMoveUp, reorderMenuTargets } from './combatantReorder';
+import { afterCombatantIdForMoveDown, afterCombatantIdForMoveUp, isAwaitingReorderResync, reorderMenuTargets } from './combatantReorder';
 import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
@@ -20,7 +20,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, CombatantReorderResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, hasCriticalHitsForAdapter, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { rulesetCapabilitiesForSelection } from '../../lib/rules';
@@ -2504,6 +2504,21 @@ export default function RunSessionPage() {
   });
 
   /**
+   * Issue #2116 — see `isAwaitingReorderResync`'s doc comment in `combatantReorder.ts` for
+   * the full defect and why this is not gated on `encounterQuery.isFetching`. Armed (in
+   * `reorderCombatant`'s `onSettled` below) with the `dataUpdatedAt` baseline as of the
+   * moment a reorder settles; cleared here the moment a STRICTLY newer read lands — whether
+   * that is the refetch this reorder's own invalidate kicked off, or another one (SSE, the
+   * periodic poll) that happens to land first.
+   */
+  const awaitingReorderResyncRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!isAwaitingReorderResync(awaitingReorderResyncRef.current, encounterQuery.dataUpdatedAt)) {
+      awaitingReorderResyncRef.current = null;
+    }
+  }, [encounterQuery.dataUpdatedAt]);
+
+  /**
    * Manual initiative reorder (issue #1923) — drag (InitiativeStrip + roster) and the
    * accessible fallback menu both funnel through this one mutation. `expectedTurnVersion`
    * is passed explicitly at call time (not resolved from an outer closure) so a caller
@@ -2512,36 +2527,22 @@ export default function RunSessionPage() {
    * A 409 (or any other failure) still refetches via `onSettled` below, so the roster
    * always re-renders server-authoritative order — the "refetch" half of "409 → refetch +
    * toast"; `reportError` below is the toast half.
-   *
-   * Issue #2116: `handleReorderDrop`'s in-flight gate below reads `reorderCombatant.isPending`,
-   * which clears the instant this mutation's POST resolves — before `onSettled`'s
-   * `invalidateEncounter` refetch has round-tripped. A second drag issued in that window
-   * used to CAS against whatever `turnVersion` was still sitting in the query cache from
-   * BEFORE this response existed, which could already be stale if the turn advanced
-   * concurrently, 409ing a drag that had every right to succeed. The response now carries
-   * `turnVersion` as observed by the server's own write (`CombatantReorderResult`) — the
-   * freshest read available, no refetch needed — so it's seeded into the cache here,
-   * synchronously, closing the window at its source rather than widening the gate (which
-   * `encounterQuery.isFetching` would do, incorrectly — see the guard's own comment).
-   * `Math.max` guards against a concurrent turn-advance response landing first over the
-   * network and this older read regressing it backward.
    */
   const reorderCombatant = useMutation({
     mutationFn: ({ combatantId, afterCombatantId, expectedTurnVersion }: { combatantId: number; afterCombatantId: number | 'top'; expectedTurnVersion: number }) =>
-      api.post<CombatantReorderResult>(`${API}/encounters/${eid}/combatants/${combatantId}/reorder`, { afterCombatantId, expectedTurnVersion }),
+      api.post<Combatant>(`${API}/encounters/${eid}/combatants/${combatantId}/reorder`, { afterCombatantId, expectedTurnVersion }),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
     },
     onSuccess: (updated) => {
       announce(t('encounters.reorder.announcement', 'Moved {{name}} in the initiative order.', { name: updated.name }));
-      queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
-        current ? { ...current, turnVersion: Math.max(current.turnVersion, updated.turnVersion) } : current,
-      );
     },
     onError: reportError,
     onSettled: (_data, _err, { combatantId }) => {
       markCombatantPending(combatantId, false);
+      // See `awaitingReorderResyncRef`'s own doc comment above for why this is armed here.
+      awaitingReorderResyncRef.current = encounterQuery.dataUpdatedAt;
       invalidateEncounter(queryClient, eid);
     },
   });
@@ -3336,6 +3337,9 @@ export default function RunSessionPage() {
     activeEncounterIdRef.current = eid;
     setPendingCombatantUndo(null);
     setPendingCombatantIds(new Set());
+    // A stale baseline from the PREVIOUS encounter must not gate a drag on this one — see
+    // `awaitingReorderResyncRef`'s own doc comment.
+    awaitingReorderResyncRef.current = null;
   }, [eid]);
 
   // Battle map (issue #39): attach/clear the encounter's map image (DM only). Also the seam
@@ -3904,16 +3908,24 @@ export default function RunSessionPage() {
       // Gating the two entry points separately is what let them drift; gating the single
       // write path they share makes them agree by construction.
       // `reorderCombatant.isPending`, NOT `pendingCombatantIds.has(combatantId)`. A reorder is a
-      // TOPOLOGY-wide write: it renumbers the whole roster and bumps `turnVersion`. The per-row
-      // pending set is the right granularity for an HP tick, which is why `buildReorderControls`
-      // uses it — but copying that shape here meant dragging combatant B while A's reorder was
-      // still in flight sailed past the guard, and both requests carried the SAME rendered
-      // `turnVersion`, so one came back TURN_VERSION_MISMATCH instead of being prevented.
-      if (reconcileBlocks || riskyBlocked || reorderCombatant.isPending) return;
+      // TOPOLOGY-wide write: it renumbers the whole roster. The per-row pending set is the right
+      // granularity for an HP tick, which is why `buildReorderControls` uses it — but copying
+      // that shape here meant dragging combatant B while A's reorder was still in flight sailed
+      // past the guard, and both requests carried the SAME rendered `turnVersion`, so one came
+      // back TURN_VERSION_MISMATCH instead of being prevented.
+      //
+      // `awaitingReorderResyncRef.current !== null` (issue #2116, see that ref's own doc
+      // comment): `reorderCombatant.isPending` alone still leaves a window open between this
+      // mutation's `onSettled` and its triggered refetch actually landing, during which a drag
+      // would be authored against the pre-reorder roster.
+      if (reconcileBlocks || riskyBlocked || reorderCombatant.isPending || awaitingReorderResyncRef.current !== null) return;
       reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion });
     },
     // `reorderCombatant` covers `.isPending` — the mutation object is a new reference on each
-    // status change, so the closure re-forms when pending flips.
+    // status change, so the closure re-forms when pending flips. `awaitingReorderResyncRef`
+    // is a ref (stable identity, read at call time) and deliberately omitted — including it
+    // would not change when the closure re-forms and ESLint's exhaustive-deps does not flag
+    // ref reads.
     [encounter, reorderCombatant, reconcileBlocks, riskyBlocked],
   );
   const rosterDragReorder = useCombatantDragReorder({

@@ -50,3 +50,25 @@ export function afterCombatantIdForDrop(
 export function reorderMenuTargets<T extends { id: number }>(orderedCombatants: readonly T[], combatantId: number): T[] {
   return orderedCombatants.filter((c) => c.id !== combatantId);
 }
+
+/**
+ * Issue #2116. `handleReorderDrop`'s in-flight gate refuses while `reorderCombatant.isPending`
+ * — but that flips false the instant the reorder POST resolves, before the follow-up refetch
+ * it triggers has actually landed. A drag issued in that window would be authored against
+ * whatever roster is STILL in the query cache — the pre-reorder topology — and the server's
+ * `expectedTurnVersion` CAS would still accept it (a reorder never bumps `turnVersion`, only a
+ * turn advance does), so the request would silently apply relative to an order the DM can no
+ * longer see: a wrong-result path, not the recoverable-409 the CAS otherwise guards.
+ *
+ * `armedAt` is the `encounterQuery.dataUpdatedAt` baseline captured the moment a reorder
+ * settled (`null` when no reorder has settled since the last resync, or since this last
+ * cleared). This returns `true` — "still waiting, keep the gate closed" — until a read
+ * STRICTLY NEWER than that baseline lands (`dataUpdatedAt > armedAt`); the read that merely
+ * triggered the refetch does not itself count. Deliberately independent of
+ * `encounterQuery.isFetching`, which the issue rules out as the gating signal: `isFetching`
+ * is true for ANY refetch (SSE invalidations, an unrelated write's own `onSettled`), so
+ * gating on it would silently swallow a completed drag whenever one happened to overlap.
+ */
+export function isAwaitingReorderResync(armedAt: number | null, dataUpdatedAt: number): boolean {
+  return armedAt !== null && dataUpdatedAt <= armedAt;
+}

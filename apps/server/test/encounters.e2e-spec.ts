@@ -10711,48 +10711,6 @@ describe('encounters — issue #1923: manual initiative reorder (e2e)', () => {
     expect(fresh.status).toBe(201);
   });
 
-  /**
-   * Issue #2116. `RunSessionPage.tsx`'s in-flight gate (`reorderCombatant.isPending`) opens
-   * the instant this endpoint's POST resolves — before the client's own follow-up refetch
-   * lands. A second drag issued in that window used to CAS against whatever `turnVersion`
-   * was still cached from BEFORE this response existed, which can already be stale if the
-   * turn advanced concurrently (simulated below via `next-turn`). The fix is server-side:
-   * the reorder response now echoes `turnVersion` as observed by this write itself
-   * (`CombatantReorderResult`), not a bare `Combatant` — fresh enough to seed the client's
-   * cache and use for an immediate next drag with no intervening GET, closing the window at
-   * its source rather than widening `handleReorderDrop`'s gate.
-   */
-  it('the reorder response echoes turnVersion observed by its own write — usable for an immediate second drag with no refetch in between', async () => {
-    const { encounterId, rogueId, clericId, turnVersion } = await seedFight();
-    const server = ctx.app.getHttpServer();
-
-    // A turn advance lands concurrently with the window between a client's last read and
-    // its next reorder — exactly the race the issue describes.
-    const advanced = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
-    expect(advanced.status).toBe(201);
-    const advancedTurnVersion = advanced.body.turnVersion as number;
-    expect(advancedTurnVersion).not.toBe(turnVersion);
-
-    const first = await request(server)
-      .post(`/api/v1/encounters/${encounterId}/combatants/${rogueId}/reorder`)
-      .set(dm)
-      .send({ afterCombatantId: clericId, expectedTurnVersion: advancedTurnVersion });
-    expect(first.status).toBe(201);
-    // The core regression pin: a bare Combatant response has no `turnVersion` field at all
-    // (`undefined`), so this assertion alone fails if the response shape is reverted.
-    expect(first.body.turnVersion).toBe(advancedTurnVersion);
-
-    // Using ONLY the first response's own turnVersion — no extra GET/refetch — for an
-    // immediate second drag succeeds. A reverted fix would still 409 (or the CAS would
-    // silently no-op on `undefined`) instead of legitimately confirming the fresh value.
-    const second = await request(server)
-      .post(`/api/v1/encounters/${encounterId}/combatants/${clericId}/reorder`)
-      .set(dm)
-      .send({ afterCombatantId: 'top', expectedTurnVersion: first.body.turnVersion });
-    expect(second.status).toBe(201);
-    expect(second.body.turnVersion).toBe(advancedTurnVersion);
-  });
-
   it('reordering a delaying combatant clears delaying and logs it', async () => {
     const { encounterId, fighterId, rogueId, turnVersion } = await seedFight();
     const server = ctx.app.getHttpServer();

@@ -90,8 +90,12 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
     expect(fnEnd).toBeGreaterThan(fnStart);
     const fn = source.slice(fnStart, fnEnd);
 
-    // An early return on all three, ahead of the mutate call — not merely a mention.
-    const guardIndex = fn.search(/if \(reconcileBlocks \|\| riskyBlocked \|\| reorderCombatant\.isPending\) return;/);
+    // An early return on all four, ahead of the mutate call — not merely a mention.
+    // Issue #2116 added the fourth condition (`awaitingReorderResyncRef`, see the
+    // describe block below); the other three predate it (issue #2074).
+    const guardIndex = fn.search(
+      /if \(reconcileBlocks \|\| riskyBlocked \|\| reorderCombatant\.isPending \|\| awaitingReorderResyncRef\.current !== null\) return;/,
+    );
     expect(guardIndex).toBeGreaterThan(-1);
     expect(guardIndex).toBeLessThan(fn.indexOf('reorderCombatant.mutate('));
 
@@ -119,20 +123,17 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
   });
 });
 
-test.describe('reorderCombatant seeds turnVersion from its own response (issue #2116)', () => {
+test.describe('awaitingReorderResyncRef wiring in RunSessionPage.tsx (issue #2116)', () => {
   /**
-   * `handleReorderDrop`'s guard (pinned above) opens the instant `reorderCombatant.isPending`
-   * clears — the moment the POST resolves, before `onSettled`'s `invalidateEncounter` refetch
-   * has round-tripped. A drag completed in that window used to CAS against whatever
-   * `turnVersion` was still sitting in the query cache from before this response existed,
-   * which could already be stale, 409ing a drag that had every right to succeed. Rather than
-   * widen the gate to `encounterQuery.isFetching` (ruled out above — see the reorder-drop test
-   * suite in this file), the fix closes the window at its source: the reorder response now
-   * carries the encounter's `turnVersion` as observed by the write itself
-   * (`CombatantReorderResult`, `@campfire/schema`), and `onSuccess` seeds the query cache from
-   * it synchronously, ahead of `onSettled`'s refetch.
+   * Source-scan coverage that `isAwaitingReorderResync` (behaviorally unit-tested against
+   * real values in `combatant-reorder.unit.spec.ts`, alongside this module's other pure
+   * reorder helpers) is actually wired into the mutation lifecycle here: armed at settle
+   * time, consulted (and cleared) as `encounterQuery.dataUpdatedAt` changes, and consulted
+   * by the guard (pinned in the describe block above). `RunSessionPage.tsx` is too heavily
+   * wired to mount — see this file's top comment — so the call sites are pinned by source
+   * rather than by rendering.
    */
-  test("onSuccess writes the response's turnVersion into the encounter query cache before onSettled's refetch", () => {
+  test('reorderCombatant.onSettled arms the ref with the dataUpdatedAt baseline, before invalidateEncounter', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     const fnStart = source.indexOf('const reorderCombatant = useMutation({');
     expect(fnStart).toBeGreaterThan(-1);
@@ -140,21 +141,31 @@ test.describe('reorderCombatant seeds turnVersion from its own response (issue #
     expect(fnEnd).toBeGreaterThan(fnStart);
     const fn = source.slice(fnStart, fnEnd);
 
-    // A bare Combatant carries no turnVersion to seed from — the mutation must type its
-    // response as the extended result the fix introduces.
-    expect(fn).toContain('api.post<CombatantReorderResult>');
+    // A bare Combatant response — issue #2116's review found the previous CombatantReorderResult
+    // response-shape change could never carry a fresher turnVersion than the CAS the caller
+    // already sent, so it was reverted; there is no server-side response-shape change here.
+    expect(fn).toContain('api.post<Combatant>(');
 
-    const onSuccessStart = fn.indexOf('onSuccess:');
     const onSettledStart = fn.indexOf('onSettled:');
-    expect(onSuccessStart).toBeGreaterThan(-1);
-    expect(onSettledStart).toBeGreaterThan(onSuccessStart);
-    const onSuccessBlock = fn.slice(onSuccessStart, onSettledStart);
+    expect(onSettledStart).toBeGreaterThan(-1);
+    const onSettledBlock = fn.slice(onSettledStart);
+    const armIndex = onSettledBlock.indexOf('awaitingReorderResyncRef.current = encounterQuery.dataUpdatedAt;');
+    const invalidateIndex = onSettledBlock.indexOf('invalidateEncounter(queryClient, eid);');
+    expect(armIndex).toBeGreaterThan(-1);
+    expect(invalidateIndex).toBeGreaterThan(-1);
+    expect(armIndex).toBeLessThan(invalidateIndex);
+  });
 
-    expect(onSuccessBlock).toContain('queryClient.setQueryData');
-    expect(onSuccessBlock).toContain('queryKeys.encounter(eid)');
-    // A monotonic max, not a blind overwrite — a concurrent turn-advance response landing
-    // first over the network must not be regressed backward by this older read.
-    expect(onSuccessBlock).toMatch(/turnVersion:\s*Math\.max\(current\.turnVersion,\s*updated\.turnVersion\)/);
+  test('a useEffect on encounterQuery.dataUpdatedAt clears the ref via isAwaitingReorderResync', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const refStart = source.indexOf('const awaitingReorderResyncRef = useRef<number | null>(null);');
+    expect(refStart).toBeGreaterThan(-1);
+    const effectEnd = source.indexOf('\n  }, [encounterQuery.dataUpdatedAt]);', refStart);
+    expect(effectEnd).toBeGreaterThan(refStart);
+    const block = source.slice(refStart, effectEnd);
+
+    expect(block).toMatch(/if \(!isAwaitingReorderResync\(awaitingReorderResyncRef\.current, encounterQuery\.dataUpdatedAt\)\) \{/);
+    expect(block).toContain('awaitingReorderResyncRef.current = null;');
   });
 });
 
