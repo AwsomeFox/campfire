@@ -38,6 +38,7 @@ import {
   applyOptimisticHpDelta,
   replayOptimisticHpDeltas,
   rollbackOptimisticHpTargets,
+  withOptimisticHpCombatants,
   type OptimisticHpDelta,
 } from './optimisticHp';
 import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
@@ -2721,17 +2722,21 @@ export default function RunSessionPage() {
     if (queue.encounterId !== eid) return;
     const { base } = queue;
     if (!base) return;
-    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
-      ...base,
-      combatants: replayOptimisticHpDeltas(
-        base.combatants,
-        [...queue.operations.values()]
-          .sort((a, b) => a.sequence - b.sequence)
-          .map(({ combatantId, delta }) => ({ combatantId, delta })),
-        ruleSystem,
-        campaign?.customMechanicsProfile,
-      ),
-    });
+    const combatants = replayOptimisticHpDeltas(
+      base.combatants,
+      [...queue.operations.values()]
+        .sort((a, b) => a.sequence - b.sequence)
+        .map(({ combatantId, delta }) => ({ combatantId, delta })),
+      ruleSystem,
+      campaign?.customMechanicsProfile,
+    );
+    // Build off the freshest cached encounter, not the captured `base` — `base`
+    // can be older than a snapshot another writer (next-turn seeding, an
+    // encounter PATCH response) has since installed, and this replay has no
+    // business reverting `turnVersion`/`currentCombatantId` to recompute HP.
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+      current ? withOptimisticHpCombatants(current, combatants) : current,
+    );
   }, [eid, queryClient, ruleSystem, campaign?.customMechanicsProfile]);
   const hpDelta = useKeyedMutation({
     mutationKey: HP_MUTATION_KEY,
@@ -2912,10 +2917,12 @@ export default function RunSessionPage() {
               if (targets.has(combatant.id)) snapshot.combatants.set(combatant.id, combatant);
             }
           }
-          queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
-            ...previous,
-            combatants: optimisticCombatants,
-          });
+          // Build off the freshest cached encounter, not the captured `previous` —
+          // see `withOptimisticHpCombatants`. Apply-to-all is an HP mechanism and
+          // has no business reverting encounter-level turn fields either.
+          queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+            current ? withOptimisticHpCombatants(current, optimisticCombatants) : current,
+          );
         }
         const feedbackOperation = { targets, stale: new Map<number, HpFeedbackSnapshot>(), emitted: new Set<number>() };
         bulkHpFeedbackOperationsRef.current.set(bulkOperationId, feedbackOperation);

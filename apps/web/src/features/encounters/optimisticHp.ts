@@ -105,6 +105,23 @@ export function rollbackOptimisticHpTargets(
   };
 }
 
+/**
+ * Installs a recomputed `combatants` array into the freshest cached encounter,
+ * leaving every other field untouched. HP mechanisms (the optimistic replay and
+ * the bulk "Apply to all" write) have no business setting `turnVersion`,
+ * `currentCombatantId`, or any other encounter-level turn field — building the
+ * next cache value off `current` rather than a captured, possibly stale base
+ * means a newer snapshot installed by another writer (next-turn seeding, an
+ * encounter PATCH response, an SSE-driven refetch) cannot be reverted by an HP
+ * write that lands after it.
+ */
+export function withOptimisticHpCombatants(
+  current: EncounterWithCombatants,
+  combatants: Combatant[],
+): EncounterWithCombatants {
+  return { ...current, combatants };
+}
+
 /** Rebuilds the optimistic encounter cache from a committed base plus pending writes. */
 export function replayOptimisticHpDeltas(
   encounter: Combatant[],
