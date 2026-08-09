@@ -180,10 +180,13 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
   // A VAPID rotation invalidates old subscriptions. Remove the stale endpoint
   // now so the next explicit enable action can subscribe with the new key.
   if (subscription && !usesApplicationServerKey(subscription, status.publicKey)) {
+    const unsubscribed = await subscription.unsubscribe();
+    if (!unsubscribed) {
+      throw new Error('The browser could not remove its stale push subscription. Try again.');
+    }
     await api.delete(`${API}/notifications/push-subscribe`, {
       json: { endpoint: subscription.endpoint },
     });
-    await subscription.unsubscribe();
     forgetEndpoint();
     subscription = null;
   }

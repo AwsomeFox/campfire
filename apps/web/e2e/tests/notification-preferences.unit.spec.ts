@@ -55,6 +55,29 @@ test.describe('Notification preferences card (#789)', () => {
     expect(BROWSER_PUSH_SOURCE).toContain("Notification.permission === 'denied'");
   });
 
+  test('does not delete the server binding until local unsubscribe succeeds', () => {
+    const disableSource = BROWSER_PUSH_SOURCE.slice(
+      BROWSER_PUSH_SOURCE.indexOf('export async function disableBrowserPush'),
+    );
+    expect(disableSource).toContain('if (!unsubscribed)');
+    expect(disableSource.indexOf('subscription.unsubscribe()')).toBeLessThan(
+      disableSource.indexOf("api.delete(`${API}/notifications/push-subscribe`"),
+    );
+  });
+
+  test('does not clear a rotated-key subscription when local unsubscribe fails', () => {
+    const rotationSource = BROWSER_PUSH_SOURCE.slice(
+      BROWSER_PUSH_SOURCE.indexOf('// A VAPID rotation'),
+      BROWSER_PUSH_SOURCE.indexOf('// Permission can be revoked outside Campfire'),
+    );
+    expect(rotationSource).toContain('if (!unsubscribed)');
+    expect(rotationSource.indexOf('subscription.unsubscribe()')).toBeLessThan(
+      rotationSource.indexOf("api.delete(`${API}/notifications/push-subscribe`"),
+    );
+    expect(rotationSource.indexOf('if (!unsubscribed)')).toBeLessThan(
+      rotationSource.indexOf('forgetEndpoint()'),
+    );
+  });
   test('service worker displays pushes and opens/focuses their Campfire link', () => {
     expect(PUSH_WORKER_SOURCE).toContain("addEventListener('push'");
     expect(PUSH_WORKER_SOURCE).toContain("addEventListener('notificationclick'");
