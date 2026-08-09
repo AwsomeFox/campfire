@@ -61,7 +61,15 @@ function visibleBottomPx(element: Element): number {
  * then accounted for without this hook having to know about it.
  */
 export function measureImmersiveChromeInsetPx(): number {
-  let bottom = 0;
+  // Baseline: the top of Layout's `<main>`, which is exactly "everything Layout renders
+  // above the routed page" — its sticky mobile header, the offline/stale/archived banners,
+  // all of it. Both chrome selectors above are OPTIONAL (`SafetyHoldBar` renders nothing
+  // while its read is unresolved or failed, and the prompts are absent with an empty
+  // queue), so anchoring only on them measured 0 in a state an offline cached encounter
+  // can sit in indefinitely — and the cockpit then started at the viewport top and covered
+  // that chrome with the page scroll-locked.
+  const main = document.getElementById(MAIN_CONTENT_ID);
+  let bottom = main instanceof HTMLElement ? Math.max(0, main.getBoundingClientRect().top) : 0;
   for (const selector of CHROME_SELECTORS) {
     const element = document.querySelector(selector);
     if (element) bottom = Math.max(bottom, visibleBottomPx(element));
@@ -75,7 +83,10 @@ export function measureImmersiveChromeInsetPx(): number {
  * or anything else added there later — is accounted for without naming it.
  */
 export function measureImmersiveChromeCapPx(): number {
-  let top = Number.POSITIVE_INFINITY;
+  const main = document.getElementById(MAIN_CONTENT_ID);
+  // Same anchor as the inset: `<main>`'s top is what Layout has already used up, whether
+  // or not either optional chrome element happens to be mounted right now.
+  let top = main instanceof HTMLElement ? main.getBoundingClientRect().top : Number.POSITIVE_INFINITY;
   for (const selector of CHROME_SELECTORS) {
     const element = document.querySelector(selector);
     if (!(element instanceof HTMLElement)) continue;

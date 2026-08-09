@@ -172,3 +172,48 @@ test.describe('encounter cockpit — gated tool hints', () => {
     }
   });
 });
+
+test.describe('encounter cockpit — short canvas', () => {
+  test('grid & fog stays usable when the canvas is barely taller than its own reserve', async ({ page }) => {
+    await restoreSeedEncounter(page);
+    const { campaignId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Short canvas drill', hidden: false },
+    });
+    expect(created.ok()).toBe(true);
+    const id = ((await created.json()) as { id: number }).id;
+    const up = await page.request.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+      multipart: { kind: 'map', file: { name: 'short.png', mimeType: 'image/png', buffer: PNG } },
+    });
+    expect(up.ok()).toBe(true);
+    const mapAttachmentId = ((await up.json()) as { id: number }).id;
+    await page.request.patch(`/api/v1/encounters/${id}`, { data: { mapAttachmentId, gridSize: 8, gridScale: 5 } });
+
+    try {
+      // Wide but very short: the canvas ends up near the grid's 96px floor, where the
+      // overlays' `100% - 190px` reserve goes negative and used to clamp to nothing.
+      await page.setViewportSize({ width: 1280, height: 400 });
+      await page.goto(`/c/${campaignId}/encounters/${id}`);
+      await expect(page.getByTestId('battle-map-surface')).toBeVisible();
+
+      await page.getByRole('button', { name: /Grid & fog/i }).click();
+
+      const usable = await page.evaluate(() => {
+        const aside = document.querySelector('.cf-vtt-map-aside') as HTMLElement | null;
+        const canvas = document.querySelector('.cf-vtt-main') as HTMLElement | null;
+        if (!aside || !canvas) return null;
+        return {
+          height: Math.round(aside.getBoundingClientRect().height),
+          canvasHeight: Math.round(canvas.getBoundingClientRect().height),
+        };
+      });
+      expect(usable, 'the map aside must exist').not.toBeNull();
+      // Something rather than nothing, and never taller than the canvas holding it.
+      expect(usable!.height).toBeGreaterThan(40);
+      expect(usable!.height).toBeLessThanOrEqual(usable!.canvasHeight);
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
+});

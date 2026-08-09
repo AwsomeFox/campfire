@@ -3446,8 +3446,10 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
   width: min(320px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-4)));
   /* Bounded by the CANVAS, not the viewport: the tray is absolutely positioned inside a
      canvas that clips overflow, so a `60vh` tray in a shorter canvas had its top — and
-     its primary dice controls — cut off with no way to scroll them back. */
-  max-height: min(520px, calc(100% - 200px));
+     its primary dice controls — cut off with no way to scroll them back. Floored for the
+     same reason as the map asides: `100% - 200px` collapses to nothing on a short canvas,
+     and an empty tray is worse than a scrolling one. */
+  max-height: min(calc(100% - 16px), max(96px, min(520px, calc(100% - 200px))));
   overflow-y: auto;
   overscroll-behavior: contain;
   border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
@@ -3611,7 +3613,11 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
      the tray comes later in the DOM at the same z-index it swallowed pointer input over
      the aside's Grid & fog panel. Below 900px they stop floating altogether. */
   width: min(340px, calc((100% - var(--cf-vtt-rail-width) - 4 * var(--space-3)) / 2));
-  max-height: calc(100% - 190px);
+  /* Never zero. `100% - 190px` alone goes NEGATIVE — and so clamps to nothing — whenever
+     the canvas is short (the body is only guaranteed 96px), which made Grid & fog open
+     onto an empty box despite scrolling fine. Floor it at something usable, then cap at
+     the canvas so the floor cannot itself overflow a canvas smaller than it. */
+  max-height: min(calc(100% - 16px), max(80px, calc(100% - 190px)));
   overflow-y: auto;
   overscroll-behavior: contain;
   display: flex;
