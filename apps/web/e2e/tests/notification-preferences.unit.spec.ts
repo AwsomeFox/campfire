@@ -13,10 +13,12 @@ import { resolve } from 'node:path';
 const CARD = resolve(__dirname, '../../src/features/preferences/NotificationPreferencesCard.tsx');
 const PAGE = resolve(__dirname, '../../src/features/preferences/PreferencesPage.tsx');
 const BROWSER_PUSH = resolve(__dirname, '../../src/lib/browserPush.ts');
+const AUTH_PROVIDER = resolve(__dirname, '../../src/app/AuthProvider.tsx');
 const PUSH_WORKER = resolve(__dirname, '../../public/sw-push.js');
 const CARD_SOURCE = readFileSync(CARD, 'utf8');
 const PAGE_SOURCE = readFileSync(PAGE, 'utf8');
 const BROWSER_PUSH_SOURCE = readFileSync(BROWSER_PUSH, 'utf8');
+const AUTH_PROVIDER_SOURCE = readFileSync(AUTH_PROVIDER, 'utf8');
 const PUSH_WORKER_SOURCE = readFileSync(PUSH_WORKER, 'utf8');
 
 test.describe('Notification preferences card (#789)', () => {
@@ -59,6 +61,14 @@ test.describe('Notification preferences card (#789)', () => {
     expect(PUSH_WORKER_SOURCE).toContain('showNotification');
     expect(PUSH_WORKER_SOURCE).toContain('client.navigate(target)');
     expect(PUSH_WORKER_SOURCE).toContain('openWindow(target)');
+  });
+
+  test('detaches the browser capability on logout and global authentication loss', () => {
+    expect(BROWSER_PUSH_SOURCE).toContain('detachBrowserPushLocally');
+    expect(BROWSER_PUSH_SOURCE).toContain('pendingLocalDetach');
+    expect(AUTH_PROVIDER_SOURCE).toContain('browserPushEndpointForLogout');
+    expect(AUTH_PROVIDER_SOURCE).toContain("api.post(`${API}/auth/logout`, pushEndpoint ? { pushEndpoint } : {})");
+    expect(AUTH_PROVIDER_SOURCE.match(/detachBrowserPushLocally\(\)/g)?.length).toBeGreaterThanOrEqual(4);
   });
 
   test('routes status through the shared Announcer, not a new aria-live region', () => {

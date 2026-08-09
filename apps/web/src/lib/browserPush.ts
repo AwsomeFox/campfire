@@ -15,6 +15,7 @@ export type BrowserPushUiState =
 
 const SERVICE_WORKER_READY_TIMEOUT_MS = 10_000;
 const PUSH_ENDPOINT_STORAGE_KEY = 'cf.browserPushEndpoint';
+let pendingLocalDetach: Promise<void> = Promise.resolve();
 
 export function browserPushSupported(): boolean {
   return (
@@ -52,6 +53,11 @@ function rememberedEndpoint(): string | null {
   }
 }
 
+/** Endpoint included in logout so the server can detach it before revoking the session. */
+export function browserPushEndpointForLogout(): string | undefined {
+  return rememberedEndpoint() ?? undefined;
+}
+
 function forgetEndpoint(): void {
   try {
     localStorage.removeItem(PUSH_ENDPOINT_STORAGE_KEY);
@@ -71,6 +77,27 @@ function usesApplicationServerKey(subscription: PushSubscription, publicKey: str
 
 async function currentRegistration(): Promise<ServiceWorkerRegistration | undefined> {
   return (await navigator.serviceWorker.getRegistration()) ?? undefined;
+}
+
+/**
+ * Stop this browser capability without requiring a live session. AuthProvider
+ * calls this for explicit, cross-tab, expired-session, and account-switch paths.
+ * Serializing detaches prevents a fast re-login from re-binding a subscription
+ * while the prior account's local unsubscribe is still in flight.
+ */
+export function detachBrowserPushLocally(): Promise<void> {
+  forgetEndpoint();
+  if (!browserPushSupported()) return pendingLocalDetach;
+  pendingLocalDetach = pendingLocalDetach.then(async () => {
+    try {
+      const registration = await currentRegistration();
+      const subscription = (await registration?.pushManager.getSubscription()) ?? null;
+      await subscription?.unsubscribe();
+    } catch {
+      // Auth transitions must complete even if the browser push implementation fails.
+    }
+  });
+  return pendingLocalDetach;
 }
 
 async function readyRegistration(): Promise<ServiceWorkerRegistration> {
@@ -103,6 +130,7 @@ function subscriptionBody(subscription: PushSubscription): BrowserPushSubscripti
 }
 
 export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
+  await pendingLocalDetach;
   if (!browserPushSupported()) return { kind: 'unsupported' };
   const status = await api.get<BrowserPushStatus>(`${API}/notifications/push-status`);
   if (!status.configured || !status.publicKey) return { kind: 'unconfigured' };
@@ -150,6 +178,7 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
 }
 
 export async function enableBrowserPush(publicKey: string): Promise<void> {
+  await pendingLocalDetach;
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') {
     throw new Error(permission === 'denied' ? 'Browser notifications are blocked.' : 'Browser notification permission was not granted.');

@@ -179,8 +179,9 @@ function defaultQuietHours(): QuietHoursType {
 /**
  * In-app notification store. Deliberately transport-agnostic: rows are written
  * synchronously by domain services and read by polling clients. Browser Web
- * Push (#1323) observes only rows that this service has materialized after the
- * same preference gate; future live transports can do the same.
+ * Push (#1323) mirrors rows only after they have been materialized. It never
+ * re-evaluates preferences or quiet hours, including for the narrow cases where
+ * another domain service writes its notification row atomically.
  *
  * Emission is best-effort by design: callers `await` it inside the same request
  * but a notification failure must never fail the triggering write, so both

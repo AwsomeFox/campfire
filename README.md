@@ -213,7 +213,7 @@ the Campfire installation and keep using that pair; rotating it invalidates
 existing browser subscriptions:
 
 ```bash
-npm exec --workspace apps/server web-push -- generate-vapid-keys --json
+npm exec --workspace apps/server -- web-push generate-vapid-keys --json
 ```
 
 Set the printed values as `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`, set

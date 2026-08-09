@@ -20,7 +20,7 @@ import type {
 import { resolvePublicBase } from '../../common/security-config';
 import type { RequestUser } from '../../common/user.types';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { pushSubscriptions } from '../../db/schema';
+import { pushSubscriptions, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 
 export const WEB_PUSH_TRANSPORT = Symbol('WEB_PUSH_TRANSPORT');
@@ -202,9 +202,16 @@ export class PushNotificationsService {
     if (this.publicKey === null || deliveries.length === 0) return;
     const userIds = [...new Set(deliveries.map((delivery) => delivery.userId))];
     const subscriptions = await this.db
-      .select()
+      .select({
+        id: pushSubscriptions.id,
+        userId: pushSubscriptions.userId,
+        endpoint: pushSubscriptions.endpoint,
+        p256dh: pushSubscriptions.p256dh,
+        auth: pushSubscriptions.auth,
+      })
       .from(pushSubscriptions)
-      .where(inArray(pushSubscriptions.userId, userIds));
+      .innerJoin(users, eq(pushSubscriptions.userId, users.id))
+      .where(and(inArray(pushSubscriptions.userId, userIds), eq(users.disabled, false)));
     if (subscriptions.length === 0) return;
 
     const byUser = new Map<number, typeof subscriptions>();

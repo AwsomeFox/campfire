@@ -9,6 +9,7 @@ import { closeTestApp, createTestAppNoDevAuth, type TestAppContext } from './tes
 
 describe('browser push notifications (issue #1323, e2e)', () => {
   let ctx: TestAppContext;
+  let admin: ReturnType<typeof request.agent>;
   let player: ReturnType<typeof request.agent>;
   let playerId: number;
   let campaignId: number;
@@ -48,7 +49,7 @@ describe('browser push notifications (issue #1323, e2e)', () => {
 
     ctx = await createTestAppNoDevAuth({ overrides: [{ token: WEB_PUSH_TRANSPORT, useValue: transport }] });
     const server = ctx.app.getHttpServer();
-    const admin = request.agent(server);
+    admin = request.agent(server);
     await admin.post('/api/v1/auth/setup').send({ username: 'push-admin', password: 'admin-password-1' });
     const createdPlayer = await admin
       .post('/api/v1/users')
@@ -145,6 +146,19 @@ describe('browser push notifications (issue #1323, e2e)', () => {
     await waitForCalls(3);
   });
 
+  it('does not deliver to an account after an administrator disables it', async () => {
+    expect((await admin.patch(`/api/v1/users/${playerId}`).send({ disabled: true })).status).toBe(200);
+
+    await ctx.app.get(NotificationsService).notifyUser(playerId, campaignId, null, {
+      type: 'note_shared',
+      title: 'Disabled accounts must not receive this',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(sendNotification).toHaveBeenCalledTimes(3);
+
+    expect((await admin.patch(`/api/v1/users/${playerId}`).send({ disabled: false })).status).toBe(200);
+  });
+
   it('prunes a subscription rejected as gone by the browser push service', async () => {
     sendNotification.mockRejectedValueOnce(Object.assign(new Error('gone'), { statusCode: 410 }));
     const notifications = ctx.app.get(NotificationsService);
@@ -176,6 +190,27 @@ describe('browser push notifications (issue #1323, e2e)', () => {
     await ctx.app.get(NotificationsService).notifyUser(playerId, campaignId, null, {
       type: 'note_shared',
       title: 'No browser delivery',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(sendNotification).toHaveBeenCalledTimes(4);
+  });
+
+  it('atomically detaches the supplied browser endpoint during logout', async () => {
+    expect((await player.post('/api/v1/notifications/push-subscribe').send(subscription)).status).toBe(201);
+    expect(
+      (await player.post('/api/v1/auth/logout').send({ pushEndpoint: subscription.endpoint })).status,
+    ).toBe(204);
+
+    player = request.agent(ctx.app.getHttpServer());
+    expect(
+      (await player.post('/api/v1/auth/login').send({
+        username: 'push-player',
+        password: 'player-password-1',
+      })).status,
+    ).toBe(201);
+    await ctx.app.get(NotificationsService).notifyUser(playerId, campaignId, null, {
+      type: 'note_shared',
+      title: 'The signed-out browser must stay detached',
     });
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(sendNotification).toHaveBeenCalledTimes(4);

@@ -11,7 +11,14 @@ import type { z } from 'zod';
 import { SetupRequest, LoginRequest, SignupRequest } from '@campfire/schema';
 import type { GuestDmGrantScope, Me } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { users, userSessions, campaignMembers, campaigns, campaignGuestDmGrants } from '../../db/schema';
+import {
+  users,
+  userSessions,
+  campaignMembers,
+  campaigns,
+  campaignGuestDmGrants,
+  pushSubscriptions,
+} from '../../db/schema';
 import { randomBytes } from 'node:crypto';
 import { nowIso } from '../../common/time';
 import { hashPassword, verifyPassword, generateSessionToken, hashSessionToken } from '../../common/crypto';
@@ -276,8 +283,28 @@ export class AuthService implements OnApplicationBootstrap {
     return { token, me };
   }
 
-  async logout(token: string): Promise<void> {
-    await this.db.delete(userSessions).where(eq(userSessions.tokenHash, hashSessionToken(token)));
+  async logout(token: string, pushEndpoint?: string): Promise<void> {
+    const tokenHash = hashSessionToken(token);
+    this.db.transaction((tx) => {
+      const session = tx
+        .select({ id: userSessions.id, userId: userSessions.userId })
+        .from(userSessions)
+        .where(eq(userSessions.tokenHash, tokenHash))
+        .limit(1)
+        .get();
+      if (!session) return;
+      if (pushEndpoint) {
+        tx.delete(pushSubscriptions)
+          .where(
+            and(
+              eq(pushSubscriptions.userId, session.userId),
+              eq(pushSubscriptions.endpoint, pushEndpoint),
+            ),
+          )
+          .run();
+      }
+      tx.delete(userSessions).where(eq(userSessions.id, session.id)).run();
+    });
   }
 
   private parseGrantScopes(raw: string): GuestDmGrantScope[] {

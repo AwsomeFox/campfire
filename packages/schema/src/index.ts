@@ -3317,9 +3317,9 @@ export type CommentReplyPage = z.infer<typeof CommentReplyPage>;
 // (quest_updated), a member submits a proposal to the DM (proposal_submitted) or
 // the DM approves/rejects it (proposal_resolved), or a member posts to the DM
 // scribe inbox (inbox_submitted, issue #832). Read via
-// GET /notifications (own rows only). Browser Web Push (#1323) observes rows
-// only after the same preference gate materializes them; the store remains
-// transport-agnostic and authoritative.
+// GET /notifications (own rows only). Browser Web Push (#1323) mirrors rows
+// only after they have been materialized in this store; it does not re-evaluate
+// preferences or quiet hours. The store remains transport-agnostic and authoritative.
 export const NotificationType = z.enum([
   'recap_posted',
   'recap_share_enabled',
@@ -7067,6 +7067,11 @@ export const SetupRequest = z.object({ username: User.shape.username, password: 
 // UNauthenticated path would let a caller force the server to run scrypt (CPU-heavy)
 // against an arbitrarily large input before verifyPassword() even gets to reject it.
 export const LoginRequest = z.object({ username: z.string().min(1), password: z.string().min(1).max(200) });
+/** Optional browser capability detached atomically with the current cookie session. */
+export const LogoutRequest = z.object({
+  pushEndpoint: BrowserPushSubscription.shape.endpoint.optional(),
+});
+export type LogoutRequest = z.infer<typeof LogoutRequest>;
 export const UserCreate = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional(), serverRole: ServerRole.optional() });
 // Self-service signup (POST /auth/signup) — same shape as SetupRequest, but the created
 // account is always serverRole 'user' (never admin) and the route is gated on allowSignup.

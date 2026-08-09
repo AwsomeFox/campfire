@@ -21,6 +21,7 @@ import {
   AuthTokenRequestDto,
   PasswordResetRequestCreateDto,
   PasswordResetConfirmDto,
+  LogoutRequestDto,
 } from './auth.dto';
 import { PreferencesUpdateDto } from '../users/users.dto';
 import { SESSION_COOKIE_NAME, VERSION } from './auth.constants';
@@ -190,12 +191,16 @@ export class AuthController {
   @Post('logout')
   @HttpCode(204)
   @ApiCookieAuth('campfire_session')
-  @ApiOperation({ summary: 'Log out', description: 'Clears the current session cookie and revokes the underlying session server-side.' })
+  @ApiOperation({ summary: 'Log out', description: 'Clears the current session cookie, revokes the underlying session, and detaches the supplied browser-push endpoint.' })
   @ApiResponse({ status: 204, description: 'Logged out (idempotent even with no active session).' })
-  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response): Promise<void> {
+  async logout(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Body() body?: LogoutRequestDto,
+  ): Promise<void> {
     const token = req.cookies?.[SESSION_COOKIE_NAME] as string | undefined;
     if (token) {
-      await this.auth.logout(token);
+      await this.auth.logout(token, body?.pushEndpoint);
     }
     res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
   }
