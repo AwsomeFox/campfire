@@ -5010,7 +5010,8 @@ export class McpToolsService {
         'combatant\'s initiative between its new neighbors and clears the now-stale initiativeBreakdown. Clears ' +
         'turnState.delaying on the moved combatant if it was set. expectedTurnVersion (from get_encounter/get_turn) is ' +
         'a compare-and-set against the encounter\'s current turnVersion — 409s if the turn advanced since it was read. ' +
-        'Refused (403) if the moved combatant currently holds the turn.',
+        'Refused (403) if the moved combatant currently holds the turn. Returns the moved combatant plus turnVersion ' +
+        'as observed by this write (issue #2116) — fresher than a prior get_encounter/get_turn read.',
       { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantReorderRequest.shape },
       async ({ encounterId, combatantId, ...fields }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);

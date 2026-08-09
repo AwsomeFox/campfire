@@ -20,7 +20,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, CombatantReorderResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, hasCriticalHitsForAdapter, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { rulesetCapabilitiesForSelection } from '../../lib/rules';
@@ -2409,16 +2409,32 @@ export default function RunSessionPage() {
    * A 409 (or any other failure) still refetches via `onSettled` below, so the roster
    * always re-renders server-authoritative order — the "refetch" half of "409 → refetch +
    * toast"; `reportError` below is the toast half.
+   *
+   * Issue #2116: `handleReorderDrop`'s in-flight gate below reads `reorderCombatant.isPending`,
+   * which clears the instant this mutation's POST resolves — before `onSettled`'s
+   * `invalidateEncounter` refetch has round-tripped. A second drag issued in that window
+   * used to CAS against whatever `turnVersion` was still sitting in the query cache from
+   * BEFORE this response existed, which could already be stale if the turn advanced
+   * concurrently, 409ing a drag that had every right to succeed. The response now carries
+   * `turnVersion` as observed by the server's own write (`CombatantReorderResult`) — the
+   * freshest read available, no refetch needed — so it's seeded into the cache here,
+   * synchronously, closing the window at its source rather than widening the gate (which
+   * `encounterQuery.isFetching` would do, incorrectly — see the guard's own comment).
+   * `Math.max` guards against a concurrent turn-advance response landing first over the
+   * network and this older read regressing it backward.
    */
   const reorderCombatant = useMutation({
     mutationFn: ({ combatantId, afterCombatantId, expectedTurnVersion }: { combatantId: number; afterCombatantId: number | 'top'; expectedTurnVersion: number }) =>
-      api.post<Combatant>(`${API}/encounters/${eid}/combatants/${combatantId}/reorder`, { afterCombatantId, expectedTurnVersion }),
+      api.post<CombatantReorderResult>(`${API}/encounters/${eid}/combatants/${combatantId}/reorder`, { afterCombatantId, expectedTurnVersion }),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
     },
     onSuccess: (updated) => {
       announce(t('encounters.reorder.announcement', 'Moved {{name}} in the initiative order.', { name: updated.name }));
+      queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+        current ? { ...current, turnVersion: Math.max(current.turnVersion, updated.turnVersion) } : current,
+      );
     },
     onError: reportError,
     onSettled: (_data, _err, { combatantId }) => {

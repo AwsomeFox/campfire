@@ -10,7 +10,7 @@ import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateU
   parseRechargeRange,
   effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantReorderResult, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -7180,6 +7180,12 @@ export class EncountersService {
    * around the acting combatant itself has no sensible meaning. A combatant that was
    * delaying has that marker cleared and logged in the same transaction: the drag itself
    * IS Delay's mechanical resolution ("the fighter acts after the wizard now").
+   *
+   * Returns `CombatantReorderResult` (issue #2116) — the moved combatant plus the
+   * `turnVersion` this transaction observed, not just a bare `Combatant`. See that type's
+   * doc comment in @campfire/schema for why: it lets the caller seed its own turnVersion
+   * cache from a value fresher than its last read, closing the window between this write
+   * resolving and a caller's own refetch landing.
    */
   async reorderCombatant(
     encounterId: number,
@@ -7187,7 +7193,7 @@ export class EncountersService {
     input: CombatantReorderRequest,
     user: RequestUser,
     role: Role,
-  ): Promise<Combatant> {
+  ): Promise<CombatantReorderResult> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
     // Adapter lookup reads outside the transaction (rollCombatantInitiative precedent) —
@@ -7196,12 +7202,18 @@ export class EncountersService {
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
 
     let committed!: Combatant;
+    // Issue #2116: the `turnVersion` this transaction actually observed, echoed back so
+    // the caller can seed its cache with a value fresher than its last GET/refetch — see
+    // `CombatantReorderResult`'s doc comment for why this closes the in-flight-gate window
+    // without widening the gate itself.
+    let observedTurnVersion!: number;
 
     this.db.transaction((tx) => {
       const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
       if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
       this.assertMutable(fresh);
       this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      observedTurnVersion = fresh.turnVersion;
       if (input.expectedTurnVersion !== undefined && fresh.turnVersion !== input.expectedTurnVersion) {
         throw new ConflictException({
           code: 'TURN_VERSION_MISMATCH',
@@ -7432,7 +7444,7 @@ export class EncountersService {
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
-    return committed;
+    return { ...committed, turnVersion: observedTurnVersion };
   }
 
   async start(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {

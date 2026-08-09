@@ -811,7 +811,7 @@ export class EncountersController {
       'Delay\'s only mechanical resolution. `expectedTurnVersion` is a compare-and-set against the encounter\'s current ' +
       '`turnVersion`.',
   })
-  @ApiResponse({ status: 201, description: 'Updated combatant.' })
+  @ApiResponse({ status: 201, description: 'Updated combatant, plus the encounter\'s `turnVersion` as observed by this write (issue #2116) — fresher than a client\'s last GET/refetch, so a caller can seed its own cache from it instead of waiting on one.' })
   @ApiResponse({ status: 400, description: 'afterCombatantId references the moved combatant itself.' })
   @ApiResponse({ status: 403, description: 'Not the DM, or the moved combatant is the current actor.' })
   @ApiResponse({ status: 404, description: 'Encounter or afterCombatantId combatant not found.' })
