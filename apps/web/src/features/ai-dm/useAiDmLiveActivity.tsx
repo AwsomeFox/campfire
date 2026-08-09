@@ -220,6 +220,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           ) {
             clearTranscript(viewerId, campaignId);
             clearTranscript(viewerId, campaignId, 'activity');
+            // Invalidate every overlapping history read before an older authorized response
+            // can repopulate this projection after access has been revoked.
+            ++transcriptRequestGenerationRef.current;
             lastSeqRef.current = 0;
             setPreHydrationLiveEntryIds(new Set());
             setTranscriptGeneration((generation) => generation + 1);

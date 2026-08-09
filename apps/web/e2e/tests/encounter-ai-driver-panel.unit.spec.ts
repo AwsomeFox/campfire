@@ -69,6 +69,7 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/err\.status === 403 \|\| err\.status === 404/);
     expect(hook).toMatch(/clearTranscript\(viewerId, campaignId\);/);
     expect(hook).toMatch(/clearTranscript\(viewerId, campaignId, 'activity'\);/);
+    expect(hook).toMatch(/\+\+transcriptRequestGenerationRef\.current/);
     expect(hook).toMatch(/\},\s*effectiveRole,/);
   });
 
