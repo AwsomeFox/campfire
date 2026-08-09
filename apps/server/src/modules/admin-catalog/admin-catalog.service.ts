@@ -1903,6 +1903,8 @@ function planChange(
       // another admin installing the pack between preview and Apply flipped a shown
       // skip into an unshown rule-system change.
       if (!input.rulePack) return `rule pack '${next}' is not installed on this server`;
+      // Captured by `apply` inside the transaction, read by `afterCommit` once it lands.
+      let clearedCharacterIds: number[] = [];
       return {
         summary: { field: 'ruleSystem', before: row.ruleSystem || 'unset', after: next },
         apply: (tx) => {
@@ -1913,7 +1915,18 @@ function planChange(
             // is stored against the campaign's CURRENT adapter — so every writer of
             // `campaigns.ruleSystem` has to invalidate them, not just CampaignsService. Same
             // transaction as the write, so the two can never disagree.
-            clearDerivedEquippedActionsIn(tx, id, ts);
+            clearedCharacterIds = clearDerivedEquippedActionsIn(tx, id, ts);
+          }
+        },
+        // Review (chatgpt-codex-connector P2): clearing the actions is only half of it. This
+        // campaign may be live, and `RunSessionPage` invalidates its cached action lists off
+        // `character.updated` — without it, open encounter and party views keep offering
+        // actions from the previous rule system until a poll or a reload. Emitted after the
+        // commit, like every other event on this path, so nothing is announced that the
+        // transaction might still roll back.
+        afterCommit: () => {
+          for (const characterId of clearedCharacterIds) {
+            ctx.events.emit({ type: 'character.updated', campaignId: id, characterId, userId: actor.actor });
           }
         },
       };
