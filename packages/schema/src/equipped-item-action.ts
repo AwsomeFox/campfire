@@ -437,6 +437,16 @@ function specAgreesWithFields(edited: CharacterAction): boolean {
 
   const specParts = spec.outcomes?.hit?.damage ?? [];
   const fieldPart = damageLineToPart(edited.damage);
+
+  // A display line stating rollable typed damage beside a spec that rolls NO damage at all
+  // (chatgpt-codex-connector P1): adding "1d6 bludgeoning" to a previously non-damaging attack
+  // and round-tripping its spec showed the new damage while the apply path rolled none.
+  //
+  // Checked across EVERY outcome branch, not just `hit`: a save-based action puts its damage
+  // under `failure` (see `expandRawStatblockAction`), and demanding a `hit` branch would call
+  // that a contradiction and rebuild away a legitimately authored spec.
+  const specRollsDamageAnywhere = Object.values(spec.outcomes ?? {}).some((branch) => (branch?.damage?.length ?? 0) > 0);
+  if (fieldPart && !specRollsDamageAnywhere) return false;
   // One part is what a round trip carries and what one display line can describe; more than
   // that is authored structure the line was never able to express, so there is nothing to
   // contradict.

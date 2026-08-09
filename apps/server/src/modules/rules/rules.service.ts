@@ -2544,6 +2544,11 @@ export class RulesService implements OnModuleInit {
     // ruleEntryId path) would otherwise be left with a dangling rule_entry_id once the
     // entries are gone — null it out in the SAME transaction as the entries/pack delete,
     // so there's never a window where the FK-shaped reference points at nothing.
+    // Issue #2097 review (chatgpt-codex-connector P2): the entries this uninstall DELETES are
+    // the live source for any equipped item that holds a `ruleEntryId` with no accepted
+    // snapshot, so its granted action disappears on the next read. Captured inside the
+    // transaction, announced after it commits.
+    let deletedEntryIds: number[] = [];
     this.db.transaction((tx) => {
       const usage = tx
         .select({ count: sql<number>`count(*)` })
@@ -2569,7 +2574,11 @@ export class RulesService implements OnModuleInit {
       }
       tx.delete(ruleEntries).where(eq(ruleEntries.packId, id)).run();
       tx.delete(rulePacks).where(eq(rulePacks.id, id)).run();
+      deletedEntryIds = entryIds;
     });
+    // After the commit, and it still resolves: `announceEntryChange` looks the ids up in
+    // `inventory_items`, which keeps its (uncascaded) `rule_entry_id` once the entry is gone.
+    this.announceEntryChange(deletedEntryIds, String(user.id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: auditActorRole(user),

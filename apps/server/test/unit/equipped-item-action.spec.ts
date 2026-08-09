@@ -482,6 +482,37 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
     expect(rebuildEditedActionSpec(abilityDerived, 'dnd5e', DND5E_DAMAGE_TYPES).spec).toBeUndefined();
   });
 
+  it('rebuilds when the display ADDS damage a spec that rolls none never had', () => {
+    // Review (chatgpt-codex-connector P1): the consistency check only compared a spec that
+    // already declared damage. Adding "1d6 bludgeoning" to a previously non-damaging attack
+    // and round-tripping its spec therefore displayed the new damage while the apply path
+    // rolled none — the same lie, reached from zero parts instead of one.
+    const noDamage = CharacterAction.parse({
+      ...derived,
+      damage: '1d6 bludgeoning',
+      spec: { ...derived.spec, outcomes: { hit: { damage: [] } } },
+    });
+    const out = rebuildEditedActionSpec(noDamage, 'dnd5e', DND5E_DAMAGE_TYPES);
+    expect(out.spec?.outcomes?.hit?.damage?.[0]).toMatchObject({ formula: '1d6', flat: 0, type: 'bludgeoning' });
+  });
+
+  it('trusts a save-based spec whose damage lives under `failure`, not `hit`', () => {
+    // The reason the check above looks across EVERY outcome branch: `expandRawStatblockAction`
+    // puts a save action's damage under `failure`, so demanding a `hit` branch would call a
+    // legitimately authored spec a contradiction and rebuild it away.
+    const saveAction = CharacterAction.parse({
+      ...derived,
+      toHit: '',
+      damage: '2d6 fire',
+      spec: {
+        ...derived.spec,
+        attack: { bonus: '', ability: 'DEX', proficient: true, vs: 'ac' },
+        outcomes: { failure: { damage: [{ formula: '2d6', flat: 0, type: 'fire' }] } },
+      },
+    });
+    expect(rebuildEditedActionSpec(saveAction, 'dnd5e', DND5E_DAMAGE_TYPES)).toEqual(saveAction);
+  });
+
   it('still trusts a single-part spec with no fixed bonus beside an unreadable line', () => {
     // A save-based action legitimately carries one damage part beside a line no attack parser
     // can read; rebuilding would throw its structure away. Only the WEAPON shape — a spec

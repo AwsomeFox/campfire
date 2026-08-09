@@ -3,7 +3,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns, characters, inventoryItems, ruleEntries } from '../src/db/schema';
+import { campaigns, characters, inventoryItems, rulePacks, ruleEntries } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
 import { InventoryService } from '../src/modules/inventory/inventory.service';
 import { charactersDerivingFromEntries } from '../src/modules/inventory/derived-action-invalidation';
@@ -707,6 +707,69 @@ describe('derived equipped-item actions (issue #2097)', () => {
 
     const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
     expect(after.body.equippedAction.damage).toContain('2d10+3');
+  });
+
+  it('uninstalling the source pack announces that its actions are gone', async () => {
+    const server = ctx.app.getHttpServer();
+    // Review (chatgpt-codex-connector P2): uninstall deletes every one of the pack's entries.
+    // For an equipped item holding a `ruleEntryId` with no accepted snapshot, that live entry
+    // IS its action source, so the action disappears on the next read.
+    //
+    // The pack is built directly rather than installed from the fake server: a second install
+    // from the same source REFRESHES the fixture pack in place (same slug) instead of creating
+    // one, so a fake-server route silently had nothing to uninstall — the first version of
+    // this test passed while exercising none of the path.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    const pack = db
+      .insert(rulePacks)
+      .values({ slug: 'e2e-uninstall-pack', name: 'E2E Uninstall Pack', installedAt: ts, entryCount: 1 })
+      .returning()
+      .get();
+    const entry = db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'e2e-uninstall-blade',
+        name: 'Uninstall Blade',
+        type: 'item',
+        summary: 'A weapon whose pack is uninstalled.',
+        dataJson: JSON.stringify({ itemKind: 'weapon', damageDice: '1d6', damageType: 'Slashing', properties: [] }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning()
+      .get();
+
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: entry.id, ownerType: 'character', characterId, duplicateMode: 'separate' });
+    expect(acquired.status).toBe(201);
+    const itemId = acquired.body.id as number;
+    // No accepted snapshot: the live entry is the source, which is the only shape a deletion
+    // can reach.
+    db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'uninstall-slot' });
+    expect(equipped.body.equippedAction.damage).toContain('1d6+3');
+
+    const events = ctx.app.get(CampaignEventsService);
+    const emitted: Array<{ type: string; characterId?: number }> = [];
+    const spy = jest.spyOn(events, 'emit').mockImplementation((event) => {
+      emitted.push(event as { type: string; characterId?: number });
+    });
+    try {
+      const removed = await request(server).delete(`/api/v1/rules/packs/${pack.id}`).set(dm);
+      expect([200, 204]).toContain(removed.status);
+      expect(emitted.some((e) => e.type === 'character.updated' && e.characterId === characterId)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // ...and the action really is gone, which is why the tick was owed.
+    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(after.status).toBe(200);
+    expect(after.body.equippedAction).toBeNull();
   });
 
   it('a DELETED entry still resolves its holders, which is what lets a removal announce', async () => {
