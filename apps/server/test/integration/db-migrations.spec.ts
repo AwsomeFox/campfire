@@ -2930,7 +2930,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0180 purges legacy context-less character-status rows for encounters that are now hidden (#2112)', () => {
+  it('0180 purges every legacy context-less encounter-status row before a later hide can expose it (#2112)', () => {
     expect(MIGRATION_NAMES).toContain('0180_hidden_status_notification_authorization_2112');
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);
@@ -2938,7 +2938,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       const ts = '2026-08-09T00:00:00.000Z';
       seeded.sqlite.prepare('INSERT INTO campaigns (name, created_at, updated_at) VALUES (?, ?, ?)').run('Legacy hidden status', ts, ts);
       seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 1, ?, ?)').run('Now hidden', ts, ts);
-      seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 0, ?, ?)').run('Still visible', ts, ts);
+      seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 0, ?, ?)').run('Visible at upgrade', ts, ts);
       const notification = seeded.sqlite.prepare(
         `INSERT INTO notifications (user_id, campaign_id, type, title, entity_type, entity_id, created_at)
          VALUES (1, 1, 'character_downed', ?, 'encounter', ?, ?)`,
@@ -2948,9 +2948,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
          VALUES (1, 1, 'character_downed', ?, 'encounter', ?, 'digest', ?)`,
       );
       notification.run('hidden legacy row', 1, ts);
-      notification.run('visible legacy row', 2, ts);
+      notification.run('visible legacy downed row', 2, ts);
       deferred.run('hidden legacy queue', 1, ts);
-      deferred.run('visible legacy queue', 2, ts);
+      deferred.run('visible legacy downed queue', 2, ts);
       seeded.sqlite.prepare("DELETE FROM __migrations WHERE name = '0180_hidden_status_notification_authorization_2112'").run();
     } finally {
       seeded.sqlite.close();
@@ -2958,8 +2958,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
 
     const upgraded = openDatabase(dataDir);
     try {
-      expect(upgraded.sqlite.prepare('SELECT title FROM notifications ORDER BY id').all()).toEqual([{ title: 'visible legacy row' }]);
-      expect(upgraded.sqlite.prepare('SELECT title FROM notification_digest_queue ORDER BY id').all()).toEqual([{ title: 'visible legacy queue' }]);
+      // A row visible during migration still lacks the owner/audience required
+      // for a safe later recheck, so changing the encounter to hidden cannot
+      // revive a durable disclosure after the upgrade.
+      upgraded.sqlite.prepare('UPDATE encounters SET hidden = 1 WHERE id = 2').run();
+      expect(upgraded.sqlite.prepare('SELECT title FROM notifications ORDER BY id').all()).toEqual([]);
+      expect(upgraded.sqlite.prepare('SELECT title FROM notification_digest_queue ORDER BY id').all()).toEqual([]);
     } finally {
       upgraded.sqlite.close();
     }

@@ -5109,11 +5109,11 @@ function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): v
  * Issue #2112: hidden encounter status rows must carry private authority context
  * so bell reads and digest delivery can fail closed after a DM demotion, removal,
  * ownership transfer, or visibility change. Legacy rows cannot supply the affected
- * character/audience safely, so context-less status rows that still point at an
- * encounter which is now hidden are removed during the upgrade.
+ * character/audience safely, so every context-less `character_downed`
+ * encounter-status row is removed during the upgrade rather than surviving a
+ * later visibility change.
  */
 function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Database): void {
-  const encountersTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'encounters'").get();
   for (const table of ['notifications', 'notification_digest_queue']) {
     const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
     if (!exists) continue;
@@ -5121,16 +5121,13 @@ function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Datab
     if (!columns.some((column) => column.name === 'hidden_status_context')) {
       sqlite.exec(`ALTER TABLE ${table} ADD COLUMN hidden_status_context TEXT`);
     }
-    // Reduced test/import fixtures may carry notification tables without the
-    // encounter module. The additive column migration remains safe there;
-    // only the legacy cleanup needs the encounter table to identify secrecy.
-    if (!encountersTable) continue;
+    // Legacy rows lack the affected character and audience. Retaining even a
+    // currently-visible row would let a subsequent hide bypass revalidation.
     sqlite.prepare(
       `DELETE FROM ${table}
        WHERE hidden_status_context IS NULL
          AND type = 'character_downed'
-         AND entity_type = 'encounter'
-         AND entity_id IN (SELECT id FROM encounters WHERE hidden = 1)`,
+         AND entity_type = 'encounter'`,
     ).run();
   }
 }
