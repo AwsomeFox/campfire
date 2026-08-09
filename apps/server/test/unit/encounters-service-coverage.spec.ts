@@ -437,7 +437,7 @@ describe('EncountersService unit coverage tests', () => {
       );
 
       expect(playerResult.name).toBe('Redacted');
-      expect(spy).toHaveBeenCalledWith(enc.id, 'player', undefined, true);
+      expect(spy).toHaveBeenCalledWith(enc.id, 'player', dmActor.id, true);
     } finally {
       spy.mockRestore();
     }
