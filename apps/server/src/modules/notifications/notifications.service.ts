@@ -141,6 +141,7 @@ const BLOCK_FILTER_EXEMPT_TYPES = new Set<string>([
   ...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
   'safety_hold',
 ]);
+const DEFERRED_MEMBERSHIP_EXEMPT_TYPES = new Set<string>(MEMBERSHIP_NOTIFICATION_TYPES);
 
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
@@ -984,12 +985,42 @@ export class NotificationsService implements OnApplicationBootstrap {
    * deferred excerpt can become either an in-app row or a browser push. The
    * caller runs this inside the same SQLite transaction as materialization so
    * moderation cannot land between the safety read and the insert.
+=======
+   * Reapply membership plus recipient-facing quarantine/block rules immediately
+   * before a deferred excerpt can become either an in-app row or browser push.
+   * The caller runs this inside the materialization transaction so access or
+   * moderation changes cannot land between these reads and the insert.
+>>>>>>> 56cefc894 (fix: close deferred push access gaps)
    */
-  private deferredSafetySuppressedIdsTx(
+  private deferredSuppressedIdsTx(
     tx: SyncDb,
     rows: Array<typeof notificationDigestQueue.$inferSelect>,
   ): Set<number> {
     const suppressed = new Set<number>();
+    const userIds = [...new Set(rows.map((row) => row.userId))];
+    const campaignIds = [...new Set(rows.map((row) => row.campaignId))];
+    const currentMemberships = tx
+      .select({ userId: campaignMembers.userId, campaignId: campaignMembers.campaignId })
+      .from(campaignMembers)
+      .where(
+        and(
+          inArray(campaignMembers.userId, userIds),
+          inArray(campaignMembers.campaignId, campaignIds),
+        ),
+      )
+      .all();
+    const currentMembershipKeys = new Set(
+      currentMemberships.map((row) => `${row.campaignId}:${row.userId}`),
+    );
+    for (const row of rows) {
+      if (
+        !DEFERRED_MEMBERSHIP_EXEMPT_TYPES.has(row.type) &&
+        !currentMembershipKeys.has(`${row.campaignId}:${row.userId}`)
+      ) {
+        suppressed.add(row.id);
+      }
+    }
+
     const commentIds = [...new Set(rows.flatMap((row) => row.commentId == null ? [] : [row.commentId]))];
     if (commentIds.length > 0) {
       const quarantined = tx
@@ -1079,9 +1110,9 @@ export class NotificationsService implements OnApplicationBootstrap {
         const removedIds: number[] = [];
 
         this.db.transaction((tx) => {
-          const safetySuppressedIds = this.deferredSafetySuppressedIdsTx(tx, candidateRows);
+          const suppressedIds = this.deferredSuppressedIdsTx(tx, candidateRows);
           for (const row of candidateRows) {
-            if (safetySuppressedIds.has(row.id)) {
+            if (suppressedIds.has(row.id)) {
               removedIds.push(row.id);
               continue;
             }
@@ -1129,11 +1160,6 @@ export class NotificationsService implements OnApplicationBootstrap {
             );
             deliveredIds.push(row.id);
           }
-          const heldRows = queued.filter((row) => !candidateRows.some((c) => c.id === row.id));
-          for (const row of heldRows) {
-            if (row.hiddenStatusContext && this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext) === 'deny') {
-              removedIds.push(row.id);
-            }
           }
           if (deliverRows.length > 0) tx.insert(notifications).values(deliverRows).run();
           const consumedIds = [...deliveredIds, ...removedIds];

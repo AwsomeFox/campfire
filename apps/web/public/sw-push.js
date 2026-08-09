@@ -4,6 +4,8 @@
  */
 const PUSH_WORKER_CAPABILITY_REQUEST = 'campfire:push-capability';
 const PUSH_WORKER_CAPABILITY_RESPONSE = 'campfire:push-capable:v1';
+const PUSH_DISPLAY_STATE_CACHE = 'cf-push-display-state-v1';
+const PUSH_DISPLAY_SUPPRESSED_PATH = '__campfire_push_suppressed__';
 
 function fallbackUrl() {
   return self.registration.scope;
@@ -12,9 +14,29 @@ function fallbackUrl() {
 function safeTarget(value) {
   try {
     const target = new URL(typeof value === 'string' ? value : fallbackUrl(), self.location.origin);
-    return target.origin === self.location.origin ? target.href : fallbackUrl();
+    return target.href.startsWith(self.registration.scope) ? target.href : fallbackUrl();
   } catch {
     return fallbackUrl();
+  }
+}
+
+function withinCampfireScope(value) {
+  try {
+    return new URL(value).href.startsWith(self.registration.scope);
+  } catch {
+    return false;
+  }
+}
+
+async function pushDisplaySuppressed() {
+  try {
+    const cache = await self.caches.open(PUSH_DISPLAY_STATE_CACHE);
+    const key = new URL(PUSH_DISPLAY_SUPPRESSED_PATH, self.registration.scope).href;
+    return Boolean(await cache.match(key));
+  } catch {
+    // If the browser cannot read its persisted transition state, do not risk
+    // showing a departed account's campaign excerpt.
+    return true;
   }
 }
 
@@ -39,7 +61,12 @@ self.addEventListener('push', (event) => {
     tag: typeof payload.tag === 'string' ? payload.tag : undefined,
     data: { url: safeTarget(payload.url) },
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    (async () => {
+      if (await pushDisplaySuppressed()) return;
+      await self.registration.showNotification(title, options);
+    })(),
+  );
 });
 
 self.addEventListener('notificationclick', (event) => {
@@ -48,8 +75,10 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil(
     (async () => {
       const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      for (const client of windows) {
-        if (new URL(client.url).origin !== self.location.origin) continue;
+      const campfireWindows = windows.filter((client) => withinCampfireScope(client.url));
+      const exact = campfireWindows.find((client) => client.url === target);
+      if (exact) return exact.focus();
+      for (const client of campfireWindows) {
         if ('navigate' in client && client.url !== target) {
           try {
             await client.navigate(target);

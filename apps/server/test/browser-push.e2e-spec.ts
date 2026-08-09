@@ -1,8 +1,14 @@
 import request from 'supertest';
 import type { SendResult } from 'web-push';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { comments, memberSafetyControls, notificationDigestQueue } from '../src/db/schema';
+import {
+  campaignMembers,
+  comments,
+  memberSafetyControls,
+  notificationDigestQueue,
+  notifications as notificationRows,
+} from '../src/db/schema';
 import { nowIso } from '../src/common/time';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import {
@@ -207,6 +213,46 @@ describe('browser push notifications (issue #1323, e2e)', () => {
     expect(sendNotification).not.toHaveBeenCalled();
     expect(db.select({ id: notificationDigestQueue.id }).from(notificationDigestQueue)
       .where(eq(notificationDigestQueue.commentId, blockedReply)).get()).toBeUndefined();
+  });
+
+  it('drops deferred campaign excerpts after the recipient membership is revoked', async () => {
+    const notifications = ctx.app.get(NotificationsService);
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const title = 'REVOKED MEMBERSHIP PUSH LEAK';
+    await player.put(`/api/v1/notifications/preferences/${campaignId}`).send({
+      categories: { quests: 'digest' },
+      quietHours: { enabled: false },
+    });
+    await notifications.notifyUser(playerId, campaignId, null, {
+      type: 'quest_updated',
+      title,
+      body: 'This campaign excerpt must be discarded.',
+    });
+    expect(db.select({ id: notificationDigestQueue.id }).from(notificationDigestQueue)
+      .where(and(eq(notificationDigestQueue.userId, playerId), eq(notificationDigestQueue.title, title))).get())
+      .toBeDefined();
+
+    const membership = db.select({ id: campaignMembers.id }).from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, playerId))).get();
+    expect(membership).toBeDefined();
+    expect((await admin.delete(`/api/v1/campaigns/${campaignId}/members/${membership!.id}`)).status).toBe(204);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    sendNotification.mockClear();
+
+    expect((await notifications.flushDigests()).delivered).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(sendNotification).not.toHaveBeenCalled();
+    expect(db.select({ id: notificationDigestQueue.id }).from(notificationDigestQueue)
+      .where(and(eq(notificationDigestQueue.userId, playerId), eq(notificationDigestQueue.title, title))).get())
+      .toBeUndefined();
+    expect(db.select({ id: notificationRows.id }).from(notificationRows)
+      .where(and(eq(notificationRows.userId, playerId), eq(notificationRows.title, title))).get())
+      .toBeUndefined();
+
+    expect((await admin.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' })).status)
+      .toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    sendNotification.mockClear();
   });
 
   it('does not deliver to an account after an administrator disables it', async () => {

@@ -99,6 +99,18 @@ test.describe('Notification preferences card (#789)', () => {
     expect(PUSH_WORKER_SOURCE).toContain('openWindow(target)');
   });
 
+  test('reuses only Campfire-scoped windows and prefers the exact push target', () => {
+    const clickSource = PUSH_WORKER_SOURCE.slice(
+      PUSH_WORKER_SOURCE.indexOf("addEventListener('notificationclick'"),
+    );
+    expect(PUSH_WORKER_SOURCE).toContain('target.href.startsWith(self.registration.scope)');
+    expect(clickSource).toContain('withinCampfireScope(client.url)');
+    expect(clickSource).toContain('campfireWindows.find((client) => client.url === target)');
+    expect(clickSource.indexOf('if (exact) return exact.focus()')).toBeLessThan(
+      clickSource.indexOf('for (const client of campfireWindows)'),
+    );
+  });
+
   test('requires the active worker to confirm push capability before subscribing', () => {
     const enableSource = BROWSER_PUSH_SOURCE.slice(
       BROWSER_PUSH_SOURCE.indexOf('export async function enableBrowserPush'),
@@ -150,6 +162,10 @@ test.describe('Notification preferences card (#789)', () => {
     expect(BROWSER_PUSH_SOURCE).toContain("const PUSH_REBIND_BLOCKED_STORAGE_KEY = 'cf.browserPushRebindBlocked'");
     expect(detachSource).toContain('if (!unsubscribed)');
     expect(detachSource.match(/blockAutomaticRebind\(\)/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(detachSource.indexOf('setPushDisplaySuppressed(registration, true)')).toBeLessThan(
+      detachSource.indexOf('subscription.unsubscribe()'),
+    );
+    expect(PUSH_WORKER_SOURCE).toContain('if (await pushDisplaySuppressed()) return');
     expect(inspectSource).toContain('subscription && !rebindBlocked');
     expect(inspectSource).toContain('enabled: subscription !== null && !rebindBlocked');
     expect(enableSource.indexOf('api.post')).toBeLessThan(enableSource.indexOf('allowAutomaticRebind()'));

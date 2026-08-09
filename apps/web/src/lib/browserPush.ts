@@ -19,6 +19,8 @@ const PUSH_WORKER_CAPABILITY_REQUEST = 'campfire:push-capability';
 const PUSH_WORKER_CAPABILITY_RESPONSE = 'campfire:push-capable:v1';
 const PUSH_ENDPOINT_STORAGE_KEY = 'cf.browserPushEndpoint';
 const PUSH_REBIND_BLOCKED_STORAGE_KEY = 'cf.browserPushRebindBlocked';
+const PUSH_DISPLAY_STATE_CACHE = 'cf-push-display-state-v1';
+const PUSH_DISPLAY_SUPPRESSED_PATH = '__campfire_push_suppressed__';
 let pendingLocalDetach: Promise<void> = Promise.resolve();
 let pushEndpointInMemory: string | null = null;
 let pushRebindBlockedInMemory = false;
@@ -113,6 +115,20 @@ async function currentRegistration(): Promise<ServiceWorkerRegistration | undefi
   return (await navigator.serviceWorker.getRegistration()) ?? undefined;
 }
 
+async function setPushDisplaySuppressed(
+  registration: ServiceWorkerRegistration | undefined,
+  suppressed: boolean,
+): Promise<void> {
+  if (!registration || !('caches' in window)) return;
+  const cache = await window.caches.open(PUSH_DISPLAY_STATE_CACHE);
+  const key = new URL(PUSH_DISPLAY_SUPPRESSED_PATH, registration.scope).href;
+  if (suppressed) {
+    await cache.put(key, new Response('1'));
+  } else {
+    await cache.delete(key);
+  }
+}
+
 /**
  * Stop this browser capability without requiring a live session. AuthProvider
  * calls this for explicit, cross-tab, expired-session, and account-switch paths.
@@ -127,14 +143,17 @@ export function detachBrowserPushLocally(): Promise<void> {
       const registration = await currentRegistration();
       const subscription = (await registration?.pushManager.getSubscription()) ?? null;
       if (!subscription) {
+        await setPushDisplaySuppressed(registration, false);
         allowAutomaticRebind();
         return;
       }
+      await setPushDisplaySuppressed(registration, true);
       const unsubscribed = await subscription.unsubscribe();
       if (!unsubscribed) {
         blockAutomaticRebind();
         return;
       }
+      await setPushDisplaySuppressed(registration, false);
       allowAutomaticRebind();
     } catch {
       // Auth transitions must complete even if browser cleanup fails. Persist a
@@ -233,7 +252,10 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
     subscription = null;
   }
 
-  if (!subscription) allowAutomaticRebind();
+  if (!subscription) {
+    await setPushDisplaySuppressed(registration, false);
+    allowAutomaticRebind();
+  }
   let rebindBlocked = automaticRebindBlocked();
 
   // Permission can be revoked outside Campfire. The next preferences visit
@@ -247,8 +269,10 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
     }
     forgetEndpoint();
     if (subscription) {
+      await setPushDisplaySuppressed(registration, true);
       const unsubscribed = await subscription.unsubscribe().catch(() => false);
       if (unsubscribed) {
+        await setPushDisplaySuppressed(registration, false);
         allowAutomaticRebind();
         rebindBlocked = false;
         subscription = null;
@@ -294,6 +318,7 @@ export async function enableBrowserPush(publicKey: string): Promise<void> {
     }));
   try {
     await api.post(`${API}/notifications/push-subscribe`, subscriptionBody(subscription));
+    await setPushDisplaySuppressed(registration, false);
     allowAutomaticRebind();
     rememberEndpoint(subscription.endpoint);
   } catch (error) {
