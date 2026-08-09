@@ -87,10 +87,10 @@ describe('GridOverlay memo boundary (issue #1917 stage 2, issue #2079)', () => {
     }
 
     try {
-      render(<Harness />);
+      const screen = render(<Harness />);
       expect(renderSpy).toHaveBeenCalledTimes(1);
 
-      const button = document.querySelector('button')!;
+      const button = screen.getByRole('button', { name: /bump 0/i });
       fireEvent.click(button);
       fireEvent.click(button);
       expect(button.textContent).toBe('bump 2'); // sanity: Harness really did re-render twice
