@@ -173,6 +173,59 @@ test.describe('encounter cockpit — gated tool hints', () => {
     }
   });
 
+  test('an escaped hint follows its trigger when the layout moves under it', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    try {
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      const gatedTool = page.getByTestId('map-tool-measure');
+      await expect(gatedTool).toBeVisible();
+      await gatedTool.focus();
+
+      const hint = page.getByTestId('gated-control-hint').first();
+      await expect(hint).toBeVisible();
+      const before = await page.evaluate(() => {
+        const h = document.querySelector('[data-testid="gated-control-hint"]') as HTMLElement | null;
+        const t = document.querySelector('[data-testid="map-tool-measure"]') as HTMLElement | null;
+        if (!h || !t) return null;
+        return { gap: Math.round(t.getBoundingClientRect().top - h.getBoundingClientRect().bottom) };
+      });
+      expect(before, 'hint and trigger must both exist').not.toBeNull();
+
+      // The bubble is portaled to <body> at fixed coordinates measured from the trigger.
+      // Move the trigger — the header wraps differently at this width, so the rail shifts
+      // — and a one-shot measurement leaves the bubble behind, still explaining a control
+      // that is no longer under it.
+      await page.setViewportSize({ width: 900, height: 620 });
+      await expect(gatedTool).toBeFocused();
+
+      await expect
+        .poll(async () =>
+          page.evaluate(() => {
+            const h = document.querySelector('[data-testid="gated-control-hint"]') as HTMLElement | null;
+            const t = document.querySelector('[data-testid="map-tool-measure"]') as HTMLElement | null;
+            if (!h || !t) return null;
+            const hr = h.getBoundingClientRect();
+            const tr = t.getBoundingClientRect();
+            return { gap: Math.round(tr.top - hr.bottom), drift: Math.round(Math.abs(tr.left - hr.left)) };
+          }),
+        )
+        .toMatchObject({ gap: before!.gap });
+      const after = await page.evaluate(() => {
+        const h = document.querySelector('[data-testid="gated-control-hint"]') as HTMLElement | null;
+        const t = document.querySelector('[data-testid="map-tool-measure"]') as HTMLElement | null;
+        if (!h || !t) return null;
+        return { drift: Math.round(Math.abs(t.getBoundingClientRect().left - h.getBoundingClientRect().left)) };
+      });
+      // Still anchored to the control horizontally too, not stranded at the old column.
+      // Bounded rather than exact:  is clamped to a viewport margin, so a trigger
+      // hard against the left edge sits a few pixels inside its own bubble.
+      expect(after!.drift).toBeLessThanOrEqual(12);
+    } finally {
+      await restoreSeedEncounter(page);
+    }
+  });
+
   test('a hint on a header control stays on screen instead of escaping off the top', async ({ page }) => {
     const { campaignId, encounterId } = seed();
     // Stub the campaign event stream with a body that never delivers a sync event: that

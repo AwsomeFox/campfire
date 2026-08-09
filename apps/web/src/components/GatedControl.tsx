@@ -202,22 +202,51 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
       setEscapeAt(null);
       return;
     }
-    const rect = wrapper.getBoundingClientRect();
     // Above the trigger only when the bubble actually fits there. The cockpit header is
     // itself a clipping ancestor (`overflow-y: auto`) AND sits at the top of the viewport
     // with 8px of padding, so anchoring a gated lifecycle action's hint to `rect.top`
     // pushed it off the top of the screen — during exactly the safety hold or sync outage
     // that made it worth reading. Both axes are clamped for the same reason: a trigger
     // near the right edge would otherwise put a 220px bubble past it.
-    const left = Math.round(
-      Math.min(Math.max(GATED_HINT_VIEWPORT_MARGIN_PX, rect.left), Math.max(GATED_HINT_VIEWPORT_MARGIN_PX, window.innerWidth - GATED_HINT_MAX_WIDTH_PX - GATED_HINT_VIEWPORT_MARGIN_PX)),
-    );
-    const fitsAbove = rect.top >= GATED_HINT_ESTIMATED_HEIGHT_PX + GATED_HINT_VIEWPORT_MARGIN_PX;
-    setEscapeAt(
-      fitsAbove
+    const place = () => {
+      frame = 0;
+      const node = wrapperRef.current;
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      const left = Math.round(
+        Math.min(Math.max(GATED_HINT_VIEWPORT_MARGIN_PX, rect.left), Math.max(GATED_HINT_VIEWPORT_MARGIN_PX, window.innerWidth - GATED_HINT_MAX_WIDTH_PX - GATED_HINT_VIEWPORT_MARGIN_PX)),
+      );
+      const fitsAbove = rect.top >= GATED_HINT_ESTIMATED_HEIGHT_PX + GATED_HINT_VIEWPORT_MARGIN_PX;
+      const next = fitsAbove
         ? { left, top: null, bottom: Math.round(window.innerHeight - rect.top) }
-        : { left, top: Math.round(rect.bottom), bottom: null },
-    );
+        : { left, top: Math.round(rect.bottom), bottom: null };
+      // Compared, not blindly set: a scroll listener that produced a fresh object every
+      // frame would re-render this control on every pixel of an unrelated scroll.
+      setEscapeAt((previous) =>
+        previous && previous.left === next.left && previous.top === next.top && previous.bottom === next.bottom
+          ? previous
+          : next,
+      );
+    };
+
+    // The bubble is `position: fixed` at coordinates measured from the trigger, and the
+    // thing that made it escape in the first place is an ancestor that SCROLLS — the map
+    // rail, the wrapped cockpit header. Scroll that container with focus still on the
+    // control and a one-shot measurement leaves the bubble behind, detached from what it
+    // is explaining. Capture phase because scroll does not bubble.
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(place);
+    };
+    place();
+    window.addEventListener('scroll', schedule, true);
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', schedule, true);
+      window.removeEventListener('resize', schedule);
+    };
   }, [tooltipVisible, reason]);
 
   // The moment the reason clears (e.g. sync recovers), drop any lingering hover/focus/tap
