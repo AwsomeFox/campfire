@@ -1325,6 +1325,76 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(true);
     expect((await listFor(coDm)).some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(true);
 
+    // A scope-capped request may retain more private rows than SQLite accepts
+    // in a single `NOT IN` predicate. Its request-only filtering must neither
+    // expose nor delete those rows; a later loss of durable authority must
+    // purge the same oversized set without exceeding SQLite's bind limit.
+    const sqliteVariableLimitRows = 32_767;
+    const sqliteGuardTitle = 'SQLite guarded notification';
+    const sqliteGuardContext = JSON.stringify({
+      encounterId: demoted.encounter.body.id,
+      characterId: demoted.character.body.id,
+      audience: 'permanent_dm',
+    });
+    const sqliteGuardCreatedAt = new Date().toISOString();
+    for (let start = 0; start < sqliteVariableLimitRows; start += 500) {
+      const rows = Array.from({ length: Math.min(500, sqliteVariableLimitRows - start) }, () => ({
+        userId: coDmId,
+        campaignId: guardedCampaignId,
+        type: 'character_downed',
+        title: sqliteGuardTitle,
+        body: 'SQLite guarded notification body',
+        entityType: 'encounter',
+        entityId: demoted.encounter.body.id,
+        commentId: null,
+        data: null,
+        hiddenStatusContext: sqliteGuardContext,
+        actorName: '',
+        actorUserId: null,
+        readAt: null,
+        createdAt: sqliteGuardCreatedAt,
+      }));
+      db.insert(notificationRows).values(rows).run();
+    }
+    const scopedGuardUser: RequestUser = {
+      id: String(coDmId),
+      name: 'Co-DM',
+      serverRole: 'user',
+      tokenContext: {
+        tokenId: 0,
+        name: 'hidden-status-viewer-read',
+        scope: 'viewer',
+        writeScope: 'none',
+        campaignId: guardedCampaignId,
+        adminEnabled: false,
+      },
+    };
+    const scopedGuardRead = await notifications.listForUser(scopedGuardUser, {
+      campaignId: guardedCampaignId,
+      type: 'character_downed',
+      limit: 1,
+    });
+    expect(scopedGuardRead.items.some((row) => row.title === sqliteGuardTitle)).toBe(false);
+    expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      eq(notificationRows.title, sqliteGuardTitle),
+    )).get()?.value).toBe(sqliteVariableLimitRows);
+    db.update(campaignMembers)
+      .set({ role: 'player' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    await notifications.unreadSummary({ id: String(coDmId), name: 'Co-DM', serverRole: 'user' });
+    expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      eq(notificationRows.title, sqliteGuardTitle),
+    )).get()?.value).toBe(0);
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+
     expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
     const visibleThenHidden = await createHiddenCombatant('Visible Then Hidden Hero', false);
     expect((await dm

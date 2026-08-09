@@ -129,6 +129,8 @@ export function excerpt(text: string, max = 200): string {
 const DIGEST_FLUSH_INTERVAL_MS = 60_000;
 /** Max rows drained per flush tick to avoid full-table scans. */
 const DIGEST_BATCH_SIZE = 500;
+/** Keep every SQLite `IN (...)` write comfortably below its bind-variable limit. */
+const SQLITE_ID_BATCH_SIZE = 1_000;
 
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
@@ -136,8 +138,8 @@ type HiddenStatusAudience = 'campaign_member' | 'permanent_dm' | 'character_owne
 type HiddenStatusDisposition = 'allow' | 'redact' | 'project_redact' | 'deny' | 'filter';
 
 interface HiddenStatusReadGuard {
-  filteredIds: number[];
-  projectedRedactIds: number[];
+  filteredIds: Set<number>;
+  projectedRedactIds: Set<number>;
 }
 
 /** Private persistence metadata; deliberately separate from public notification `data`. */
@@ -763,6 +765,40 @@ export class NotificationsService implements OnApplicationBootstrap {
     });
   }
 
+  /** SQLite caps bind variables at 32,766; retained bells can exceed that after a demotion. */
+  private forEachNotificationIdBatch(ids: readonly number[], action: (batch: number[]) => void): void {
+    for (let start = 0; start < ids.length; start += SQLITE_ID_BATCH_SIZE) {
+      action(ids.slice(start, start + SQLITE_ID_BATCH_SIZE));
+    }
+  }
+
+  private deleteNotificationIdsTx(tx: SyncDb, ids: readonly number[]): void {
+    this.forEachNotificationIdBatch(ids, (batch) => {
+      tx.delete(notifications).where(inArray(notifications.id, batch)).run();
+    });
+  }
+
+  private redactNotificationIdsTx(tx: SyncDb, ids: readonly number[]): void {
+    this.forEachNotificationIdBatch(ids, (batch) => {
+      tx.update(notifications)
+        .set({ entityType: null, entityId: null, data: null })
+        .where(inArray(notifications.id, batch))
+        .run();
+    });
+  }
+
+  private updateNotificationReadStateTx(tx: SyncDb, ids: readonly number[], readAt: string | null): Array<{ id: number }> {
+    const updated: Array<{ id: number }> = [];
+    this.forEachNotificationIdBatch(ids, (batch) => {
+      updated.push(...tx.update(notifications)
+        .set({ readAt })
+        .where(inArray(notifications.id, batch))
+        .returning({ id: notifications.id })
+        .all());
+    });
+    return updated;
+  }
+
   /**
    * Remove private-context rows whose recipient has durably lost access, while
    * returning PAT-scoped rows for request-only filtering or owner-safe
@@ -779,16 +815,13 @@ export class NotificationsService implements OnApplicationBootstrap {
     const dispositions = this.hiddenStatusDispositionsTx(tx, userId, guarded, user);
     const unauthorizedIds = dispositions.filter((row) => row.disposition === 'deny').map((row) => row.id);
     const redactIds = dispositions.filter((row) => row.disposition === 'redact').map((row) => row.id);
-    const filteredIds = dispositions.filter((row) => row.disposition === 'filter').map((row) => row.id);
-    const projectedRedactIds = dispositions.filter((row) => row.disposition === 'project_redact').map((row) => row.id);
+    const filteredIds = new Set(dispositions.filter((row) => row.disposition === 'filter').map((row) => row.id));
+    const projectedRedactIds = new Set(dispositions.filter((row) => row.disposition === 'project_redact').map((row) => row.id));
     if (unauthorizedIds.length > 0) {
-      tx.delete(notifications).where(inArray(notifications.id, unauthorizedIds)).run();
+      this.deleteNotificationIdsTx(tx, unauthorizedIds);
     }
     if (redactIds.length > 0) {
-      tx.update(notifications)
-        .set({ entityType: null, entityId: null, data: null })
-        .where(inArray(notifications.id, redactIds))
-        .run();
+      this.redactNotificationIdsTx(tx, redactIds);
     }
     return { filteredIds, projectedRedactIds };
   }
@@ -1152,36 +1185,49 @@ export class NotificationsService implements OnApplicationBootstrap {
 
     const { total, rows, projectedRedactIds } = this.db.transaction((tx) => {
       const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      const readConditions = filteredIds.length > 0
-        ? [...conditions, notInArray(notifications.id, filteredIds)]
-        : conditions;
-      const [countRow] = tx
-        .select({ value: count() })
-        .from(notifications)
-        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-        .where(and(...readConditions))
-        .all();
-      const total = countRow?.value ?? 0;
+      if (filteredIds.size === 0) {
+        const [countRow] = tx
+          .select({ value: count() })
+          .from(notifications)
+          .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+          .where(and(...conditions))
+          .all();
+        const total = countRow?.value ?? 0;
+        const pageConditions = opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0
+          ? [...conditions, lt(notifications.id, opts.cursor)]
+          : conditions;
+        const rows = tx
+          .select({ notification: notifications })
+          .from(notifications)
+          .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+          .where(and(...pageConditions))
+          .orderBy(desc(notifications.id))
+          .limit(limit + 1)
+          .all();
+        return { total, rows, projectedRedactIds };
+      }
 
-      const pageConditions = opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0
-        ? [...readConditions, lt(notifications.id, opts.cursor)]
-        : readConditions;
-
-      const rows = tx
+      // A scope-capped PAT can filter more rows than SQLite can bind in a
+      // single NOT IN predicate. Keep the revalidation and exposure in this
+      // transaction, but apply that request-only disposition in memory.
+      const candidates = tx
         .select({ notification: notifications })
         .from(notifications)
         .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-        .where(and(...pageConditions))
+        .where(and(...conditions))
         .orderBy(desc(notifications.id))
-        .limit(limit + 1)
-        .all();
-      return { total, rows, projectedRedactIds };
+        .all()
+        .filter((row) => !filteredIds.has(row.notification.id));
+      const rows = opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0
+        ? candidates.filter((row) => row.notification.id < opts.cursor!).slice(0, limit + 1)
+        : candidates.slice(0, limit + 1);
+      return { total: candidates.length, rows, projectedRedactIds };
     });
 
     const hasMore = rows.length > limit;
     const pagedRows = hasMore ? rows.slice(0, limit) : rows;
     const items = pagedRows.map((row) => (
-      projectedRedactIds.includes(row.notification.id) ? toOwnerSafeDomain(row.notification) : toDomain(row.notification)
+      projectedRedactIds.has(row.notification.id) ? toOwnerSafeDomain(row.notification) : toDomain(row.notification)
     ));
     const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].id : null;
 
@@ -1226,9 +1272,19 @@ export class NotificationsService implements OnApplicationBootstrap {
     );
     const row = this.db.transaction((tx) => {
       const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      const readConditions = filteredIds.length > 0
-        ? [...conditions, notInArray(notifications.id, filteredIds)]
-        : conditions;
+      if (filteredIds.size > 0) {
+        const candidates = tx
+          .select({ id: notifications.id, type: notifications.type })
+          .from(notifications)
+          .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+          .where(and(...conditions))
+          .all()
+          .filter((candidate) => !filteredIds.has(candidate.id));
+        return {
+          value: candidates.length,
+          membershipSignal: candidates.some((candidate) => MEMBERSHIP_NOTIFICATION_TYPES.includes(candidate.type as typeof MEMBERSHIP_NOTIFICATION_TYPES[number])) ? 1 : 0,
+        };
+      }
       return tx
         .select({
           value: count(),
@@ -1236,7 +1292,7 @@ export class NotificationsService implements OnApplicationBootstrap {
         })
         .from(notifications)
         .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-        .where(and(...readConditions))
+        .where(and(...conditions))
         .get();
     });
     return { count: row?.value ?? 0, membershipChanged: (row?.membershipSignal ?? 0) === 1 };
@@ -1248,7 +1304,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
     return this.db.transaction((tx) => {
       const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      if (filteredIds.includes(id)) throw new NotFoundException(`Notification ${id} not found`);
+      if (filteredIds.has(id)) throw new NotFoundException(`Notification ${id} not found`);
       const joined = tx
         .select({ notification: notifications })
         .from(notifications)
@@ -1257,14 +1313,14 @@ export class NotificationsService implements OnApplicationBootstrap {
         .get();
       const row = joined?.notification;
       if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
-      if (row.readAt) return projectedRedactIds.includes(id) ? toOwnerSafeDomain(row) : toDomain(row);
+      if (row.readAt) return projectedRedactIds.has(id) ? toOwnerSafeDomain(row) : toDomain(row);
       const updated = tx
         .update(notifications)
         .set({ readAt: nowIso() })
         .where(eq(notifications.id, id))
         .returning()
         .get();
-      return projectedRedactIds.includes(id) ? toOwnerSafeDomain(updated) : toDomain(updated);
+      return projectedRedactIds.has(id) ? toOwnerSafeDomain(updated) : toDomain(updated);
     });
   }
 
@@ -1273,7 +1329,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
     return this.db.transaction((tx) => {
       const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      if (filteredIds.includes(id)) throw new NotFoundException(`Notification ${id} not found`);
+      if (filteredIds.has(id)) throw new NotFoundException(`Notification ${id} not found`);
       const joined = tx
         .select({ notification: notifications })
         .from(notifications)
@@ -1282,14 +1338,14 @@ export class NotificationsService implements OnApplicationBootstrap {
         .get();
       const row = joined?.notification;
       if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
-      if (!row.readAt) return projectedRedactIds.includes(id) ? toOwnerSafeDomain(row) : toDomain(row);
+      if (!row.readAt) return projectedRedactIds.has(id) ? toOwnerSafeDomain(row) : toDomain(row);
       const updated = tx
         .update(notifications)
         .set({ readAt: null })
         .where(eq(notifications.id, id))
         .returning()
         .get();
-      return projectedRedactIds.includes(id) ? toOwnerSafeDomain(updated) : toDomain(updated);
+      return projectedRedactIds.has(id) ? toOwnerSafeDomain(updated) : toDomain(updated);
     });
   }
 
@@ -1327,12 +1383,22 @@ export class NotificationsService implements OnApplicationBootstrap {
 
     const updated = this.db.transaction((tx) => {
       const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      return tx
-        .update(notifications)
-        .set({ readAt: nowIso() })
-        .where(and(...conditions, ...(filteredIds.length > 0 ? [notInArray(notifications.id, filteredIds)] : [])))
-        .returning({ id: notifications.id })
-        .all();
+      if (filteredIds.size === 0) {
+        return tx
+          .update(notifications)
+          .set({ readAt: nowIso() })
+          .where(and(...conditions))
+          .returning({ id: notifications.id })
+          .all();
+      }
+      const ids = tx
+        .select({ id: notifications.id })
+        .from(notifications)
+        .where(and(...conditions))
+        .all()
+        .map((row) => row.id)
+        .filter((id) => !filteredIds.has(id));
+      return this.updateNotificationReadStateTx(tx, ids, nowIso());
     });
 
     const updatedIds = updated.map((r) => r.id);
@@ -1373,12 +1439,22 @@ export class NotificationsService implements OnApplicationBootstrap {
 
     const updated = this.db.transaction((tx) => {
       const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
-      return tx
-        .update(notifications)
-        .set({ readAt: null })
-        .where(and(...conditions, ...(filteredIds.length > 0 ? [notInArray(notifications.id, filteredIds)] : [])))
-        .returning({ id: notifications.id })
-        .all();
+      if (filteredIds.size === 0) {
+        return tx
+          .update(notifications)
+          .set({ readAt: null })
+          .where(and(...conditions))
+          .returning({ id: notifications.id })
+          .all();
+      }
+      const ids = tx
+        .select({ id: notifications.id })
+        .from(notifications)
+        .where(and(...conditions))
+        .all()
+        .map((row) => row.id)
+        .filter((id) => !filteredIds.has(id));
+      return this.updateNotificationReadStateTx(tx, ids, null);
     });
 
     const updatedIds = updated.map((r) => r.id);
