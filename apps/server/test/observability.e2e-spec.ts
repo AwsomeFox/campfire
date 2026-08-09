@@ -1,5 +1,8 @@
 import request from 'supertest';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { auditLog } from '../src/db/schema';
+import { nowIso } from '../src/common/time';
 
 /**
  * Issue #22 — Admin observability dashboard.
@@ -91,6 +94,21 @@ describe('Issue #22: admin observability metrics (e2e)', () => {
   });
 
   describe('shape', () => {
+    it('redacts campaign detail from server-wide recent activity', async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      await db.insert(auditLog).values({
+        campaignId: 1,
+        actor: '1',
+        actorRole: 'dm',
+        action: 'timeline.event.create',
+        detail: 'Timeline event “Hidden omen” created',
+        createdAt: nowIso(),
+      });
+      const res = await adminAgent.get('/api/v1/admin/metrics');
+      const entry = (res.body.recentActivity as Array<{ action: string; detail: string }>).find((row) => row.action === 'timeline.event.create');
+      expect(entry?.detail).toBe('');
+    });
+
     it('returns version, uptime, timestamps, counts, database size, and recent activity', async () => {
       const res = await adminAgent.get('/api/v1/admin/metrics');
       expect(res.status).toBe(200);

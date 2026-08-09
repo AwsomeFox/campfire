@@ -64,7 +64,7 @@ export function AuditEntryRow({
   const { t } = useTranslation();
   const { label, isToken } = resolveActorLabel(entry.actor, members);
   const timelineTarget =
-    entry.campaignId != null && entry.payload?.kind === 'timeline_event'
+    entry.campaignId != null && entry.payload?.kind === 'timeline_event' && entry.payload.action !== 'timeline.event.delete'
       ? {
           label: entry.payload.entity.label,
           href: entityHref(entry.campaignId, {

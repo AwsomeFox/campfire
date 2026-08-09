@@ -166,7 +166,9 @@ export class ObservabilityService {
       action: r.action,
       entityType: r.entityType ?? null,
       entityId: r.entityId ?? null,
-      detail: r.detail,
+      // Server-admin authority is not campaign membership. Keep cross-campaign
+      // metrics operational without disclosing campaign-authored labels or prose.
+      detail: r.campaignId == null ? r.detail : '',
       // Recent activity intentionally remains a compact operational feed. Raw
       // forensic payloads are available only through the DM audit surface.
       payload: null,

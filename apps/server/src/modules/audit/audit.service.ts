@@ -415,7 +415,7 @@ export class AuditService implements OnApplicationBootstrap {
    * are excluded from `entries` and counted in `meta.truncated` (with any snapshot
    * rows missed because of retention pruning during the walk).
    */
-  async listForCampaignExport(campaignId: number): Promise<{
+  async listForCampaignExport(campaignId: number, includePayload = true): Promise<{
     entries: Awaited<ReturnType<AuditService['listForCampaign']>>;
     meta: CampaignAuditExportMeta;
   }> {
@@ -444,7 +444,7 @@ export class AuditService implements OnApplicationBootstrap {
           .orderBy(desc(auditLog.id))
           .limit(EXPORT_AUDIT_PAGE_SIZE);
         if (!page.length) break;
-        entries.push(...page.map((row) => toAuditEntry(row)));
+        entries.push(...page.map((row) => toAuditEntry(row, { includePayload })));
         if (page.length < EXPORT_AUDIT_PAGE_SIZE) break;
         cursorBelow = page[page.length - 1]!.id;
       }
