@@ -3231,8 +3231,11 @@ export default function RunSessionPage() {
     },
     onSuccess: (updated, variables) => {
       lastLocalEncounterRevision.current.set(variables.encounterId, updated.updatedAt);
-      queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(variables.encounterId), () =>
-        reconcileEncounterPatchResponse(updated, pendingEncounterPatches.current.values(), variables.queueId, variables.encounterId),
+      queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(variables.encounterId), (current) =>
+        preferNewerEncounterSnapshot(
+          current,
+          reconcileEncounterPatchResponse(updated, pendingEncounterPatches.current.values(), variables.queueId, variables.encounterId),
+        ),
       );
     },
     onSettled: (_data, error, variables) => {

@@ -119,6 +119,14 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*const seeded = queryClient\.setQueryData<EncounterWithCombatants>\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) => preferNewerEncounterSnapshot\(\s*current,\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\),\s*\),\s*\);/);
   });
 
+  test('orders a delayed encounter PATCH response against the seeded turn before replacing the cache', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const setMapStart = source.indexOf('const setMap = useMutation({');
+    const setMapBody = source.slice(setMapStart, source.indexOf('const mutateQueuedPatch', setMapStart));
+
+    expect(setMapBody).toMatch(/onSuccess: \(updated, variables\) => \{[\s\S]*?setQueryData<EncounterWithCombatants>\(queryKeys\.encounter\(variables\.encounterId\), \(current\) =>\s*preferNewerEncounterSnapshot\(\s*current,\s*reconcileEncounterPatchResponse\(updated, pendingEncounterPatches\.current\.values\(\), variables\.queueId, variables\.encounterId\),\s*\),\s*\);/);
+  });
+
   test('emits an undo edge after a silent refetch baseline advances past a missed frame', () => {
     const missed = { ...initial, combatantId: 13 };
     expect(detectTurnBeat(initial, missed)).toBe('turn');

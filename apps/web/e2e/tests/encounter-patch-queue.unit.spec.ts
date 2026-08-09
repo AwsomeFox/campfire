@@ -49,6 +49,26 @@ test.describe('encounterPatchQueue unit tests — rollbackEncounterPatchError', 
     expect(preferNewerEncounterSnapshot(undefined, olderTurnReplay)).toBe(olderTurnReplay);
   });
 
+  test('a delayed encounter PATCH response cannot replace a newer seeded turn', () => {
+    const seededTurn = {
+      id: 1,
+      turnVersion: 13,
+      updatedAt: '2026-08-08T12:00:03.000Z',
+      currentCombatantId: 8,
+      fog: [{ x: 1, y: 1 }],
+    };
+    const delayedPatchResponse = {
+      id: 1,
+      turnVersion: 12,
+      updatedAt: '2026-08-08T12:00:02.000Z',
+      currentCombatantId: 7,
+      fog: [{ x: 1, y: 1 }],
+    };
+    const reconciled = reconcileEncounterPatchResponse(delayedPatchResponse, [], 'fog-1', 1);
+
+    expect(preferNewerEncounterSnapshot(seededTurn, reconciled)).toBe(seededTurn);
+  });
+
   test('rollbackEncounterPatchError restores previous values when failed patch has no overriding pending patch', () => {
     const current = { id: 1, gridSize: 8, gridScale: 5, gridUnit: 'ft' };
     const failedEntry: QueuedEncounterPatch = {
