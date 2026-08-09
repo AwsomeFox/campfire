@@ -6159,13 +6159,25 @@ export class EncountersService {
       // The player may learn their character's state, but a hidden encounter
       // remains a DM-only entity and must not become a notification deep-link.
       const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
-      await this.notifications.notifyUserIfHiddenEncounterRecipient(
+      const delivered = await this.notifications.notifyUserIfHiddenEncounterRecipient(
         memberId,
         encounterRow.campaignId,
         user,
         recipientEvent,
         isDm ? { kind: 'permanent_dm' } : { kind: 'character_owner', characterId },
       );
+      // A recipient can legitimately hold both authorities. If their DM
+      // membership changed after discovery, retry only their personal-status
+      // payload under the independently revalidated ownership authority.
+      if (!delivered && isDm && isOwner) {
+        await this.notifications.notifyUserIfHiddenEncounterRecipient(
+          memberId,
+          encounterRow.campaignId,
+          user,
+          { ...event, entityType: null, entityId: null },
+          { kind: 'character_owner', characterId },
+        );
+      }
     }
   }
 

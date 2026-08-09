@@ -1001,6 +1001,52 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(guestDmDied).toEqual([]);
     expect(spectatorDied).toEqual([]);
 
+    // #2112: if a recipient is both a permanent co-DM and the character owner,
+    // a demotion at the durable-write boundary must fall back to their still
+    // authorized personal-status notification, with no encounter deep-link.
+    const dualRoleCharacter = await coDm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Dual Role Hero', hpCurrent: 10, hpMax: 10 });
+    expect(dualRoleCharacter.status).toBe(201);
+    const dualRoleEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Dual Role Ambush', hidden: true });
+    expect(dualRoleEncounter.status).toBe(201);
+    const dualRoleRoster = await dm.get(`/api/v1/encounters/${dualRoleEncounter.body.id}`);
+    const dualRoleCombatant = dualRoleRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === dualRoleCharacter.body.id,
+    );
+    expect(dualRoleCombatant).toBeDefined();
+
+    const demoteDualRoleDmAtWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[0] === coDmId && args[4].kind === 'permanent_dm') {
+        db.update(campaignMembers)
+          .set({ role: 'player' })
+          .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
+          .run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      const dualRoleDowned = await dm
+        .patch(`/api/v1/encounters/${dualRoleEncounter.body.id}/combatants/${dualRoleCombatant.id}`)
+        .send({ hpSet: 0 });
+      expect(dualRoleDowned.status).toBe(200);
+    } finally {
+      demoteDualRoleDmAtWrite.mockRestore();
+    }
+
+    const dualRoleOwnerDowned = await statusNotifications(coDm, 'Character downed!', 1);
+    expect(dualRoleOwnerDowned[0].body).toContain('Dual Role Hero was downed');
+    expect(dualRoleOwnerDowned[0].entityType).toBeNull();
+    expect(dualRoleOwnerDowned[0].entityId).toBeNull();
+    expect(await statusNotifications(spectator, 'Character downed!', 0)).toEqual([]);
+
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+
     const visibleCharacter = await player
       .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
       .send({ name: 'Visible Hero', hpCurrent: 10, hpMax: 10 });
