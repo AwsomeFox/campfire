@@ -192,6 +192,7 @@ function DraftWithAiModal({
 }) {
   const [prompt, setPrompt] = useState('');
   const [count, setCount] = useState(1);
+  const [includeCampaignSecrets, setIncludeCampaignSecrets] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorIsForbidden, setErrorIsForbidden] = useState(false);
@@ -229,6 +230,7 @@ function DraftWithAiModal({
       if (multi) body.count = count;
       if (target === 'beat' && arcId != null) body.arcId = arcId;
       if (entityId != null) body.entityId = entityId;
+      if (editing) body.includeCampaignSecrets = includeCampaignSecrets;
       const draft = await api.post<CoDmDraftResult>(`${API}/campaigns/${campaignId}/ai-dm/draft`, body);
       setResult(draft);
     } catch (err) {
@@ -332,6 +334,21 @@ function DraftWithAiModal({
               </p>
             </div>
 
+            {editing && (
+              <label className="flex items-start gap-2 rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={includeCampaignSecrets}
+                  onChange={(event) => setIncludeCampaignSecrets(event.target.checked)}
+                  disabled={busy}
+                />
+                <span>
+                  Include the current DM-only storyline prep in this AI request. It may be sent to the configured external provider.
+                </span>
+              </label>
+            )}
+
             {multi && (
               <div className="flex items-center gap-2.5" role="group" aria-labelledby={quantityLabelId}>
                 <span id={quantityLabelId} className="text-xs text-slate-400">Number of {plural}</span>
@@ -391,7 +408,7 @@ function DraftWithAiModal({
               <Btn density="compact" ghost className="text-xs" onClick={onClose} disabled={busy}>
                 Cancel
               </Btn>
-              <Btn density="compact" className="text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim()}>
+              <Btn density="compact" className="text-xs" onClick={() => void submit()} disabled={busy || !prompt.trim() || (editing && !includeCampaignSecrets)}>
                 {busy ? (editing ? 'Rewriting…' : 'Drafting…') : editing ? 'File rewrite proposal' : `Draft ${multi && count > 1 ? `${count} ${noun}s` : noun}`}
               </Btn>
             </div>

@@ -121,13 +121,18 @@ test.describe('Storylines draft-a-beat IA (issue #639 / #1307)', () => {
         await expect(dialog.getByLabel('Title')).toHaveValue(beat.title);
         await expect(dialog.getByLabel('Body')).toHaveValue('The original beat body.');
         await dialog.getByLabel('Rewrite instructions').fill('Make the choice more dangerous.');
-        await dialog.getByRole('button', { name: 'File rewrite proposal' }).click();
+        const submit = dialog.getByRole('button', { name: 'File rewrite proposal' });
+        await expect(submit).toBeDisabled();
+        await dialog.getByRole('checkbox', { name: /Include the current DM-only storyline prep/ }).check();
+        await expect(submit).toBeEnabled();
+        await submit.click();
 
         await expect(dialog.getByText('Filed 1 pending proposal for review.')).toBeVisible();
         expect(submitted).toEqual({
           target: 'beat',
           entityId: beat.id,
           prompt: 'Make the choice more dangerous.',
+          includeCampaignSecrets: true,
         });
       } finally {
         await page.request.delete(`/api/v1/arcs/${arc.id}`).catch(() => undefined);

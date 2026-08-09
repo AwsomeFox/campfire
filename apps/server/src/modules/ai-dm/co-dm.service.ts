@@ -139,6 +139,18 @@ export class CoDmService {
     if (editing && (input.arcId != null || input.count != null)) {
       throw new BadRequestException('arcId and count are not used when rewriting an existing storyline entity');
     }
+    // Resolve egress before loading any DM-only storyline prep. A configured provider is
+    // external unless the operator explicitly declared its endpoint local (for example an
+    // on-box Ollama instance). REST and MCP both enter through this method, so neither can
+    // bypass the per-request secret-content consent boundary.
+    const { config, endpointScope: resolvedEndpointScope } =
+      await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
+    const externalSend = resolveAiProvenanceEgress(config !== null) === 'external';
+    if (editing && externalSend && !input.includeCampaignSecrets) {
+      throw new UnprocessableEntityException(
+        'Storyline rewrites include DM-only arc and beat prep. Set includeCampaignSecrets to true only after reviewing the configured external provider privacy notice.',
+      );
+    }
     const edit = editing
       ? await this.storylines.getRewriteContext(campaignId, input.target as 'arc' | 'beat', input.entityId!)
       : null;
@@ -220,14 +232,11 @@ export class CoDmService {
     // `endpointScope` here is the scope that OWNS the resolved endpoint, not merely
     // whether a campaign override row exists — a keyless override executes against the
     // SERVER endpoint (#501).
-    const { config, endpointScope: resolvedEndpointScope } =
-      await this.providerConfig.resolveEffectiveConfigWithEndpointScope(campaignId);
     // Issue #1993: whether this draft actually leaves the server. Shared with
     // `ScribeService`/`InboxSweepService` via `resolveAiProvenanceEgress` (common/
     // ai-provenance-endpoint.ts) so the three cannot drift on what "external" means — a
     // configured provider is external UNLESS the operator has declared the endpoint local
     // via `AI_PROVIDER_ENDPOINT_IS_LOCAL` (an on-box Ollama, for example).
-    const externalSend = resolveAiProvenanceEgress(config !== null) === 'external';
     const reservation = await this.aiDm.reserveTokenBudget(campaignId, DRAFT_MAX_TOKENS);
 
     let narration = '';

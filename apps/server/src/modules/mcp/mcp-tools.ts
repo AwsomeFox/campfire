@@ -5384,7 +5384,8 @@ export class McpToolsService {
         '(filed as a session), encounter (reuses generate_encounter #304), or map (reuses generate_map #306). `count` ' +
         '(npc/location/beat/quest/faction only) drafts several at once; recap/encounter/map ignore count. `arcId` (beat only) ' +
         'pins drafted beats to a story arc. To rewrite an existing storyline entity, use target arc or beat with entityId; ' +
-        'the server supplies its current arc/beat, branches, and linked-play context and files an update proposal. Returns the ' +
+        'the server supplies its current arc/beat, branches, and linked-play context and files an update proposal. That DM-only ' +
+        'context is not sent to an external provider unless includeCampaignSecrets:true is explicitly passed per request. Returns the ' +
         'created proposal ids; approve/reject them with approve_proposal / reject_proposal. Metered against the seat ' +
         'budget; the proposer is recorded as the AI seat + model.',
       {
@@ -5401,8 +5402,11 @@ export class McpToolsService {
         narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)'),
         arcId: Id.optional().describe('When target is beat, pin drafted beat(s) to this story arc id'),
         entityId: Id.optional().describe('When target is arc or beat, rewrite this existing entity and file an update proposal'),
+        includeCampaignSecrets: z.boolean().default(false).describe(
+          'Storyline rewrites only: explicitly allow DM-only arc/beat context to be sent when the configured provider is external',
+        ),
       },
-      async ({ campaignId, target, prompt, count, narrationLanguage, arcId, entityId }) => {
+      async ({ campaignId, target, prompt, count, narrationLanguage, arcId, entityId, includeCampaignSecrets }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.coDm.draft(
           campaignId as number,
@@ -5413,6 +5417,7 @@ export class McpToolsService {
             ...(narrationLanguage !== undefined ? { narrationLanguage: narrationLanguage as z.infer<typeof NarrationLanguage> } : {}),
             ...(arcId !== undefined ? { arcId: arcId as number } : {}),
             ...(entityId !== undefined ? { entityId: entityId as number } : {}),
+            includeCampaignSecrets: includeCampaignSecrets as boolean,
           },
           user,
           role,

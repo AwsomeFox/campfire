@@ -7761,7 +7761,7 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
   localByDefault:
     'By default Campfire stores your campaign on this server and does not contact any LLM vendor. Connected MCP agents read through the API; their traffic stays between your agent and your server unless you point the agent at an external model.',
   externalException:
-    'When you configure and save an external provider (OpenAI-compatible, Anthropic, or Gemini), Campfire sends prompts to that endpoint for the AI DM seat, Co-DM drafts, scheduled scribe recaps, and map generation. Only the context categories below are included — including DM steering you configure. Hidden entities, dmSecret fields, and other DM-only secrets are stripped by default unless you explicitly opt in (map generation only).',
+    'When you configure and save an external provider (OpenAI-compatible, Anthropic, or Gemini), Campfire sends prompts to that endpoint for the AI DM seat, Co-DM drafts, scheduled scribe recaps, and map generation. Only the context categories below are included — including DM steering you configure. Hidden entities, dmSecret fields, and other DM-only secrets are stripped by default unless you explicitly opt in for a map or storyline rewrite request.',
   contextCategories: [
     {
       label: 'Campaign summary',
@@ -7794,6 +7794,11 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
       copyKeyword: 'scribe',
     },
     {
+      label: 'Storyline rewrite context',
+      description: 'DM-only arc summaries, beat bodies, branches, and linked-play labels only when you explicitly opt in per rewrite request.',
+      copyKeyword: 'storyline',
+    },
+    {
       label: 'Map generation prompts',
       description: 'Your map prompt and theme; campaign secrets only if you check the explicit opt-in.',
       copyKeyword: 'map',
@@ -7808,7 +7813,7 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
     'Stored API keys (write-only; never sent to any provider)',
     'DM-only secrets by default (hidden entities, dmSecret fields, unexplored locations)',
     "Other campaigns' data",
-    'Map campaign secrets unless you explicitly opt in per request',
+    'Map and storyline-rewrite campaign secrets unless you explicitly opt in per request',
   ],
   retentionNote:
     "Campfire does not control how your chosen provider stores or retains prompts, tool results, or model replies. Review that vendor's privacy policy and data-retention terms before saving a provider. Removing a provider stops new outbound calls; it does not erase data already held by the vendor.",
@@ -8850,6 +8855,9 @@ export const CoDmDraftRequest = z.object({
   // proposal against the same id (#1311). The server loads the current snapshot and
   // related storyline context; clients never supply authoritative context themselves.
   entityId: Id.optional(),
+  // Storyline rewrites contain DM-only prep. An actually external provider may receive
+  // that context only after this per-request opt-in; local/injected providers do not need it.
+  includeCampaignSecrets: z.boolean().default(false),
 });
 export type CoDmDraftRequest = z.infer<typeof CoDmDraftRequest>;
 

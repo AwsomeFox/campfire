@@ -888,6 +888,33 @@ describe('co-DM authoring — external-AI consent provenance is explicit, never 
     expect(consent.campaignPolicy).toBe('member_consent');
   });
 
+  it('requires per-request opt-in before loading DM-only storyline prep for an external provider', async () => {
+    const campaignId = await h.createCampaign('External Storyline Privacy Boundary');
+    await h.configureSeat(campaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+    const providerRes = await h.configureProvider(campaignId);
+    expect(providerRes.status).toBe(200);
+    const arc = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'The Hidden Knife', summary: 'The trusted regent is the traitor.' });
+    expect(arc.status).toBe(201);
+
+    const storylines = h.ctx.app.get(StorylinesService);
+    const contextRead = jest.spyOn(storylines, 'getRewriteContext');
+    try {
+      const res = await request(h.server)
+        .post(`/api/v1/campaigns/${campaignId}/ai-dm/draft`)
+        .set(dm)
+        .send({ target: 'arc', entityId: arc.body.id, prompt: 'Raise the tension.' });
+
+      expect(res.status).toBe(422);
+      expect(res.body.message).toContain('includeCampaignSecrets');
+      expect(contextRead).not.toHaveBeenCalled();
+    } finally {
+      contextRead.mockRestore();
+    }
+  });
+
   /**
    * Review finding (post-#2041): a first draft of this fix set `externalSend = true`
    * whenever a provider config resolved, which ignored `AI_PROVIDER_ENDPOINT_IS_LOCAL` —

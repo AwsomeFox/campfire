@@ -4457,7 +4457,32 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(provenance.consent!.excludedInboxPrivate).toBe(0);
     });
 
-    it('files an existing story arc rewrite as an update proposal through draft_content', async () => {
+    it('does not send DM-only storyline context externally without per-request opt-in', async () => {
+      const arc = await dmAgent
+        .post(`/api/v1/campaigns/${consentCampaignId}/arcs`)
+        .send({ title: 'Private MCP Arc', summary: 'A secret betrayal waits below.' });
+      expect(arc.status).toBe(201);
+      const generate = jest.spyOn(MockAiProvider.prototype, 'generate');
+      try {
+        const client = await mcpClient(dmToken);
+        const result = await client.callTool({
+          name: 'draft_content',
+          arguments: {
+            campaignId: consentCampaignId,
+            target: 'arc',
+            entityId: arc.body.id,
+            prompt: 'Make this arc more urgent.',
+          },
+        });
+        expect(result.isError).toBe(true);
+        expect(generate).not.toHaveBeenCalled();
+        expect(JSON.stringify(result.content)).toContain('includeCampaignSecrets');
+      } finally {
+        generate.mockRestore();
+      }
+    });
+
+    it('files an opted-in existing story arc rewrite as an update proposal through draft_content', async () => {
       const arc = await dmAgent
         .post(`/api/v1/campaigns/${consentCampaignId}/arcs`)
         .send({ title: 'MCP Rewrite Arc', summary: 'The old summary.' });
@@ -4478,6 +4503,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
             target: 'arc',
             entityId: arc.body.id,
             prompt: 'Make this arc more urgent.',
+            includeCampaignSecrets: true,
           },
         });
         expect(result.isError).toBeFalsy();
