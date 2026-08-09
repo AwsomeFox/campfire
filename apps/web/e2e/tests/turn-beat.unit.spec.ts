@@ -3,12 +3,13 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { formatDocumentTitle, setDocumentTitlePrefix } from '../../src/app/routeFocus';
 import { isCampaignEvent } from '../../src/lib/useCampaignEvents';
-import { detectSseTurnBeat, detectTurnBeat, shouldConsumeTurnBeatResync, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
+import { detectSseTurnBeat, detectTurnBeat, shouldConsumeTurnBeatResync, shouldReconcileTurnBeatRead, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
 
 const initial: TurnBeatSnapshot = {
   encounterId: 8,
   combatantId: 12,
   round: 1,
+  turnVersion: 4,
   isYourTurn: false,
 };
 
@@ -28,7 +29,7 @@ test.describe('turn-change beat (issue #1906)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = turnBeatLoadWatermark\.readRevision;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
     expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
-    expect(source).toMatch(/const completedRead = latestEncounterReadRef\.current;\s*if \(!completedRead \|\| completedRead\.encounterId !== eid\) return;\s*if \(!shouldConsumeTurnBeatResync\(\s*awaitingTurnBeatResyncRef\.current,\s*completedRead\.revision,\s*\)\) return;\s*awaitingTurnBeatResyncRef\.current = null;[\s\S]*previousTurnBeatRef\.current = \{/);
+    expect(source).toMatch(/const completedRead = latestEncounterReadRef\.current;\s*if \(!completedRead \|\| completedRead\.encounterId !== eid\) return;[\s\S]*if \(!shouldReconcileTurnBeatRead\([\s\S]*?completedRead\.encounter\.turnVersion,[\s\S]*?\)\) return;\s*awaitingTurnBeatResyncRef\.current = null;[\s\S]*previousTurnBeatRef\.current = \{/);
     expect(source).not.toContain('previousTurnBeatRef.current?.encounterId === eid ||');
   });
 
@@ -47,6 +48,13 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(shouldConsumeTurnBeatResync(null, 20)).toBe(false);
     expect(shouldConsumeTurnBeatResync(20, 20)).toBe(false);
     expect(shouldConsumeTurnBeatResync(20, 21)).toBe(true);
+  });
+
+  test('lets a newer-turn poll repair one missed frame without regressing an SSE baseline', () => {
+    expect(shouldReconcileTurnBeatRead(null, 21, 4, 5)).toBe(true);
+    expect(shouldReconcileTurnBeatRead(null, 22, 5, 5)).toBe(false);
+    expect(shouldReconcileTurnBeatRead(null, 23, 5, 4)).toBe(false);
+    expect(shouldReconcileTurnBeatRead(20, 21, 4, 4)).toBe(true);
   });
 
   test('does not let an optimistic cache write impersonate the catch-up encounter read', () => {
@@ -83,16 +91,10 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(shouldConsumeTurnBeatResync(null, Number.MAX_SAFE_INTEGER)).toBe(false);
   });
 
-  // Issue #2092: this REST-driven baseline resync used to re-run on EVERY `encounter`
-  // change, including the ordinary refetch that `encounter.updated` triggers alongside
-  // (and always before) the very `encounter.turn_changed` frame that updates the SAME ref
-  // directly. Whichever settled first won the race — a fast local GET could "catch up" to
-  // the new turn before the SSE frame's own handler ran, making `detectTurnBeat` see
-  // `previous === next` and silently drop the takeover/ticker beat. Gating the resync
-  // behind a one-shot ref (consumed on load, re-armed only by reconnect/stream-recovery)
-  // removes the race: an ordinary `encounter.updated`-triggered refetch no longer touches
-  // the baseline at all.
-  test('only re-arms the REST turn-beat baseline resync after a reconnect or stream recovery', () => {
+  // Issue #2092: initial load and reconnect/recovery explicitly arm a catch-up read.
+  // Ordinary polls need no such arm: the monotonic turnVersion predicate above lets them
+  // repair only a genuinely newer missed edge while rejecting same/older paired reads.
+  test('only explicitly arms the REST turn-beat baseline after a reconnect or stream recovery', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/const awaitingTurnBeatResyncRef = useRef<number \| null>\(0\);/);
     const reconnectStart = source.indexOf('onReconnect: useCallback');
@@ -189,7 +191,7 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('accepts the optional turn_changed frame fields and rejects malformed values', () => {
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
-      round: 2, currentCombatantId: 15, combatantKind: 'character',
+      round: 2, turnVersion: 9, currentCombatantId: 15, combatantKind: 'character',
     })).toBe(true);
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
@@ -202,6 +204,10 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       turnReverted: false,
+    })).toBe(false);
+    expect(isCampaignEvent({
+      type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
+      turnVersion: -1,
     })).toBe(false);
   });
 

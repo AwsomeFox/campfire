@@ -7,6 +7,7 @@ export type TurnBeatSnapshot = {
   encounterId: number;
   combatantId: number | null;
   round: number | null;
+  turnVersion: number;
   isYourTurn: boolean;
 };
 
@@ -23,6 +24,23 @@ export function shouldConsumeTurnBeatResync(
 ): boolean {
   return armedAfterReadRevision != null
     && completedReadRevision > armedAfterReadRevision;
+}
+
+/**
+ * Initial-load/reconnect reads establish a requested silent baseline. Ordinary
+ * backstop polls may also repair a missed SSE edge, but only when the server's
+ * monotonic turn revision is strictly newer than the last SSE/REST baseline.
+ */
+export function shouldReconcileTurnBeatRead(
+  armedAfterReadRevision: number | null,
+  completedReadRevision: number,
+  previousTurnVersion: number | null,
+  completedTurnVersion: number,
+): boolean {
+  if (shouldConsumeTurnBeatResync(armedAfterReadRevision, completedReadRevision)) return true;
+  return armedAfterReadRevision == null
+    && previousTurnVersion != null
+    && completedTurnVersion > previousTurnVersion;
 }
 
 export function turnBeatKey(snapshot: TurnBeatSnapshot): string | null {

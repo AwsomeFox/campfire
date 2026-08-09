@@ -24,7 +24,7 @@ import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSess
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { rulesetCapabilitiesForSelection } from '../../lib/rules';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError, isAmbiguousMutation, isReadTimeout, isStaleWrite, isTransientError, translateApiError } from '../../lib/api';
 import { formatDateTime, formatTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter, invalidateEncounterActions, invalidateTableSafety, useTableSafety } from '../../lib/query';
@@ -51,7 +51,7 @@ import { TurnWorkspace } from './TurnWorkspace';
 import { PlayerVitalsHeader } from './PlayerVitalsHeader';
 import { TurnElapsedChip } from './TurnElapsedChip';
 import { TurnChangeBeat, type TurnChangeBeatEvent } from './TurnChangeBeat';
-import { detectSseTurnBeat, shouldConsumeTurnBeatResync, type TurnBeatSnapshot } from './turnBeat';
+import { detectSseTurnBeat, shouldReconcileTurnBeatRead, type TurnBeatSnapshot } from './turnBeat';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -1434,13 +1434,10 @@ export default function RunSessionPage() {
   // establishes a silent baseline; the reconnect/stream-recovery handlers below
   // capture the last successful query-function revision before requesting a catch-up
   // read. The baseline only consumes a completed read newer than that revision,
-  // including when TanStack Query structurally shares the same encounter object. It must NOT
-  // remain armed across an ordinary `encounter.updated`-triggered
-  // refetch: that refetch is paired with (and always precedes) the very
-  // `encounter.turn_changed` frame that updates this same ref directly, and racing
-  // the two — whichever settles first wins — let the REST resync silently
-  // "catch up" to the new turn before its own SSE handler ran, making the edge
-  // look like a no-op and dropping the takeover/ticker beat.
+  // including when TanStack Query structurally shares the same encounter object. Ordinary
+  // polls may also repair an isolated missed frame, but only when their server-owned
+  // `turnVersion` is strictly newer than this baseline. A paired refetch that races its
+  // delivered SSE frame therefore cannot silently consume that frame or overwrite it later.
   const awaitingTurnBeatResyncRef = useRef<number | null>(0);
   const turnPulseTimerRef = useRef<number | null>(null);
   const ownedTurnFeedbackRef = useRef<number | null>(null);
@@ -1513,15 +1510,19 @@ export default function RunSessionPage() {
   // running encounter from replaying a turn-start beat, and (via
   // `awaitingTurnBeatResyncRef`, set by the reconnect/stream-recovery handlers
   // below) keeps the baseline current if the stream missed an intervening edge.
-  // It deliberately does NOT re-run on every ordinary `encounter` refetch — see
-  // the ref's own comment for why that used to race the paired SSE turn edge
-  // (issue #2092).
+  // Ordinary polls can also update this silent baseline after a missed frame, but only
+  // through the monotonic `turnVersion` check below (issue #2092).
   useEffect(() => {
     const completedRead = latestEncounterReadRef.current;
     if (!completedRead || completedRead.encounterId !== eid) return;
-    if (!shouldConsumeTurnBeatResync(
+    const previous = previousTurnBeatRef.current?.encounterId === eid
+      ? previousTurnBeatRef.current
+      : null;
+    if (!shouldReconcileTurnBeatRead(
       awaitingTurnBeatResyncRef.current,
       completedRead.revision,
+      previous?.turnVersion ?? null,
+      completedRead.encounter.turnVersion,
     )) return;
     awaitingTurnBeatResyncRef.current = null;
     const readEncounter = completedRead.encounter;
@@ -1534,6 +1535,7 @@ export default function RunSessionPage() {
       encounterId: eid,
       combatantId: readEncounter.currentCombatantId,
       round: readEncounter.status === 'running' ? readEncounter.round : null,
+      turnVersion: readEncounter.turnVersion,
       isYourTurn,
     };
   }, [eid, encounterReadRevision, characters, me?.user.id]);
@@ -1844,15 +1846,16 @@ export default function RunSessionPage() {
             isYourTurn,
           } : null);
           setTurnOwnerPendingCombatantId(ownerKnown ? null : event.currentCombatantId ?? null);
+          const previous = previousTurnBeatRef.current?.encounterId === eid
+            ? previousTurnBeatRef.current
+            : null;
           const next: TurnBeatSnapshot = {
             encounterId: eid,
             combatantId: event.currentCombatantId ?? null,
             round: event.round ?? null,
+            turnVersion: event.turnVersion ?? Math.max(previous?.turnVersion ?? 0, encounter?.turnVersion ?? 0),
             isYourTurn,
           };
-          const previous = previousTurnBeatRef.current?.encounterId === eid
-            ? previousTurnBeatRef.current
-            : null;
           const kind = detectSseTurnBeat(previous, next);
           previousTurnBeatRef.current = next;
           // Issue #2092: disarm any pending REST catch-up resync. A read revision records
@@ -1919,7 +1922,7 @@ export default function RunSessionPage() {
         // to satisfy "after the encounter.updated-driven refetch (or within one poll cycle)".
         void queryClient.invalidateQueries({ queryKey: queryKeys.encounterEvents(eid) });
       },
-      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, encounter?.turnVersion, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
@@ -2580,6 +2583,7 @@ export default function RunSessionPage() {
   // committed-but-lost response is replayed by the server rather than re-applied. Retry
   // is enabled only because the key is present — the two arrive together by construction.
   const HP_MUTATION_KEY = useMemo(() => ['encounter', eid, 'hpDelta'] as const, [eid]);
+  const hpMutationCount = useIsMutating({ mutationKey: HP_MUTATION_KEY });
   const optimisticHpQueueRef = useRef<OptimisticHpQueue>({
     encounterId: eid,
     base: undefined,
@@ -3590,7 +3594,7 @@ export default function RunSessionPage() {
   // #580): while the client is checking committed state, every non-idempotent DM control
   // is unavailable, which is the "reconcile before another action is allowed" rule.
   const headerBusy =
-    runControl.isPending || nextTurnMut.isPending || hpDelta.isPending || bulkHpApplyPending || undoTurnMut.isPending || deleteEncounterMut.isPending || escalationControl.isPending || reconcileBlocks;
+    runControl.isPending || nextTurnMut.isPending || hpMutationCount > 0 || bulkHpApplyPending || undoTurnMut.isPending || deleteEncounterMut.isPending || escalationControl.isPending || reconcileBlocks;
   const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
 
   useKeyboardGuardedAction(
