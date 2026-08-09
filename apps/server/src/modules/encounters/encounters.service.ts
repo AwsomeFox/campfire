@@ -753,8 +753,9 @@ function deathSaveRollEventDetail(
  *
  * Issue #1925: the encounter's `monsterHpDisplay` dial controls how much of that is
  * withheld. `band` (default) is the behaviour above, unchanged. `exact` ships the real
- * hpCurrent/hpMax/hpTemp/sp/rp to non-DMs too (statblock + pendingConcentrationChecks
- * stay stripped regardless — separate secrecy concerns, issue #425/#606). `hidden` ships
+ * hpCurrent/hpMax/hpTemp/sp/rp to non-DMs too (unrevealed statblocks and
+ * pendingConcentrationChecks stay stripped — separate secrecy concerns, issue #425/#606).
+ * A revealed statblock follows the same HP mode for its template `hp` field. `hidden` ships
  * neither the numbers NOR the band — except a combatant at 0 HP still reports
  * `hpBand: 'down'` in every mode, so the table always knows who dropped. This is the
  * SOLE server-side choke point for the mode; there is no client-side hiding anywhere
@@ -768,11 +769,18 @@ function redactMonsterHp(c: Combatant, mode: MonsterHpDisplay): Combatant {
   // a server-persisted flag, not a client-side toggle, so a non-DM `GET` genuinely
   // never carries the field until the DM turns it on. HP banding itself is entirely
   // unaffected by the reveal: exact HP/temp-HP/SP/RP stay redacted below regardless.
+  // A revealed statblock can carry the same exact template HP used to seed hpMax
+  // (issue #2080). Strip that field in band/hidden modes too; otherwise REST and
+  // MCP callers could recover the number even though hpMax itself is null (issue #2093).
   // pendingConcentrationChecks also embeds exact post-mitigation damage + DC (#606) —
   // strip them so non-DM viewers cannot reverse-engineer secret monster HP.
+  let visibleStatblock = c.statblockRevealed ? c.statblock : null;
+  if (mode !== 'exact' && visibleStatblock) {
+    visibleStatblock = { ...visibleStatblock, hp: null };
+  }
   const redacted: Combatant = {
     ...c,
-    statblock: c.statblockRevealed ? c.statblock : null,
+    statblock: visibleStatblock,
     turnState: {
       ...c.turnState,
       pendingConcentrationChecks: [],
@@ -926,6 +934,90 @@ export class EncountersService {
     const hidden = current ? Boolean(current.hidden) : hiddenFallback;
     if (hidden) return;
     this.events.emit({ type, campaignId, encounterId, ...extraFields } as any);
+  }
+
+  /**
+   * Shared invariant checks for `adjustCombatantResource`'s per-entry mutation (issue #1998).
+   * The character-linked branch (resource on the CHARACTER row) and the statblock branch
+   * (resource on the COMBATANT row's `statblockJson`) each apply this to BOTH resource kinds
+   * they support (a named resource, and a spell slot) — four call sites, one shared code path.
+   * Issue #1909 review turned up three separate defects with the exact same shape across three
+   * consecutive rounds: a guard added to one of the two branches and not its structural twin
+   * (findings 11, 12, 13). Routing all four call sites through this one function means an
+   * omitted guard is now a visible asymmetry in the diff (a call site not updated) rather than
+   * a silent absence a reviewer has to notice by diffing the two branches against each other.
+   *
+   * Checks, in order: the entry exists (and, for spell slots only, has a positive `max` — a
+   * `{max: 0}` slot means "no slots at this level" the same as no entry at all); `used`/`max`
+   * are both integers (an unvalidated legacy/imported row can hold a non-numeric value, which
+   * would otherwise make every bounds comparison below silently false in both directions and
+   * persist `used: NaN` → `null`); the optional `expectedUsed` CAS against the FRESH value;
+   * and the resulting bounds. Returns the original `entry` (never mutated) alongside the
+   * computed next `used` — deliberately NOT applying the delta itself, since the two branches
+   * apply it differently (the character branch mutates the parsed JSON object it owns in
+   * place; the statblock branch spreads a fresh `{...entry, used: nextUsed}` to avoid
+   * disturbing the other fields of the Zod-parsed object it must merge back selectively — see
+   * that branch's own comment on why).
+   */
+  private assertAdjustableResourceEntry<T extends { used: number; max: number }>(
+    entry: T | undefined,
+    opts: {
+      /** True for spell slots — a `{max: 0}` (or absent) level counts as "no such slot". Named resources have no such convention: an existing entry always counts, regardless of `max`. */
+      requirePositiveMax: boolean;
+      existenceMessage: string;
+      /** e.g. "Spell slot entry for level 3" / "Resource 'rage' entry" — prefixes " is malformed (used/max must be integers)". */
+      malformedLabel: string;
+      /** e.g. "Level 3 spell slot" / "Resource 'rage'" — prefixes " changed since last read...". */
+      staleLabel: string;
+      /** e.g. "Spell slot adjustment" / "Resource 'rage' adjustment" — prefixes " would exceed bounds...". */
+      boundsLabel: string;
+      delta: number;
+      expectedUsed: number | undefined;
+    },
+  ): { entry: T; nextUsed: number } {
+    if (!entry) {
+      throw new BadRequestException(opts.existenceMessage);
+    }
+    if (!Number.isInteger(entry.used) || !Number.isInteger(entry.max)) {
+      throw new BadRequestException(`${opts.malformedLabel} is malformed (used/max must be integers)`);
+    }
+    if (opts.requirePositiveMax && entry.max <= 0) {
+      throw new BadRequestException(opts.existenceMessage);
+    }
+    if (opts.expectedUsed !== undefined && opts.expectedUsed !== entry.used) {
+      throw new ConflictException({
+        code: 'STALE_WRITE',
+        message: `${opts.staleLabel} changed since last read (expected used ${opts.expectedUsed}, now ${entry.used})`,
+        expectedUsed: opts.expectedUsed,
+        currentUsed: entry.used,
+      });
+    }
+    const nextUsed = entry.used + opts.delta;
+    if (nextUsed < 0 || nextUsed > entry.max) {
+      throw new BadRequestException(`${opts.boundsLabel} would exceed bounds [0, ${entry.max}] (resulting used: ${nextUsed})`);
+    }
+    return { entry, nextUsed };
+  }
+
+  /**
+   * Shared TOCTOU guard for `adjustCombatantResource`'s in-transaction combatant re-read
+   * (issue #1998). The row must still exist AND still belong to the SAME encounter this
+   * request named — not just any encounter. Issue #1909 review, Devin's twelfth finding: the
+   * character branch re-verified `freshCombatant.encounterId === encounterId` here; the
+   * statblock branch did not, so a combatant moved to another encounter inside the read/
+   * transaction window kept its row and its statblock, passed every remaining guard, and was
+   * written against an encounter the request was never scoped to. One call site per branch so
+   * a future omission is a visible asymmetry rather than an absent check.
+   */
+  private assertFreshCombatantInEncounter<T extends { encounterId: number }>(
+    fresh: T | undefined,
+    encounterId: number,
+    combatantId: number,
+  ): T {
+    if (!fresh || fresh.encounterId !== encounterId) {
+      throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
+    }
+    return fresh;
   }
 
   /**
@@ -4592,9 +4684,27 @@ export class EncountersService {
             if (!isVisibleTo({ hidden: freshEncounter.hidden }, role)) {
               throw new NotFoundException(`Encounter ${encounterId} not found`);
             }
-            if (freshEncounter.hidden) {
-              throw new ForbiddenException('Death saves cannot be rolled while an encounter is hidden');
-            }
+            // #1759 added an unconditional `if (freshEncounter.hidden) throw
+            // ForbiddenException(...)` here to keep death saves out of a hidden encounter.
+            // Removed in #2090: it was reachable ONLY by the DM, and since encounters
+            // default to hidden it made death saves impossible for the DM in the common
+            // case — the first PC to drop in a fresh fight could not roll at all.
+            //
+            // Why DM-only: `isVisibleTo` is `role === 'dm' || !hidden`, so on a hidden
+            // encounter every non-DM is already turned away with a 404 before reaching
+            // this line. There are THREE such gates on this path, and it is worth being
+            // precise about which does what, because the obvious reading is wrong:
+            //   1. the REST controller's own `isVisibleTo` precheck on this route — the
+            //      one that actually answers a non-DM's HTTP request (added by #1909
+            //      specifically so a hidden encounter 404s rather than 403ing, which
+            //      would have been an id-enumeration oracle);
+            //   2. `rollDeathSave`'s method-entry `isVisibleTo` — the gate for callers
+            //      that never touch the controller, i.e. the MCP surface;
+            //   3. this in-transaction re-check against the FRESH row, which closes the
+            //      window where an encounter is visible at entry and hidden by commit.
+            // Removed rather than re-gated on `role !== 'dm'`: that condition can never
+            // be true here, so it would read as a working player-side guard while being
+            // unreachable dead code.
             if (role !== 'dm') {
               const [freshCharacter] = tx.select().from(characters).where(eq(characters.id, fresh.characterId!)).limit(1).all();
               if (!freshCharacter || freshCharacter.ownerUserId !== user.id) {
@@ -4614,6 +4724,23 @@ export class EncountersService {
             }
             const result = this.rollDeathSaveD20();
             result.label = `${fresh.name} · death save`;
+            // Issue #1904 secrecy, reachable for the first time via #2090: the dice log is
+            // campaign-wide, and this row is labelled with the character's name. Until #2090
+            // the DM could not roll here at all while the encounter was hidden, so the
+            // missing tag below was masked by a 403; allowing the roll without it published
+            // the name, the death-save result, and the existence of a hidden fight to every
+            // campaign member.
+            //
+            // Both sibling paths — the bulk roll and the per-combatant initiative roll —
+            // already carry this rule, guarding their dice-log write with `if (!fresh.hidden)`
+            // and passing `encounterId`. Death saves cannot simply skip the write the way
+            // those do: #1462 makes the dice row part of the authoritative outcome, committed
+            // or rolled back with the combatant state, and `rollDeathSave` returns that roll
+            // to its caller. So tag it and let `RollsService.listForCampaign`'s read-time
+            // filter drop it for non-DMs. Tagging is also the stronger mechanism: it keeps
+            // covering the row when an encounter is hidden AFTER the roll was persisted,
+            // which a write-time check cannot.
+            result.encounterId = encounterId;
             roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
             // `updateCombatant` applies this server-only face after the hook returns.
             deathSavePatch.deathSaveRoll = result.total;
@@ -4686,7 +4813,17 @@ export class EncountersService {
         // satisfied by a prior claim still returns the stored response as its body, but
         // the winner already broadcast that die — emitting again put the same d20 in the
         // shared dice tray twice, making one death save look like two.
-        if (!replayedPriorClaim) this.rolls.emitDiceRolled?.(replay.roll);
+        // ...and never for a hidden encounter. `dice.rolled` is in
+        // CAMPAIGN_BROADCAST_SAFE_FRAMES, so `projectCampaignEventForRole` returns it to every
+        // role unchanged — including the `encounterId` this PR now tags the roll with. Filtering
+        // the REST feed alone would still have announced "activity in encounter N" over SSE to
+        // every player and viewer. The per-combatant initiative roll already guards its emit the
+        // same way (`if (roll && !freshEncounterRow.hidden)`); this is that rule applied to the
+        // path #2090 newly opened. Re-read the row rather than trusting the pre-transaction
+        // snapshot, so a reveal or hide committed in between is respected.
+        if (!replayedPriorClaim && !(await this.getRowOrThrow(encounterId, true)).hidden) {
+          this.rolls.emitDiceRolled?.(replay.roll);
+        }
         return replay;
       }
       // A null replay here does NOT always mean nothing was persisted. `replayCommittedDeathSave`
@@ -4710,7 +4847,13 @@ export class EncountersService {
           // returns it unredacted whenever `prior.responseRole === role` — redaction there
           // is reserved for the changed-role re-derivation. Redacting here would make the
           // recovery answer differ from the answer the same caller gets on the normal path.
-          this.rolls.emitDiceRolled?.(roll);
+          //
+          // The BROADCAST is a different question from the response body, and gets the same
+          // hidden-encounter guard as the emit above: returning the die to the caller who
+          // rolled it is correct, announcing it to every campaign stream is not.
+          if (!(await this.getRowOrThrow(encounterId, true)).hidden) {
+            this.rolls.emitDiceRolled?.(roll);
+          }
           return { combatant: committed, roll };
         }
       }
@@ -5216,6 +5359,17 @@ export class EncountersService {
         _beforeSucc = fresh.deathSaveSuccesses;
         _beforeFail = fresh.deathSaveFailures;
         const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
+        // Issue #2084 finding 1 (the "clear the stamp" half): a DM's manual `initiative`
+        // PATCH (set or clear) moves this combatant out of whatever tie group its
+        // `manualOrder` stamp referred to — that tie no longer exists, so the stamp must
+        // not go on deciding a DIFFERENT tie the combatant lands in later (or continue
+        // being consulted for a tie it no longer belongs to at all). Compared against
+        // `fresh`, the transaction-local row, not the pre-transaction `existing` snapshot,
+        // for the same staleness reason `expectedUpdatedAt` is re-checked against `fresh`
+        // above. A same-value PATCH (idempotent resend) leaves the stamp alone.
+        if (staticUpdate.initiative !== undefined && staticUpdate.initiative !== fresh.initiative) {
+          writeSet.manualOrder = null;
+        }
         if (actionUsesPatch) {
           // Rebase the DM's uses override against the FRESH row, for the same reason the
           // condition block below does (issue #747): `action_uses` is a single JSON map of
@@ -6573,6 +6727,13 @@ export class EncountersService {
         .set({
           initiative: sql`CASE ${combatants.id} ${cases} END`,
           initiativeBreakdown: sql`CASE ${combatants.id} ${breakdownCases} END`,
+          // Issue #2084 finding 1: this row's initiative is moving off null, so any
+          // `manualOrder` it carries can only be leftover from data written under the
+          // pre-#2084 roster-wide stamp (which stamped unrolled `preparing` rows too) —
+          // never a value this narrower scheme would itself have written, since a
+          // null-initiative row is never stamped now. Clear it so a first roll can't hand
+          // a brand-new tie an insertion-order decision instead of the adapter's.
+          manualOrder: null,
         })
         .where(and(inArray(combatants.id, rolled.map((r) => r.id)), isNull(combatants.initiative)))
         .run();
@@ -6660,6 +6821,27 @@ export class EncountersService {
    * single-combatant write here would desync it from the rest of its side. That side-wide
    * roll stays exclusively the bulk `rollInitiative` path.
    */
+  private async redactReplayCombatant(combatant: Combatant, role: Role, encounterId: number): Promise<Combatant> {
+    if (role === 'dm') return combatant;
+    const freshEncounterForReplay = await this.getRowOrThrow(encounterId, true);
+    // The outer visibility check and the fresh role-filtered replay read are separate
+    // queries. If the encounter becomes hidden between them, the latter throws and lands
+    // in the stored-body fallback below. Re-check entity visibility here so that fallback
+    // cannot turn the race into a disclosure of a now-hidden encounter.
+    if (!isVisibleTo({ hidden: freshEncounterForReplay.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    const freshSiblingProtects =
+      freshEncounterForReplay.mapAttachmentId != null &&
+      !fogConcealsPixels(parseFog(freshEncounterForReplay.fog)) &&
+      (await this.attachmentsService.isFogProtectedEncounterMap(freshEncounterForReplay.mapAttachmentId, freshEncounterForReplay.campaignId));
+    const fog = parseFog(freshEncounterForReplay.fog);
+    const invalidFog = freshEncounterForReplay.fog !== null && fog === null;
+    if (invalidFog || freshSiblingProtects) return redactTokenInFog(combatant, { enabled: true, revealed: [] });
+    if (fog?.enabled) return redactTokenInFog(combatant, fog);
+    return combatant;
+  }
+
   async rollCombatantInitiative(
     encounterId: number,
     combatantId: number,
@@ -6706,16 +6888,24 @@ export class EncountersService {
     const resolveReplay = async (prior: EncounterOpPrior): Promise<{ combatant: Combatant; roll: DiceRoll | null } | null> => {
       const parsed = replayResponse(prior.response);
       if (!parsed) return null;
-      if (prior.responseRole === role) return parsed;
-      // Re-derive for a changed role; tolerate a trashed encounter and treat any
-      // visibility failure as best-effort so the original rejection reason is preserved.
       try {
-        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
+        const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, user.id, true);
         const found = snapshot.combatants.find((c) => c.id === combatantId);
-        if (!found) return null;
         const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
-        return { combatant: found, roll };
+        if (found) {
+          return { combatant: found, roll };
+        }
+        if (prior.responseRole === role) {
+          const redactedCombatant = await this.redactReplayCombatant(parsed.combatant, role, encounterId);
+          return { combatant: redactedCombatant, roll };
+        }
+        return null;
       } catch {
+        if (prior.responseRole === role) {
+          const roll = parsed.roll ? await this.rolls.redactRollForRole(parsed.roll, role) : null;
+          const redactedCombatant = await this.redactReplayCombatant(parsed.combatant, role, encounterId);
+          return { combatant: redactedCombatant, roll };
+        }
         return null;
       }
     };
@@ -6825,7 +7015,16 @@ export class EncountersService {
         });
 
         tx.update(combatants)
-          .set({ initiative, initiativeBreakdown: toJsonText(breakdown) })
+          .set({
+            initiative,
+            initiativeBreakdown: toJsonText(breakdown),
+            // Issue #2084 finding 1: an overwrite re-roll (or a first roll off a legacy
+            // null-but-stamped row) assigns a fresh initiative value, so whatever tie
+            // group any prior `manualOrder` referred to no longer applies — the DM's next
+            // drag, if any, will re-establish one for wherever this combatant actually
+            // lands now.
+            manualOrder: null,
+          })
           .where(eq(combatants.id, combatantId))
           .run();
 
@@ -6951,13 +7150,32 @@ export class EncountersService {
    *
    * `initiative` is only ever touched while the encounter is `running` — `sortCombatants`
    * ignores `initiative` entirely while `preparing` (plain sortOrder ascending), so a
-   * preparing-time reorder is establishing tie-break order for later, not overriding a
-   * rolled value. While running, a move that stays within the SAME initiative value (the
-   * moved combatant's own initiative already equals a new neighbor's, e.g. reordering a
-   * tied 14) only rewrites `sortOrder`. A move that crosses initiative values sets the
-   * moved combatant's `initiative` to a value between its NEW neighbors — so the manual
-   * placement survives a later resort — and clears the now-stale `initiativeBreakdown`
-   * (#1476: this must never fabricate a breakdown for a manually-assigned value).
+   * preparing-time reorder never overrides a rolled value. Whether it also establishes
+   * tie-break order for later depends on whether the moved combatant already has a real
+   * `initiative` at drag time: `manualOrder` is skipped whenever the landing value is
+   * null (see that field's schema doc), which it usually is before `/start` — a
+   * preparing-time drag of two still-unrolled combatants records ONLY `sortOrder`, and
+   * once real values are rolled, a tie between them resolves through the adapter, not
+   * this drag. Only a prep-time reorder among combatants that ALREADY carry a real
+   * `initiative` (set ahead of the roll) establishes real tie-break order. Deciding what
+   * "the DM's ordering intent" even means for combatants that have not rolled yet — which
+   * of them the DM meant relative to which, when the tie groups they will land in do not
+   * exist — is tracked as a follow-up (issue #2102), not attempted here: it is the exact
+   * design question whose rushed first answer (stamping unconditionally during prep)
+   * produced #2084's "encodes add order" defect in the first place. While running, a
+   * move that leaves the moved combatant's own initiative
+   * already sitting between its NEW neighbours' values (the ordinary within-a-tie case,
+   * e.g. reordering a tied 14, but also a move that happens to land back where the value
+   * already belonged) only rewrites `sortOrder` — issue #2084 finding 2: the old
+   * "differs from both neighbours" predicate rewrote a rolled value whenever it merely
+   * differed, including when it already sat correctly between them. A move that truly
+   * crosses initiative values sets the moved combatant's `initiative` to a value between
+   * its NEW neighbors — so the manual placement survives a later resort — and clears the
+   * now-stale `initiativeBreakdown` (#1476: this must never fabricate a breakdown for a
+   * manually-assigned value). `manualOrder` is stamped for every row sharing the moved
+   * combatant's landing initiative — its whole tie group, not the roster and not just the
+   * rows the drag physically crossed (issue #2084 finding 1, corrected to whole-group
+   * scope by issue #2095 review) — see that field's own doc comment in @campfire/schema.
    *
    * `expectedTurnVersion` CAS: 409s when it no longer matches the encounter's current
    * `turnVersion` (bumped on every turn advance) — a drag issued against a roster the DM
@@ -7024,7 +7242,38 @@ export class EncountersService {
         const origInit = moved.initiative;
         const prevInit = prev?.initiative ?? null;
         const nextInit = next?.initiative ?? null;
-        if (origInit !== prevInit && origInit !== nextInit) {
+        // Issue #2084 finding 2 (originally reported as review finding 4): the predicate
+        // used to be "origInit differs from BOTH neighbours", which is true even when
+        // origInit already sits strictly BETWEEN them — its natural, already-correct
+        // position. Roster A(20), M(14), C(6): dragging M to just after A (a no-op, or
+        // "Move after A" from the menu) has prev=20, next=6; 14 differs from both, so the
+        // old code wrote floor((20+6)/2)=13 and nulled a real, already-fine
+        // initiativeBreakdown for a move that changed nothing about the ordering. The
+        // question that matters is whether the CURRENT value already lies within the new
+        // neighbours' bounds, not whether it differs from them.
+        const alreadyBetween =
+          origInit !== null && (prevInit === null || origInit <= prevInit) && (nextInit === null || origInit >= nextInit);
+        // Issue #2095 review (Codex P1): `alreadyBetween` above is `false` unconditionally
+        // whenever `origInit === null` (an unrolled combatant), so a null-origin move used
+        // to fall straight into reassignment below. Roster A(20), B(10), U(null), V(null):
+        // dragging U to just after B — where it already sits — had prevInit=10, nextInit=
+        // null, landing in the `prevInit != null` branch and writing `newInitiative = 9`.
+        // That silently rolls an unrolled combatant in for a drop `sortOrder` alone should
+        // have satisfied — the same class of bug as finding 2 above, at the rolled/null
+        // boundary instead of between two rolled neighbours.
+        //
+        // `nextInit === null` is exactly "the drop still lands inside (or at the end of)
+        // the unrolled tier": `sorted` above places every rolled row before every unrolled
+        // one, so the only way an unrolled combatant's NEXT neighbour can be a rolled row is
+        // a drop at the very top of the whole roster (`insertAt === 0`, `prevInit === null`
+        // too) — deliberately rolling it in ahead of everyone. Any other `nextInit === null`
+        // drop keeps at least the row immediately after it (if any) unrolled, so the
+        // combatant belongs in the unrolled tier regardless of `prevInit`. Preserve `null`
+        // there; only the two cases below (`nextInit !== null`) are actually placing an
+        // unrolled combatant into the rolled region, which — unlike the null-preserving
+        // cases — is a deliberate re-roll-by-position, not an accident of the drop math.
+        const stillUnrolled = origInit === null && nextInit === null;
+        if (!alreadyBetween && !stillUnrolled) {
           if (prevInit != null && nextInit != null) {
             newInitiative = prevInit === nextInit ? prevInit : Math.floor((prevInit + nextInit) / 2);
           } else if (prevInit != null) {
@@ -7048,20 +7297,70 @@ export class EncountersService {
       // initModDescThenSortOrderAsc, which compares initMod BEFORE sortOrder) — a
       // sortOrder-only rewrite is silently discarded whenever the tied combatants have
       // different initMod (different DEX), so the DM's drag has no visible effect. Stamp
-      // `manualOrder` on EVERY combatant in the newly computed order (not just the moved
-      // one) so sortCombatants can hold the whole roster at this position across a
-      // re-sort.
+      // `manualOrder` to hold the moved combatant's new position across a re-sort.
       //
-      // Stamped for a PREPARING encounter too (#2074 review finding 2). It is inert while
-      // preparing — `sortCombatants` orders by sortOrder alone there and never reaches the
-      // adapter tiebreak — but `/start` re-sorts the roster in RUNNING mode, so without it
-      // a prep-time reorder is discarded at exactly the moment the fight begins, by exactly
-      // the mechanism above. Gating the stamp on status reintroduced the bug on the
-      // preparing→running edge; the doc on this method already promised the opposite ("a
-      // preparing-time reorder is establishing tie-break order for later"), and only
-      // stamping unconditionally makes that true.
+      // Issue #2084 finding 1: NOT every combatant in the roster. The original fix
+      // stamped the whole roster on every drag, so after one reorder EVERY row carried a
+      // value, and `sortCombatants` consults `manualOrder` ahead of the adapter tiebreak
+      // whenever a stamped row is involved — so `adapter.initiativeTiebreak` never ran
+      // again for this encounter, including for ties the DM never touched. It was worse
+      // while `preparing`, where most rows have no rolled initiative yet and the stamped
+      // index encoded add order, not a DM decision.
+      //
+      // The narrower rule: stamp only rows that share the moved combatant's landing
+      // (possibly just-reassigned) initiative value — its FULL tie group as it exists in
+      // the newly computed order, not merely the ones the drag's own start/end positions
+      // happened to span. A tie group nobody dragged into stays entirely null and keeps
+      // falling through to the adapter, since only same-initiative rows are relevant to a
+      // tiebreak comparison at all (`sortCombatants` never calls into `manualOrder` for
+      // two different initiative values — it decides those numerically first).
+      //
+      // Issue #2095 review (Devin, Codex, and Copilot, same root cause, three independent
+      // repros): an
+      // earlier version stamped only the moved combatant plus whichever OTHER tie-group
+      // members its start/end positions physically crossed — but #2088's
+      // stamped-before-unstamped total-order rule (relanded in this same PR, see
+      // `sortCombatants`) makes ANY stamped row sort ahead of ANY unstamped one within a
+      // tie, with no regard for whether that row was crossed. A partial stamp therefore
+      // does not merely fail to help the untouched members — it ACTIVELY sinks them below
+      // the touched ones, an order the DM never asked for:
+      //
+      //   running A(20), W/X/Y/Z all tied at 14; drag Z to just after X. Crossing only
+      //   spans Y, so the old code stamped {Z, Y} and left W/X null — sorting to
+      //   A, Z, Y, W, X instead of the requested A, W, X, Z, Y.
+      //
+      // Smaller and nastier: a tied [A, B, C], no-op move of B to right after A crosses
+      // NOBODY (insertAt already equals B's old position) — the old code still stamped
+      // only B, and a stamped B alone now sorts ahead of unstamped A and C: a no-op drag
+      // silently reorders its own tie group.
+      //
+      // Stamping the WHOLE landing group, using each member's index in this SAME
+      // `orderedIds` pass, also closes a second issue both reviewers noted: `manualOrder`
+      // is an absolute index into `orderedIds`, so a stamp from an EARLIER drag lives in a
+      // different index space than one from this drag. A partial stamp could leave part of
+      // a tie group holding stale indices from a prior operation while the rest got fresh
+      // ones, risking duplicate or inverted values within one group. Every member of the
+      // group is (re)stamped together here, in one consistent space, every time.
+      //
+      // Deliberately skipped altogether when the moved combatant's landing initiative is
+      // null (unrolled): `sortCombatants` decides an unrolled tie by `sortOrder` alone
+      // (its own null/null branch), same as every row while `preparing` — there is no
+      // adapter tiebreak for a stamp to protect there, and stamping it anyway is exactly
+      // what reproduced the preparing-time "encodes add order" bug even under this
+      // narrower scheme, since prep-time rows are null far more often than not.
+      const finalInitiative = newInitiative;
+      const manualOrderIds = new Set<number>();
+      if (finalInitiative !== null) {
+        manualOrderIds.add(combatantId);
+        for (const c of withoutMoved) {
+          if (c.initiative === finalInitiative) manualOrderIds.add(c.id);
+        }
+      }
       orderedIds.forEach((id, index) => {
-        tx.update(combatants).set({ sortOrder: index, manualOrder: index }).where(eq(combatants.id, id)).run();
+        tx.update(combatants)
+          .set({ sortOrder: index, ...(manualOrderIds.has(id) ? { manualOrder: index } : {}) })
+          .where(eq(combatants.id, id))
+          .run();
       });
       const initiativeChanged = newInitiative !== moved.initiative;
       if (initiativeChanged) {
@@ -7584,6 +7883,22 @@ export class EncountersService {
         }
 
         const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+        if (rows.length === 0) {
+          // Issue #2091: removeCombatant deliberately still permits emptying a RUNNING
+          // encounter's roster (including its last combatant) — two pre-existing flows
+          // depend on that: the 30-second combatant-removal undo window, and a death-save
+          // replay that removes its subject and only later calls /end. Guarding the delete
+          // itself would break both. Instead, the invariant is enforced HERE, at the only
+          // place emptying the roster actually harmed the DM: next-turn/end-turn (this
+          // function backs both) must never silently report success and advance the round
+          // on a fight with nobody in it — that silent "success" is what let the campaign's
+          // one-live-fight slot (issue #744) stay wedged with no discoverable way out. The
+          // message names the actual recovery so the DM's very next action tells them what
+          // to do, rather than leaving them to rediscover it via a 409 on a different fight.
+          throw new BadRequestException(
+            'This encounter has no combatants — end the encounter instead of advancing an empty fight.',
+          );
+        }
         const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
         const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
         const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
@@ -9857,21 +10172,14 @@ export class EncountersService {
     // combatant row) — so re-deriving just that one projection against CURRENT fog/sibling
     // state is sufficient, not a narrowing of what the previous fix already covered.
     const resolveReplay = async (prior: EncounterOpPrior): Promise<Combatant> => {
+      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, user.id, true);
+      const found = snapshot.combatants.find((c) => c.id === combatantId);
+      if (found) return found;
+
       const body = prior.response as Combatant | null;
       if (body && prior.responseRole === role) {
-        if (role === 'dm') return body;
-        const freshEncounterForReplay = await this.getRowOrThrow(encounterId, true);
-        const freshSiblingProtects =
-          freshEncounterForReplay.mapAttachmentId != null &&
-          !fogConcealsPixels(parseFog(freshEncounterForReplay.fog)) &&
-          (await this.attachmentsService.isFogProtectedEncounterMap(freshEncounterForReplay.mapAttachmentId, freshEncounterForReplay.campaignId));
-        return redactForRole(body, freshEncounterForReplay.fog, freshSiblingProtects);
+        return this.redactReplayCombatant(body, role, encounterId);
       }
-      // Role MISMATCH (or a missing body, which cannot happen for THIS implementation
-      // since the claim and its body are written in the same transaction, but handled the
-      // same defensive way as the sibling keyed mutations that guard on this): mirrors
-      // `rollCombatantInitiative`/`advanceCurrentTurn`/`undoTurn`'s own
-      // `prior.responseRole === role` guard — fall through to a FULL fresh, role-filtered
       // read (`getWithCombatantsOrThrow`), since a role change can affect more projections
       // than fog alone (e.g. a demoted co-DM). This never re-runs the effect a second time;
       // only the returned VIEW is re-derived. Unlike the same-role branch above, THIS path
@@ -9890,10 +10198,7 @@ export class EncountersService {
       // above and the early replay check do — a role-mismatched replay of an
       // already-committed outcome must survive the encounter having since been trashed
       // just as much as a same-role one does.
-      const snapshot = await this.getWithCombatantsOrThrow(encounterId, role, undefined, true);
-      const found = snapshot.combatants.find((c) => c.id === combatantId);
-      if (!found) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
-      return found;
+      throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
     };
 
     // Issue #1909 review (Codex): a keyed retry must replay an already-committed outcome
@@ -10007,10 +10312,11 @@ export class EncountersService {
           // encounter read, so this mirrors the established sibling shape. `row` (used below
           // for the event detail and the idempotency claim's stored response body) is
           // reassigned to this fresh row so a name change in the same window isn't lost.
-          const freshCombatant = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
-          if (!freshCombatant || freshCombatant.encounterId !== encounterId) {
-            throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
-          }
+          const freshCombatant = this.assertFreshCombatantInEncounter(
+            tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0],
+            encounterId,
+            combatantId,
+          );
           row = freshCombatant;
           const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
           if (!character) throw new NotFoundException(`No such character ${characterId}`);
@@ -10018,50 +10324,20 @@ export class EncountersService {
           if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
             const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
             const levelKey = String(patch.spellLevel);
-            const slot = slots[levelKey];
-            if (!slot || slot.max <= 0) {
-              throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
-            }
-            // Issue #1909 review (Devin, thirteenth finding): the statblock branch got this
-            // malformed-entry guard and its character twin did not — the same
-            // one-of-two-symmetric-branches omission as the twelfth finding's missing
-            // `encounterId` check, in this same method. `character.spellSlots` is read with a
-            // bare `fromJsonText` carrying a CLAIMED type and no runtime validation, so a
-            // legacy/imported row can hold a non-numeric `used`/`max`. The check just above
-            // does NOT catch it: `'three' <= 0` is false, so a string `max` sails through.
-            // Then every NaN comparison is false, so `nextUsed < 0 || nextUsed > slot.max`
-            // passes in BOTH directions and persists `used: NaN`, which serializes to `null`
-            // and leaves the tracker unusable — the exact contradiction of the "never a
-            // silent clamp" contract this PR's own REST and MCP docs state for both
-            // branches. Placed before the CAS below so a malformed entry reports what is
-            // actually wrong instead of a misleading STALE_WRITE.
-            if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
-              throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
-            }
-            // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
-            // ("set this slot's used to N") converted to a relative delta against whatever
-            // `used` the caller last rendered. The transactional fresh-row read above
-            // prevents the whole-blob lost-update this endpoint replaced, but does nothing
-            // to stop a SECOND caller's delta — computed against the SAME stale baseline —
-            // from landing on top of a first caller's fresh result (two clicks of "set to
-            // 1" from a shared used:0 baseline would otherwise commit used:1 then used:2).
-            // `expectedUsed` is optional (a purely relative caller, e.g. an AI DM's
-            // "restore 2 charges", never sends it) but when present is checked against the
-            // FRESH `slot.used` read just above, inside this same transaction — the same
-            // per-value CAS shape as `expectedUpdatedAt` elsewhere, scoped to one resource
-            // instead of the whole sheet/statblock.
-            if (patch.expectedUsed !== undefined && patch.expectedUsed !== slot.used) {
-              throw new ConflictException({
-                code: 'STALE_WRITE',
-                message: `Level ${patch.spellLevel} spell slot changed since last read (expected used ${patch.expectedUsed}, now ${slot.used})`,
-                expectedUsed: patch.expectedUsed,
-                currentUsed: slot.used,
-              });
-            }
-            const nextUsed = slot.used + delta;
-            if (nextUsed < 0 || nextUsed > slot.max) {
-              throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
-            }
+            // Issue #1998: existence, integer used/max, the expectedUsed CAS, and bounds are
+            // all enforced through the ONE shared helper both this branch and the statblock
+            // branch's identical spell-slot path call — see the helper's own doc comment for
+            // why (issue #1909 review findings 11-13 were three rounds of exactly this guard
+            // drifting between the two branches).
+            const { entry: slot, nextUsed } = this.assertAdjustableResourceEntry(slots[levelKey], {
+              requirePositiveMax: true,
+              existenceMessage: `No spell slots at level ${patch.spellLevel}`,
+              malformedLabel: `Spell slot entry for level ${patch.spellLevel}`,
+              staleLabel: `Level ${patch.spellLevel} spell slot`,
+              boundsLabel: 'Spell slot adjustment',
+              delta,
+              expectedUsed: patch.expectedUsed,
+            });
             slot.used = nextUsed;
             slots[levelKey] = slot;
             // Issue #1902 rework (round 10): nextUpdatedAt, not nowIso — `updatedAt` is a CAS
@@ -10089,33 +10365,19 @@ export class EncountersService {
             // this method (see the statblock branch's identical fix below) — create-on-
             // demand is a real feature someone could want, but it must be an explicit,
             // named capability, not an accident of `??`.
-            const res = resources[patch.key];
-            if (!res) {
-              throw new BadRequestException(`No such resource '${patch.key}'`);
-            }
-            // Issue #1909 review (Devin, thirteenth finding): character-branch counterpart to
-            // the statblock branch's identical guard. `character.resources` gets the same
-            // unvalidated `fromJsonText` treatment as `spellSlots` above, and here there is
-            // no prior check at all to lean on — a missing `used` reaches the arithmetic
-            // directly. A string `max` additionally disables the upper bound outright, since
-            // `nextUsed > 'three'` is false for any number.
-            if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
-              throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
-            }
-            // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
-            // spell-slot branch above.
-            if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
-              throw new ConflictException({
-                code: 'STALE_WRITE',
-                message: `Resource '${patch.key}' changed since last read (expected used ${patch.expectedUsed}, now ${res.used})`,
-                expectedUsed: patch.expectedUsed,
-                currentUsed: res.used,
-              });
-            }
-            const nextUsed = res.used + delta;
-            if (nextUsed < 0 || nextUsed > res.max) {
-              throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
-            }
+            // Issue #1998: same shared helper as the spell-slot path above — see its doc
+            // comment. `requirePositiveMax: false` matches this branch's pre-existing
+            // convention that a named resource's existence alone (not its `max`) decides
+            // whether the key is known.
+            const { entry: res, nextUsed } = this.assertAdjustableResourceEntry(resources[patch.key], {
+              requirePositiveMax: false,
+              existenceMessage: `No such resource '${patch.key}'`,
+              malformedLabel: `Resource '${patch.key}' entry`,
+              staleLabel: `Resource '${patch.key}'`,
+              boundsLabel: `Resource '${patch.key}' adjustment`,
+              delta,
+              expectedUsed: patch.expectedUsed,
+            });
             res.used = nextUsed;
             resources[patch.key] = res;
             tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nextUpdatedAt(character.updatedAt) }).where(eq(characters.id, characterId)).run();
@@ -10201,10 +10463,11 @@ export class EncountersService {
           // this window would have been written through unscoped. Both branches were added
           // in this PR for the identical TOCTOU concern; the asymmetry was an oversight, not
           // a decision.
-          const fresh = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0];
-          if (!fresh || fresh.encounterId !== encounterId) {
-            throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
-          }
+          const fresh = this.assertFreshCombatantInEncounter(
+            tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all()[0],
+            encounterId,
+            combatantId,
+          );
           if (!fresh.statblockJson) {
             throw new BadRequestException('This combatant has no inline statblock resources');
           }
@@ -10226,50 +10489,26 @@ export class EncountersService {
 
           if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
             const levelKey = String(patch.spellLevel);
-            const slot = statblock.spellSlots[levelKey] as { max: number; used: number } | undefined;
-            if (!slot || slot.max <= 0) {
-              throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
-            }
-            // Issue #1909 review (Codex P2): `CombatantStatblock.spellSlots`/`.resources`
-            // are `z.record(..., z.any())` — no per-entry shape enforcement — so a stored
-            // entry can be malformed (`{max: 3}` with no `used`, or `{}` entirely). Without
-            // this check, `slot.used + delta` below would be `NaN`, and `NaN < 0 || NaN >
-            // slot.max` is FALSE either way (every NaN comparison is false), so the
-            // overspend/over-restore guard would silently pass and persist `used: NaN` —
-            // which serializes to `null` and leaves the tracker unusable — directly
-            // contradicting this endpoint's documented contract that overspend/
-            // over-restore is always a typed 400, never a silent clamp (or, worse here, a
-            // silent corruption). A non-numeric `max` would also disable the upper bound
-            // entirely (`nextUsed > undefined` is always false). Validate numerically
-            // BEFORE computing the delta so a malformed entry 400s, naming it, instead of
-            // writing garbage.
-            if (!Number.isInteger(slot.used) || !Number.isInteger(slot.max)) {
-              throw new BadRequestException(`Spell slot entry for level ${patch.spellLevel} is malformed (used/max must be integers)`);
-            }
-            // Issue #1909 review (Codex P2): `delta` encodes an ABSOLUTE pip intent
-            // ("set this slot's used to N") converted to a relative delta against whatever
-            // `used` the caller last rendered. The transactional fresh-row read above
-            // prevents the whole-blob lost-update this endpoint replaced, but does nothing
-            // to stop a SECOND caller's delta — computed against the SAME stale baseline —
-            // from landing on top of a first caller's fresh result (two clicks of "set to
-            // 1" from a shared used:0 baseline would otherwise commit used:1 then used:2).
-            // `expectedUsed` is optional (a purely relative caller, e.g. an AI DM's
-            // "restore 2 charges", never sends it) but when present is checked against the
-            // FRESH `slot.used` read just above, inside this same transaction — the same
-            // per-value CAS shape as `expectedUpdatedAt` elsewhere, scoped to one resource
-            // instead of the whole encounter.
-            if (patch.expectedUsed !== undefined && patch.expectedUsed !== slot.used) {
-              throw new ConflictException({
-                code: 'STALE_WRITE',
-                message: `Level ${patch.spellLevel} spell slot changed since last read (expected used ${patch.expectedUsed}, now ${slot.used})`,
+            // Issue #1998: `CombatantStatblock.spellSlots`/`.resources` are
+            // `z.record(..., z.any())` — no per-entry shape enforcement — so a stored entry
+            // can be malformed (`{max: 3}` with no `used`, or `{}` entirely). Existence,
+            // integer used/max, the expectedUsed CAS, and bounds are all enforced through the
+            // ONE shared helper both this branch and the character branch's identical
+            // spell-slot path call — see the helper's own doc comment for why (issue #1909
+            // review findings 11-13 were three rounds of exactly this guard drifting between
+            // the two branches).
+            const { entry: slot, nextUsed } = this.assertAdjustableResourceEntry(
+              statblock.spellSlots[levelKey] as { max: number; used: number } | undefined,
+              {
+                requirePositiveMax: true,
+                existenceMessage: `No spell slots at level ${patch.spellLevel}`,
+                malformedLabel: `Spell slot entry for level ${patch.spellLevel}`,
+                staleLabel: `Level ${patch.spellLevel} spell slot`,
+                boundsLabel: 'Spell slot adjustment',
+                delta,
                 expectedUsed: patch.expectedUsed,
-                currentUsed: slot.used,
-              });
-            }
-            const nextUsed = slot.used + delta;
-            if (nextUsed < 0 || nextUsed > slot.max) {
-              throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
-            }
+              },
+            );
             statblock.spellSlots[levelKey] = { ...slot, used: nextUsed };
             // Issue #1909 review (Devin P2): merge only the TOUCHED level back into the
             // ORIGINAL raw `rawStatblock.spellSlots`, not the re-parsed `statblock` as a
@@ -10286,30 +10525,22 @@ export class EncountersService {
             // synthesized-`{max: 1, used: 0, ...}`-on-missing-key fallback, silently
             // creating a brand-new resource on a typo or a hallucinated AI-driver key
             // instead of 400ing the way the spell-slot path above already does.
-            const res = statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined;
-            if (!res) {
-              throw new BadRequestException(`No such resource '${patch.key}'`);
-            }
-            // Issue #1909 review (Codex P2): same malformed-entry guard as the spell-slot
-            // branch above — an EXISTING stored entry is not schema-enforced and can carry
-            // a non-numeric `used`/`max`.
-            if (!Number.isInteger(res.used) || !Number.isInteger(res.max)) {
-              throw new BadRequestException(`Resource '${patch.key}' entry is malformed (used/max must be integers)`);
-            }
-            // Issue #1909 review (Codex P2): same per-resource expected-value CAS as the
-            // spell-slot branch above.
-            if (patch.expectedUsed !== undefined && patch.expectedUsed !== res.used) {
-              throw new ConflictException({
-                code: 'STALE_WRITE',
-                message: `Resource '${patch.key}' changed since last read (expected used ${patch.expectedUsed}, now ${res.used})`,
+            // Issue #1998: same shared helper as the spell-slot path above — see its doc
+            // comment. `requirePositiveMax: false` matches this branch's pre-existing
+            // convention (and the character branch's identical one) that a named resource's
+            // existence alone, not its `max`, decides whether the key is known.
+            const { entry: res, nextUsed } = this.assertAdjustableResourceEntry(
+              statblock.resources[patch.key] as { max: number; used: number; name?: string; recharge?: string } | undefined,
+              {
+                requirePositiveMax: false,
+                existenceMessage: `No such resource '${patch.key}'`,
+                malformedLabel: `Resource '${patch.key}' entry`,
+                staleLabel: `Resource '${patch.key}'`,
+                boundsLabel: `Resource '${patch.key}' adjustment`,
+                delta,
                 expectedUsed: patch.expectedUsed,
-                currentUsed: res.used,
-              });
-            }
-            const nextUsed = res.used + delta;
-            if (nextUsed < 0 || nextUsed > res.max) {
-              throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
-            }
+              },
+            );
             statblock.resources[patch.key] = { ...res, used: nextUsed };
             // Issue #1909 review (Devin P2): same merge-only-the-touched-entry rationale as
             // the spell-slot branch above.

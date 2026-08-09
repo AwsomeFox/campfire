@@ -287,6 +287,10 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
     // without creating a cycle (index registers Pathfinder1eAdapter).
     return representation === 'score' ? breakdown.bonus : Math.trunc(breakdown.dexScore);
   },
+  // Initiative is DEX-derived, so the catalog names the score it reads (see
+  // `initiativeAbility`) — without it a sheet whose DEX is unset offers a rollable,
+  // fabricated +0 initiative.
+  initiativeAbility: 'DEX',
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',

@@ -70,7 +70,15 @@ describe('mid-campaign ruleSystem migration (issue #1508, e2e)', () => {
   });
 
   it('preserves stored character data when switching ruleSystem and reinterprets mechanics under new adapter', async () => {
-    // 1. Verify initial Open Legend check catalog returns native attributes
+    const charRes0 = await request(server).get(`/api/v1/characters/${characterId}`).set(dm);
+    expect(charRes0.status).toBe(200);
+
+    // 1. Open Legend offers NO d20 ability checks. Its attributes roll an exploding dice
+    // pool (`attributeDicePool`), which the neutral `d20 + modifier` catalog cannot express,
+    // so the adapter sets `hasNeutralD20Checks: false` and the catalog stays empty rather
+    // than publishing — and letting this endpoint's sibling `/checks/roll` persist — a roll
+    // the system never makes. The migration claim below is what this test is really about;
+    // this is its precondition, and the contrast with step 4 is the point.
     const initialChecks = await request(server)
       .get(`/api/v1/characters/${characterId}/checks`)
       .set(dm);
@@ -78,7 +86,9 @@ describe('mid-campaign ruleSystem migration (issue #1508, e2e)', () => {
     const initialAbilities = initialChecks.body
       .filter((c: { category: string }) => c.category === 'ability')
       .map((c: { ability: string }) => c.ability);
-    expect(initialAbilities).toContain('MIGHT');
+    expect(initialAbilities).toEqual([]);
+    // The stored attributes themselves are untouched — see step 3.
+    expect(charRes0.body.stats).toMatchObject({ MIGHT: 18, GRACE: 14 });
 
     // 2. PATCH campaign ruleSystem to open5e-srd
     const patchRes = await request(server)

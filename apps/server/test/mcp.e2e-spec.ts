@@ -769,6 +769,55 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(denied.isError).toBe(true);
   });
 
+  it('update_campaign MCP tool rejects an importer-only ruleSystem — REST/MCP parity (issue #2081)', async () => {
+    const dmClient = await mcpClient(dmToken);
+
+    // An installed pack under the 'cepheus-srd' slug — the real Cepheus importer's pack slug
+    // (see rules.e2e-spec.ts's sibling-importer-wiring suite) — but, like the archmage fixture
+    // above, uploaded directly rather than run through the live importer; the guard cares only
+    // about the slug's ADAPTERS registration, not how the pack got installed.
+    const cepheusPackUpload = await dmAgent.post('/api/v1/rules/packs/upload').send({
+      source: 'upload',
+      pack: { slug: 'cepheus-srd', name: 'MCP Cepheus Fixture', version: '1', license: 'OGL v1.0a' },
+      entries: [{ slug: 'mcp-cepheus-fixture', name: 'MCP Cepheus Fixture Section', type: 'section', body: 'Cepheus fixture reference text.' }],
+    });
+    expect(cepheusPackUpload.status).toBe(202);
+    const cepheusJobId = cepheusPackUpload.body.id as string;
+    const cepheusJobStart = Date.now();
+    for (;;) {
+      const jobRes = await dmAgent.get(`/api/v1/rules/packs/install-jobs/${cepheusJobId}`);
+      if (jobRes.body.status === 'completed' || jobRes.body.status === 'failed') {
+        expect(jobRes.body.status).toBe('completed');
+        break;
+      }
+      if (Date.now() - cepheusJobStart > 10_000) throw new Error(`cepheus pack install job did not finish (last ${jobRes.body.status})`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const createCampRaw = await dmClient.callTool({
+      name: 'create_campaign',
+      arguments: { name: 'MCP Cepheus Table' },
+    });
+    expect(createCampRaw.isError).toBeFalsy();
+    const createCamp = parseResult(createCampRaw) as { id: number };
+
+    // update_campaign is the MCP write path for ruleSystem (see the archmage test above,
+    // which asserts the positive case — an adapter-having slug succeeds through this same
+    // tool). Here the pack IS installed (validateRuleSystem's pack-existence check alone
+    // would pass) but has no registered combat adapter, so the importer-only guard must
+    // reject it — the same 400 REST already returns from campaigns.controller (see
+    // rules.e2e-spec.ts), because both write paths funnel through
+    // CampaignsService.validateRuleSystem.
+    const setRuleSystemRaw = await dmClient.callTool({
+      name: 'update_campaign',
+      arguments: { campaignId: createCamp.id, ruleSystem: 'cepheus-srd' },
+    });
+    expect(setRuleSystemRaw.isError).toBe(true);
+    expect(parseResult(setRuleSystemRaw)).toMatchObject({ error: { status: 400, code: 'bad_request' } });
+    const errorResult = parseResult(setRuleSystemRaw) as { error: { message: string } };
+    expect(errorResult.error.message).toMatch(/importer-only/i);
+  });
+
   it('roll catalog (issue #415): list_checks surfaces unproficient skills; roll_check resolves server-side', async () => {
     const client = await mcpClient(dmToken);
     const created = parseResult(
@@ -3072,7 +3121,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
           kind: 'monster',
           name: 'MCP Troll',
           hpMax: 20,
-          statblock: { ac: 14, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
+          statblock: { ac: 14, hp: 20, abilityScores: {}, actions: [], resources: {}, spellSlots: {}, traits: [], notes: 'mcp secret notes' },
         },
       }),
     ) as { id: number };
@@ -3104,11 +3153,13 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const afterReveal = parseResult(
       await viewerClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
-    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number } | null }> };
+    ) as { combatants: Array<{ id: number; statblockRevealed: boolean; statblock: { ac: number; hp: number | null } | null }> };
     const afterBoss = afterReveal.combatants.find((c) => c.id === added.id)!;
     expect(afterBoss.statblockRevealed).toBe(true);
     expect(afterBoss.statblock).not.toBeNull();
     expect(afterBoss.statblock!.ac).toBe(14);
+    expect(afterBoss.statblock!.hp).toBeNull();
+    expect(JSON.stringify(afterBoss)).not.toContain('"hp":20');
   });
 
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {

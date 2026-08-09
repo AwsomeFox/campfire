@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #1465 — Phone viewport turn loop E2E test.
@@ -32,6 +33,7 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
       const { campaignId, encounterId } = seed();
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await openCockpitTab(page, 'turn');
 
       const checkOverflow = async (stepName: string) => {
         const overflow = await page.evaluate(
@@ -72,6 +74,7 @@ test.describe('phone viewport encounter turn loop (#1465)', () => {
       // this step is required visible (not isVisible()-guarded) and its click is confirmed
       // via the PATCH response, so a broken HP control fails the test instead of silently
       // skipping the step.
+      await openCockpitTab(page, 'party');
       const hpSteppers = page.getByTestId('hp-steppers').first();
       await expect(hpSteppers).toBeVisible();
       const reduceHpBtn = hpSteppers.getByRole('button', { name: /Reduce/ }).first();

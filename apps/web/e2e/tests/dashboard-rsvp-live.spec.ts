@@ -8,12 +8,23 @@ async function json<T>(response: APIResponse, operation: string): Promise<T> {
   return (body ? JSON.parse(body) : undefined) as T;
 }
 
+/**
+ * Remove leftovers from a PREVIOUS run of this spec, so the row created below is the soonest
+ * next session.
+ *
+ * Filtered to this spec's own `E2E785 ` prefix, mirroring `dashboard-schedule-live.spec.ts`.
+ * It used to delete every schedule in the campaign, including the seeded
+ * 'DLRNAV Saturday Game' that `entity-deep-links.spec.ts` searches for and links to — so
+ * whenever sharding put the two specs in the same job, three of that spec's tests failed
+ * with the seeded row simply gone. Deleting it was never needed: the seeded row is dated
+ * 2032 and this one is 30 days out, so it is already the sooner of the two.
+ */
 async function clearIssueSchedules(request: APIRequestContext, campaignId: number): Promise<void> {
   const schedules = await json<ScheduledSessionWithRsvps[]>(
     await request.get(`/api/v1/campaigns/${campaignId}/schedule`),
     'list issue #785 schedules',
   );
-  for (const schedule of schedules) {
+  for (const schedule of schedules.filter((item) => item.title.startsWith('E2E785 '))) {
     await json<unknown>(await request.delete(`/api/v1/schedule/${schedule.id}`, { data: {} }), 'remove prior schedule');
   }
 }

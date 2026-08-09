@@ -94,6 +94,7 @@
       "slotHelp": "أين يُرتدى أو يُستخدم — أي تسمية تصلح.",
       "slotRequired": "الموضع مطلوب لتجهيز العنصر.",
       "grantsAction": "يمنح إجراء قتالي: {{name}}",
+      "equipToUse": "جهّز {{name}} لاستخدام هذا الإجراء.",
       "conflictTitle": "الموضع مشغول",
       "conflictBody": "\"{{incumbent}}\" مُجهَّز بالفعل في \"{{slot}}\" على هذه الشخصية.",
       "swapButton": "استبدال {{incumbent}}",
@@ -113,6 +114,10 @@
         "ring2": "الخاتم 2",
         "wondrous": "غرض عجائبي"
       }
+    },
+    "compendium": {
+      "statsLabel": "الإحصائيات",
+      "sourceDetails": "تفاصيل المصدر"
     }
   }
 }

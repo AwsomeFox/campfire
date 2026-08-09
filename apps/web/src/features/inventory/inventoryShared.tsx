@@ -26,6 +26,7 @@ import { useFormattingLocale, formatNumber } from '../../lib/format';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 import { useDialog } from '../../components/useDialog';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
+import { EntryFacts, hasEntryFacts } from '../../components/EntryFacts';
 
 /** Add-item quantity bounds (issue #459). */
 export const ITEM_QTY_MIN = 0;
@@ -37,6 +38,25 @@ export function newIdempotencyKey(): string {
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
+
+/**
+ * What a mutation actually did, handed to `onChanged` so a caller does not have to refetch
+ * to learn it. A caller that only refetches may ignore it entirely.
+ *
+ * Without this, a successful equip whose follow-up GET failed left every other view of the
+ * item stale — the card showed the new state from its own `committed`, while a parent that
+ * derives from the fetched list kept the old one (Codex review on #2115).
+ */
+export type InventoryItemChange =
+  /**
+   * `displacedId` is the OTHER item a slot swap unequipped. The server does both halves
+   * atomically but returns only the newly equipped one, so without this a consumer applying
+   * the response still believes the incumbent is equipped — and would offer two
+   * slot-conflicting items at once until a refetch happened to succeed.
+   */
+  | { readonly updated: InventoryItem; readonly displacedId?: number }
+  | { readonly created: InventoryItem }
+  | { readonly deletedId: number };
 
 export function ItemSection({
   title,
@@ -55,7 +75,7 @@ export function ItemSection({
   characters: Pick<PartyCharacter, 'id' | 'name'>[];
   writableOwners: Character[];
   canEditItem: (item: InventoryItem) => boolean;
-  onChanged: () => void;
+  onChanged: (change?: InventoryItemChange) => void;
   partyStashTitle: string;
   /** When true, omit the outer Card wrapper (embedded in another card). */
   embedded?: boolean;
@@ -102,7 +122,7 @@ export function ItemRow({
   editable: boolean;
   characters: Pick<PartyCharacter, 'id' | 'name'>[];
   writableOwners: Character[];
-  onChanged: () => void;
+  onChanged: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -140,7 +160,7 @@ export function ItemRow({
       setCommitted(updated);
       setSlotConflict(null);
       setEquipOpen(false);
-      onChanged();
+      onChanged({ updated });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
         setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? trimmed });
@@ -197,7 +217,8 @@ export function ItemRow({
       setCommitted(updated);
       setSlotConflict(null);
       setEquipOpen(false);
-      onChanged();
+      // Report BOTH halves of the atomic swap — see `displacedId`.
+      onChanged({ updated, displacedId: slotConflict.itemId });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === 'INVENTORY_SLOT_CONFLICT' && err.conflictingItemId != null) {
         setSlotConflict({ itemId: err.conflictingItemId, itemName: err.conflictingItemName ?? '', slot: err.equipSlot ?? slotConflict.slot });
@@ -215,7 +236,7 @@ export function ItemRow({
     try {
       const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, { equipped: false });
       setCommitted(updated);
-      onChanged();
+      onChanged({ updated });
     } catch (err) {
       setEquipError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
     } finally {
@@ -229,7 +250,7 @@ export function ItemRow({
     try {
       const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, body);
       setCommitted(updated);
-      onChanged();
+      onChanged({ updated });
       return updated;
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
@@ -252,7 +273,7 @@ export function ItemRow({
     setError(null);
     try {
       await api.delete(`${API}/inventory/${committed.id}`);
-      onChanged();
+      onChanged({ deletedId: committed.id });
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.deleteItem' }));
     } finally {
@@ -264,7 +285,7 @@ export function ItemRow({
     setBusy(true); setError(null);
     try {
       const updated = await api.post<InventoryItem>(`${API}/inventory/${committed.id}/compendium/${action}`);
-      setCommitted(updated); onChanged();
+      setCommitted(updated); onChanged({ updated });
     } catch (err) { setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' })); }
     finally { setBusy(false); }
   }
@@ -318,8 +339,14 @@ export function ItemRow({
             <span className="tag tag-neutral">{committed.compendiumState.replace('_', ' ')}</span>
             {committed.compendiumSnapshot && <>
               <span className="ml-1">{committed.compendiumSnapshot.source || committed.compendiumRef?.packSlug}{committed.compendiumSnapshot.license ? ` · ${committed.compendiumSnapshot.license}` : ''}</span>
-              {committed.compendiumSnapshot.body && <details><summary>Source details</summary><Markdown className="!text-[12px]">{committed.compendiumSnapshot.body}</Markdown></details>}
-              {committed.compendiumSnapshot.dataJson && <details><summary>Item data</summary><pre className="text-xs whitespace-pre-wrap">{committed.compendiumSnapshot.dataJson}</pre></details>}
+              {/* The item's own stats — price, bulk, damage, AC — read straight off the
+                  snapshot. Shown OPEN and formatted: they used to sit collapsed behind
+                  "Item data" as a raw JSON string, which is the stat line a player needs
+                  most while the item is equipped. */}
+              {hasEntryFacts(committed.compendiumSnapshot.dataJson) && (
+                <EntryFacts data={committed.compendiumSnapshot.dataJson} compact label={t('inventory.compendium.statsLabel')} />
+              )}
+              {committed.compendiumSnapshot.body && <details><summary>{t('inventory.compendium.sourceDetails')}</summary><Markdown className="!text-[12px]">{committed.compendiumSnapshot.body}</Markdown></details>}
               {committed.ruleEntryId != null && committed.compendiumState !== 'detached' && <a className="ml-1 underline" href={`/c/${committed.campaignId}/compendium/${committed.ruleEntryId}`}>Open in Compendium</a>}
               {committed.compendiumSnapshot.sourceUrl && <a className="ml-1 underline" href={committed.compendiumSnapshot.sourceUrl} target="_blank" rel="noreferrer">Source ↗</a>}
             </>}
@@ -556,7 +583,7 @@ export function AddItemForm({
   /** Initial owner select value — 'party' or a character id string. */
   defaultOwner?: string;
   onCancel: () => void;
-  onCreated: () => void;
+  onCreated: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const [name, setName] = useState('');
@@ -602,8 +629,8 @@ export function AddItemForm({
         body.ownerType = 'character';
         body.characterId = Number(owner);
       }
-      await api.post(`${API}/campaigns/${campaignId}/inventory`, body);
-      onCreated();
+      const created = await api.post<InventoryItem>(`${API}/campaigns/${campaignId}/inventory`, body);
+      onCreated(created && typeof created.id === 'number' ? { created } : undefined);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.addItem' }));
     } finally {
@@ -727,9 +754,9 @@ export function AddItemForm({
           owners={owners}
           defaultOwner={owner}
           onClose={() => setShowCompendiumPicker(false)}
-          onCreated={() => {
+          onCreated={(change) => {
             setShowCompendiumPicker(false);
-            onCreated();
+            onCreated(change);
           }}
         />
       )}
@@ -748,7 +775,7 @@ export function CompendiumItemPickerModal({
   owners: Character[];
   defaultOwner?: string;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (change?: InventoryItemChange) => void;
 }) {
   const { t } = useTranslation();
   const dialogRef = useDialog({ onClose });
@@ -807,7 +834,7 @@ export function CompendiumItemPickerModal({
       const ownerType = owner === 'party' ? 'party' : 'character';
       const characterId = owner === 'party' ? null : Number(owner);
       const qtyParsed = Math.max(1, Number(qty) || 1);
-      await api.post(`${API}/campaigns/${campaignId}/inventory/from-compendium`, {
+      const created = await api.post<InventoryItem>(`${API}/campaigns/${campaignId}/inventory/from-compendium`, {
         ruleEntryId: selectedEntry.id,
         ownerType,
         characterId,
@@ -815,7 +842,7 @@ export function CompendiumItemPickerModal({
         notes: notes.trim(),
         duplicateMode,
       });
-      onCreated();
+      onCreated(created && typeof created.id === 'number' ? { created } : undefined);
       onClose();
     } catch (err) {
       const code = err instanceof Error && 'body' in err ? (err as { body?: { code?: string } }).body?.code : '';
@@ -915,6 +942,20 @@ export function CompendiumItemPickerModal({
 
         {selectedEntry && (
           <div className="pt-3 border-t border-[var(--color-neutral-800)] space-y-3">
+            {/* Stats for the highlighted row, so the choice is made on damage/price/bulk
+                rather than on the name alone.
+
+                Height-bounded and independently scrollable ON PURPOSE. This card is
+                `max-h-[85vh] overflow-hidden` and the results list above it holds a
+                `min-h-[200px]` floor, so it cannot shrink to absorb a tall sibling: an
+                unbounded preview (a magic weapon carries a dozen-plus facts) would push the
+                owner/quantity fields and the Add button past the card edge, clipped with no
+                way to scroll to them. */}
+            {hasEntryFacts(selectedEntry.dataJson) && (
+              <div className="max-h-[22vh] overflow-y-auto pr-1" data-testid="compendium-picker-stats">
+                <EntryFacts data={selectedEntry.dataJson} compact label={t('inventory.compendium.statsLabel')} />
+              </div>
+            )}
             {duplicatePrompt ? (
               <div className="p-3 rounded bg-[var(--color-neutral-800)] space-y-2">
                 <p className="text-xs font-semibold text-amber-400">{t('inventory.duplicateConfirmTitle')}</p>

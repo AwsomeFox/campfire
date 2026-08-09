@@ -94,6 +94,7 @@
       "slotHelp": "Where it's worn or wielded — any label works.",
       "slotRequired": "A slot is required to equip an item.",
       "grantsAction": "Grants combat action: {{name}}",
+      "equipToUse": "Equip {{name}} to use this action.",
       "conflictTitle": "Slot occupied",
       "conflictBody": "\"{{incumbent}}\" is already equipped in \"{{slot}}\" on this character.",
       "swapButton": "Replace {{incumbent}}",
@@ -113,6 +114,10 @@
         "ring2": "Ring 2",
         "wondrous": "Wondrous item"
       }
+    },
+    "compendium": {
+      "statsLabel": "Statistics",
+      "sourceDetails": "Source details"
     }
   }
 }

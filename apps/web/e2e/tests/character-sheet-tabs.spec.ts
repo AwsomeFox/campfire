@@ -7,6 +7,10 @@ import { seed, stateFor } from './seed';
  *
  * Verifies compact section nav, persisted/URL tab state, deep-link focus, and
  * that Play hides build-only blocks (mobile scroll reduction).
+ *
+ * The persistent vitals rail (HP / conditions / rests) is deliberately outside both
+ * tabpanels — see CharacterPage's module comment — so it is asserted page-wide rather
+ * than inside the Play panel.
  */
 
 test.describe('Character sheet Play vs Build tabs (#646)', () => {
@@ -26,15 +30,19 @@ test.describe('Character sheet Play vs Build tabs (#646)', () => {
     const buildPanel = page.getByTestId('character-sheet-panel-build');
     await expect(playPanel).toBeVisible();
     await expect(buildPanel).toBeHidden();
-    await expect(playPanel.getByText('Hit points & Defenses')).toBeVisible();
+    await expect(playPanel.getByRole('heading', { name: 'Actions' })).toBeVisible();
     await expect(page.getByTestId('character-xp')).toBeHidden();
+    // The vitals rail lives OUTSIDE both tabpanels (design template's play surface), so
+    // HP stays on screen while you read Build — it is not a Play-only block.
+    await expect(page.getByRole('heading', { name: 'Hit points & Defenses' })).toBeVisible();
 
     await tablist.getByRole('tab', { name: /Build & profile/ }).click();
     await expect(page).toHaveURL(/tab=build/);
     await expect(buildPanel).toBeVisible();
     await expect(playPanel).toBeHidden();
     await expect(page.getByTestId('character-xp')).toBeVisible();
-    await expect(playPanel.getByText('Hit points & Defenses')).toBeHidden();
+    await expect(playPanel.getByRole('heading', { name: 'Actions' })).toBeHidden();
+    await expect(page.getByRole('heading', { name: 'Hit points & Defenses' })).toBeVisible();
 
     await tablist.getByRole('tab', { name: /^Play/ }).click();
     await expect(page).not.toHaveURL(/tab=build/);

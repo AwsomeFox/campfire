@@ -38,6 +38,7 @@ import {
   PendingConcentrationCheck,
   RESOLVER_MATH_D20_5E,
   type CriticalDamageRule,
+  type ResolverDegree,
   type ResolverMathProfile,
   type AttackRollInput,
   type AttackRollResult,
@@ -3888,6 +3889,11 @@ export const RulePackInstallSection = z.enum([
   'classes',
   'races',
   'feats',
+  // Open5e mundane gear (issue #2096). `items` maps to Open5e's /magicitems/ path and so
+  // never contained a Longsword or Chain Mail; these two carry the SRD's ordinary weapons
+  // and armour, which is what a character sheet actually equips.
+  'weapons',
+  'armor',
   // Starfinder
   'equipment',
   'starships',
@@ -3954,6 +3960,15 @@ export interface RulePackSourceMeta {
    * candidate is dead/unusable. For an api system: the base the importer actually pulls from.
    */
   candidateSourceUrl: string | null;
+  /**
+   * The `rule_packs.slug` (or slugs — 'osr' installs several retroclone variants) this
+   * source's importer writes to `campaign.ruleSystem` when installed (issue #2081). Attached
+   * after `RULE_PACK_SOURCE_META` below, once the per-system `*_PACK_SLUG` constants exist —
+   * see the assignment block right before {@link isImporterOnlyRuleSystemSlug}. Left
+   * `undefined` here, not a hardcoded slug, so there is exactly one place each source's slug
+   * is declared.
+   */
+  packSlug?: string | readonly string[];
 }
 
 /**
@@ -4298,6 +4313,37 @@ export function initiativeModelForAdapter(adapter: Pick<RuleSystemAdapter, 'init
   return adapter.initiativeModel ?? DEFAULT_INITIATIVE_MODEL;
 }
 
+/**
+ * Whether a system rolls initiative at all — see {@link RuleSystemAdapter.hasInitiativeRoll}.
+ * Omission means yes, so every existing adapter keeps its current behaviour and only a system
+ * that explicitly has no initiative roll opts out.
+ */
+export function hasInitiativeRollForAdapter(adapter?: Pick<RuleSystemAdapter, 'hasInitiativeRoll'> | null): boolean {
+  return adapter?.hasInitiativeRoll !== false;
+}
+
+/**
+ * Whether the neutral `d20 + modifier` catalog describes this system's checks — see
+ * {@link RuleSystemAdapter.hasNeutralD20Checks}. Omission means yes, so an adapter must opt
+ * out deliberately and every existing system is unchanged.
+ */
+export function hasNeutralD20ChecksForAdapter(adapter?: Pick<RuleSystemAdapter, 'hasNeutralD20Checks'> | null): boolean {
+  return adapter?.hasNeutralD20Checks !== false;
+}
+
+/**
+ * Whether this system owns its attack roll — see {@link RuleSystemAdapter.resolveAttack}.
+ *
+ * A UI that builds a `1d20 + bonus` expression from an action's printed to-hit is only
+ * correct while the resolver would do the same. Once an adapter declares `resolveAttack`
+ * (Open Legend rolls an exploding attribute pool), the same action used through the
+ * authoritative resolver produces materially different numbers, so a hand-built d20 chip
+ * would disagree with the encounter for the very same attack.
+ */
+export function hasAdapterOwnedAttackRoll(adapter?: Pick<RuleSystemAdapter, 'resolveAttack'> | null): boolean {
+  return typeof adapter?.resolveAttack === 'function';
+}
+
 // ---------- adapter-defined grid distance rules (issue #467) ----------
 // Square grids default to Euclidean straight-line ruler distance; hex grids use
 // cube/axial hex steps. 5e optionally counts every other diagonal as 2 squares.
@@ -4541,6 +4587,21 @@ export interface RuleSystemAdapter {
    */
   readonly criticalDamage?: CriticalDamageRule;
   /**
+   * OPTIONAL — declare `false` if this system has no critical hit at all (issue #1598 review).
+   * Read through {@link hasCriticalHitsForAdapter}; see its note on why {@link criticalDamage}
+   * is the wrong field to gate a crit-offering control on.
+   */
+  readonly hasCriticalHits?: boolean;
+  /**
+   * OPTIONAL — this system's DEGREE-of-success classification (PF2e/SF2e's four degrees).
+   *
+   * Declared on the base adapter, not only on {@link Pf2eRuleSystemAdapter}, so a generic
+   * caller holding a `RuleSystemAdapter` can ASK whether degrees exist rather than testing the
+   * adapter's id. Read through {@link hasDegreesOfSuccessForAdapter}; `classifySaveOutcome`
+   * makes the same test, and a system without it only ever resolves a save to success/failure.
+   */
+  degreeOfSuccess?(total: number, dc: number, naturalRoll?: number): ResolverDegree;
+  /**
    * OPTIONAL, OPT-IN — declare this only if the structured action resolver's OWN maths is this
    * system's maths (issue #1053 review): a single d20 plus a flat modifier, compared against
    * ascending armour class, with 5e's level-based proficiency bonus. See
@@ -4591,6 +4652,53 @@ export interface RuleSystemAdapter {
    * 5e sets this to true; systems without 5e death saves set it to false or omit it.
    */
   readonly hasDeathSaves?: boolean;
+  /**
+   * OPTIONAL — whether the NEUTRAL check catalog honestly describes this system's checks.
+   * Default true.
+   *
+   * {@link neutralCheckCatalog} emits ability/save/skill entries as `d20 + modifier` with a
+   * flat +2 proficiency term. That is a reasonable generic shape for a d20 system without
+   * its own `buildCheckCatalog`, and a LIE for a system that does not roll d20 checks at
+   * all: Ironsworn: Starforged resolves moves on a d6 action die against challenge dice,
+   * and Open Legend rolls an exploding attribute dice pool (score 5 is 1d20 + 2d6, see
+   * `attributeDicePool`). Neither can be expressed as a flat d20 modifier, so offering one
+   * does not merely look wrong — the server resolves that same definition and PERSISTS the
+   * wrong number to the shared dice log.
+   *
+   * Systems in that position set this false until they have an adapter-owned
+   * `buildCheckCatalog`, and the catalog returns nothing rather than something incorrect.
+   * Read through {@link hasNeutralD20ChecksForAdapter}.
+   */
+  readonly hasNeutralD20Checks?: boolean;
+  /**
+   * OPTIONAL — the ability/attribute this system's initiative derives from ('DEX', 'AGILITY'),
+   * for adapters that use the neutral roll catalog.
+   *
+   * `initiativeModifier` computes the number but does not say what it read, so the neutral
+   * catalog had to publish `ability: null` — and a caller that gates on "is the source score
+   * actually set" (the character sheet does, so a draft sheet cannot roll a fabricated +0)
+   * had nothing to gate on. Declaring it also gives the breakdown an honest label instead of
+   * the generic "initiative".
+   *
+   * Omit it for a system whose initiative reads no ability at all (Starforged's flat 0);
+   * `null`/absent then keeps today's ability-independent behaviour. Adapters with their own
+   * `buildCheckCatalog` (5e, PF2e) already publish the ability directly and ignore this.
+   */
+  readonly initiativeAbility?: string;
+  /**
+   * OPTIONAL — whether this system rolls initiative AT ALL. Default true.
+   *
+   * Distinct from {@link initiativeModel}, which answers "individual or group" for a system
+   * that HAS one. `initiativeDie` cannot answer this: the generic roller seam requires a die
+   * from every adapter, so a system with no initiative roll (Ironsworn: Starforged, a PbtA
+   * game with no turn-order roll) still reports one — its d6 action die — purely to satisfy
+   * that seam. Reading the die, or treating "not group" as "individual", therefore offers a
+   * personal initiative roll on a table that has none. Set this false to say so explicitly.
+   *
+   * Read through {@link hasInitiativeRollForAdapter} so an adapter that omits it keeps the
+   * true default, exactly as {@link hasDeathSaves} works.
+   */
+  readonly hasInitiativeRoll?: boolean;
   /**
    * OPTIONAL — whether this system endorses "half or more of the party succeeds" as a group-check
    * convention (issue #1943). The group-check board's X/N tally is universal, but the advisory
@@ -5182,6 +5290,20 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
     const hp = d.hp ?? d.hitPoints ?? d.hit_points;
     return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
   },
+  // Open Legend rolls an EXPLODING attribute dice pool (see `attributeDicePool`), not a flat
+  // d20 + modifier, so the neutral catalog cannot describe its checks — and the server
+  // resolves that same definition, so an offered check would persist a wrong result.
+  hasNeutralD20Checks: false,
+  // Turn order is Agility-monotonic (see `initiativeModifier` below), so the catalog can
+  // name the score it reads rather than publishing an ability-less initiative.
+  initiativeAbility: 'AGILITY',
+  /**
+   * No critical hits: `resolveAttack` below returns only `hit` or `miss`, because the exploding
+   * dice pool IS this system's escalation mechanic and has no separate crit tier. Declared for
+   * the same reason as the OSR variants — a control gating on the crit-damage FORMULA (which
+   * every adapter has) would offer a doubled total this system's resolver cannot produce.
+   */
+  hasCriticalHits: false,
   attributeDicePool(score: number): AttributeDicePool {
     return openLegendAttributeDicePool(score);
   },
@@ -5200,7 +5322,8 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
    * No separate crit tier: the pool's OWN exploding dice already are Open Legend's escalation
    * mechanic (a max face re-rolls and adds), so layering a 5e-style "natural 20 crits" on top
    * would double-count an already-escalating result. `naturalRoll` is null — there is no single
-   * die whose face is "the" roll to show as d20-style crit/fumble evidence.
+   * die whose face is "the" roll to show as d20-style crit/fumble evidence. `hasCriticalHits`
+   * above is the machine-readable half of that same paragraph — see its note.
    */
   resolveAttack(input: AttackRollInput): AttackRollResult {
     const score = Number.isFinite(input.modifier) ? Math.trunc(input.modifier) : 0;
@@ -5421,6 +5544,17 @@ export const DND5E_SKILLS: ReadonlyArray<{ readonly name: string; readonly abili
 /** 5e proficiency bonus by level: +2 at 1–4 up to +6 at 17–20 (single source of truth, issue #415). */
 export function dnd5eProficiencyBonus(level: number): number {
   return 2 + Math.floor((Math.max(1, level) - 1) / 4);
+}
+
+/**
+ * Read an ability score tolerantly, or null when the character has not set it — the same
+ * lookup as {@link readAbilityScore} without its default. Catalog builders use this to tell
+ * "absent" from "present and low", which the defaulting reader cannot.
+ */
+function readAbilityScoreOrNull(stats: Record<string, number>, ability: string): number | null {
+  const up = ability.toUpperCase();
+  const raw = stats[up] ?? stats[ability] ?? stats[ability.toLowerCase()];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
 }
 
 /** Read an ability score from a stats record tolerantly (uppercase-folded; default 10). */
@@ -5658,15 +5792,29 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
   const FLAT_PROFICIENCY = 2;
   const out: RollCheckDefinition[] = [];
 
-  const initBase = adapter.initiativeModifier(stats, 'score', character.level);
+  // The ADAPTER'S OWN key expectations, not the catalog's normalised ones. `normalizeStats`
+  // uppercases every key for this module's ability lookups, which silently hid PF1e's native
+  // `initiative` / `init` bonus (its reader matches those lowercase keys) and made a valid
+  // initiative resolve to 0 — reported as "Initiative —" on a sheet whose DEX was unset.
+  // Adapters already accept either canonical or raw ability maps, so handing them the stored
+  // record is strictly more permissive; verified identical for a canonical DEX map across
+  // every registered adapter.
+  const initBase = adapter.initiativeModifier(character.stats ?? stats, 'score', character.level);
   const initLevel = adapter.levelInitiativeBonus?.(character.level) ?? 0;
   const initMod = initBase + initLevel;
-  const initiativeLabel = adapter.id === ARCHMAGE_ADAPTER_ID ? 'DEX' : 'initiative';
-  out.push({
+  // The adapter's own declaration, when it has one — this used to special-case a single
+  // adapter id for the label and publish no ability at all (see `initiativeAbility`).
+  const initiativeAbility = adapter.initiativeAbility ?? null;
+  const initiativeLabel = initiativeAbility ?? 'initiative';
+
+  // A system with no initiative roll gets no initiative check — its `initiativeDie` exists
+  // only to satisfy the generic roller seam (see `hasInitiativeRoll`), so emitting an entry
+  // would let REST and MCP discover and persist a turn-order roll the game does not have.
+  if (hasInitiativeRollForAdapter(adapter)) out.push({
     id: 'initiative',
     label: 'Initiative',
     category: 'initiative',
-    ability: null,
+    ability: initiativeAbility,
     proficiency: null,
     favorite: true,
     modifier: initMod,
@@ -5681,6 +5829,10 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
     supportsAdvantage: true,
     supportsDegrees: false,
   });
+
+  // Everything below is `d20 + modifier`. For a system that does not roll d20 checks, the
+  // honest catalog is an empty one — see `hasNeutralD20Checks`.
+  if (!hasNeutralD20ChecksForAdapter(adapter)) return out;
 
   for (const ability of abilityKeys) {
     const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
@@ -5746,8 +5898,55 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
  * configurable {@link neutralCheckCatalog}. This is the single entry point the server, the MCP
  * tools, the character sheet, and the encounter card all call — so the math is identical.
  */
+/**
+ * Flag an initiative check that was computed from a score the character does not have.
+ *
+ * Applied to EVERY catalog — the adapter-owned ones (5e, PF2e) as much as the neutral one —
+ * because a renderer gating on `incomplete` must get the same answer whichever built it; a
+ * rule that only covered the neutral path silently let a 5e draft sheet roll a fabricated
+ * +0 initiative.
+ *
+ * The question is whether initiative has a SOURCE, which is not the same as whether it has a
+ * value. A 13th Age level-3 character with no DEX totals +3 from `levelInitiativeBonus` alone,
+ * so a total-based test would call that complete; a PF1e character with a native `initiative`
+ * bonus and no DEX has a real source, so an ability-presence test alone would call it
+ * incomplete. Provenance is therefore ASKED, never inferred: an adapter that tracks it exposes
+ * `initiativeModifierOrNull` and gets the final word (PF1e's `initiative: 0` is a declared
+ * +0, not a missing score — a nonzero-contribution test read it as the latter, #2115 review),
+ * and everyone else falls back to whether the declared `initiativeAbility` score is set.
+ */
+function withInitiativeCompleteness(
+  adapter: RuleSystemAdapter,
+  catalog: RollCheckDefinition[],
+  character: CheckCatalogCharacter,
+): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  return catalog.map((def) => {
+    if (def.category !== 'initiative' || def.incomplete) return def;
+    // An adapter that tracks provenance answers directly — no inference. Raw stats, not the
+    // uppercased map, because the native keys this reads (`initiative`, `init`) are lowercase.
+    if (adapter.initiativeModifierOrNull) {
+      const resolved = adapter.initiativeModifierOrNull(character.stats ?? stats, 'score', character.level);
+      return resolved === null ? { ...def, incomplete: true } : def;
+    }
+    const ability = def.ability;
+    if (!ability) return def;
+    return readAbilityScoreOrNull(stats, ability) === null ? { ...def, incomplete: true } : def;
+  });
+}
+
 export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
-  return adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character);
+  const catalog = withInitiativeCompleteness(
+    adapter,
+    adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character),
+    character,
+  );
+  // Enforced HERE, not at each render site: this is the one seam the sheet, the encounter
+  // card, REST `/checks` + `/checks/roll`, and the MCP `list_checks`/`roll_check` tools all
+  // read, so filtering anywhere else would leave the others able to roll what the adapter
+  // says does not exist.
+  if (hasInitiativeRollForAdapter(adapter)) return catalog;
+  return catalog.filter((c) => c.category !== 'initiative');
 }
 
 /** Find a single check by its stable id within a character's catalog, or null. */
@@ -6128,6 +6327,48 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) {
 }
 
 /**
+ * Attach each source's installed pack slug(s) to `RULE_PACK_SOURCE_META` (issue #2081), now
+ * that the per-system `*_PACK_SLUG` constants exist — `RULE_PACK_SOURCE_META` itself is
+ * declared much earlier in this file (the install-validation code above needs it), before
+ * most of these constants are. Mutating the already-exported object in place, rather than
+ * redeclaring it here, keeps a single object identity: every import of
+ * `RULE_PACK_SOURCE_META` resolves only after this module finishes evaluating, so callers
+ * always see the complete entries.
+ *
+ * 'archmage' and 'cepheus' have no schema-side `*_PACK_SLUG` export — their importers live
+ * in apps/server (ARCHMAGE_PACK_SLUG in archmage-importer.ts, CEPHEUS_PACK_SLUG in
+ * cepheus-importer.ts), which this package cannot import from — so those two are literals,
+ * pinned to the importers' actual constants by
+ * apps/server/test/unit/importer-only-rule-system.spec.ts. 'other' has no pack slug of its
+ * own: RulesService routes it to the Open5e importer (see enqueueInstall/installFromSource),
+ * so it installs under DND5E_PACK_SLUG too.
+ */
+RULE_PACK_SOURCE_META.open5e.packSlug = DND5E_PACK_SLUG;
+RULE_PACK_SOURCE_META.pf2e.packSlug = PF2E_PACK_SLUG;
+RULE_PACK_SOURCE_META.sf2e.packSlug = SF2E_PACK_SLUG;
+RULE_PACK_SOURCE_META['open-legend'].packSlug = OPEN_LEGEND_PACK_SLUG;
+RULE_PACK_SOURCE_META.pf1e.packSlug = PF1E_PACK_SLUG;
+RULE_PACK_SOURCE_META.starfinder.packSlug = STARFINDER_ADAPTER_ID;
+RULE_PACK_SOURCE_META.archmage.packSlug = 'archmage-srd';
+RULE_PACK_SOURCE_META.osr.packSlug = OSR_RULE_SYSTEM_SLUGS;
+RULE_PACK_SOURCE_META.cepheus.packSlug = 'cepheus-srd';
+RULE_PACK_SOURCE_META.datasworn.packSlug = STARFORGED_PACK_SLUG;
+RULE_PACK_SOURCE_META.other.packSlug = DND5E_PACK_SLUG;
+
+/**
+ * Every pack slug a REGISTERED rule-system source (the table above) actually installs
+ * under (issue #2081). Deliberately NOT "every installed `rule_packs` row" — that set is
+ * unbounded (uploads and homebrew installs carry arbitrary slugs) and is exactly what made
+ * the original guard here reject every homebrew/uploaded pack, not just importer-only ones.
+ * This set is bounded to the handful of slugs the registry above actually declares.
+ */
+const IMPORTER_INSTALLED_PACK_SLUGS: ReadonlySet<string> = new Set(
+  Object.values(RULE_PACK_SOURCE_META).flatMap((meta) =>
+    Array.isArray(meta.packSlug) ? meta.packSlug : meta.packSlug ? [meta.packSlug] : [],
+  ),
+);
+
+/**
  * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
  * (or ''); it is matched against the adapter registry and falls back to the 5e adapter
  * for anything unrecognized — so every existing campaign keeps 5e behavior. The default
@@ -6163,6 +6404,63 @@ export function ruleSystemAdapter(
  */
 export function isRegisteredRuleSystemSlug(ruleSystem: string): boolean {
   return Object.prototype.hasOwnProperty.call(ADAPTERS, ruleSystem);
+}
+
+/**
+ * Whether `ruleSystem` names an "importer-only" rule pack (issue #2081): a pack that a
+ * REGISTERED rule-system source installed (`ruleSystem` is a member of
+ * {@link IMPORTER_INSTALLED_PACK_SLUGS}, derived from `RULE_PACK_SOURCE_META` above) but
+ * which has no entry in {@link ADAPTERS}. Cepheus Engine (2D6 sci-fi) is the current
+ * example — it ships a full importer (`cepheus` install source, `cepheus-srd` pack slug)
+ * but no combat adapter, so without this guard a campaign that selects it silently
+ * inherits the unknown-slug 5e fallback (d20 initiative, 5e ability modifiers on 2D6 UPP
+ * scores, 5e conditions/action economy/death saves, `maxLevel: 20`, a 5e XP band) instead
+ * of failing loudly.
+ *
+ * `isInstalledPack` (the caller's own `rule_packs.slug` lookup; this module has no DB
+ * access, so it cannot determine that fact itself) still gates the check — a slug that
+ * merely COINCIDES with a known importer's pack slug but names no actual installed row is
+ * not flagged.
+ *
+ * A first version of this guard (issue #2081's original PR) was
+ * `isInstalledPack && !isRegisteredRuleSystemSlug(ruleSystem)` — "installed, and no
+ * adapter" — with no reference to which installer put the pack there. That is a materially
+ * larger set than "importer-only": every user-uploaded and homebrew pack is also installed
+ * and also has no `ADAPTERS` entry (arbitrary slugs like `dnd-homebrew-srd` were never
+ * going to be in a fixed adapter registry), so that version rejected uploaded/homebrew
+ * packs identically to Cepheus — breaking `apps/web/e2e/global-setup.ts`'s
+ * `e2e-open5e-actions` fixture and `ai-dm-stuck.e2e-spec.ts`'s uploaded `dnd-homebrew-srd`
+ * campaign in CI before it could reach `main`. `isRegisteredRuleSystemSlug` alone answers
+ * "does this slug have an adapter", not "did an importer install this slug" — the two
+ * questions were conflated.
+ *
+ * The `IMPORTER_INSTALLED_PACK_SLUGS` membership check closes that gap: it is bounded to
+ * the small set of slugs `RULE_PACK_SOURCE_META` actually declares, so an arbitrary
+ * upload/homebrew/test-fixture slug is never a member and is therefore never flagged,
+ * regardless of `isInstalledPack`. The predicate is still NOT `ruleSystem === 'cepheus-srd'`
+ * or any other string literal naming Cepheus — it stays derived from the registry, so a
+ * future importer that (a) is added to `RULE_PACK_SOURCE_META` with a `packSlug` and
+ * (b) ships without a matching `ADAPTERS` entry is caught the same way, by definition, not
+ * by editing this function. The trade-off is explicit and deliberately fails closed: an
+ * importer that forgets to declare its `packSlug` in step (a) is simply not blocked here
+ * (same as any other unrecognized slug), rather than the reverse failure mode of blocking
+ * real user content.
+ *
+ * An arbitrary/unknown/homebrew slug that names NO installed pack is unaffected
+ * (`isInstalledPack` is false) — that is the long-standing, deliberate "every existing
+ * campaign keeps 5e behavior" default {@link ruleSystemAdapter} documents, not a bug this
+ * issue is about. A homebrew slug backed by its own `customMechanicsProfile` never reaches
+ * this predicate at all — the server's `validateRuleSystem` short-circuits on a
+ * `customMechanicsProfile` before ever doing the installed-pack lookup this predicate needs.
+ *
+ * Empty `ruleSystem` (the "no rule system picked" sentinel, `''`) always returns false
+ * regardless of `isInstalledPack` — no `rule_packs` row can have an empty slug, so a true
+ * `isInstalledPack` paired with `''` cannot occur from a real lookup, and the function stays
+ * safe to call without first checking `ruleSystem` for truthiness.
+ */
+export function isImporterOnlyRuleSystemSlug(ruleSystem: string, isInstalledPack: boolean): boolean {
+  if (!ruleSystem) return false;
+  return isInstalledPack && IMPORTER_INSTALLED_PACK_SLUGS.has(ruleSystem) && !isRegisteredRuleSystemSlug(ruleSystem);
 }
 
 /**
@@ -10740,17 +11038,42 @@ export const Combatant = z.object({
   conditions: z.array(z.string().max(40)).default([]),
   ruleEntryId: Id.nullable().default(null),
   sortOrder: z.number().int().default(0),
-  // DM manual-reorder override (issue #1923 review finding 1). Set on EVERY combatant in
-  // the roster (not just the moved one) whenever `reorderCombatant` runs against a
-  // running encounter, to the combatant's index in the newly computed order. Null until
-  // the first manual reorder on a running encounter (and for legacy rows). This exists
-  // because a running encounter's `sortCombatants` orders by initiative, and an adapter's
-  // `initiativeTiebreak` (e.g. 5e's `initModDescThenSortOrderAsc`) compares `initMod`
-  // BEFORE `sortOrder` — a pure `sortOrder` rewrite is silently discarded by the adapter
-  // tiebreak whenever the tied combatants have different `initMod` (different DEX).
-  // `sortCombatants` consults this ahead of the adapter tiebreak, but only when BOTH
-  // combatants in the comparison have a non-null value, so an unrelated tie (one or both
-  // never manually reordered) still falls through to the adapter's own rule untouched.
+  // DM manual-reorder override (issue #1923 review finding 1; narrowed by #2084 finding
+  // 1; corrected to whole-tie-group scope by #2095 review — Devin, Codex, and Copilot
+  // independently). This exists because a running encounter's `sortCombatants` orders by
+  // initiative, and an adapter's `initiativeTiebreak` (e.g. 5e's
+  // `initModDescThenSortOrderAsc`) compares `initMod` BEFORE `sortOrder` — a pure
+  // `sortOrder` rewrite is silently discarded by the adapter tiebreak whenever the tied
+  // combatants have different `initMod` (different DEX).
+  //
+  // Set by `reorderCombatant` on EVERY row that shares the moved combatant's landing
+  // (possibly just-reassigned) initiative value — its full tie group as it exists in the
+  // newly computed order, all in one consistent `orderedIds` index space from that same
+  // pass — never the whole roster, and NOT merely the rows the drag's own start/end
+  // positions happened to cross. An earlier version stamped every combatant on every
+  // drag, which meant one reorder disabled `adapter.initiativeTiebreak` for the entire
+  // encounter, including ties the DM never touched; while `preparing` (before most rows
+  // have a rolled initiative) that also meant the stamp encoded add order rather than DM
+  // intent. A narrower revision then stamped only the moved combatant plus whichever
+  // OTHER tie-group members the drag physically crossed — but `sortCombatants` puts ANY
+  // stamped row ahead of ANY unstamped one within a tie (see below), with no regard for
+  // whether that specific row was crossed, so a partial stamp did not merely fail to help
+  // the untouched members — it actively sank them below the touched ones, an order the DM
+  // never asked for. Stamping the WHOLE landing group closes that: a tie group nobody
+  // dragged into stays entirely null so it keeps falling through to the adapter. Never
+  // stamped for a null-initiative row — an unrolled tie is decided by `sortOrder` alone
+  // (see `sortCombatants`'s own null/null branch and the `preparing` sort), so a stamp
+  // there would outlive the roll and could wrongly decide a REAL tie later by insertion
+  // order instead of the adapter.
+  //
+  // Cleared back to null whenever a combatant's OWN `initiative` value changes outside
+  // this same reorder (a DM PATCH, or an overwrite re-roll) — the tie it was placed in no
+  // longer exists once its number moves.
+  //
+  // `sortCombatants` consults this ahead of the adapter tiebreak whenever EITHER side has
+  // a value: a stamped row always precedes an unstamped one, which keeps the comparator a
+  // total order when a tie mixes stamped and unstamped rows (see that function's own
+  // comment for the non-transitive cycle this prevents).
   manualOrder: z.number().int().nullable().default(null),
   // Battle-map token position (issue #39): 0–100 percent overlay on the encounter's
   // map image, mirroring location.mapX/mapY. null = not yet placed on the map.

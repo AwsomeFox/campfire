@@ -1,8 +1,18 @@
 /**
- * Character sheet — mirrors design/claude-design/Campfire.dc.html "Character sheet" (~720-864).
- * Layout: back link, avatar + name/class/level/owner header, HP card w/ editor, then a
- * two-column body — ability scores / HP / background / conditions on the left, a
- * portrait upload + player info panel on the right.
+ * Character sheet — mirrors the Claude Design template
+ * `templates/character-sheet/CharacterSheet.dc.html` ("Character sheet — play surface").
+ *
+ * Layout: back link + identity header + tab bar across the top, then a three-pane play
+ * surface — a persistent vitals rail (HP, temp HP, death saves, defenses/initiative/
+ * speed/proficiency, conditions, rests), the Play/Build tabpanels, and the table's shared
+ * roll feed. The template's `position:fixed` full-viewport shell maps onto the same
+ * sticky-rail grid RunSessionPage already uses, so the sheet stays inside the app chrome
+ * and still reads as a document when printed or narrowed.
+ *
+ * The vitals rail sits OUTSIDE both tabpanels on purpose (as it does in the template):
+ * HP, conditions and rests stay reachable while you are reading Build. `?focus=hp` and
+ * `?focus=conditions` still select Play — the sections they point at are simply always
+ * mounted.
  *
  * Owner or DM can edit everything (HP, conditions, stats, saves, skills, actions,
  * spell slots, story, portrait); everyone else gets a read-only view.
@@ -35,10 +45,12 @@ import type {
   Character,
   CharacterAction,
   CampaignMember,
+  InventoryItem,
   CharacterStatus,
   SkillRank,
   LeveledConditionTrack,
   AdapterResourceDef,
+  CriticalDamageRule,
 } from '@campfire/schema';
 import { formatNumber, useFormattingLocale } from '../../lib/format';
 import {
@@ -46,13 +58,22 @@ import {
   xpProgressForCharacter,
   ruleSystemAdapter,
   type RuleSystemAdapter,
+  type RollCheckDefinition,
   checkCatalogForAdapter,
+  checkRollExpr,
+  criticalDamageRuleForAdapter,
+  hasCriticalHitsForAdapter,
+  hasDegreesOfSuccessForAdapter,
+  hasAdapterOwnedAttackRoll,
   sortCheckCatalog,
   formatCheckBreakdown,
   restOptionsForAdapter,
   inferActionSpecFromText,
   isResolvableSpec,
+  hasDeathSavesForAdapter,
 } from '@campfire/schema';
+import { DeathSaveTracker } from '../encounters/combat/DeathSaves';
+import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { findLeveledConditionTrack, conditionLevel } from './leveledCondition';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
@@ -129,7 +150,7 @@ import {
   rollPreview,
 } from '../../lib/characterStats';
 import { RollModeChooser } from './RollModeChooser';
-import { resolveRollMode, toCheckRollMode, rollModeSummary } from './rollMode';
+import { allowsCriticalDamageRoll, rollModeForClick, showsInitiativeTile, toCheckRollMode, rollModeSummary } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
@@ -155,6 +176,7 @@ import {
   specialResourceAdjustBody,
 } from './specialCharacterResource';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { actionSpecEffects, actionSpecFacts, actionSourceText } from './actionSpecFacts';
 import { adapterConditionLabel, adapterResourceLabel } from '../../lib/adapterVocabularyLabel';
 
 export default function CharacterPage() {
@@ -163,7 +185,7 @@ export default function CharacterPage() {
   const id = Number(characterId);
   const navigate = useNavigate();
   const { me } = useAuth();
-  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  const { isDm, canDmWrite, canPlayerWrite, canAnyMemberWrite } = useCampaignAccess();
   const activeCampaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   // Rule-system adapter resolved from the active campaign (issue #234, #2003): drives ability
   // modifiers and the condition vocabulary instead of a call-site 5e default.
@@ -182,6 +204,15 @@ export default function CharacterPage() {
   const [trashing, setTrashing] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
   const [markingActive, setMarkingActive] = useState(false);
+  // This character's pack, used to surface the actions their EQUIPPED gear grants
+  // (`InventoryItem.equippedAction`, issue #1326/#1791) in the Actions card, as the design
+  // template does with its 🎒 chips. Those actions are already usable in an encounter, so a
+  // sheet that omits them hides half of what a geared character can do.
+  //
+  // Published by CharacterInventorySection rather than fetched again here: that section is
+  // mounted for both tabs and already reads `/inventory`, so this is one campaign-inventory
+  // read per sheet, and the Actions card cannot drift from the Inventory list it describes.
+  const [packItems, setPackItems] = useState<InventoryItem[]>([]);
   // Shared dice-log roller for click-to-roll saves/skills/attacks (issue #258).
   const roller = useRoller(cid, setActionError);
   const { liveEncounter } = useLiveEncounterState(Number.isFinite(cid) ? cid : undefined);
@@ -196,7 +227,29 @@ export default function CharacterPage() {
     [adapter, character],
   );
 
+  /**
+   * Bumped every time the sheet is replaced with a fresh server read.
+   *
+   * `TempHpControl` applies its PATCH's own response rather than awaiting a refresh, which is
+   * correct until something else writes the SAME field while that request is in flight: Long
+   * Rest clears `hpTemp` and refreshes, and the older PATCH response then merged its value back
+   * in — leaving the stepper reading an absolute number the server no longer held, so the next
+   * click restored temp HP the rest had cleared (Codex review on #2115). The control captures
+   * this counter before its request and the merge is dropped if it moved, so a superseded
+   * response is rejected instead of overwriting the state that superseded it. The stepper is
+   * also held disabled while a refresh is in flight — rejecting the merge stops the stale
+   * number being written back to state, but only an inert control stops the user sending a
+   * new ABSOLUTE value computed from a display the pending refresh is about to replace.
+   */
+  const characterEpochRef = useRef(0);
+
   const load = useCallback(async () => {
+    // Bumped when the refresh STARTS, not when it lands. A Long Rest commits its clear and
+    // then calls `load()` without awaiting it, so a temp-HP response arriving while that GET
+    // is still in flight would otherwise pass an epoch check that had not moved yet and
+    // restore the value the rest cleared (#2115 review). Anything already in flight when a
+    // refresh begins is superseded by definition.
+    characterEpochRef.current += 1;
     setLoading(true);
     setError(null);
     setNotFound(false);
@@ -282,7 +335,6 @@ export default function CharacterPage() {
   const myUserId = me?.user.id;
   const isOwner = character.ownerUserId != null && myUserId != null && character.ownerUserId === String(myUserId);
   const canEdit = canDmWrite || (canPlayerWrite && isOwner);
-  const abilityFields = abilityFieldsForCharacter(adapter, character);
   const classField = adapter.characterSheet?.classField ?? { label: 'Class', placeholder: 'Class', required: true, visible: true };
   const classSummary = classField.visible && character.className.trim()
     ? `${character.className} · `
@@ -355,7 +407,7 @@ export default function CharacterPage() {
   }
 
   return (
-    <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
+    <div className="cf-character-sheet-root reading-surface max-w-5xl xl:max-w-[80rem] 2xl:max-w-[100rem] mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
       <div className="cf-print-hide">
         <DetailPageWayfinding
           campaignId={cid}
@@ -450,314 +502,271 @@ export default function CharacterPage() {
       />
 
       {/*
-        Play vs Build/Profile IA (issue #646): at-table controls live in Play;
-        advancement, story, portrait, and DM admin live in Build. Both panels stay
-        mounted (WAI-ARIA tabpanels) so deep links and aria-controls resolve; the
-        inactive panel is hidden to cut mobile scroll depth.
+        Three-pane play surface from the design template: vitals rail | tabpanels |
+        roll feed. The panes appear as the width to hold them does — rail at xl, roll feed
+        at 2xl — because the centre pane's own grids (six ability tiles, six save tiles)
+        stop being tappable long before they stop fitting. Below xl everything stacks, rail
+        first, since HP and conditions are what a player reaches for at the table; that is
+        also the print order.
       */}
-      <div
-        id="character-sheet-panel-play"
-        role="tabpanel"
-        aria-labelledby="character-sheet-tab-play"
-        tabIndex={0}
-        data-testid="character-sheet-panel-play"
-        className={tab === 'play' ? 'space-y-4 min-w-0' : 'cf-character-sheet-panel-hidden space-y-4 min-w-0'}
-        aria-hidden={tab !== 'play'}
-      >
-        <section
-          id={characterSheetSectionId('abilities')}
-          aria-labelledby={`${characterSheetSectionId('abilities')}-heading`}
-          className="cf-sheet-section"
-        >
-          <Card className="space-y-3">
-            <h2 id={`${characterSheetSectionId('abilities')}-heading`} className="card-kicker">Ability scores</h2>
-            <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
-              {abilityFields.map(({ key, label }) => {
-                const score = abilityScore(character, key);
-                const mod = score === null ? null : adapter.abilityModifier(score);
-                return (
-                  <div key={key} className="cf-inset text-center py-2.5 px-1.5">
-                    <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{label}</p>
-                    <p className="text-xl font-heading my-0.5">{score ?? '—'}</p>
-                    <p className="text-[length:var(--type-meta)]" style={{ color: 'var(--color-accent-300)' }}>
-                      {mod === null ? '—' : signed(mod)}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          </Card>
-        </section>
+      <div className="cf-character-play-surface grid gap-4 min-w-0 items-start xl:grid-cols-[16rem_minmax(0,1fr)] 2xl:grid-cols-[16rem_minmax(0,1fr)_19rem]">
+        <CharacterVitalsRail
+          character={character}
+          adapter={adapter}
+          canEdit={canEdit}
+          onChange={load}
+          refreshing={loading}
+          onTempHp={(hpTemp, epoch) => {
+            if (epoch !== characterEpochRef.current) return false;
+            setCharacter((prev) => (prev ? { ...prev, hpTemp } : prev));
+            return true;
+          }}
+          readCharacterEpoch={() => characterEpochRef.current}
+          onError={setActionError}
+          roller={roller}
+          leveledConditionTrack={leveledConditionTrack}
+          defenseLabel={defenseLabel}
+          defenseTitle={defenseTitle}
+        />
 
-        <section
-          id={characterSheetSectionId('hp')}
-          aria-labelledby={`${characterSheetSectionId('hp')}-heading`}
-          className="cf-sheet-section"
-        >
-          <Card className="space-y-3">
-            <div className="flex items-baseline gap-2.5 flex-wrap justify-between">
-              <h2 id={`${characterSheetSectionId('hp')}-heading`} className="card-kicker mb-0">Hit points & Defenses</h2>
-              <div className="text-xs text-slate-400 font-semibold">
-                {character.eac != null || character.kac != null ? (
-                  <span>EAC <strong className="text-white">{character.eac ?? '—'}</strong> · KAC <strong className="text-white">{character.kac ?? '—'}</strong></span>
-                ) : (
-                  <span title={defenseTitle}>{defenseLabel} {character.ac ?? '—'}</span>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center gap-3.5 flex-wrap">
-              <span className="font-heading text-[34px] leading-none">
-                {character.hpMax > 0 ? (
-                  <>
-                    {character.hpCurrent}
-                    <span className="text-base text-secondary"> / {character.hpMax} HP</span>
-                  </>
-                ) : (
-                  <span className="text-base text-secondary">HP not set</span>
-                )}
-              </span>
-              {character.hpMax > 0 && (
-                <div className="flex-1 min-w-[120px]">
-                  <HpBar current={character.hpCurrent} max={character.hpMax} />
-                </div>
-              )}
-            </div>
-            {(character.spMax > 0 || character.rpMax > 0) && (
-              <div className="space-y-2 pt-2 border-t border-slate-800">
-                {character.spMax > 0 && (
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-xs text-slate-400 font-medium">
-                      <span>Stamina Points (SP)</span>
-                      <span className="text-white">{character.spCurrent} / {character.spMax}</span>
-                    </div>
-                    <HpBar current={character.spCurrent} max={character.spMax} />
-                  </div>
-                )}
-                {character.rpMax > 0 && (
-                  <div className="flex items-center justify-between text-xs text-slate-400 font-medium">
-                    <span>Resolve Points (RP)</span>
-                    <span className="text-white font-semibold">{character.rpCurrent} / {character.rpMax}</span>
-                  </div>
-                )}
-              </div>
-            )}
-            {canEdit && (
-              <div className="space-y-2 cf-print-hide">
-                <HpEditor character={character} onChange={load} onError={setActionError} />
-                <RestControls character={character} onChange={load} onError={setActionError} adapter={adapter} />
-              </div>
-            )}
-          </Card>
-        </section>
+        <div className="min-w-0 space-y-4">
+          {/*
+            Play vs Build/Profile IA (issue #646): at-table controls live in Play;
+            advancement, story, portrait, and DM admin live in Build. Both panels stay
+            mounted (WAI-ARIA tabpanels) so deep links and aria-controls resolve; the
+            inactive panel is hidden to cut mobile scroll depth.
+          */}
+          <div
+            id="character-sheet-panel-play"
+            role="tabpanel"
+            aria-labelledby="character-sheet-tab-play"
+            tabIndex={0}
+            data-testid="character-sheet-panel-play"
+            className={tab === 'play' ? 'space-y-4 min-w-0' : 'cf-character-sheet-panel-hidden space-y-4 min-w-0'}
+            aria-hidden={tab !== 'play'}
+          >
+            <section
+              id={characterSheetSectionId('abilities')}
+              aria-labelledby={`${characterSheetSectionId('abilities')}-heading`}
+              className="cf-sheet-section"
+            >
+              <AbilityScoresCard character={character} adapter={adapter} roller={roller} canRoll={canEdit} />
+            </section>
 
-        <section
-          id={characterSheetSectionId('conditions')}
-          aria-labelledby={`${characterSheetSectionId('conditions')}-heading`}
-          className="cf-sheet-section"
-        >
-          <Card className="space-y-2.5">
-            <h2 id={`${characterSheetSectionId('conditions')}-heading`} className="card-kicker mb-0">Conditions</h2>
-            {leveledConditionTrack && (
-              <ConditionLevelRow
+            <section
+              id={characterSheetSectionId('actions')}
+              aria-labelledby={`${characterSheetSectionId('actions')}-heading`}
+              className="cf-sheet-section"
+            >
+              <ActionsCard
                 character={character}
                 canEdit={canEdit}
                 onChange={load}
                 onError={setActionError}
-                track={leveledConditionTrack}
+                roller={roller}
+                adapter={adapter}
+                canRoll={canAnyMemberWrite}
+                packItems={packItems}
+                onShowInventory={() => setTab('build', { focus: 'inventory' })}
               />
-            )}
-            <ConditionsRow
-              character={character}
-              canEdit={canEdit}
-              onChange={load}
-              onError={setActionError}
-              adapter={adapter}
-              excludeName={leveledConditionTrack?.name}
-            />
-          </Card>
-        </section>
-
-        <section
-          id={characterSheetSectionId('actions')}
-          aria-labelledby={`${characterSheetSectionId('actions')}-heading`}
-          className="cf-sheet-section"
-        >
-          <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} roller={roller} />
-        </section>
-
-        {showSavingThrowEditor && (
-          <section
-            id={characterSheetSectionId('saves')}
-            aria-labelledby={`${characterSheetSectionId('saves')}-heading`}
-            className="cf-sheet-section"
-          >
-            <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
-          </section>
-        )}
-
-        {showSkillEditor && (
-          <section
-            id={characterSheetSectionId('skills')}
-            aria-labelledby={`${characterSheetSectionId('skills')}-heading`}
-            className="cf-sheet-section"
-          >
-            <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
-          </section>
-        )}
-
-        {showSpellSlotEditor ? (
-          <section
-            id={characterSheetSectionId('slots')}
-            aria-labelledby={`${characterSheetSectionId('slots')}-heading`}
-            className="cf-sheet-section"
-          >
-            <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
-          </section>
-        ) : adapter.characterSheet?.genericModeDescription ? (
-          <Card className="space-y-1.5">
-            <h2 id="character-rules-native-heading" className="card-kicker mb-0">Rules-native sheet mode</h2>
-            <p className="text-xs text-secondary">{adapter.characterSheet.genericModeDescription}</p>
-          </Card>
-        ) : null}
-
-        {specialResource && (
-          <section
-            id={characterSheetSectionId('resources')}
-            aria-labelledby={`${characterSheetSectionId('resources')}-heading`}
-            className="cf-sheet-section"
-          >
-            <AdapterResourceCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} def={specialResource} />
-          </section>
-        )}
-      </div>
-
-      <div
-        id="character-sheet-panel-build"
-        role="tabpanel"
-        aria-labelledby="character-sheet-tab-build"
-        tabIndex={0}
-        data-testid="character-sheet-panel-build"
-        className={tab === 'build'
-          ? 'grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start min-w-0'
-          : 'cf-character-sheet-panel-hidden grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start min-w-0'}
-        aria-hidden={tab !== 'build'}
-      >
-        <div className="space-y-4 min-w-0">
-          <section
-            id={characterSheetSectionId('xp')}
-            aria-labelledby={`${characterSheetSectionId('xp')}-heading`}
-            className="cf-sheet-section"
-          >
-            <XpCard character={character} adapter={adapter} canEdit={canEdit} onChange={load} onError={setActionError} />
-          </section>
-
-          <section
-            id={characterSheetSectionId('background')}
-            aria-labelledby={`${characterSheetSectionId('background')}-heading`}
-            className="cf-sheet-section"
-          >
-            <Card className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 id={`${characterSheetSectionId('background')}-heading`} className="card-kicker mb-0">Background</h2>
-              </div>
-              <div className="space-y-1.5 text-[13px]">
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted">Species</span>
-                  <span>{character.species || '—'}</span>
-                </div>
-                <div className="flex justify-between gap-2">
-                  <span className="text-muted">Background</span>
-                  <span>{character.background || '—'}</span>
-                </div>
-              </div>
-              <StoryBody character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
-            </Card>
-          </section>
-
-          <section
-            id={characterSheetSectionId('inventory')}
-            aria-labelledby={`${characterSheetSectionId('inventory')}-heading`}
-            className="cf-sheet-section"
-          >
-            <Card>
-              <CharacterInventorySection campaignId={cid} character={character} />
-            </Card>
-          </section>
-
-          {isDm && (
-            <section
-              id={characterSheetSectionId('dm-secret')}
-              aria-labelledby={`${characterSheetSectionId('dm-secret')}-heading`}
-              className="cf-sheet-section cf-print-secret"
-            >
-              <DmSecretCard character={character} onChange={load} onError={setActionError} />
             </section>
-          )}
-        </div>
 
-        <div className="space-y-4 min-w-0">
-          <section
-            id={characterSheetSectionId('portrait')}
-            aria-labelledby={`${characterSheetSectionId('portrait')}-heading`}
-            className="cf-sheet-section"
+            {showSavingThrowEditor && (
+              <section
+                id={characterSheetSectionId('saves')}
+                aria-labelledby={`${characterSheetSectionId('saves')}-heading`}
+                className="cf-sheet-section"
+              >
+                <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
+              </section>
+            )}
+
+            {showSkillEditor && (
+              <section
+                id={characterSheetSectionId('skills')}
+                aria-labelledby={`${characterSheetSectionId('skills')}-heading`}
+                className="cf-sheet-section"
+              >
+                <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
+              </section>
+            )}
+
+            {showSpellSlotEditor ? (
+              <section
+                id={characterSheetSectionId('slots')}
+                aria-labelledby={`${characterSheetSectionId('slots')}-heading`}
+                className="cf-sheet-section"
+              >
+                <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+              </section>
+            ) : adapter.characterSheet?.genericModeDescription ? (
+              <Card className="space-y-1.5">
+                <h2 id="character-rules-native-heading" className="card-kicker mb-0">Rules-native sheet mode</h2>
+                <p className="text-xs text-secondary">{adapter.characterSheet.genericModeDescription}</p>
+              </Card>
+            ) : null}
+
+            {specialResource && (
+              <section
+                id={characterSheetSectionId('resources')}
+                aria-labelledby={`${characterSheetSectionId('resources')}-heading`}
+                className="cf-sheet-section"
+              >
+                <AdapterResourceCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} def={specialResource} />
+              </section>
+            )}
+          </div>
+
+          <div
+            id="character-sheet-panel-build"
+            role="tabpanel"
+            aria-labelledby="character-sheet-tab-build"
+            tabIndex={0}
+            data-testid="character-sheet-panel-build"
+            className={tab === 'build'
+              ? 'grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start min-w-0'
+              : 'cf-character-sheet-panel-hidden grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start min-w-0'}
+            aria-hidden={tab !== 'build'}
           >
-            <Card className="items-center text-center py-6 space-y-1.5">
-              {canEdit ? (
-                <>
-                  <div className="cf-print-hide">
-                    <ImageUpload
-                      campaignId={cid}
-                      kind="portrait"
-                      shape="circle"
-                      previewUrl={character.portraitUrl ?? undefined}
-                      label="Portrait"
-                      onUploaded={savePortrait}
-                      onError={setActionError}
-                    />
+            <div className="space-y-4 min-w-0">
+              <section
+                id={characterSheetSectionId('xp')}
+                aria-labelledby={`${characterSheetSectionId('xp')}-heading`}
+                className="cf-sheet-section"
+              >
+                <XpCard character={character} adapter={adapter} canEdit={canEdit} onChange={load} onError={setActionError} />
+              </section>
+
+              <section
+                id={characterSheetSectionId('background')}
+                aria-labelledby={`${characterSheetSectionId('background')}-heading`}
+                className="cf-sheet-section"
+              >
+                <Card className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 id={`${characterSheetSectionId('background')}-heading`} className="card-kicker mb-0">Background</h2>
                   </div>
-                  {character.portraitUrl ? (
+                  <div className="space-y-1.5 text-[13px]">
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted">Species</span>
+                      <span>{character.species || '—'}</span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-muted">Background</span>
+                      <span>{character.background || '—'}</span>
+                    </div>
+                  </div>
+                  <StoryBody character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+                </Card>
+              </section>
+
+              <section
+                id={characterSheetSectionId('inventory')}
+                aria-labelledby={`${characterSheetSectionId('inventory')}-heading`}
+                className="cf-sheet-section"
+              >
+                <Card>
+                  {/* Equipping here changes what the Actions card can offer, so this
+                      section publishes the pack it fetched straight back to the sheet. */}
+                  <CharacterInventorySection
+                    campaignId={cid}
+                    character={character}
+                    onPackLoaded={setPackItems}
+                  />
+                </Card>
+              </section>
+
+              {isDm && (
+                <section
+                  id={characterSheetSectionId('dm-secret')}
+                  aria-labelledby={`${characterSheetSectionId('dm-secret')}-heading`}
+                  className="cf-sheet-section cf-print-secret"
+                >
+                  <DmSecretCard character={character} onChange={load} onError={setActionError} />
+                </section>
+              )}
+            </div>
+
+            <div className="space-y-4 min-w-0">
+              <section
+                id={characterSheetSectionId('portrait')}
+                aria-labelledby={`${characterSheetSectionId('portrait')}-heading`}
+                className="cf-sheet-section"
+              >
+                <Card className="items-center text-center py-6 space-y-1.5">
+                  {canEdit ? (
+                    <>
+                      <div className="cf-print-hide">
+                        <ImageUpload
+                          campaignId={cid}
+                          kind="portrait"
+                          shape="circle"
+                          previewUrl={character.portraitUrl ?? undefined}
+                          label="Portrait"
+                          onUploaded={savePortrait}
+                          onError={setActionError}
+                        />
+                      </div>
+                      {character.portraitUrl ? (
+                        <img
+                          src={character.portraitUrl}
+                          alt=""
+                          className="cf-print-only h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
+                        />
+                      ) : (
+                        <span className="cf-print-only h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
+                          Portrait
+                        </span>
+                      )}
+                      <span className="text-[length:var(--type-label)] text-secondary cf-print-hide">Click or drop to change</span>
+                    </>
+                  ) : character.portraitUrl ? (
                     <img
                       src={character.portraitUrl}
                       alt=""
-                      className="cf-print-only h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
+                      className="h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
                     />
                   ) : (
-                    <span className="cf-print-only h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
+                    <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
                       Portrait
                     </span>
                   )}
-                  <span className="text-[length:var(--type-label)] text-secondary cf-print-hide">Click or drop to change</span>
-                </>
-              ) : character.portraitUrl ? (
-                <img
-                  src={character.portraitUrl}
-                  alt=""
-                  className="h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
-                />
-              ) : (
-                <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
-                  Portrait
-                </span>
-              )}
-            </Card>
-          </section>
-          <section
-            id={characterSheetSectionId('player')}
-            aria-labelledby={`${characterSheetSectionId('player')}-heading`}
-            className="cf-sheet-section"
-          >
-            <Card className="space-y-2">
-              <h2 id={`${characterSheetSectionId('player')}-heading`} className="card-kicker mb-0">Player</h2>
-              <div className="space-y-1.5 text-[13px]">
-                <div className="flex justify-between">
-                  <span className="text-muted">Owner</span>
-                  <span>{ownerLabel(character.ownerUserId)}</span>
-                </div>
-                <DdbProvenanceRow ddbId={character.ddbId} canEdit={canEdit} />
-              </div>
-            </Card>
-          </section>
+                </Card>
+              </section>
+              <section
+                id={characterSheetSectionId('player')}
+                aria-labelledby={`${characterSheetSectionId('player')}-heading`}
+                className="cf-sheet-section"
+              >
+                <Card className="space-y-2">
+                  <h2 id={`${characterSheetSectionId('player')}-heading`} className="card-kicker mb-0">Player</h2>
+                  <div className="space-y-1.5 text-[13px]">
+                    <div className="flex justify-between">
+                      <span className="text-muted">Owner</span>
+                      <span>{ownerLabel(character.ownerUserId)}</span>
+                    </div>
+                    <DdbProvenanceRow ddbId={character.ddbId} canEdit={canEdit} />
+                  </div>
+                </Card>
+              </section>
+            </div>
+          </div>
         </div>
+
+        {/*
+          The template's right-hand "Roll feed — shared with the table" rail. This is the
+          SAME campaign-scoped shared log the encounter screen and the dashboard show
+          (SharedDiceLog), including its quick d4–d20 tray, so a save rolled here and a
+          save rolled in the encounter land in one feed rather than two.
+        */}
+        <aside
+          className="min-w-0 cf-print-hide xl:col-span-2 2xl:col-span-1 2xl:sticky 2xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)] 2xl:overflow-y-auto 2xl:overscroll-contain"
+          style={{ top: 'calc(var(--app-header-h, 0px) + 4rem)' }}
+          aria-label="Roll feed"
+          data-testid="character-roll-feed"
+        >
+          <SharedDiceLog campaignId={cid} />
+        </aside>
       </div>
 
       <div className="cf-print-hide">
@@ -1401,16 +1410,556 @@ function RollChip({
   title,
   onClick,
   disabled,
+  allowCrit = true,
+  allowAdvantage = true,
 }: {
   label: string;
   title: string;
-  onClick: (mode: RollMode) => void;
+  /** `event` is forwarded verbatim: its presence is what marks a plain click. */
+  onClick: (mode: RollMode, event?: MouseEvent) => void;
   disabled: boolean;
+  /**
+   * Damage chips pass false: this handler treats advantage and disadvantage exactly like a
+   * normal roll and only labels the log entry, so offering them rolled unchanged damage
+   * under a name that claimed otherwise. An attack chip keeps them — a to-hit really is
+   * roll-two-keep.
+   */
+  allowAdvantage?: boolean;
+  /**
+   * Only a DAMAGE chip doubles dice on a crit. A TO-HIT chip has no critical variant here —
+   * its handler maps advantage/disadvantage and lets anything else fall through to the flat
+   * expression, so offering the command produced an ordinary attack roll labelled "(crit)".
+   */
+  allowCrit?: boolean;
 }) {
   return (
-    <RollContextMenu type="button" className="btn btn-ghost btn-xs text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title}>
+    <RollContextMenu type="button" className="btn btn-ghost btn-xs text-xs" style={{ minHeight: 32 }} onRoll={onClick} disabled={disabled} title={title} allowCrit={allowCrit} allowAdvantage={allowAdvantage}>
       <GameIcon slug="rolling-dices" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />{label}
     </RollContextMenu>
+  );
+}
+
+/**
+ * Ability scores — click to roll (design template, "Ability scores — click to roll a
+ * check"). The modifier and the roll both come from the campaign adapter's check catalog
+ * via `roller.rollCheck`, exactly as Skills and Saving throws already do, so the sheet
+ * never invents ability math client-side. An adapter whose catalog carries no `ability`
+ * entry for a field still renders the score read-only rather than a dead button.
+ */
+function AbilityScoresCard({
+  character,
+  adapter,
+  roller,
+  canRoll,
+}: {
+  character: Character;
+  adapter: RuleSystemAdapter;
+  roller: Roller;
+  /**
+   * POST /characters/:id/checks/roll requires the DM or the OWNING player on a writable
+   * campaign (issue #1479). A reader who is neither sees the scores, not a button that
+   * only ever 403s.
+   */
+  canRoll: boolean;
+}) {
+  const abilityFields = useMemo(() => abilityFieldsForCharacter(adapter, character), [adapter, character]);
+  // A system with its OWN attribute roll cannot be represented by the neutral catalog's
+  // `1d20 + modifier`: Open Legend rolls an exploding attribute dice pool (score 5 is
+  // 1d20 + 2d6, not 1d20+5), and the server resolves that same neutral definition, so a
+  // button here would persist a materially wrong result to the shared log. Those scores
+  // stay read-only until the catalog can express the adapter's native roll.
+  const nativeAttributeRoll = typeof adapter.attributeDicePool === 'function';
+  const abilityChecks = useMemo(() => {
+    if (nativeAttributeRoll) return new Map<string, RollCheckDefinition>();
+    const catalog = checkCatalogForAdapter(adapter, character).filter((c) => c.category === 'ability');
+    const byAbility = new Map<string, RollCheckDefinition>();
+    for (const def of catalog) {
+      const key = (def.ability ?? def.id.replace('ability:', '')).toUpperCase();
+      if (!byAbility.has(key)) byAbility.set(key, def);
+    }
+    return byAbility;
+  }, [adapter, character, nativeAttributeRoll]);
+
+  return (
+    <Card className="space-y-3">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <h2 id={`${characterSheetSectionId('abilities')}-heading`} className="card-kicker mb-0">Ability scores</h2>
+        <span className="text-[11px] text-secondary cf-print-hide">tap a score to roll a check</span>
+      </div>
+      <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
+        {abilityFields.map(({ key, label }) => {
+          const score = abilityScore(character, key);
+          // An unset score is NOT a 10. The catalog defaults a missing stat to 10 (see
+          // `readAbilityScore`), so trusting `def.modifier` here would print "— / +0" and
+          // roll a check for a score the sheet never had. A draft ability stays read-only
+          // until someone actually fills it in.
+          const def = score === null ? null : abilityChecks.get(key.toUpperCase()) ?? null;
+          const mod = def ? def.modifier : score === null ? null : adapter.abilityModifier(score);
+          const body = (
+            <>
+              <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{label}</p>
+              <p className="text-xl font-heading my-0.5">{score ?? '—'}</p>
+              <p className="text-[length:var(--type-meta)]" style={{ color: 'var(--color-accent-300)' }}>
+                {mod === null ? '—' : signed(mod)}
+              </p>
+            </>
+          );
+          if (!def || !canRoll) {
+            return (
+              <div key={key} className="cf-inset text-center py-2.5 px-1.5">
+                {body}
+              </div>
+            );
+          }
+          const breakdownStr = formatCheckBreakdown(def);
+          return (
+            <div key={key} className="cf-inset text-center py-2.5 px-1.5">
+              <RollContextMenu
+                allowAdvantage={def.supportsAdvantage}
+                allowCrit={false}
+                className="w-full h-full block"
+                onRoll={(m) => {
+                  const resolved = toCheckRollMode(def.supportsAdvantage ? m : 'normal');
+                  void roller.rollCheck(character.id, def.id, resolved, undefined, checkRollExpr(def, resolved));
+                }}
+                disabled={roller.rolling}
+                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                title={`Roll ${label} check (${signed(def.modifier)}) [${breakdownStr}]`}
+                aria-label={`Roll ${label} check (${signed(def.modifier)})`}
+              >
+                {body}
+              </RollContextMenu>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * The design template's left vitals rail. Everything a player reaches for mid-turn —
+ * HP + temp HP, death saves, the defenses/initiative/speed/proficiency block, conditions
+ * and rests — in one column that stays put while the centre pane switches between Play
+ * and Build.
+ *
+ * The HP and Conditions sections keep their `character-section-*` ids and `<h2>` text so
+ * `?focus=hp` / `?focus=conditions` deep links and the sheet's heading outline are
+ * unchanged by the move out of the Play tabpanel.
+ */
+function CharacterVitalsRail({
+  character,
+  adapter,
+  canEdit,
+  onChange,
+  onTempHp,
+  readCharacterEpoch,
+  refreshing,
+  onError,
+  roller,
+  leveledConditionTrack,
+  defenseLabel,
+  defenseTitle,
+}: {
+  character: Character;
+  adapter: RuleSystemAdapter;
+  canEdit: boolean;
+  /** Reloads the sheet. Returns a promise so TempHpControl can await it — see its note. */
+  onChange: () => void | Promise<void>;
+  /**
+   * Applies an authoritative `hpTemp` from a write's own response — that field only, and only
+   * while `epoch` still matches. Returns whether it was applied.
+   */
+  onTempHp: (hpTemp: number, epoch: number) => boolean;
+  /** Reads the sheet's current refresh epoch, captured before a write. */
+  readCharacterEpoch: () => number;
+  /** A sheet refresh is in flight — absolute-value controls must not act on a stale display. */
+  refreshing: boolean;
+  onError: (msg: string | null) => void;
+  roller: Roller;
+  leveledConditionTrack: LeveledConditionTrack | null | undefined;
+  defenseLabel: string;
+  defenseTitle: string;
+}) {
+  // See `showsInitiativeTile`: the catalog decides whether the roll may HAPPEN, this decides
+  // whether the tile appears at all — an absent entry would otherwise render "Initiative —".
+  const showInitiative = showsInitiativeTile(adapter);
+  const initiative = useMemo(() => {
+    const def = checkCatalogForAdapter(adapter, character).find((c) => c.category === 'initiative') ?? null;
+    if (!def) return null;
+    // Same reason the ability tiles gate on a stored score: the catalog defaults a missing
+    // stat to 10, so a draft sheet would show a plausible initiative and let it be rolled
+    // from a DEX (5e) / WIS (PF2e) the character never had. An adapter whose initiative
+    // depends on no ability at all (`ability: null`) is untouched by this.
+    // The CATALOG decides whether this was computed from data the character has: it can see
+    // the ability-derived component separately from a level term, which neither an
+    // ability-presence check nor a total-based one here could. See `initiativeIncomplete`.
+    if (def.incomplete) return null;
+    return def;
+  }, [adapter, character]);
+  // Only a system that actually models death saves gets the tracker; PF2e (dying/wounded)
+  // and the neutral adapters simply show "down" via HP 0 (see hasDeathSavesForAdapter).
+  const showDeathSaves =
+    hasDeathSavesForAdapter(adapter) &&
+    (character.deathState !== 'none' || (character.hpMax > 0 && character.hpCurrent <= 0));
+
+  return (
+    <div
+      className="cf-sheet-rail min-w-0 space-y-4 xl:sticky xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)] xl:overflow-y-auto xl:overscroll-contain"
+      style={{ top: 'calc(var(--app-header-h, 0px) + 4rem)' }}
+      data-testid="character-vitals-rail"
+    >
+      <section
+        id={characterSheetSectionId('hp')}
+        aria-labelledby={`${characterSheetSectionId('hp')}-heading`}
+        className="cf-sheet-section"
+      >
+        <Card className="space-y-3">
+          <div className="flex items-baseline gap-2.5 flex-wrap justify-between">
+            <h2 id={`${characterSheetSectionId('hp')}-heading`} className="card-kicker mb-0">Hit points &amp; Defenses</h2>
+          </div>
+          <div className="flex items-center gap-3.5 flex-wrap">
+            <span className="font-heading text-[34px] leading-none">
+              {character.hpMax > 0 ? (
+                <>
+                  {character.hpCurrent}
+                  <span className="text-base text-secondary"> / {character.hpMax} HP</span>
+                  {character.hpTemp > 0 && (
+                    <span className="text-base" style={{ color: 'var(--color-accent-300)' }}> +{character.hpTemp}</span>
+                  )}
+                </>
+              ) : (
+                <span className="text-base text-secondary">HP not set</span>
+              )}
+            </span>
+            {character.hpMax > 0 && (
+              <div className="flex-1 min-w-[120px]">
+                <HpBar current={character.hpCurrent} max={character.hpMax} />
+              </div>
+            )}
+          </div>
+          {(character.spMax > 0 || character.rpMax > 0) && (
+            <div className="space-y-2 pt-2 border-t border-slate-800">
+              {character.spMax > 0 && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-slate-400 font-medium">
+                    <span>Stamina Points (SP)</span>
+                    <span className="text-white">{character.spCurrent} / {character.spMax}</span>
+                  </div>
+                  <HpBar current={character.spCurrent} max={character.spMax} />
+                </div>
+              )}
+              {character.rpMax > 0 && (
+                <div className="flex items-center justify-between text-xs text-slate-400 font-medium">
+                  <span>Resolve Points (RP)</span>
+                  <span className="text-white font-semibold">{character.rpCurrent} / {character.rpMax}</span>
+                </div>
+              )}
+            </div>
+          )}
+          {canEdit && (
+            <div className="space-y-2 cf-print-hide">
+              <HpEditor character={character} onChange={onChange} onError={onError} />
+              <TempHpControl
+                character={character}
+                onTempHp={onTempHp}
+                readCharacterEpoch={readCharacterEpoch}
+                refreshing={refreshing}
+                onChange={onChange}
+                onError={onError}
+              />
+              <RestControls character={character} onChange={onChange} onError={onError} adapter={adapter} />
+            </div>
+          )}
+          {showDeathSaves && <DeathSavesPanel character={character} />}
+        </Card>
+      </section>
+
+      <VitalsBlock
+        character={character}
+        adapter={adapter}
+        roller={roller}
+        initiative={showInitiative ? initiative : null}
+        showInitiative={showInitiative}
+        canRoll={canEdit}
+        defenseLabel={defenseLabel}
+        defenseTitle={defenseTitle}
+      />
+
+      <section
+        id={characterSheetSectionId('conditions')}
+        aria-labelledby={`${characterSheetSectionId('conditions')}-heading`}
+        className="cf-sheet-section"
+      >
+        <Card className="space-y-2.5">
+          <h2 id={`${characterSheetSectionId('conditions')}-heading`} className="card-kicker mb-0">Conditions</h2>
+          {leveledConditionTrack && (
+            <ConditionLevelRow
+              character={character}
+              canEdit={canEdit}
+              onChange={onChange}
+              onError={onError}
+              track={leveledConditionTrack}
+            />
+          )}
+          <ConditionsRow
+            character={character}
+            canEdit={canEdit}
+            onChange={onChange}
+            onError={onError}
+            adapter={adapter}
+            excludeName={leveledConditionTrack?.name}
+          />
+        </Card>
+      </section>
+    </div>
+  );
+}
+
+/**
+ * The template's 2×2 vitals tiles. Initiative is a catalog check like any other, so it
+ * rolls from here through the same server-resolved path Skills/Saves use; the rest are
+ * read-only readouts of sheet fields (edited in "Edit sheet"). Starfinder's EAC/KAC pair
+ * replaces the single defense tile when set.
+ *
+ * The template's fourth tile is 5e's proficiency bonus, and this shows LEVEL instead. A
+ * single level-derived proficiency number is a 5e concept: PF2e's proficiency is level
+ * plus a per-rank bonus, and Starforged/Open Legend have none at all, so a tile driven by
+ * `profBonus` would state a plausible wrong number on every non-5e sheet. No adapter
+ * exposes a global proficiency value to read instead, and none is invented here — the
+ * per-check bonus is already visible, honestly and per system, in each catalog check's
+ * own breakdown (see `formatCheckBreakdown` in the Skills and Saving throws cards).
+ */
+function VitalsBlock({
+  character,
+  adapter,
+  roller,
+  initiative,
+  showInitiative,
+  canRoll,
+  defenseLabel,
+  defenseTitle,
+}: {
+  character: Character;
+  adapter: RuleSystemAdapter;
+  roller: Roller;
+  initiative: RollCheckDefinition | null;
+  /** False for a group-initiative system, where initiative is not a per-character stat. */
+  showInitiative: boolean;
+  /** Whether this viewer may roll at all — see AbilityScoresCard's `canRoll`. */
+  canRoll: boolean;
+  defenseLabel: string;
+  defenseTitle: string;
+}) {
+  const splitDefense = character.eac != null || character.kac != null;
+  const tile = 'cf-inset text-center py-2 px-1.5';
+  const tileLabel = 'text-[length:var(--type-label)] tracking-wide text-secondary';
+  const tileValue = 'text-[17px] font-heading mt-0.5';
+  return (
+    <Card className="space-y-2.5" data-testid="character-vitals">
+      <span className="card-kicker mb-0">Vitals</span>
+      <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
+        {splitDefense ? (
+          <>
+            <div className={tile}>
+              <p className={tileLabel}>EAC</p>
+              <p className={tileValue}>{character.eac ?? '—'}</p>
+            </div>
+            <div className={tile}>
+              <p className={tileLabel}>KAC</p>
+              <p className={tileValue}>{character.kac ?? '—'}</p>
+            </div>
+          </>
+        ) : (
+          <div className={tile} title={defenseTitle}>
+            <p className={tileLabel}>{defenseLabel}</p>
+            <p className={tileValue}>{character.ac ?? '—'}</p>
+          </div>
+        )}
+        {initiative && canRoll ? (
+          <div className={tile}>
+            <RollContextMenu
+              allowAdvantage={initiative.supportsAdvantage}
+              allowCrit={false}
+              className="w-full h-full block"
+              onRoll={(m) => {
+                const resolved = toCheckRollMode(initiative.supportsAdvantage ? m : 'normal');
+                void roller.rollCheck(character.id, initiative.id, resolved, undefined, checkRollExpr(initiative, resolved));
+              }}
+              disabled={roller.rolling}
+              style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+              title={`Roll initiative (${signed(initiative.modifier)}) [${formatCheckBreakdown(initiative)}]`}
+              aria-label={`Roll initiative (${signed(initiative.modifier)})`}
+            >
+              <p className={tileLabel}>Initiative</p>
+              <p className={tileValue}>{signed(initiative.modifier)}</p>
+            </RollContextMenu>
+          </div>
+        ) : showInitiative ? (
+          <div className={tile}>
+            <p className={tileLabel}>Initiative</p>
+            <p className={tileValue}>{initiative ? signed(initiative.modifier) : '—'}</p>
+          </div>
+        ) : null}
+        <div className={tile}>
+          <p className={tileLabel}>Speed</p>
+          <p className={tileValue}>{character.speed ?? '—'}</p>
+        </div>
+        <div className={tile}>
+          <p className={tileLabel}>Level</p>
+          <p className={tileValue}>{character.level}</p>
+        </div>
+      </div>
+      <p className="text-[11px] text-secondary cf-print-hide">
+        {adapter.presentation?.defense.full ?? 'Defense'} and speed are set in Edit sheet.
+      </p>
+    </Card>
+  );
+}
+
+/**
+ * Temp HP stepper (design template's "Temp HP − n +" row). `hpTemp` is a plain sheet
+ * field, so this PATCHes the character rather than going through POST /hp — that endpoint
+ * moves real hit points, and temporary hit points are a separate pool the damage path
+ * spends first.
+ *
+ * Unlike `HpEditor`, which posts commutative DELTAS, this writes an ABSOLUTE value read
+ * off the current character — so the displayed value must be current before the controls
+ * re-enable, or two quick `+` taps both PATCH 1 and the second adjustment vanishes with no
+ * error (Codex review on #2115).
+ *
+ * The PATCH response IS the post-write character, so it is applied directly rather than
+ * awaiting a follow-up GET. Awaiting the parent refresh was not enough: `load()` catches
+ * its own fetch failure and resolves anyway, so a failed refresh looked identical to a
+ * successful one and re-enabled the controls over a stale value. Reading the write's own
+ * result cannot drift that way — and costs one request fewer.
+ *
+ * A `?proposed=true`-style 202 (a proposal, not a write) has no `hpTemp`, so anything that
+ * is not a character falls back to the refresh instead of being trusted.
+ *
+ * Only `hpTemp` is taken from that response, never the whole character: the sheet's other
+ * controls stay enabled while this request is in flight, so a condition or HP change that
+ * lands first would be reverted by this older snapshot arriving late — and a later
+ * array-based edit (actions, conditions, resources) would then build on the stale copy.
+ */
+function TempHpControl({
+  character,
+  onTempHp,
+  readCharacterEpoch,
+  refreshing,
+  onChange,
+  onError,
+}: {
+  character: Character;
+  /**
+   * Applies the authoritative `hpTemp` from the PATCH response — that field only, and only if
+   * the sheet has not been refreshed since `epoch`. Returns whether it was applied.
+   */
+  onTempHp: (hpTemp: number, epoch: number) => boolean;
+  /** Reads the sheet's refresh epoch. Captured BEFORE the request, compared after. */
+  readCharacterEpoch: () => number;
+  /** A refresh is in flight, so the displayed number this control writes from is provisional. */
+  refreshing: boolean;
+  /** Fallback refresh, awaited, for a response that is not a character. */
+  onChange: () => void | Promise<void>;
+  onError: (msg: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
+
+  async function set(next: number) {
+    if (busy || next === character.hpTemp || next < 0) return;
+    setBusy(true);
+    onError(null);
+    // Captured BEFORE the request: anything that refreshes the sheet while this is in flight
+    // moves it, and the response is then older than what the user is looking at.
+    const epoch = readCharacterEpoch();
+    try {
+      const updated = await api.patch<Character>(`${API}/characters/${character.id}`, { hpTemp: next });
+      let applied = true;
+      if (updated && typeof updated.hpTemp === 'number') applied = onTempHp(updated.hpTemp, epoch);
+      else await onChange();
+      // Superseded writes stay silent: `next` is no longer what the sheet holds, and announcing
+      // it would tell a screen-reader user a number the server has already moved past.
+      if (applied) announce(`${character.name} temporary hit points ${next}`);
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't update temporary hit points.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2 cf-print-hide" role="group" aria-label={`${character.name} temporary hit points`} data-testid="character-temp-hp">
+      <span className="flex-1 text-[length:var(--type-label)] text-secondary">Temp HP</span>
+      <Btn
+        density="xs"
+        ghost
+        style={{ minWidth: 44, minHeight: 44 }}
+        disabled={busy || refreshing || character.hpTemp <= 0}
+        aria-label={`Remove 1 temporary hit point from ${character.name}`}
+        onClick={() => void set(character.hpTemp - 1)}
+      >
+        −
+      </Btn>
+      <span className="min-w-[2.5rem] text-center font-heading text-[15px]" data-testid="character-temp-hp-value">
+        {character.hpTemp}
+      </span>
+      <Btn
+        density="xs"
+        ghost
+        style={{ minWidth: 44, minHeight: 44 }}
+        disabled={busy || refreshing}
+        aria-label={`Add 1 temporary hit point to ${character.name}`}
+        onClick={() => void set(character.hpTemp + 1)}
+      >
+        +
+      </Btn>
+    </div>
+  );
+}
+
+/**
+ * Death saves on the sheet (design template's "Death saves — you are dying" panel).
+ * Reuses the encounter tracker so the pips look and announce identically in both places.
+ *
+ * READ-ONLY, deliberately — neither the roll nor the counters are editable here.
+ *
+ * The 5e death lifecycle lives on the server, in the encounter: both
+ * POST /encounters/:id/combatants/:cid/death-save and the combatant PATCH route counter
+ * changes through `applyCombatantHp`, which DERIVES `deathState` from them (three failures
+ * is dead, three successes is stable). `PATCH /characters/:id` has no such derivation — it
+ * writes the counters verbatim and mirrors them into any live combatant. Marking a third
+ * failure from here would therefore produce `deathSaveFailures: 3` still sitting at
+ * `deathState: 'dying'`, on the sheet AND in the fight (Codex review on #2115).
+ *
+ * So the sheet shows the state and names where it is changed, rather than writing half of
+ * a lifecycle transition it cannot complete.
+ */
+function DeathSavesPanel({ character }: { character: Character }) {
+  return (
+    <div className="cf-inset px-3 py-2 space-y-1" data-testid="character-death-saves">
+      <p className="text-[length:var(--type-label)] tracking-wide" style={{ color: 'var(--color-danger, #e5484d)' }}>
+        {character.deathState === 'dead'
+          ? 'Dead'
+          : character.deathState === 'stable'
+            ? 'Stable at 0 HP'
+            : 'Death saves — you are dying'}
+      </p>
+      <DeathSaveTracker
+        successes={character.deathSaveSuccesses}
+        failures={character.deathSaveFailures}
+        canEditPermission={false}
+        canRoll={false}
+        busy={false}
+        syncBlocked={false}
+        onSet={() => undefined}
+        onRoll={() => undefined}
+      />
+      <p className="text-[11px] text-secondary">
+        Rolled and tracked in the encounter, where the server applies each save to the death lifecycle.
+      </p>
+    </div>
   );
 }
 
@@ -1423,6 +1972,13 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
   const saves = useMemo(() => catalog.filter((c) => c.category === 'save'), [catalog]);
+  // The chooser needs BOTH a system that can honour it and a viewer who can roll: PF2e's
+  // saves are not roll-two-keep, and a reader (archived campaign, non-owner) gets static
+  // tiles — either way an enabled chooser would only move a status label, driving nothing.
+  const supportsAdvantage = useMemo(
+    () => canEdit && saves.some((c) => c.supportsAdvantage),
+    [canEdit, saves],
+  );
 
   async function toggle(k: Ability) {
     if (!canEdit || busy) return;
@@ -1448,18 +2004,22 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
       <div className="flex items-center gap-2 flex-wrap">
         <h2 id={`${characterSheetSectionId('saves')}-heading`} className="card-kicker mb-0">Saving throws</h2>
         <span className="text-[11px] text-secondary">proficiency {signed(pb)}</span>
-        <span className="ml-auto cf-roll-mode-status cf-print-hide" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
-          {rollModeSummary(mode)}
-        </span>
+        {supportsAdvantage && (
+          <span className="ml-auto cf-roll-mode-status cf-print-hide" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
+            {rollModeSummary(mode)}
+          </span>
+        )}
       </div>
-      <div className="cf-print-hide">
-        <RollModeChooser
-          value={mode}
-          onChange={setMode}
-          disabled={roller.rolling}
-          aria-label="Saving throw roll mode"
-        />
-      </div>
+      {supportsAdvantage && (
+        <div className="cf-print-hide">
+          <RollModeChooser
+            value={mode}
+            onChange={setMode}
+            disabled={roller.rolling}
+            aria-label="Saving throw roll mode"
+          />
+        </div>
+      )}
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
         {saves.map((def) => {
           const k = (def.ability ?? def.id.replace('save:', '')) as Ability;
@@ -1468,17 +2028,29 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
           const breakdownStr = formatCheckBreakdown(def);
           return (
             <div key={def.id} className="cf-inset text-center py-2 px-1.5 relative">
-              <RollContextMenu
-                className="w-full h-full block"
-                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false })))}
-                disabled={roller.rolling}
-                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-                title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}]`}
-                aria-label={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)})`}
-              >
-                <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
-                <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
-              </RollContextMenu>
+              {canEdit ? (
+                <RollContextMenu
+                  allowAdvantage={def.supportsAdvantage}
+                  allowCrit={false}
+                  className="w-full h-full block"
+                  onRoll={(m, e) => {
+                    const resolved = toCheckRollMode(def.supportsAdvantage ? rollModeForClick(m, mode, e) : 'normal');
+                    void roller.rollCheck(character.id, def.id, resolved, undefined, checkRollExpr(def, resolved));
+                  }}
+                  disabled={roller.rolling}
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                  title={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)}) [${breakdownStr}]`}
+                  aria-label={`Roll ${k ? `${k.toUpperCase()} ` : ''}save (${signed(mod)})`}
+                >
+                  <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
+                  <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
+                </RollContextMenu>
+              ) : (
+                <div title={breakdownStr}>
+                  <p className="text-[10px] tracking-wide text-secondary">{k || def.label}</p>
+                  <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
+                </div>
+              )}
               {canEdit ? (
                 <>
                   <button
@@ -1595,18 +2167,31 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                   {marker}
                 </span>
               )}
-              <RollContextMenu
-                className="flex-1 flex items-center gap-1.5 min-w-0"
-                onRoll={(m) => void roller.rollCheck(character.id, def.id, toCheckRollMode(resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false })))}
-                disabled={roller.rolling}
-                style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-                title={`Roll ${name} (${signed(mod)}) [${breakdownStr}]`}
-                aria-label={`Roll ${name} (${signed(mod)})`}
-              >
-                <span className="flex-1 text-left truncate">{name}</span>
-                {ability && <span className="text-[10px] text-secondary">{ability}</span>}
-                <span className="w-8 text-right font-semibold">{signed(mod)}</span>
-              </RollContextMenu>
+              {canEdit ? (
+                <RollContextMenu
+                  allowAdvantage={def.supportsAdvantage}
+                  allowCrit={false}
+                  className="flex-1 flex items-center gap-1.5 min-w-0"
+                  onRoll={(m) => {
+                    const resolved = toCheckRollMode(def.supportsAdvantage ? m : 'normal');
+                    void roller.rollCheck(character.id, def.id, resolved, undefined, checkRollExpr(def, resolved));
+                  }}
+                  disabled={roller.rolling}
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                  title={`Roll ${name} (${signed(mod)}) [${breakdownStr}]`}
+                  aria-label={`Roll ${name} (${signed(mod)})`}
+                >
+                  <span className="flex-1 text-left truncate">{name}</span>
+                  {ability && <span className="text-[10px] text-secondary">{ability}</span>}
+                  <span className="w-8 text-right font-semibold">{signed(mod)}</span>
+                </RollContextMenu>
+              ) : (
+                <span className="flex-1 flex items-center gap-1.5 min-w-0" title={breakdownStr}>
+                  <span className="flex-1 text-left truncate">{name}</span>
+                  {ability && <span className="text-[10px] text-secondary">{ability}</span>}
+                  <span className="w-8 text-right font-semibold">{signed(mod)}</span>
+                </span>
+              )}
             </div>
           );
         })}
@@ -1615,9 +2200,61 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
   );
 }
 
-function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCardProps & { roller: Roller }) {
+function ActionsCard({
+  character,
+  canEdit,
+  onChange,
+  onError,
+  roller,
+  adapter,
+  canRoll,
+  packItems,
+  onShowInventory,
+}: SheetCardProps & {
+  roller: Roller;
+  adapter: RuleSystemAdapter;
+  /**
+   * Membership + writability, VIEWERS INCLUDED — `POST /campaigns/:id/roll` runs
+   * `requireMemberOnWritableCampaign`, which asserts no role floor. A viewer-role member who
+   * owns this sheet may still roll, so this must not be the stricter `canMemberWrite`.
+   */
+  canRoll: boolean;
+  packItems: InventoryItem[];
+  onShowInventory: () => void;
+}) {
   const { t } = useTranslation();
   const [adding, setAdding] = useState(false);
+  // Two reasons a printed to-hit must NOT become a roll chip:
+  //
+  //  - `POST /campaigns/:id/roll` needs a writable campaign and campaign MEMBERSHIP — not
+  //    character-edit rights (`CampaignRollController.roll` calls
+  //    `requireMemberOnWritableCampaign`). Gating on `canEdit` would have taken these chips
+  //    away from a member who may legitimately roll them, e.g. a viewer-role member who
+  //    still owns this sheet; `canRoll` is the endpoint's own authority.
+  //  - `toHitExpr` builds `1d20 + bonus`. That matches what the resolver would do only while
+  //    the adapter has no attack maths of its own; once it declares `resolveAttack` (Open
+  //    Legend rolls an exploding attribute pool), the SAME action rolled here and rolled in
+  //    the encounter would produce materially different numbers.
+  //
+  // Either way the value still reads as text — the number is real, the roll is not offered.
+  const criticalDamage = criticalDamageRuleForAdapter(adapter);
+  const allowCritDamage = allowsCriticalDamageRoll(adapter);
+  const hasCriticalHits = hasCriticalHitsForAdapter(adapter);
+  const hasDegreesOfSuccess = hasDegreesOfSuccessForAdapter(adapter);
+  const adapterOwnsAttack = hasAdapterOwnedAttackRoll(adapter);
+  const canRollAttack = canRoll && !adapterOwnsAttack;
+  const canRollDamage = canRoll;
+
+  // Which row's details disclosure is open (design template's "Details ▾ / Hide ▴").
+  // A sheet action is keyed by index, an equipped-gear action by `item:<id>`.
+  const [openDetails, setOpenDetails] = useState<string | null>(null);
+  // Every pack item that authored an action, equipped or not: an unequipped one still
+  // renders, locked, so "why can't I use this?" is answerable without leaving the tab —
+  // the same reason the encounter only merges the EQUIPPED ones into a turn's options.
+  const grantedActions = useMemo(
+    () => packItems.filter((item) => item.equippedAction != null),
+    [packItems],
+  );
   const [busy, setBusy] = useState(false);
   const announce = useAnnounce();
   const [name, setName] = useState('');
@@ -1627,8 +2264,9 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
   const [targetAc, setTargetAc] = useState('');
   const [notes, setNotes] = useState('');
   // Roll-mode chooser (issue #713): the attack "to hit" roll mode. Applies to
-  // every action's attack roll in this card; a shift/alt-click still overrides
-  // once (resolveRollMode) so the desktop shortcut keeps working.
+  // every action's attack roll in this card — sheet-authored and gear-granted alike;
+  // a shift/alt-click or the long-press menu still overrides once (rollModeForClick),
+  // so the desktop shortcut keeps working and the chooser is untouched by it.
   const [mode, setMode] = useState<RollMode>('normal');
   // In-place edit (issue #718): editingIndex is the position in character.actions
   // being edited, or null when not editing an existing row. The row collapses into
@@ -1740,9 +2378,22 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
     );
   }
 
-  // Only surface the chooser when at least one action carries a "to hit" roll —
-  // a list of feature-only actions has nothing to take with advantage.
-  const hasAttackRoll = character.actions.some((a) => a.toHit && toHitExpr(a.toHit, 'flat'));
+  // Only surface the chooser when at least one action carries a "to hit" roll — a list of
+  // feature-only actions has nothing to take with advantage.
+  //
+  // Gear counts, and only while EQUIPPED: the chooser has to appear exactly when a rollable
+  // attack chip does, or a character whose only attack comes from an equipped item gets the
+  // chip with no way to set advantage but the one-shot context menu (Codex review on #2115).
+  const hasAttackRoll = useMemo(
+    () =>
+      // `canRollAttack` first: with no rollable to-hit chip on screen — a read-only campaign,
+      // or a system whose adapter owns its attack maths — the chooser would announce mode
+      // changes that drive nothing at all.
+      canRollAttack &&
+      (character.actions.some((a) => a.toHit && toHitExpr(a.toHit, 'flat')) ||
+        grantedActions.some((item) => item.equipped && item.equippedAction?.toHit && toHitExpr(item.equippedAction.toHit, 'flat'))),
+    [canRollAttack, character.actions, grantedActions],
+  );
 
   return (
     <Card className="space-y-2.5">
@@ -1769,7 +2420,9 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
           />
         </div>
       )}
-      {character.actions.length === 0 && !adding && (
+      {/* "No actions yet" would be a lie once gear grants some — the "From your gear"
+          group below is still a list of actions, authored on the items instead of here. */}
+      {character.actions.length === 0 && !adding && grantedActions.length === 0 && (
         <p className="text-xs text-secondary">
           No actions yet{canEdit ? ' — add attacks, spells, and features to roll them straight from the sheet' : ''}.
         </p>
@@ -1803,8 +2456,9 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
         const attackExpr = action.toHit ? toHitExpr(action.toHit, 'flat') : null;
         const dmgExpr = action.damage ? damageExpr(action.damage) : null;
         const isResolvable = action.spec != null && isResolvableSpec(action.spec);
+        const detailsKey = `action-${i}`;
         return (
-          <div key={`${action.name}-${i}`} className="cf-inset px-3 py-2 flex items-start gap-2.5">
+          <div key={`${action.name}-${i}`} className="cf-inset px-3 py-2 flex items-start gap-2.5 flex-wrap">
             <div className="flex-1 min-w-0">
               <p className="text-[13px] font-semibold flex items-center gap-1.5 flex-wrap">
                 {action.name}
@@ -1831,27 +2485,39 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
               {(action.toHit || action.damage) && (
                 <div className="flex gap-2 flex-wrap items-center mt-1">
                   {action.toHit &&
-                    (attackExpr ? (
+                    (attackExpr && canRollAttack ? (
                       <RollChip
                         label={`to hit ${action.toHit}`}
                         title={`Roll ${action.name} attack (${attackExpr}) · ${rollModeSummary(mode)}`}
                         disabled={roller.rolling}
-                        onClick={(m) => {
-                          const resolvedMode = resolveRollMode(m, { shiftKey: m === 'advantage', altKey: m === 'disadvantage', ctrlKey: false, metaKey: false });
+                        allowCrit={false}
+                        onClick={(m, e) => {
+                          const resolvedMode = rollModeForClick(m, mode, e);
                           void roller.roll(toHitExpr(action.toHit, resolvedMode === 'advantage' ? 'adv' : resolvedMode === 'disadvantage' ? 'dis' : 'flat')! , `${character.name} · ${action.name} to hit${resolvedMode !== 'normal' ? ` (${resolvedMode})` : ''}`);
                         }}
                       />
                     ) : (
-                      <span className="text-xs text-slate-400" title="Not a rollable to-hit value — edit the action and use +5, -1, or 1d20+5">
-                        to hit {action.toHit} (not rollable)
+                      <span
+                        className="text-xs text-slate-400"
+                        title={
+                          adapterOwnsAttack
+                            ? "This system rolls its own attack — use the action in an encounter so the rules engine resolves it"
+                            : !canRoll
+                              ? 'Read-only campaign'
+                              : 'Not a rollable to-hit value — edit the action and use +5, -1, or 1d20+5'
+                        }
+                      >
+                        to hit {action.toHit}
                       </span>
                     ))}
                   {action.damage &&
-                    (dmgExpr ? (
+                    (dmgExpr && canRollDamage ? (
                       <RollChip
                         label={action.damage}
                         title={`Roll ${action.name} damage (${dmgExpr})`}
                         disabled={roller.rolling}
+                        allowAdvantage={false}
+                        allowCrit={allowCritDamage}
                         onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${action.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
                       />
                     ) : (
@@ -1862,6 +2528,14 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                 </div>
               )}
               {action.notes && <p className="text-[11px] text-secondary mt-0.5">{action.notes}</p>}
+              <ActionDetails
+                action={action}
+                open={openDetails === detailsKey}
+                onToggle={() => setOpenDetails((prev) => (prev === detailsKey ? null : detailsKey))}
+                criticalDamage={criticalDamage}
+                hasCriticalHits={hasCriticalHits}
+                hasDegreesOfSuccess={hasDegreesOfSuccess}
+              />
             </div>
             {canEdit && (
               <div className="flex items-center gap-1 shrink-0 cf-print-hide">
@@ -1927,7 +2601,185 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
           autoFocusName
         />
       )}
+
+      {grantedActions.length > 0 && (
+        <div className="space-y-2.5 pt-1" data-testid="character-granted-actions">
+          <p className="card-kicker mb-0">From your gear</p>
+          {grantedActions.map((item) => {
+            const granted = item.equippedAction!;
+            const detailsKey = `item-${item.id}`;
+            const attackExpr = granted.toHit ? toHitExpr(granted.toHit, 'flat') : null;
+            const dmgExpr = granted.damage ? damageExpr(granted.damage) : null;
+            return (
+              <div key={detailsKey} className="cf-inset px-3 py-2 flex items-start gap-2.5 flex-wrap">
+                <div className="flex-1 min-w-0">
+                  <p className="text-[13px] font-semibold flex items-center gap-1.5 flex-wrap">
+                    {granted.name}
+                    {granted.kind && <span className="tag tag-neutral">{granted.kind}</span>}
+                  </p>
+                  <button
+                    type="button"
+                    className="tag tag-accent text-[10px] mt-1 cf-print-hide"
+                    onClick={onShowInventory}
+                    style={{ cursor: 'pointer', border: 0, font: 'inherit', minHeight: 32 }}
+                    title={`Show ${item.name} in this character's inventory`}
+                  >
+                    <GameIcon slug="backpack" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />
+                    {item.name} →
+                  </button>
+                  {item.equipped ? (
+                    (granted.toHit || granted.damage) && (
+                      // A value with no dice in it is still the item's real number, so it
+                      // reads as text rather than vanishing — same as a sheet action's row.
+                      <div className="flex gap-2 flex-wrap items-center mt-1">
+                        {granted.toHit &&
+                          (attackExpr && canRollAttack ? (
+                            <RollChip
+                              label={`to hit ${granted.toHit}`}
+                              title={`Roll ${granted.name} attack (${attackExpr})`}
+                              disabled={roller.rolling}
+                              allowCrit={false}
+                              onClick={(m, e) => {
+                                const resolved = rollModeForClick(m, mode, e);
+                                void roller.roll(
+                                  toHitExpr(granted.toHit, resolved === 'advantage' ? 'adv' : resolved === 'disadvantage' ? 'dis' : 'flat')!,
+                                  `${character.name} · ${granted.name} to hit${resolved !== 'normal' ? ` (${resolved})` : ''}`,
+                                );
+                              }}
+                            />
+                          ) : (
+                            <span
+                              className="text-xs text-slate-400"
+                              title={
+                                adapterOwnsAttack
+                                  ? "This system rolls its own attack — use the item in an encounter so the rules engine resolves it"
+                                  : !canRoll
+                                    ? 'Read-only campaign'
+                                    : "Not a rollable to-hit value — edit the item's action and use +5, -1, or 1d20+5"
+                              }
+                            >
+                              to hit {granted.toHit}
+                            </span>
+                          ))}
+                        {granted.damage &&
+                          (dmgExpr && canRollDamage ? (
+                            <RollChip
+                              label={granted.damage}
+                              title={`Roll ${granted.name} damage (${dmgExpr})`}
+                              disabled={roller.rolling}
+                              allowAdvantage={false}
+                              allowCrit={allowCritDamage}
+                              onClick={(m) => void roller.roll(m === 'crit' ? critDamageExpr(dmgExpr) || dmgExpr : dmgExpr, `${character.name} · ${granted.name} damage${m !== 'normal' ? ` (${m})` : ''}`)}
+                            />
+                          ) : (
+                            <span className="text-xs text-slate-400" title="Flat or unparseable damage — no dice to roll">
+                              {granted.damage} (flat)
+                            </span>
+                          ))}
+                      </div>
+                    )
+                  ) : (
+                    <p className="text-[11px] text-secondary mt-1">
+                      🔒 {t('inventory.equip.equipToUse', { name: item.name })}
+                    </p>
+                  )}
+                  {granted.notes && <p className="text-[11px] text-secondary mt-0.5">{granted.notes}</p>}
+                  <ActionDetails
+                    action={granted}
+                    open={openDetails === detailsKey}
+                    onToggle={() => setOpenDetails((prev) => (prev === detailsKey ? null : detailsKey))}
+                    criticalDamage={criticalDamage}
+                hasCriticalHits={hasCriticalHits}
+                hasDegreesOfSuccess={hasDegreesOfSuccess}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </Card>
+  );
+}
+
+/**
+ * The design template's per-action disclosure: the facts, effects and citation the
+ * structured `spec` carries, hidden until asked for so the Actions list stays scannable.
+ * Renders nothing at all for a text-only action — no empty toggle to nowhere.
+ */
+function ActionDetails({
+  action,
+  open,
+  onToggle,
+  criticalDamage,
+  hasCriticalHits,
+  hasDegreesOfSuccess,
+}: {
+  action: CharacterAction;
+  open: boolean;
+  onToggle: () => void;
+  /** This campaign's critical rule — see `actionSpecEffects`. */
+  criticalDamage: CriticalDamageRule;
+  /** False for a system whose attack resolution has no critical tier — see `actionSpecEffects`. */
+  hasCriticalHits: boolean;
+  /** True for a system that reports degrees of success — see `actionSpecEffects`. */
+  hasDegreesOfSuccess: boolean;
+}) {
+  const facts = useMemo(() => actionSpecFacts(action.spec), [action.spec]);
+  const effects = useMemo(
+    () => actionSpecEffects(action.spec, criticalDamage, hasCriticalHits, hasDegreesOfSuccess),
+    [action.spec, criticalDamage, hasCriticalHits, hasDegreesOfSuccess],
+  );
+  const source = actionSourceText(action.spec);
+  if (facts.length === 0 && effects.length === 0 && !source) return null;
+  return (
+    <div className="mt-1.5">
+      {/* The visible label is bare "Details" to keep the list scannable, so the name a
+          screen reader announces has to carry the action — otherwise a sheet with eight
+          actions offers eight identically-named buttons in the rotor. */}
+      <button
+        type="button"
+        className="btn btn-ghost btn-xs text-[11px] cf-print-hide"
+        aria-expanded={open}
+        aria-label={open ? `Hide details for ${action.name}` : `Show details for ${action.name}`}
+        onClick={onToggle}
+        style={{ minHeight: 32 }}
+      >
+        {open ? 'Hide details' : 'Details'}
+      </button>
+      {/* Always mounted, so paper carries the facts/effects/source of every structured
+          action. On screen a collapsed panel is hidden; `cf-print-only` reveals it when
+          printing, which the toggle itself (cf-print-hide) could never do. */}
+      <div className={open ? 'mt-2 pt-2 border-t border-slate-800 space-y-2' : 'cf-print-only mt-2 pt-2 border-t border-slate-800 space-y-2'}>
+        {facts.length > 0 && (
+          <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))' }}>
+            {facts.map((fact) => (
+              <div key={fact.label}>
+                <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{fact.label}</p>
+                <p className="text-[11px]">{fact.value}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        {effects.length > 0 && (
+          <div className="space-y-1.5">
+            {/* Named per branch: a save's success and failure consequences are mutually
+                exclusive, and one merged list would read as though both applied. */}
+            {effects.map((group) => (
+              <div key={group.outcome}>
+                <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{group.label}</p>
+                <ul className="text-[11px] space-y-0.5 mt-0.5">
+                  {group.lines.map((line) => (
+                    <li key={line}>· {line}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+        {source && <p className="text-[10px] text-muted">{source}</p>}
+      </div>
+    </div>
   );
 }
 
