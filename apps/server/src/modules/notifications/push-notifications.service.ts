@@ -11,16 +11,17 @@ import webpush, {
   type RequestOptions,
   type SendResult,
 } from 'web-push';
-import type {
-  BrowserPushStatus,
-  BrowserPushSubscription,
-  BrowserPushUnsubscribeResult,
-  NotificationType,
+import {
+  MEMBERSHIP_NOTIFICATION_TYPES,
+  type BrowserPushStatus,
+  type BrowserPushSubscription,
+  type BrowserPushUnsubscribeResult,
+  type NotificationType,
 } from '@campfire/schema';
 import { resolvePublicBase } from '../../common/security-config';
 import type { RequestUser } from '../../common/user.types';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { pushSubscriptions, users } from '../../db/schema';
+import { campaignMembers, pushSubscriptions, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 
 export const WEB_PUSH_TRANSPORT = Symbol('WEB_PUSH_TRANSPORT');
@@ -67,6 +68,7 @@ const ALLOWED_PUSH_HOSTS = new Set([
   'updates.push.services.mozilla.com',
   'web.push.apple.com',
 ]);
+const MEMBERSHIP_EXEMPT_TYPES = new Set<NotificationType>(MEMBERSHIP_NOTIFICATION_TYPES);
 
 /**
  * A subscription endpoint becomes an authenticated server-side outbound request.
@@ -221,13 +223,42 @@ export class PushNotificationsService {
   }
 
   /**
-   * Deliver already-gated notification rows. Every error is contained here:
-   * push vendors are optional infrastructure and may never roll back or reject
-   * the Campfire write that produced the in-app notification.
+   * Deliver already-materialized notification rows. Preferences and quiet hours
+   * are not re-evaluated, but account state and campaign membership are checked
+   * immediately before vendor fan-out. Membership lifecycle notifications are
+   * exempt because losing access is the event they must report. Every error is
+   * contained here: push vendors are optional infrastructure and may never roll
+   * back or reject the Campfire write that produced the in-app notification.
    */
   async deliver(deliveries: BrowserPushDelivery[]): Promise<void> {
     if (this.publicKey === null || deliveries.length === 0) return;
-    const userIds = [...new Set(deliveries.map((delivery) => delivery.userId))];
+    const membershipGated = deliveries.filter((delivery) => !MEMBERSHIP_EXEMPT_TYPES.has(delivery.type));
+    const currentMembershipKeys = new Set<string>();
+    if (membershipGated.length > 0) {
+      const userIds = [...new Set(membershipGated.map((delivery) => delivery.userId))];
+      const campaignIds = [...new Set(membershipGated.map((delivery) => delivery.campaignId))];
+      const memberships = await this.db
+        .select({ userId: campaignMembers.userId, campaignId: campaignMembers.campaignId })
+        .from(campaignMembers)
+        .where(
+          and(
+            inArray(campaignMembers.userId, userIds),
+            inArray(campaignMembers.campaignId, campaignIds),
+          ),
+        );
+      for (const membership of memberships) {
+        currentMembershipKeys.add(`${membership.campaignId}:${membership.userId}`);
+      }
+    }
+
+    const authorizedDeliveries = deliveries.filter(
+      (delivery) =>
+        MEMBERSHIP_EXEMPT_TYPES.has(delivery.type) ||
+        currentMembershipKeys.has(`${delivery.campaignId}:${delivery.userId}`),
+    );
+    if (authorizedDeliveries.length === 0) return;
+
+    const userIds = [...new Set(authorizedDeliveries.map((delivery) => delivery.userId))];
     const subscriptions = await this.db
       .select({
         id: pushSubscriptions.id,
@@ -249,7 +280,7 @@ export class PushNotificationsService {
     }
 
     await Promise.all(
-      deliveries.flatMap((delivery) => {
+      authorizedDeliveries.flatMap((delivery) => {
         const userSubscriptions = byUser.get(delivery.userId) ?? [];
         const payload: PushPayload = {
           title: delivery.title,

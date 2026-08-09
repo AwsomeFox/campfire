@@ -213,6 +213,12 @@ describe('browser push notifications (issue #1323, e2e)', () => {
     expect(sendNotification).not.toHaveBeenCalled();
     expect(db.select({ id: notificationDigestQueue.id }).from(notificationDigestQueue)
       .where(eq(notificationDigestQueue.commentId, blockedReply)).get()).toBeUndefined();
+    db.delete(memberSafetyControls)
+      .where(and(
+        eq(memberSafetyControls.ownerUserId, String(playerId)),
+        eq(memberSafetyControls.targetUserId, String(adminId)),
+      ))
+      .run();
   });
 
   it('drops deferred campaign excerpts after the recipient membership is revoked', async () => {
@@ -279,6 +285,48 @@ describe('browser push notifications (issue #1323, e2e)', () => {
         eq(notificationRows.campaignId, campaignId),
         eq(notificationRows.type, 'note_reply'),
         eq(notificationRows.body, resolution),
+      )).get()).toBeDefined();
+
+    expect((await admin.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' })).status)
+      .toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    sendNotification.mockClear();
+  });
+
+  it('rechecks membership for immediate comment push while preserving access lifecycle delivery', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await player.put(`/api/v1/notifications/preferences/${campaignId}`).send({
+      categories: { comments: 'immediate' },
+      quietHours: { enabled: false },
+    });
+    const sessionId = (await admin
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .send({ number: 2, title: 'Former participant thread' })).body.id;
+    expect((await player.post(`/api/v1/campaigns/${campaignId}/comments`).send({
+      entityType: 'session', entityId: sessionId, body: 'Historical participant comment',
+    })).status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    sendNotification.mockClear();
+
+    const membership = db.select({ id: campaignMembers.id }).from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, playerId))).get();
+    expect(membership).toBeDefined();
+    expect((await admin.delete(`/api/v1/campaigns/${campaignId}/members/${membership!.id}`)).status).toBe(204);
+    await waitForCalls(1);
+    sendNotification.mockClear();
+
+    const excerpt = 'FORMER MEMBER COMMENT PUSH LEAK';
+    expect((await admin.post(`/api/v1/campaigns/${campaignId}/comments`).send({
+      entityType: 'session', entityId: sessionId, body: excerpt,
+    })).status).toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(sendNotification).not.toHaveBeenCalled();
+    expect(db.select({ id: notificationRows.id }).from(notificationRows)
+      .where(and(
+        eq(notificationRows.userId, playerId),
+        eq(notificationRows.campaignId, campaignId),
+        eq(notificationRows.type, 'comment_reply'),
+        eq(notificationRows.body, excerpt),
       )).get()).toBeDefined();
 
     expect((await admin.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' })).status)
