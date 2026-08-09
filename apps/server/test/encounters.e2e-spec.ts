@@ -111,7 +111,10 @@ describe('encounters (e2e)', () => {
 
   it('DM-only creature checks use the adapter catalog and persist an attributed, non-leaking shared roll', async () => {
     const server = ctx.app.getHttpServer();
-    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Creature checks' });
+    // The player-facing dice-log assertion below needs an encounter visible to the player;
+    // encounter creation otherwise defaults to hidden DM prep and the secrecy filter correctly
+    // omits its rolls from the shared feed.
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Creature checks', hidden: false });
     const added = await request(server)
       .post(`/api/v1/encounters/${created.body.id}/combatants`)
       .set(dm)
