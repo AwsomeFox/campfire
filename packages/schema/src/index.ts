@@ -5513,6 +5513,17 @@ export function dnd5eProficiencyBonus(level: number): number {
   return 2 + Math.floor((Math.max(1, level) - 1) / 4);
 }
 
+/**
+ * Read an ability score tolerantly, or null when the character has not set it — the same
+ * lookup as {@link readAbilityScore} without its default. Catalog builders use this to tell
+ * "absent" from "present and low", which the defaulting reader cannot.
+ */
+function readAbilityScoreOrNull(stats: Record<string, number>, ability: string): number | null {
+  const up = ability.toUpperCase();
+  const raw = stats[up] ?? stats[ability] ?? stats[ability.toLowerCase()];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+}
+
 /** Read an ability score from a stats record tolerantly (uppercase-folded; default 10). */
 function readAbilityScore(stats: Record<string, number>, ability: string): number {
   const up = ability.toUpperCase();
@@ -5755,6 +5766,22 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
   // adapter id for the label and publish no ability at all (see `initiativeAbility`).
   const initiativeAbility = adapter.initiativeAbility ?? null;
   const initiativeLabel = initiativeAbility ?? 'initiative';
+  /**
+   * Whether this initiative was computed from data the character does not have.
+   *
+   * The ABILITY-derived component is `initBase` — `initiativeModifier` reads the declared
+   * `initiativeAbility` when the score is there, and some systems fall back to a native
+   * bonus stored under another key (PF1e's `initiative`/`init`). Testing that component,
+   * rather than the final total, is what separates the two cases a consumer must not
+   * confuse: a 13th Age level-3 character with no DEX totals +3 purely from
+   * `levelInitiativeBonus`, so a total-based test would call that complete; a PF1e character
+   * with a native +5 and no DEX has a real source, so an ability-presence test alone would
+   * call it incomplete. Both are answered here, in the catalog, instead of each renderer
+   * re-deriving it.
+   */
+  const initiativeIncomplete =
+    initiativeAbility != null && readAbilityScoreOrNull(stats, initiativeAbility) === null && initBase === 0;
+
   // A system with no initiative roll gets no initiative check — its `initiativeDie` exists
   // only to satisfy the generic roller seam (see `hasInitiativeRoll`), so emitting an entry
   // would let REST and MCP discover and persist a turn-order roll the game does not have.
@@ -5776,6 +5803,7 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
     die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
     supportsAdvantage: true,
     supportsDegrees: false,
+    ...(initiativeIncomplete ? { incomplete: true } : {}),
   });
 
   // Everything below is `d20 + modifier`. For a system that does not roll d20 checks, the

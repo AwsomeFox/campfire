@@ -62,15 +62,18 @@ export function RollContextMenu({ children, onRoll, allowCrit = true, allowAdvan
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     if (disabled) return;
-    // Let keyboard modifiers override
-    if (e.shiftKey) {
+    // Keyboard modifiers are the desktop shortcut for the same two menu items, so they honour
+    // the same opt-out: hiding the items while still emitting the mode on shift/alt-click
+    // left a path that rolled unchanged and labelled the result with a mode the caller does
+    // not support.
+    if (allowAdvantage && e.shiftKey) {
       onRoll('advantage', e);
-    } else if (e.altKey || e.metaKey || e.ctrlKey) {
+    } else if (allowAdvantage && (e.altKey || e.metaKey || e.ctrlKey)) {
       onRoll('disadvantage', e);
     } else {
       onRoll('normal', e);
     }
-  }, [disabled, onRoll]);
+  }, [allowAdvantage, disabled, onRoll]);
 
   const closeMenu = useCallback(() => setMenuPos(null), []);
 

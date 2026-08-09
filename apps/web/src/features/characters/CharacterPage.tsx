@@ -1552,11 +1552,10 @@ function CharacterVitalsRail({
     // stat to 10, so a draft sheet would show a plausible initiative and let it be rolled
     // from a DEX (5e) / WIS (PF2e) the character never had. An adapter whose initiative
     // depends on no ability at all (`ability: null`) is untouched by this.
-    // Drop it only when the declared source is missing AND nothing else contributed. PF1e
-    // may carry a native `initiative`/`init` bonus with no DEX at all (`pf1eInitiativeBreakdown`
-    // prefers it), and hiding a real, rollable initiative is a worse error than showing a
-    // fabricated +0 — so a non-zero modifier keeps the tile whatever its declared ability.
-    if (def.ability && def.modifier === 0 && abilityScore(character, def.ability) === null) return null;
+    // The CATALOG decides whether this was computed from data the character has: it can see
+    // the ability-derived component separately from a level term, which neither an
+    // ability-presence check nor a total-based one here could. See `initiativeIncomplete`.
+    if (def.incomplete) return null;
     return def;
   }, [adapter, character]);
   // Only a system that actually models death saves gets the tracker; PF2e (dying/wounded)

@@ -243,6 +243,49 @@ test.describe('neutral initiative declares the score it reads', () => {
   });
 
   /**
+   * The two cases a consumer must not confuse — and which a total-based test DOES confuse,
+   * which is how an earlier fix here reintroduced the bug it was meant to close.
+   */
+  test('a level term does not disguise a missing ability score', () => {
+    // 13th Age adds `levelInitiativeBonus`, so a level-3 character with no DEX totals +3
+    // from the level alone. The ability contributed nothing, so this is incomplete.
+    const noDex = { level: 3, stats: { STR: 12 }, saveProficiencies: [], skills: {} };
+    const def = initiativeOf(Archmage13aAdapter);
+    expect(def?.ability).toBe('DEX');
+    const incomplete = checkCatalogForAdapter(Archmage13aAdapter, noDex).find((c) => c.category === 'initiative');
+    expect(incomplete?.modifier).not.toBe(0);
+    expect(incomplete?.incomplete).toBe(true);
+  });
+
+  /**
+   * The test rules ON the ability-derived component, not on ability PRESENCE — so a system
+   * whose modifier came from somewhere else is not called incomplete. Documented against a
+   * synthetic adapter because no shipped one currently reaches the catalog that way: PF1e
+   * reads a native `initiative`/`init` key, but `neutralCheckCatalog` normalises stats to
+   * uppercase first and PF1e's reader matches lowercase only, so its native bonus resolves
+   * to 0 through this path and IS incomplete. See the PR thread — that case-sensitivity is a
+   * separate latent bug, not something to fix from a character-sheet change.
+   */
+  test('a non-ability source keeps the entry complete', () => {
+    const nativeSourced = {
+      ...Archmage13aAdapter,
+      initiativeAbility: 'DEX',
+      levelInitiativeBonus: undefined,
+      initiativeModifier: () => 5,
+    } as unknown as typeof Archmage13aAdapter;
+    const def = checkCatalogForAdapter(nativeSourced, { level: 3, stats: { STR: 12 }, saveProficiencies: [], skills: {} })
+      .find((c) => c.category === 'initiative');
+    expect(def?.modifier).toBe(5);
+    expect(def?.incomplete).toBeFalsy();
+  });
+
+  test('a set ability score is complete, obviously', () => {
+    const withDex = { level: 3, stats: { DEX: 16 }, saveProficiencies: [], skills: {} };
+    expect(checkCatalogForAdapter(Archmage13aAdapter, withDex).find((c) => c.category === 'initiative')?.incomplete)
+      .toBeFalsy();
+  });
+
+  /**
    * Registry-wide, because declaring this adapter-by-adapter is exactly how it drifted:
    * the first pass covered 13th Age, Open Legend and the OSR variants and missed Starfinder
    * AND Pathfinder 1e, both DEX-derived. Probing `initiativeModifier` for a reaction to a
