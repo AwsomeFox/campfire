@@ -212,7 +212,7 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
     });
     const blocked = await h.sendMessage(campaignId, { input: 'roll the monster stealth check' });
     expect(blocked.status).toBe(201);
-    expect(blocked.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: true, proposed: false }]);
+    expect(blocked.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: true, proposed: false, encounterId }]);
     const blockedResult = toolResultFor(h, 'roll-without-grant') ?? '';
     expect(blockedResult).toContain('forbidden_secret_read');
     expect(blockedResult).not.toContain('"modifier":6');
