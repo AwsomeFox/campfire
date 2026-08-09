@@ -39,14 +39,35 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
       id: 8,
       currentCombatantId: 1,
       turnVersion: 4,
-      combatants: [combatant, { id: 2, hpCurrent: 12, hpMax: 20 } as Combatant],
+      combatants: [{
+        ...combatant,
+        turnState: {
+          used: { action: 1 },
+          movementUsedFt: 20,
+          concentration: null,
+          pendingConcentrationChecks: [],
+          delaying: false,
+          readied: null,
+        },
+      }, { id: 2, hpCurrent: 12, hpMax: 20 } as Combatant],
     } as EncounterWithCombatants;
     const advanced = {
       ...base,
       currentCombatantId: 2,
       turnVersion: 5,
       combatants: [
-        { ...combatant, hpCurrent: 15 },
+        {
+          ...combatant,
+          hpCurrent: 15,
+          turnState: {
+            used: {},
+            movementUsedFt: 0,
+            concentration: null,
+            pendingConcentrationChecks: [],
+            delaying: false,
+            readied: null,
+          },
+        },
         { id: 2, hpCurrent: 9, hpMax: 20 } as Combatant,
       ],
     };
@@ -57,6 +78,7 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
 
     expect(rebased.currentCombatantId).toBe(2);
     expect(rebased.turnVersion).toBe(5);
+    expect(rebased.combatants.find(({ id }) => id === 1)?.turnState).toEqual(advanced.combatants[0]?.turnState);
     expect(replayed.find(({ id }) => id === 1)?.hpCurrent).toBe(15);
     expect(replayed.find(({ id }) => id === 2)?.hpCurrent).toBe(9);
   });

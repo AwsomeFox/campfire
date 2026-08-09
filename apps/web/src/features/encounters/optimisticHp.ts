@@ -79,8 +79,8 @@ export type OptimisticHpDelta = {
 /**
  * Moves an optimistic HP ledger onto a newer encounter snapshot without
  * double-applying operations that the newer response may already contain.
- * Pending targets retain their original base combatants; all encounter-level
- * state and unrelated combatants advance to the newer snapshot.
+ * Pending targets retain only the HP/lifecycle fields replay can change; all
+ * turn-owned fields and unrelated combatants advance to the newer snapshot.
  */
 export function rebaseOptimisticHpEncounter(
   base: EncounterWithCombatants,
@@ -92,9 +92,21 @@ export function rebaseOptimisticHpEncounter(
   const baseCombatants = new Map(base.combatants.map((combatant) => [combatant.id, combatant]));
   return {
     ...updated,
-    combatants: updated.combatants.map((combatant) =>
-      pendingCombatantIds.has(combatant.id) ? baseCombatants.get(combatant.id) ?? combatant : combatant,
-    ),
+    combatants: updated.combatants.map((combatant) => {
+      if (!pendingCombatantIds.has(combatant.id)) return combatant;
+      const previous = baseCombatants.get(combatant.id);
+      if (!previous) return combatant;
+      return {
+        ...combatant,
+        hpCurrent: previous.hpCurrent,
+        hpTemp: previous.hpTemp,
+        spCurrent: previous.spCurrent,
+        rpCurrent: previous.rpCurrent,
+        deathState: previous.deathState,
+        deathSaveSuccesses: previous.deathSaveSuccesses,
+        deathSaveFailures: previous.deathSaveFailures,
+      };
+    }),
   };
 }
 
