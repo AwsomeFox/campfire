@@ -206,6 +206,19 @@ test('clearTranscript is scoped to one viewer + campaign + scope', () => {
   expect(loadTranscript(USER_A, CAMPAIGN, 'activity').entries).toHaveLength(1);
 });
 
+test('an activity cache only hydrates for the role projection that wrote it', () => {
+  setTranscriptRemember(USER_A, true);
+  saveTranscript(USER_A, CAMPAIGN, transcriptOf('DM-only transcript row.'), 'activity', 'dm');
+
+  expect(loadTranscript(USER_A, CAMPAIGN, 'activity', 'dm').entries).toHaveLength(1);
+  // A later player projection must start empty and refetch server-authorized rows; it may
+  // never paint the prior DM cache while that request is pending.
+  expect(loadTranscript(USER_A, CAMPAIGN, 'activity', 'player')).toEqual(emptyTranscript);
+  const activityKey = transcriptStorageKey(USER_A, CAMPAIGN, 'activity');
+  expect(activityKey).not.toBeNull();
+  expect(store.keys()).not.toContain(activityKey!);
+});
+
 // ---- Clearing on identity boundaries --------------------------------------
 
 test('the identity-boundary purge removes EVERY user’s transcripts and grants', () => {

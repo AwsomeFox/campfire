@@ -313,9 +313,9 @@ export default function AiTablePage() {
           // ("not a member of this campaign") or a 404 (campaign gone) means this viewer
           // may no longer see this table's history, so drop the local copy rather than
           // leaving it repainting from cache. BOTH scopes go: the activity provider caches
-          // the same campaign under its own key and never fetches the transcript, so it has
-          // no failure of its own to learn this from. Any other failure is soft — the live
-          // stream still carries the table and the client keeps whatever scrollback it had.
+          // the same campaign under its own key and reconciles independently. Any other
+          // failure is soft — the live stream still carries the table and the client keeps
+          // whatever scrollback it had.
           if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
             clearTranscript(viewerId, campaignId);
             clearTranscript(viewerId, campaignId, 'activity');

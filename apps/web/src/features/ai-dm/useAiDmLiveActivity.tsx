@@ -44,6 +44,7 @@ import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChi
 import {
   transcriptReducer,
   saveTranscript,
+  loadTranscript,
   emptyTranscript,
   type TranscriptAction,
   type TranscriptState,
@@ -136,14 +137,18 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
    *     things to run after a reload — exactly the window in which a slow auth check used
    *     to let it read the previous account's cache.
    */
-  const { me, ready } = useAuth();
+  const { me, ready, roleIn } = useAuth();
   const pendingHydrate = usePendingHydrate({ ready, userId: me?.user.id ?? null });
   const viewerId = pendingHydrate.viewerId;
+  // The durable transcript is role-projected by the server. Keep role in the reducer
+  // ownership key so a live promotion/demotion resets and rehydrates before the dock can
+  // render the prior projection.
+  const effectiveRole = campaignId === undefined ? null : roleIn(campaignId);
 
   // Keep a separate cache namespace from AiTablePage: both surfaces now read the same
   // authoritative server events, but the Layout provider remains mounted when moving between
   // routes and must not overwrite the Table page's paint cache during that transition.
-  const key = `${viewerId ?? ''}:${campaignId ?? ''}:${enabled}`;
+  const key = `${viewerId ?? ''}:${campaignId ?? ''}:${enabled}:${effectiveRole ?? ''}`;
 
   /**
    * Which `key` the reducer state currently belongs to.
@@ -195,10 +200,10 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   );
 
   useEffect(() => {
-    if (!enabled || campaignId === undefined || viewerId === null) return;
+    if (!enabled || campaignId === undefined || viewerId === null || effectiveRole === null) return;
     if (transcriptOwnerRef.current !== key) return;
-    saveTranscript(viewerId, campaignId, transcript, 'activity');
-  }, [campaignId, enabled, transcript, viewerId, key]);
+    saveTranscript(viewerId, campaignId, transcript, 'activity', effectiveRole);
+  }, [campaignId, effectiveRole, enabled, transcript, viewerId, key]);
 
   // Reset activity + transcript when the viewer, campaign or driver mode changes.
   const prevKeyRef = useRef<string>('');
@@ -216,9 +221,12 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     if (campaignId !== undefined && viewerId !== null) {
       dispatchTranscript({
         type: 'hydrate',
-        // Pre-#1318 activity snapshots use the thin-stream format and cannot be merged by
-        // event id with durable rows. Start clean and let the server hydrate the shared truth.
-        state: emptyTranscript,
+        // Old thin-stream activity snapshots have no projection marker and are rejected by
+        // loadTranscript. Current authoritative snapshots paint immediately only when their
+        // server role projection matches this viewer's effective role.
+        state: effectiveRole === null
+          ? emptyTranscript
+          : loadTranscript(viewerId, campaignId, 'activity', effectiveRole),
       });
       if (enabled) {
         dispatchTranscript({ type: 'authoritative' });
@@ -234,6 +242,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     campaignId,
     enabled,
     viewerId,
+    effectiveRole,
     fetchTranscript,
     pendingHydrate,
     pendingHydrate.identityPending,

@@ -50,6 +50,15 @@ export const MAX_TRANSCRIPT_ENTRIES = 200;
 export type TranscriptStorageScope = 'table' | 'activity';
 
 /**
+ * Effective campaign-role projection used by the activity transcript cache.
+ *
+ * The server can redact transcript rows differently for a DM, player, and viewer. The
+ * Layout-level activity surface therefore records which projection produced a cache and
+ * never rehydrates it for another role of the same signed-in user.
+ */
+export type TranscriptCacheProjection = 'dm' | 'player' | 'viewer';
+
+/**
  * localStorage key for one VIEWER's cached transcript of a campaign, or `null` when
  * there is no established viewer (#573).
  *
@@ -1044,6 +1053,7 @@ export function loadTranscript(
   viewerId: TranscriptViewerId,
   campaignId: number,
   scope: TranscriptStorageScope = 'table',
+  projection?: TranscriptCacheProjection,
 ): TranscriptState {
   if (!hasStorage()) return emptyTranscript;
   const key = transcriptStorageKey(viewerId, campaignId, scope);
@@ -1056,6 +1066,14 @@ export function loadTranscript(
     if (!raw) return emptyTranscript;
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as TranscriptState).entries)) {
+      // The activity provider's transcript is server-authoritative but role-projected. A
+      // cache made while this viewer was a DM must not repaint before the player/viewer
+      // fetch settles after a demotion. Older activity caches have no projection marker,
+      // so they are treated as untrusted and discarded once rather than guessed at.
+      if (projection !== undefined && (parsed as { projection?: unknown }).projection !== projection) {
+        window.localStorage.removeItem(key);
+        return emptyTranscript;
+      }
       const entries = (parsed as TranscriptState).entries;
       // Defensively re-bound in case an older/hand-edited store exceeded the cap.
       return { entries: entries.length > MAX_TRANSCRIPT_ENTRIES ? entries.slice(entries.length - MAX_TRANSCRIPT_ENTRIES) : entries };
@@ -1088,6 +1106,7 @@ export function saveTranscript(
   campaignId: number,
   state: TranscriptState,
   scope: TranscriptStorageScope = 'table',
+  projection?: TranscriptCacheProjection,
 ): void {
   if (!hasStorage()) return;
   if (state.entries.length === 0) return;
@@ -1098,7 +1117,10 @@ export function saveTranscript(
       state.entries.length > MAX_TRANSCRIPT_ENTRIES
         ? { entries: state.entries.slice(state.entries.length - MAX_TRANSCRIPT_ENTRIES) }
         : state;
-    window.localStorage.setItem(key, JSON.stringify(bounded));
+    window.localStorage.setItem(key, JSON.stringify({
+      ...bounded,
+      ...(projection === undefined ? {} : { projection }),
+    }));
   } catch {
     /* quota / privacy mode — transcript is best-effort, not authoritative */
   }
