@@ -419,26 +419,73 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
     expect(out.damage).toBe('1d8+4 slashing');
   });
 
-  it('detects a round-tripped spec even when the client reserialized its keys', () => {
-    // Review (chatgpt-codex-connector P2): a client that reads an action and sends it back
-    // with a different key order produces a different JSON string for an identical spec.
-    // A textual comparison classified that as newly authored and kept the stale numbers.
-    const withSpec = CharacterAction.parse({ ...derived, toHit: '+7', damage: '1d8+4 slashing' });
-    const reordered = JSON.parse(JSON.stringify(withSpec.spec), (_k, v) =>
-      v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).reverse()) : v,
-    );
-    const out = rebuildEditedActionSpec(
-      CharacterAction.parse({ ...withSpec, spec: reordered }),
-      'dnd5e',
-      DND5E_DAMAGE_TYPES,
-      derived,
-    );
+  it('rebuilds a carried spec that contradicts the numbers it arrived with', () => {
+    // The round trip: a REST/MCP client reads the whole action, edits toHit/damage, and posts
+    // it back still carrying the spec it was given. Trusting it would display the correction
+    // and keep rolling the original.
+    const roundTripped = CharacterAction.parse({ ...derived, toHit: '+7', damage: '1d8+4 slashing' });
+    const out = rebuildEditedActionSpec(roundTripped, 'dnd5e', DND5E_DAMAGE_TYPES);
     expect(out.spec?.attack?.bonus).toBe('+7');
+    expect(out.spec?.outcomes?.hit?.damage?.[0]).toMatchObject({ formula: '1d8', flat: 4 });
   });
 
-  it('leaves a caller-supplied spec alone — the MCP path for a richer action', () => {
-    const authored = CharacterAction.parse({ ...derived, toHit: '+99', damage: 'nonsense' });
-    expect(rebuildEditedActionSpec(authored, 'dnd5e')).toEqual(authored);
+  it('needs no baseline, so a spec read before a concurrent edit is still caught', () => {
+    // Review (chatgpt-codex-connector P1, second round): the first fix identified a round trip
+    // by comparing against the row's CURRENT action. That asks a third party, and the third
+    // party moves — client A reads spec X, client B commits spec Y, A submits its edit still
+    // carrying X, the comparison against Y fails, and X is stored as "deliberate" while the
+    // display shows A's edited numbers. Judging the request against ITSELF has no such window:
+    // whatever else has been written in the meantime, this spec still contradicts these fields.
+    const staleFromAnEarlierRead = CharacterAction.parse({ ...derived, toHit: '+12', damage: '2d6+5 slashing' });
+    const out = rebuildEditedActionSpec(staleFromAnEarlierRead, 'dnd5e', DND5E_DAMAGE_TYPES);
+    expect(out.spec?.attack?.bonus).toBe('+12');
+    expect(out.spec?.outcomes?.hit?.damage?.[0]).toMatchObject({ formula: '2d6', flat: 5 });
+  });
+
+  it('trusts a spec whose numbers ARE the displayed numbers', () => {
+    // The deliberate edit: the caller changed the spec and the fields together. Nothing
+    // contradicts, so their structure survives untouched.
+    const authored = CharacterAction.parse({
+      ...derived,
+      toHit: '+11',
+      spec: { ...derived.spec, attack: { ...derived.spec!.attack, bonus: '+11' } },
+    });
+    expect(rebuildEditedActionSpec(authored, 'dnd5e', DND5E_DAMAGE_TYPES)).toEqual(authored);
+  });
+
+  it('trusts a spec the display line could never describe — the MCP path for a richer action', () => {
+    // A save-based action carries no attack bonus and two damage parts. There is nothing in
+    // `toHit`/`damage` that could contradict it, and rebuilding would throw the structure away.
+    const richer = CharacterAction.parse({
+      ...derived,
+      toHit: '',
+      damage: '2d6 fire plus 1d6 radiant',
+      spec: {
+        ...derived.spec,
+        attack: { bonus: '', ability: 'STR', proficient: true, vs: 'ac' },
+        outcomes: {
+          hit: {
+            damage: [
+              { formula: '2d6', flat: 0, type: 'fire' },
+              { formula: '1d6', flat: 0, type: 'radiant' },
+            ],
+          },
+        },
+      },
+    });
+    expect(rebuildEditedActionSpec(richer, 'dnd5e', DND5E_DAMAGE_TYPES)).toEqual(richer);
+  });
+
+  it('rebuilds a single-part spec sitting beside a damage line nobody can roll', () => {
+    // The round trip again, with the edit landing on text the parser cannot represent.
+    // Text-only is honest about being unfinished; rolling 1d8+3 while showing "nonsense" is not.
+    const out = rebuildEditedActionSpec(
+      CharacterAction.parse({ ...derived, damage: 'nonsense' }),
+      'dnd5e',
+      DND5E_DAMAGE_TYPES,
+    );
+    expect(out.spec).toBeUndefined();
+    expect(out.damage).toBe('nonsense');
   });
 
   it('rejects a zero-padded count the roller grammar forbids', () => {

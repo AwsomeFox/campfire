@@ -38,7 +38,6 @@
 import { z } from 'zod';
 import { CharacterAction } from './character-action';
 import { expandRawStatblockAction } from './combatant-statblock';
-import { canonicalJson } from './canonical-json';
 import { isRollableDamageExpression } from './dice-bounds';
 
 /**
@@ -374,6 +373,85 @@ export const EquippedActionSource = z.enum(['derived', 'manual']);
 export type EquippedActionSource = z.infer<typeof EquippedActionSource>;
 
 /**
+ * Parse the human-facing damage line ("1d8+3 slashing") into the structured part the resolver
+ * rolls. Null when it is not one rollable, typed expression — which is a legitimate thing for
+ * a human to type, and simply means this line cannot be compared against a spec.
+ */
+function damageLineToPart(damage: string): { formula: string; flat: number; type: string } | null {
+  const m = damage.trim().match(/^(\d{0,2})d(\d{1,3})(?:\s*([+-])\s*(\d{1,3}))?\s+(.+)$/i);
+  if (!m) return null;
+  const flat = m[4] ? (m[3] === '-' ? -1 : 1) * Number(m[4]) : 0;
+  return { formula: `${m[1] || '1'}d${m[2]}`, flat, type: m[5].trim().toLowerCase() };
+}
+
+/** A signed integer bonus ("+6", "7", "-1"), or null when the text is not one. */
+function bonusOf(text: string): number | null {
+  const m = text.trim().match(/^([+-]?\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Whether a supplied `spec` is consistent with the `toHit` / `damage` the same request is
+ * displaying (issue #2097 review: chatgpt-codex-connector P1, twice).
+ *
+ * The problem this solves: a REST or MCP client naturally reads a whole action, edits the
+ * numbers, and submits it back carrying the spec it was given. "A spec was supplied, so trust
+ * it" then updates the display while combat keeps rolling the original — the exact defect the
+ * editor was built to fix, reached through the other surface.
+ *
+ * The FIRST fix compared the supplied spec against the row's current action and called a match
+ * a round trip. That identifies staleness by asking a third party, and the third party can move:
+ * if client A reads spec X, client B commits spec Y, and A then submits its edit still carrying
+ * X, the comparison against Y fails, X looks deliberately authored, and it is stored — display
+ * says one thing, the dice say another. No amount of care in choosing the baseline fixes that;
+ * the baseline is the bug.
+ *
+ * So nothing outside the request is consulted. A spec is stale precisely when it CONTRADICTS
+ * the fields it arrived with, and that is decidable from the request alone:
+ *
+ *  - the attack bonus, when both the spec and `toHit` state one and they disagree;
+ *  - the first hit-damage part, when `damage` reads as one rollable typed expression and the
+ *    spec's own first part is a different formula, modifier, or type.
+ *
+ * Everything else is trusted: a spec with no attack (the MCP path for saves and effects), a
+ * multi-part damage spec no single display line could describe, an ability-derived bonus with
+ * no explicit number. Those are authored intent this function cannot second-guess.
+ *
+ * A spec that survives is one whose numbers ARE the displayed numbers, so trusting it and
+ * rebuilding it would produce the same rolls — which is what makes the racy case harmless
+ * rather than merely unlikely.
+ */
+function specAgreesWithFields(edited: CharacterAction): boolean {
+  const spec = edited.spec;
+  if (!spec) return true;
+
+  const specBonus = bonusOf(spec.attack?.bonus ?? '');
+  const fieldBonus = bonusOf(edited.toHit);
+  // Only comparable when BOTH state an explicit number. An ability-derived spec bonus (empty
+  // `bonus`, non-empty `ability`) is deliberately not a fixed number, and a non-numeric
+  // `toHit` is display prose the resolver never reads.
+  if (specBonus !== null && fieldBonus !== null && specBonus !== fieldBonus) return false;
+
+  const specParts = spec.outcomes?.hit?.damage ?? [];
+  const fieldPart = damageLineToPart(edited.damage);
+  // One part is what a round trip carries and what one display line can describe; more than
+  // that is authored structure the line was never able to express, so there is nothing to
+  // contradict.
+  if (specParts.length === 1 && fieldPart) {
+    const part = specParts[0];
+    if (part.formula.toLowerCase() !== fieldPart.formula.toLowerCase()) return false;
+    if (part.flat !== fieldPart.flat) return false;
+    if (part.type.toLowerCase() !== fieldPart.type) return false;
+  }
+  // A single-part attack spec beside a damage line nobody can roll is the round trip again,
+  // with the edit landing on text the parser cannot represent. Rebuilding yields a text-only
+  // action — honest about being unfinished — rather than rolling numbers the line disowns.
+  if (specParts.length === 1 && !fieldPart && edited.damage.trim() !== '') return false;
+
+  return true;
+}
+
+/**
  * Rebuild the structured `spec` of a hand-edited equipped action from its own display fields
  * (issue #2097 review: chatgpt-codex-connector P1, Copilot).
  *
@@ -407,33 +485,11 @@ export function rebuildEditedActionSpec(
    * response is a text-only action they can see is unfinished, not silent defense bypass.
    */
   damageTypes?: readonly string[],
-  /**
-   * The action currently PERSISTED on the row, when there is one. Review
-   * (chatgpt-codex-connector P1): the web editor strips the spec before sending, but a REST or
-   * MCP client naturally reads the whole action, edits `toHit`/`damage`, and submits it back
-   * WITH its original spec — and "a spec was supplied, so trust it" then updated the displayed
-   * numbers while combat kept resolving the old ones. That is the same defect the editor fix
-   * closed, reached through the other surface, and this repo requires REST and MCP to behave
-   * identically. Passing the persisted action lets this function tell a deliberate spec from a
-   * round-tripped one.
-   */
-  previous?: CharacterAction | null,
 ): CharacterAction {
-  if (edited.spec) {
-    // A spec the caller AUTHORED is trusted — that is the MCP path for saves, effects, and
-    // action economy the five text fields cannot express. A spec that is byte-identical to
-    // the persisted one while the combat fields moved is not authored, it is carried along,
-    // and it is stale by definition. Rebuild that; trust everything else.
-    // Compared CANONICALLY (chatgpt-codex-connector P2): a client that reserializes the spec
-    // it read — different key order, identical content — would otherwise look like it authored
-    // a new one, and the stale spec would be kept while the displayed numbers moved. Exactly
-    // the failure this check exists to prevent, reached through serialization order.
-    const roundTripped =
-      !!previous &&
-      canonicalJson(edited.spec) === canonicalJson(previous.spec) &&
-      (edited.toHit !== previous.toHit || edited.damage !== previous.damage || edited.targetAc !== previous.targetAc);
-    if (!roundTripped) return edited;
-  }
+  // A supplied spec is trusted only while it AGREES with the numbers the caller is displaying.
+  // See {@link specAgreesWithFields} for why the test is self-consistency rather than a
+  // comparison against the stored row.
+  if (edited.spec && specAgreesWithFields(edited)) return edited;
 
   const bonusMatch = edited.toHit.trim().match(/^([+-]?\d+)$/);
   const bonus = bonusMatch ? Number(bonusMatch[1]) : null;

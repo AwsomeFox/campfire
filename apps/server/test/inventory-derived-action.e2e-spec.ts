@@ -555,6 +555,34 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(roundTripped.body.equippedAction.spec.outcomes.hit.damage[0]).toMatchObject({ formula: '2d6', flat: 5 });
   });
 
+  it('a spec carried from a read that a later edit superseded is still rebuilt', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stale-read-slot' });
+    // Client A reads the action here, and holds it.
+    const readByA = equipped.body.equippedAction;
+    expect(readByA.spec.attack.bonus).toBe('+6');
+
+    // Client B edits in the meantime, so the row's action is no longer the one A read.
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'B was here', kind: 'melee', toHit: '+8', damage: '1d10+5 slashing', targetAc: '', notes: '' } });
+
+    // A now submits its edit, still carrying the spec it read before B wrote. Review
+    // (chatgpt-codex-connector P1): identifying a round trip by comparing against the row's
+    // CURRENT action classified this as deliberately authored, so it stored A's stale +6 spec
+    // under A's displayed +9 — the exact defect the rebuild exists to prevent, reached through
+    // a race. The check now judges the request against itself and has no such window.
+    const fromA = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { ...readByA, toHit: '+9', damage: '2d6+5 slashing' } });
+    expect(fromA.status).toBe(200);
+    expect(fromA.body.equippedAction.spec.attack.bonus).toBe('+9');
+    expect(fromA.body.equippedAction.spec.outcomes.hit.damage[0]).toMatchObject({ formula: '2d6', flat: 5 });
+  });
+
   it('a deliberately authored spec is still trusted, not rebuilt', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();

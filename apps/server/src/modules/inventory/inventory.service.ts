@@ -301,38 +301,6 @@ export class InventoryService {
    * action, `derived` for a computed one — so clients keep the distinction without the server
    * keeping a column.
    */
-  /**
-   * The action ONE stored row derives right now, or null if it derives none. The single-row
-   * counterpart of {@link resolveEquippedActions}, for the write path — which needs the
-   * derivation as a comparison baseline rather than as something to return.
-   */
-  private async deriveActionFor(
-    row: typeof inventoryItems.$inferSelect,
-    adapter: RuleSystemAdapter,
-  ): Promise<CharacterAction | null> {
-    if (!row.equipped || row.ownerType !== 'character' || row.characterId == null) return null;
-    const character = await this.db
-      .select({ stats: characters.stats, level: characters.level })
-      .from(characters)
-      .where(eq(characters.id, row.characterId))
-      .get();
-    if (!character) return null;
-    const snapshot = fromJsonText<{ dataJson?: string } | null>(row.compendiumSnapshot, null);
-    const dataJson =
-      snapshot?.dataJson ??
-      (row.ruleEntryId != null
-        ? (await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, row.ruleEntryId)).get())
-            ?.dataJson ?? null
-        : null);
-    if (!dataJson) return null;
-    return deriveEquippedItemAction({
-      itemName: row.name,
-      data: safeJson(dataJson),
-      character: { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level },
-      adapter,
-    });
-  }
-
   private async resolveEquippedActions(items: InventoryItem[], user: RequestUser, role: Role): Promise<InventoryItem[]> {
     // Only an EQUIPPED, character-owned item without an authored action can derive one.
     const derivable = items.filter(
@@ -600,28 +568,40 @@ export class InventoryService {
   async refreshCompendium(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
     const existing = await this.getRowOrThrow(id); await this.assertCanWriteOwner(existing.ownerType as 'party' | 'character', existing.characterId, existing.campaignId, user, role);
     if (!existing.ruleEntryId) throw new BadRequestException('This item is detached from the compendium');
-    const [entry] = await this.db
-      .select()
-      .from(ruleEntries)
-      .where(and(eq(ruleEntries.id, existing.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, existing.campaignId))))
-      .limit(1);
-    if (!entry || entry.type !== 'item') throw new NotFoundException('The linked source item is unavailable');
-    const [pack] = await this.db.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1); if (!pack) throw new NotFoundException('The linked source pack is unavailable');
-    const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
-    if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
-    // Accepting a new revision is now a plain snapshot write. A derived action is computed
-    // from whatever snapshot the row holds at READ time (see `resolveEquippedActions`), so
-    // there is nothing cached here to regenerate, fence, or authorize a second time.
-    const [row] = await this.db
-      .update(inventoryItems)
-      .set({
-        compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)),
-        compendiumSnapshot: JSON.stringify(snapshot),
-        compendiumState: 'linked',
-        updatedAt: nowIso(),
-      })
-      .where(eq(inventoryItems.id, id))
-      .returning();
+    // Read the source and write the snapshot in ONE synchronous better-sqlite3 transaction
+    // (issue #2097 review: chatgpt-codex-connector P2). Reading the entry first and updating
+    // afterwards leaves a window in which `RulesService.updatePack()` rewrites that entry, so
+    // the refresh stores a revision that was already superseded before it landed — and marks
+    // it `linked`, which claims the item is current. Nothing here needs to await, so the
+    // window can simply be closed rather than fenced against.
+    const row = this.db.transaction((tx) => {
+      const [entry] = tx
+        .select()
+        .from(ruleEntries)
+        .where(and(eq(ruleEntries.id, existing.ruleEntryId!), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, existing.campaignId))))
+        .limit(1)
+        .all();
+      if (!entry || entry.type !== 'item') throw new NotFoundException('The linked source item is unavailable');
+      const [pack] = tx.select().from(rulePacks).where(eq(rulePacks.id, entry.packId)).limit(1).all();
+      if (!pack) throw new NotFoundException('The linked source pack is unavailable');
+      const snapshot = sanitizeCompendiumSnapshot(buildCompendiumSnapshot(entry));
+      if (!snapshot) throw new BadRequestException('The linked source item is not play-safe');
+      // A derived action is computed from whatever snapshot the row holds at READ time (see
+      // `resolveEquippedActions`), so accepting a revision is now only this snapshot write —
+      // there is nothing cached to regenerate or authorize a second time.
+      const [row] = tx
+        .update(inventoryItems)
+        .set({
+          compendiumRef: JSON.stringify(buildCompendiumRef(entry, pack)),
+          compendiumSnapshot: JSON.stringify(snapshot),
+          compendiumState: 'linked',
+          updatedAt: nowIso(),
+        })
+        .where(eq(inventoryItems.id, id))
+        .returning()
+        .all();
+      return row;
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -771,15 +751,6 @@ export class InventoryService {
     const campaignRuleSystem = editAdapter?.id ?? '';
     const campaignDamageTypes = editAdapter?.damageTypes;
 
-    // The action this item ALREADY grants, whether or not anything is stored: the stored
-    // authored action if there is one, otherwise today's derivation. `rebuildEditedActionSpec`
-    // needs it to tell an edit apart from a round-trip — a REST/MCP client reads the whole
-    // action, changes `toHit`, and posts it back carrying the spec it was given, which would
-    // otherwise be trusted as deliberate and go on rolling the original numbers. The stored
-    // side is read again inside the transaction (`fresh`); this is the DERIVED fallback, which
-    // no transaction can race because it is computed, not stored.
-    const derivedBaseline = input.equippedAction ? await this.deriveActionFor(existing, editAdapter!) : null;
-
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
     // retries observe a single committed apply (issue #782).
@@ -920,15 +891,12 @@ export class InventoryService {
           // An authored action's structured `spec` is what the resolver ROLLS; `toHit` and
           // `damage` are only what it shows. A caller that edits the numbers while carrying
           // the old spec through — which a REST/MCP round-trip does naturally — would display
-          // the correction and keep rolling the original, so the spec is rebuilt from the
-          // edited fields. A caller supplying its OWN spec is trusted and untouched.
-          const persistedAction = fresh.equippedAction ? CharacterAction.safeParse(safeJson(fresh.equippedAction)) : null;
-          const authored = rebuildEditedActionSpec(
-            input.equippedAction!,
-            campaignRuleSystem,
-            campaignDamageTypes,
-            persistedAction?.success ? persistedAction.data : derivedBaseline,
-          );
+          // the correction and keep rolling the original, so a spec that contradicts the
+          // fields it arrived with is rebuilt from them. Decided from the REQUEST alone (see
+          // `rebuildEditedActionSpec`), which is why nothing is read here to compare against:
+          // any such baseline can be overwritten by a concurrent edit between the caller's
+          // read and this write, and then a genuinely stale spec looks deliberate.
+          const authored = rebuildEditedActionSpec(input.equippedAction!, campaignRuleSystem, campaignDamageTypes);
           update.equippedAction = JSON.stringify(authored);
         } else if (actionWrite === 'clear') {
           update.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
