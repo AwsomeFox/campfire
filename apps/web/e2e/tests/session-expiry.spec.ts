@@ -193,14 +193,14 @@ test.describe('issue #885 - session expiry reauth', () => {
     const { campaignId, encounterId } = seed();
     const deepLink = `/c/${campaignId}/encounters/${encounterId}`;
 
+    // Count the opens, then let the real stream through. Fulfilling this with a bare
+    // keepalive body never delivers a sync event, so the encounter's write gate marks
+    // every header action `cf-gated-disabled` — the click below then issues no request at
+    // all and there is no 401 to redirect on.
     let streamOpens = 0;
     await page.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
       streamOpens += 1;
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream',
-        body: ': keepalive\n\n',
-      });
+      await route.continue();
     });
 
     await mockAuthStatus(page);
