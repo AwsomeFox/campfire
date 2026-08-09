@@ -353,6 +353,53 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     ]);
   });
 
+  /**
+   * #2115 review: `resolveOneTarget` branches on `spec.mode` — `attack` classifies to
+   * crit/hit/miss/critMiss, `save`/`check` to the four degrees — and the families never mix.
+   * A schema-valid spec can still carry both, and an attack whose `success` branch healed was
+   * printed as a consequence using the action can never reach.
+   */
+  test('only the outcome family the declared mode can reach is shown', () => {
+    const attack = ActionSpec.parse({
+      mode: 'attack',
+      attack: { bonus: '+5' },
+      outcomes: {
+        hit: { damage: [{ formula: '1d8', flat: 3, type: 'piercing' }] },
+        success: { healing: '2d4' },
+        failure: { text: 'Never reached' },
+      },
+    });
+    expect(actionSpecEffects(attack)).toEqual([
+      { outcome: 'hit', label: 'On a hit', lines: ['1d8+3 piercing damage'] },
+    ]);
+
+    const save = ActionSpec.parse({
+      mode: 'save',
+      outcomes: {
+        hit: { text: 'Never reached' },
+        success: { text: 'Shrugged off' },
+        failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }] },
+      },
+    });
+    expect(actionSpecEffects(save)).toEqual([
+      { outcome: 'success', label: 'On a success', lines: ['Shrugged off'] },
+      { outcome: 'failure', label: 'On a failure', lines: ['8d6 fire damage'] },
+    ]);
+  });
+
+  /**
+   * `none` never auto-resolves (`isResolvableSpec` returns false), so its branches are prose a
+   * human applies rather than a claim about the resolver — nothing to contradict, nothing to
+   * filter. This is also the parsed default, so specs that never declared a mode are unchanged.
+   */
+  test('a descriptive action keeps every branch it was authored with', () => {
+    const descriptive = ActionSpec.parse({
+      outcomes: { hit: { text: 'Shoves' }, success: { text: 'Holds' } },
+    });
+    expect(descriptive.mode).toBe('none');
+    expect(actionSpecEffects(descriptive).map((g) => g.outcome)).toEqual(['hit', 'success']);
+  });
+
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });

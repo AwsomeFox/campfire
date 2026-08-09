@@ -10,6 +10,8 @@ import {
   StarforgedAdapter,
   listRuleSystemAdapters,
   checkCatalogForAdapter,
+  hasAdapterOwnedAttackRoll,
+  hasCriticalHitsForAdapter,
   hasInitiativeRollForAdapter,
   hasNeutralD20ChecksForAdapter,
 } from '@campfire/schema';
@@ -387,6 +389,42 @@ test.describe('allowsCriticalDamageRoll — crits are a capability, not a damage
   test('a system whose attack resolution has no crit tier is offered none', () => {
     for (const [id, adapter] of Object.entries(OSR_VARIANT_ADAPTERS)) {
       expect(allowsCriticalDamageRoll(adapter), id).toBe(false);
+    }
+  });
+
+  test('Open Legend is offered none either — its exploding pool IS the escalation', () => {
+    expect(allowsCriticalDamageRoll(OpenLegendAdapter)).toBe(false);
+  });
+
+  /**
+   * A guard rather than a list: an adapter that owns its attack roll is the only kind that can
+   * withhold `crit`, and this drives each one's real `resolveAttack` across every d20 face and
+   * a wide modifier/AC range. If none of those rolls can produce a crit, the adapter must say
+   * so — otherwise the next system added with its own hit/miss resolver silently inherits a
+   * crit control again, which is exactly how OSR and Open Legend each got here.
+   */
+  test('every adapter whose attack roll cannot crit declares it', () => {
+    const everyAdapter = [...listRuleSystemAdapters(), ...Object.values(OSR_VARIANT_ADAPTERS)];
+    for (const adapter of everyAdapter) {
+      if (!hasAdapterOwnedAttackRoll(adapter)) continue;
+      let sawCrit = false;
+      for (let face = 1; face <= 20 && !sawCrit; face += 1) {
+        for (let targetAc = -5; targetAc <= 30 && !sawCrit; targetAc += 5) {
+          for (const modifier of [-2, 0, 3, 10]) {
+            const result = adapter.resolveAttack!({
+              modifier,
+              targetAc,
+              roll: (expr: string) => {
+                const sides = Number(/d(\d+)/i.exec(expr)?.[1] ?? 20);
+                const value = Math.min(face, sides);
+                return { expr, rolls: [value], total: value };
+              },
+            });
+            if (result.outcome === 'crit') { sawCrit = true; break; }
+          }
+        }
+      }
+      if (!sawCrit) expect(hasCriticalHitsForAdapter(adapter), adapter.id).toBe(false);
     }
   });
 

@@ -142,6 +142,27 @@ const OUTCOME_LABELS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
+ * Which outcome branches the resolver can actually SELECT for a given `spec.mode`.
+ *
+ * `ActionResolverService.resolveOneTarget` branches on the mode: `attack` classifies through
+ * `resolveAttackForAdapter` (crit / hit / miss / critMiss), `save` and `check` through
+ * `classifySaveOutcome` (the four degrees). The two families never mix, but nothing stops a
+ * schema-valid spec carrying branches from both — and an attack whose `success` branch heals
+ * was printed as "On a success — Heals …" for an outcome using the action can never reach
+ * (#2115 review).
+ *
+ * `none` maps to null, meaning "show everything": that mode never auto-resolves at all
+ * (`isResolvableSpec` returns false), so its branches are prose for a human to apply rather
+ * than a claim about what the resolver will do. There is no resolution to contradict.
+ */
+const OUTCOMES_BY_MODE: Record<string, ReadonlySet<string> | null> = {
+  attack: new Set(['crit', 'hit', 'miss', 'critMiss']),
+  save: new Set(['critSuccess', 'success', 'failure', 'critFailure']),
+  check: new Set(['critSuccess', 'success', 'failure', 'critFailure']),
+  none: null,
+};
+
+/**
  * The branches an ATTACK roll's critical tier produces — the ones a system without critical
  * hits can never reach. Deliberately excludes `critSuccess` / `critFailure`, which are degrees
  * of success and answer to a different capability.
@@ -285,10 +306,12 @@ export function actionSpecEffects(
 ): ActionEffectGroup[] {
   if (!spec) return [];
   const outcomes = spec.outcomes ?? {};
+  const reachable = OUTCOMES_BY_MODE[spec.mode] ?? null;
   // What a save-for-half branch would actually halve — see `branchLines`.
   const fallbackHasDamage = (outcomes.failure?.damage ?? []).some(partCanDealDamage);
   const groups: ActionEffectGroup[] = [];
   for (const [outcome, label] of OUTCOME_LABELS) {
+    if (reachable && !reachable.has(outcome)) continue;
     if (!hasCriticalHits && ATTACK_CRIT_OUTCOMES.has(outcome)) continue;
     const branch = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
     if (!branch) continue;

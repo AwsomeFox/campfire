@@ -5278,6 +5278,13 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   // Turn order is Agility-monotonic (see `initiativeModifier` below), so the catalog can
   // name the score it reads rather than publishing an ability-less initiative.
   initiativeAbility: 'AGILITY',
+  /**
+   * No critical hits: `resolveAttack` below returns only `hit` or `miss`, because the exploding
+   * dice pool IS this system's escalation mechanic and has no separate crit tier. Declared for
+   * the same reason as the OSR variants — a control gating on the crit-damage FORMULA (which
+   * every adapter has) would offer a doubled total this system's resolver cannot produce.
+   */
+  hasCriticalHits: false,
   attributeDicePool(score: number): AttributeDicePool {
     return openLegendAttributeDicePool(score);
   },
@@ -5296,7 +5303,8 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
    * No separate crit tier: the pool's OWN exploding dice already are Open Legend's escalation
    * mechanic (a max face re-rolls and adds), so layering a 5e-style "natural 20 crits" on top
    * would double-count an already-escalating result. `naturalRoll` is null — there is no single
-   * die whose face is "the" roll to show as d20-style crit/fumble evidence.
+   * die whose face is "the" roll to show as d20-style crit/fumble evidence. `hasCriticalHits`
+   * above is the machine-readable half of that same paragraph — see its note.
    */
   resolveAttack(input: AttackRollInput): AttackRollResult {
     const score = Number.isFinite(input.modifier) ? Math.trunc(input.modifier) : 0;
