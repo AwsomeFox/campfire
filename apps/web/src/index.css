@@ -123,6 +123,25 @@
     grid-template-columns: 1fr 280px !important;
   }
 
+  /* The sheet's three-pane play surface is a screen affordance for wide displays.
+     Paper gets the single-column document it always was: the grid collapses, the
+     vitals rail scrolls with the page instead of pinning itself to a viewport that
+     doesn't exist, and the sheet keeps its reading width no matter how wide the
+     window was when Print was pressed. */
+  .cf-character-sheet-root {
+    max-width: 64rem !important;
+  }
+
+  .cf-character-play-surface {
+    display: block !important;
+  }
+
+  .cf-sheet-rail {
+    position: static !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
   .cf-authed-shell,
   .reading-surface,
   .cf-card,

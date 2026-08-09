@@ -59,6 +59,7 @@ export function ActionUsePanel({
   targetIds,
   onToggleTarget,
   isDm,
+  allowCrit = true,
   applyDisabled = false,
   applyGateReason,
   onDismiss,
@@ -81,6 +82,14 @@ export function ActionUsePanel({
   targetIds: number[];
   onToggleTarget: (id: number) => void;
   isDm: boolean;
+  /**
+   * Whether this system has critical hits (`hasCriticalHitsForAdapter`). False drops the
+   * Critical Hit item from the Preview menu — OSR and Open Legend resolve an attack to hit or
+   * miss and nothing else, so the forced crit produced a preview their own `resolveAttack`
+   * could never return. The resolver rejects it server-side either way (#2115 review); this
+   * keeps the control from offering what the server will not honour.
+   */
+  allowCrit?: boolean;
   applyDisabled?: boolean;
   /**
    * Localized reason the Apply control is gated right now, or `undefined` when it is not
@@ -259,6 +268,7 @@ export function ActionUsePanel({
           <RollContextMenu
             className="btn btn-primary"
             data-testid="action-use-preview"
+            allowCrit={allowCrit}
             disabled={!canPreview || resolvePreview.isPending}
             onRoll={(rollMode) => resolvePreview.mutate({ rollMode, actionToken })}
           >

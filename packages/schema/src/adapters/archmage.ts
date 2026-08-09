@@ -148,6 +148,9 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
   // to 5e). Sourced from the adapter, not hardcoded, so a 13th-Age campaign rejects a level-11
   // level-up that 5e's hardcoded cap would wrongly allow (issue #535).
   maxLevel: 10,
+  // The catalog names the score this reads (see `initiativeAbility`), so a sheet whose DEX
+  // is unset does not get a rollable, fabricated +0 initiative.
+  initiativeAbility: 'DEX',
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',

@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { test, expect, request } from '@playwright/test';
+import { CREDS } from '../global-setup';
 import { seed, stateFor } from './seed';
 
 function paths() {
@@ -240,32 +241,39 @@ test.describe('Unicode markdown mentions (issue #627)', () => {
 test.describe('notification deep links', () => {
   test.use({ storageState: stateFor('player') });
 
-  test('a recap notification opens and focuses the selected session', async ({ page, baseURL }) => {
-    const { campaignId } = seed();
-    // Post a recap of our own rather than reaching for the fixture's. The bell fetches
-    // the newest thirty notifications with no pagination, and every spec anywhere that
-    // starts or ends an encounter adds to that one global list — so a fixture-time recap
-    // is reachable only while nothing else has been noisy, which is not a property this
-    // spec can hold. `recap_posted` fires on the empty -> non-empty transition, so a
-    // session created with its recap already set publishes it immediately, newest first.
-    const dm = await request.newContext({ baseURL, storageState: stateFor('dm') });
-    let sessionId: number | null = null;
-    try {
-      const created = await dm.post(`/api/v1/campaigns/${campaignId}/sessions`, {
-        data: { title: 'Deep-link recap drill', recap: 'The party finally slept.' },
-      });
-      expect(created.ok(), `create session: ${await created.text()}`).toBe(true);
-      sessionId = ((await created.json()) as { id: number }).id;
+  /**
+   * Re-post the seeded recap so the notification under test is the newest one.
+   *
+   * The bell fetches only `?limit=30`, and global setup writes this recap before every
+   * other spec runs. Any shard whose earlier specs generate thirty player notifications
+   * pushes the seeded one out of the window, and the click times out — which is what
+   * happened here once a shard rebalance changed which specs precede this file. Nothing
+   * about the deep link is shard-dependent, so the test stops depending on the seed's
+   * position in a shared list and produces its own notification instead.
+   *
+   * `recap_posted` fires only on the empty -> non-empty transition, so clearing and
+   * restoring the same text is what re-emits it; the session ends up exactly as seeded.
+   */
+  test.beforeAll(async ({ baseURL }) => {
+    const { navigation } = seed();
+    const ctx = await request.newContext({ baseURL: baseURL! });
+    await ctx.post('/api/v1/auth/login', { data: CREDS.dm });
+    const before = await ctx.get(`/api/v1/sessions/${navigation.sessionId}`);
+    expect(before.ok()).toBeTruthy();
+    const { recap } = (await before.json()) as { recap: string };
+    expect(recap.trim()).not.toBe('');
+    expect((await ctx.patch(`/api/v1/sessions/${navigation.sessionId}`, { data: { recap: '' } })).ok()).toBeTruthy();
+    expect((await ctx.patch(`/api/v1/sessions/${navigation.sessionId}`, { data: { recap } })).ok()).toBeTruthy();
+    await ctx.dispose();
+  });
 
-      await page.goto(`/c/${campaignId}`);
-      await page.getByRole('button', { name: /Notifications/ }).click();
-      // The notification title carries the session LABEL — "Session 2: Deep-link recap
-      // drill" — not the bare title.
-      await page.getByRole('button', { name: /Recap posted for .*Deep-link recap drill/ }).click();
-      await expectFocused(page, `entity-session-${sessionId}`);
-    } finally {
-      if (sessionId != null) await dm.delete(`/api/v1/sessions/${sessionId}`).catch(() => undefined);
-      await dm.dispose();
-    }
+  test('a recap notification opens and focuses the selected session', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: /Notifications/ }).click();
+    // `.first()` — the re-post above leaves the seeded notification behind it, and both
+    // deep-link to the same session.
+    await page.getByRole('button', { name: /Recap posted for Session 1/ }).first().click();
+    await expectFocused(page, `entity-session-${navigation.sessionId}`);
   });
 });
