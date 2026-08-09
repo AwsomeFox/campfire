@@ -6154,26 +6154,9 @@ export class EncountersService {
     const roles = await this.notifications.memberRoles(encounterRow.campaignId);
     const narrowlyDelivered = new Set<number>();
     let retriedVisibleFanout = false;
-    for (const [memberId, memberRole] of roles) {
-      const isDm = memberRole === 'dm';
-      const isOwner = String(memberId) === character?.ownerUserId;
-      if (!isDm && !isOwner) continue;
-      // The player may learn their character's state, but a hidden encounter
-      // remains a DM-only entity and must not become a notification deep-link.
-      const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
-      let delivered = await this.notifications.notifyUserIfHiddenEncounterRecipient(
-        memberId,
-        encounterRow.campaignId,
-        user,
-        recipientEvent,
-        isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
-        encounterRow.id,
-      );
-      // The first broad guard can correctly refuse a hidden encounter, then a
-      // reveal can win before this narrow write. Retry broad fan-out exactly
-      // once from the transaction-observed transition; exclude prior narrow
-      // deliveries so the retry cannot duplicate DM/owner rows.
-      if (delivered === 'visible' && !retriedVisibleFanout) {
+    const deliverNarrow = async (send: () => ReturnType<NotificationsService['notifyUserIfHiddenEncounterRecipient']>) => {
+      let outcome = await send();
+      if (outcome === 'visible' && !retriedVisibleFanout) {
         retriedVisibleFanout = true;
         if (await this.notifications.notifyCampaignIfEncounterVisible(
           encounterRow.campaignId,
@@ -6182,30 +6165,44 @@ export class EncountersService {
           user,
           event,
           narrowlyDelivered,
-        )) return;
-        delivered = await this.notifications.notifyUserIfHiddenEncounterRecipient(
-          memberId,
-          encounterRow.campaignId,
-          user,
-          recipientEvent,
-          isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
-          encounterRow.id,
-        );
+        )) return { outcome, broadDelivered: true };
+        // One terminal narrow recheck after the one-shot broad retry; never
+        // recurse or attempt another broad fan-out if visibility flips again.
+        outcome = await send();
       }
-      if (delivered === 'delivered') narrowlyDelivered.add(memberId);
+      return { outcome, broadDelivered: false };
+    };
+    for (const [memberId, memberRole] of roles) {
+      const isDm = memberRole === 'dm';
+      const isOwner = String(memberId) === character?.ownerUserId;
+      if (!isDm && !isOwner) continue;
+      // The player may learn their character's state, but a hidden encounter
+      // remains a DM-only entity and must not become a notification deep-link.
+      const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
+      const primary = await deliverNarrow(() => this.notifications.notifyUserIfHiddenEncounterRecipient(
+        memberId,
+        encounterRow.campaignId,
+        user,
+        recipientEvent,
+        isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
+        encounterRow.id,
+      ));
+      if (primary.broadDelivered) return;
+      if (primary.outcome === 'delivered') narrowlyDelivered.add(memberId);
       // A recipient can legitimately hold both authorities. If their DM
       // membership changed after discovery, retry only their personal-status
       // payload under the independently revalidated ownership authority.
-      if (delivered === 'skipped' && isDm && isOwner) {
-        const ownerDelivered = await this.notifications.notifyUserIfHiddenEncounterRecipient(
+      if (primary.outcome === 'skipped' && isDm && isOwner) {
+        const owner = await deliverNarrow(() => this.notifications.notifyUserIfHiddenEncounterRecipient(
           memberId,
           encounterRow.campaignId,
           user,
           { ...event, entityType: null, entityId: null },
           { kind: 'character_owner', characterId },
           encounterRow.id,
-        );
-        if (ownerDelivered === 'delivered') narrowlyDelivered.add(memberId);
+        ));
+        if (owner.broadDelivered) return;
+        if (owner.outcome === 'delivered') narrowlyDelivered.add(memberId);
       }
     }
   }

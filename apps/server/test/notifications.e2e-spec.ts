@@ -1058,6 +1058,9 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
           .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
           .run();
       }
+      if (args[0] === coDmId && args[4].kind === 'character_owner') {
+        db.update(encounters).set({ hidden: false }).where(eq(encounters.id, dualRoleEncounter.body.id)).run();
+      }
       return guardedNotify(...args);
     });
     try {
@@ -1071,9 +1074,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
 
     const dualRoleOwnerDowned = await statusNotifications(coDm, 'Character downed!', 1);
     expect(dualRoleOwnerDowned[0].body).toContain('Dual Role Hero was downed');
-    expect(dualRoleOwnerDowned[0].entityType).toBeNull();
-    expect(dualRoleOwnerDowned[0].entityId).toBeNull();
-    expect(await statusNotifications(spectator, 'Character downed!', 0)).toEqual([]);
+    expect(dualRoleOwnerDowned[0].entityId).toBe(dualRoleEncounter.body.id);
+    expect((await statusNotifications(spectator, 'Character downed!', 1))[0].entityId).toBe(dualRoleEncounter.body.id);
 
     db.update(campaignMembers)
       .set({ role: 'dm' })
