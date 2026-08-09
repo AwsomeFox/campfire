@@ -174,13 +174,19 @@ const ATTACK_CRIT_OUTCOMES: ReadonlySet<string> = new Set(['crit', 'critMiss']);
  *
  * `DamagePart` keeps dice in `formula` and the modifier in `flat` (that split is what lets
  * a system apply its own critical rule), so both halves are recombined here for display.
+ *
+ * A formula-less part shows only a POSITIVE flat amount, matching `partCanDealDamage` and the
+ * resolver: `rollBranchDamage` floors each part with `Math.max(0, amount)`, so `{ flat: -3 }`
+ * with no dice deals nothing, and printing "-3 damage" told players to apply an amount using
+ * the action never produces (#2115 review). WITH dice the sign still prints — `1d8-1` is a real
+ * formula whose roll absorbs the modifier, and only the summed total is floored.
  */
 function damagePartText(part: { formula: string; flat: number; type: string }): string {
   const dice = part.formula.trim();
   const flat = part.flat;
   const amount = dice
     ? `${dice}${flat > 0 ? `+${flat}` : flat < 0 ? `${flat}` : ''}`
-    : flat !== 0
+    : flat > 0
       ? String(flat)
       : '';
   if (!amount) return '';

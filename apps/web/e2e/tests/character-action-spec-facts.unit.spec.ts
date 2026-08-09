@@ -432,6 +432,27 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     ]);
   });
 
+  /**
+   * #2115 review: `rollBranchDamage` floors every part with `Math.max(0, amount)`, so a
+   * formula-less `{ flat: -3 }` deals nothing — "-3 damage" told players to apply an amount the
+   * action never produces. With dice the sign is real: `1d8-1` rolls, and only the total floors.
+   */
+  test('a negative flat with no dice prints nothing; with dice it still prints', () => {
+    const negativeOnly = ActionSpec.parse({
+      outcomes: { hit: { text: 'Glances off', damage: [{ flat: -3, type: 'force' }] } },
+    });
+    expect(actionSpecEffects(negativeOnly)).toEqual([
+      { outcome: 'hit', label: 'On a hit', lines: ['Glances off'] },
+    ]);
+
+    const withDice = ActionSpec.parse({
+      outcomes: { hit: { damage: [{ formula: '1d8', flat: -1, type: 'force' }] } },
+    });
+    expect(actionSpecEffects(withDice)).toEqual([
+      { outcome: 'hit', label: 'On a hit', lines: ['1d8-1 force damage'] },
+    ]);
+  });
+
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });
