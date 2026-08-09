@@ -3582,12 +3582,22 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
    both in view, which is the one thing this screen exists to do. */
 @media (max-width: 900px) {
   .cf-vtt { --cf-vtt-rail-width: 50px; }
+  /* The header carries the whole DM control set and wraps hard at phone width — left
+     alone it grew past the viewport and pushed the side panel off the bottom of the
+     screen entirely. Cap it and let it scroll. */
+  .cf-vtt-header {
+    max-height: 40vh;
+    overflow-y: auto;
+  }
   .cf-vtt-body { flex-direction: column; }
   /* Nothing overlays the board at phone width: the canvas and the turn bar stack, so a
-     drag that starts at the middle of the map reaches the map and not the strip. */
+     drag that starts at the middle of the map reaches the map and not the strip.
+     `min-height: 0` on BOTH halves, so they always split whatever the row gives them
+     rather than one of them growing to its content and evicting the other — each scrolls
+     internally instead. */
   .cf-vtt-main {
     flex: 1 1 45%;
-    min-height: 180px;
+    min-height: 0;
     display: flex;
     flex-direction: column;
   }

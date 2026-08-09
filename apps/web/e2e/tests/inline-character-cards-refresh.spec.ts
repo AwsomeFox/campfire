@@ -94,7 +94,10 @@ test.describe('inline character cards — live sheet refresh', () => {
       // (issue #415: the encounter card resolves checks through the rule-system roll catalog).
       // Announcer also echoes it (avoid strict-mode dual match).
       await expect(page.getByText('Sheet Sync PC · STR check (STR +4 = +4)', { exact: true })).toBeVisible({ timeout: 10_000 });
-      await expect(cockpitPanel(page, 'party').getByText(/1d20\+4/i).first()).toBeVisible();
+      // The breakdown appears twice — the roll banner, and the shared dice feed behind the
+      // cockpit's Roll tray, which stays mounted (and hidden) so no roll is missed. Take the
+      // one actually on screen rather than whichever comes first in the DOM.
+      await expect(page.getByText(/1d20\+4/i).filter({ visible: true }).first()).toBeVisible();
     } finally {
       // End before delete so a failed DELETE cannot leave a RUNNING fight that
       // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).

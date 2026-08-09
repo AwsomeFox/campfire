@@ -57,6 +57,15 @@ export function measureImmersiveChromeInsetPx(): number {
 export function useImmersiveChromeInset(): void {
   useLayoutEffect(() => {
     const root = document.documentElement;
+
+    // Land at the top before anything is measured or locked. SPA navigation preserves
+    // `window.scrollY` and route focus restores focus with `preventScroll`, so arriving
+    // from a scrolled page could leave Layout's chrome entirely ABOVE the viewport — its
+    // `rect.bottom` negative, the measured inset therefore 0, and the safety hold
+    // unreachable behind a cockpit that has stopped the page scrolling. Nothing is lost
+    // by resetting: this surface owns the viewport and does not scroll.
+    if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
+
     let frame = 0;
     let published = -1;
 

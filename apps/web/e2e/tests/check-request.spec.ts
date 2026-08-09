@@ -1,6 +1,6 @@
 import { expect, request, test, type APIRequestContext } from '@playwright/test';
 import { seed, stateFor } from './seed';
-import { openCockpitTab } from '../lib/encounterCockpit';
+import { openCockpitDiceTray, openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * DM-initiated check request → player prompt → consequence loop (issue #415), across two real
@@ -92,6 +92,9 @@ test.describe('DM check request loop (#415)', () => {
       await expect(playerPage.getByRole('button', { name: 'Roll DEX save for Test Hero' })).toHaveCount(0);
 
       // The shared dice feed reflects the resolved roll (label carries the character + check).
+      // It lives behind the cockpit's Roll control now — mounted the whole time so the roll
+      // is not missed, but shown only when the tray is open.
+      await openCockpitDiceTray(playerPage);
       await expect(playerPage.getByTestId('shared-dice-log').getByText(/Test Hero · DEX save/)).toBeVisible({ timeout: 15_000 });
     } finally {
       await playerContext.close();

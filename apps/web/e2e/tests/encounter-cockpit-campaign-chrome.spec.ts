@@ -161,6 +161,41 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
     }
   });
 
+  test('arriving from a scrolled page still lands with the chrome on screen', async ({ page, baseURL }) => {
+    const fixture = await privateFixture(baseURL || undefined);
+    try {
+      // A tall page to scroll, then in-app navigation — which preserves `window.scrollY`,
+      // and route focus restores focus with `preventScroll`. Without a reset the cockpit
+      // locks the page at that offset with Layout's chrome above the viewport: measured
+      // inset 0, safety hold unreachable, and no way to scroll back to it.
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await page.goto(`/c/${fixture.campaignId}`);
+      await page.evaluate(() => {
+        document.body.style.minHeight = '4000px';
+        window.scrollTo(0, 1200);
+      });
+      expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+
+      await page.evaluate(
+        ([campaignId, encounterId]) => {
+          window.history.pushState({}, '', `/c/${campaignId}/encounters/${encounterId}`);
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        },
+        [fixture.campaignId, fixture.encounterId] as const,
+      );
+
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      const probe = await settledProbe(page, 'safety-bar');
+      expect(probe.present).toBe(true);
+      // On screen, not merely in the document — a negative `top` is the failure mode.
+      expect(probe.chromeBottom).toBeGreaterThan(0);
+      await page.getByTestId('safety-bar').getByRole('button').first().click({ trial: true });
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   test('a delivered check-request prompt is reachable without leaving combat', async ({ page, baseURL }) => {
     const fixture = await privateFixture(baseURL || undefined);
     try {

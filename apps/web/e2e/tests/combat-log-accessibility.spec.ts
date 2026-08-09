@@ -328,9 +328,14 @@ test.describe('combat log accessibility — remote clients', () => {
       await log.focus();
       await expect(log).toBeFocused();
       await viewerPage.keyboard.press('End');
+      // "End reached the bottom", within a pixel: `scrollTop` is fractional in a container
+      // whose own box is fractional (the panel's width and the spacing scale both are), so
+      // an exact equality here asserts pixel rounding rather than the behaviour.
       await expect
-        .poll(() => log.evaluate((node) => ({ top: node.scrollTop, max: node.scrollHeight - node.clientHeight })))
-        .toEqual(await log.evaluate((node) => ({ top: node.scrollHeight - node.clientHeight, max: node.scrollHeight - node.clientHeight })));
+        .poll(() =>
+          log.evaluate((node) => Math.abs(node.scrollTop - (node.scrollHeight - node.clientHeight)) <= 1),
+        )
+        .toBe(true);
       // End proves the focused history is keyboard-scrollable. Use a stable mid-history
       // position for the append assertion after the key scroll has fully settled.
       await log.evaluate((node) => {
