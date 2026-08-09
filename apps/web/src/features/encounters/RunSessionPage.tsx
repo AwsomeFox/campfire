@@ -3850,6 +3850,21 @@ export default function RunSessionPage() {
   }
   const panelTab: PanelTab = panelTabChoice ?? defaultPanelTabRef.current;
 
+  // A prompt that demands a decision must not sit inside a collapsed panel. These arrive
+  // unprompted — a co-DM's damage raises a concentration save, an MCP action resolves an
+  // attack — so the viewer has no reason to look, and the reopen tab carries no badge.
+  // Reopen for them; leave the viewer's tab choice alone, since each prompt renders above
+  // the tab switch and is visible whichever section is showing.
+  const attentionKey = pendingConcentrationCheck
+    ? `concentration:${pendingConcentrationCheck.id}`
+    : pendingApply
+      ? `apply:${pendingApply.id}`
+      : pendingActionUse
+        ? `action:${pendingActionUse.id}`
+        : pendingGroupActionUse
+          ? `group:${pendingGroupActionUse.id}`
+          : null;
+
   const lifecycle = dmLifecycleActions(encounter.status);
   const deleteCopy = deleteConfirmCopy(encounter.status);
 
@@ -4233,6 +4248,7 @@ export default function RunSessionPage() {
       onSelectTab={(id) => setPanelTabChoice(id as PanelTab)}
       panelOpen={panelOpen}
       onPanelOpenChange={setPanelOpen}
+      attentionKey={attentionKey}
       panelSlot={
         <>
           {/* Transient, high-priority prompts. Deliberately outside the tab switch: an

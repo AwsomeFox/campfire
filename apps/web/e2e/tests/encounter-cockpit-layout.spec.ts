@@ -177,3 +177,63 @@ test.describe('encounter cockpit deep links', () => {
     }
   });
 });
+
+test.describe('encounter cockpit panel collapse', () => {
+  test('hands keyboard focus between the collapse controls', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+
+      // Activating Hide removes the focused control's ancestor from the layout. Without a
+      // transfer, focus falls to the document and the reopen tab — earlier in DOM order —
+      // is only reachable by traversing the whole cockpit again.
+      const close = page.getByTestId('encounter-vtt-panel-close');
+      await close.focus();
+      await page.keyboard.press('Enter');
+      const reopen = page.getByTestId('encounter-vtt-panel-open');
+      await expect(reopen).toBeFocused();
+
+      await page.keyboard.press('Enter');
+      await expect(page.getByTestId('encounter-vtt-panel-close')).toBeFocused();
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+
+  test('reopens itself when a prompt starts waiting on the viewer', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+      await page.getByTestId('encounter-vtt-panel-close').click();
+      await expect(page.getByTestId('encounter-vtt-panel')).not.toBeVisible();
+
+      // Damage from elsewhere (a co-DM, an MCP action) raises a concentration save. The
+      // viewer has no reason to be looking and the reopen tab carries no badge, so a
+      // collapsed panel would hide a decision the fight is waiting on.
+      const combatants = (await (
+        await page.request.get(`/api/v1/encounters/${fixture.encounterId}`)
+      ).json()) as { combatants: Array<{ id: number }> };
+      const target = combatants.combatants[0];
+      expect(target, 'fixture needs a combatant').toBeTruthy();
+      const concentrating = await page.request.post(
+        `/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}/turn-state`,
+        { data: { concentration: 'Bless' } },
+      );
+      expect(concentrating.ok(), `set concentration: ${await concentrating.text()}`).toBe(true);
+      const damaged = await page.request.patch(
+        `/api/v1/encounters/${fixture.encounterId}/combatants/${target.id}`,
+        { data: { hpDelta: -6 } },
+      );
+      expect(damaged.ok(), `apply damage: ${await damaged.text()}`).toBe(true);
+
+      await expect(page.getByTestId('concentration-check-prompt')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+});

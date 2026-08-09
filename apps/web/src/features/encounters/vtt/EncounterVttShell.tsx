@@ -53,6 +53,12 @@ type Props = {
   panelOpen: boolean;
   onPanelOpenChange: (open: boolean) => void;
   panelSlot: ReactNode;
+  /**
+   * Identifies a prompt that is waiting on the viewer. When it becomes non-null the panel
+   * reopens, because such a prompt arrives unprompted (a co-DM's damage, an MCP action)
+   * and would otherwise sit unseen inside a collapsed panel. `null` while nothing waits.
+   */
+  attentionKey?: string | null;
   /** Dialogs, snackbars and other portaled-in-place overlays. */
   children?: ReactNode;
   /**
@@ -135,6 +141,7 @@ export function EncounterVttShell({
   panelOpen,
   onPanelOpenChange,
   panelSlot,
+  attentionKey = null,
   children,
   mapStacked = false,
   className,
@@ -142,6 +149,31 @@ export function EncounterVttShell({
 }: Props) {
   const { t } = useTranslation();
   const panelLabel = t('encounters.vtt.panelLabel');
+
+  // Collapsing the panel hides the control that was just activated, so without this the
+  // keyboard user's focus falls to the document and getting back to the reopen tab means
+  // traversing the whole cockpit. Hand focus to the control that replaces it, and back
+  // again on reopen. Only on a real toggle — `panelOpen` also changes when something else
+  // reopens the panel, and stealing focus then would be worse than leaving it alone.
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const reopenButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingFocusRef = useRef<'closed' | 'opened' | null>(null);
+  // Reopen for a prompt that needs an answer — but only as it appears, so a viewer who
+  // collapses the panel again while it is still up is not fought by this effect.
+  const panelOpenRef = useRef(panelOpen);
+  panelOpenRef.current = panelOpen;
+  const onPanelOpenChangeRef = useRef(onPanelOpenChange);
+  onPanelOpenChangeRef.current = onPanelOpenChange;
+  useEffect(() => {
+    if (attentionKey && !panelOpenRef.current) onPanelOpenChangeRef.current(true);
+  }, [attentionKey]);
+
+  useEffect(() => {
+    const move = pendingFocusRef.current;
+    pendingFocusRef.current = null;
+    if (move === 'closed') reopenButtonRef.current?.focus();
+    else if (move === 'opened') closeButtonRef.current?.focus();
+  }, [panelOpen]);
 
   // Layout mounts the safety hold and check-request prompts outside the routed page so
   // they reach every campaign route. This shell would paint over both, so it publishes
@@ -198,12 +230,16 @@ export function EncounterVttShell({
           {!panelOpen && (
             <button
               type="button"
+              ref={reopenButtonRef}
               className="cf-vtt-panel-reopen"
               data-testid="encounter-vtt-panel-open"
               aria-label={t('encounters.vtt.showPanel')}
               aria-expanded={false}
               title={t('encounters.vtt.showPanel')}
-              onClick={() => onPanelOpenChange(true)}
+              onClick={() => {
+                pendingFocusRef.current = 'opened';
+                onPanelOpenChange(true);
+              }}
             >
               <span aria-hidden>‹</span>
             </button>
@@ -253,12 +289,16 @@ export function EncounterVttShell({
               <div className="cf-vtt-header-spacer" />
               <button
                 type="button"
+                ref={closeButtonRef}
                 className="cf-vtt-panel-close"
                 data-testid="encounter-vtt-panel-close"
                 aria-label={t('encounters.vtt.hidePanel')}
                 aria-expanded
                 title={t('encounters.vtt.hidePanel')}
-                onClick={() => onPanelOpenChange(false)}
+                onClick={() => {
+                  pendingFocusRef.current = 'closed';
+                  onPanelOpenChange(false);
+                }}
               >
                 <span aria-hidden>›</span>
               </button>
