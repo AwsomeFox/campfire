@@ -360,7 +360,12 @@ export class NotificationsService implements OnApplicationBootstrap {
     encounterId: number,
   ): Promise<HiddenRecipientDelivery> {
     const recipient = numericUserId(userId);
-    if (recipient === null || (actor && recipient === numericUserId(actor.id))) return 'delivered';
+    if (recipient === null) return 'skipped';
+    // Actors receive no row, but their skipped narrow path must still observe
+    // a reveal at the same transactional boundary as any durable recipient.
+    if (actor && recipient === numericUserId(actor.id)) {
+      return this.encounterHiddenAtBoundary(campaignId, encounterId) ? 'delivered' : 'visible';
+    }
     const hiddenStatusContext: HiddenStatusContext = {
       encounterId,
       characterId: authority.characterId,
@@ -373,12 +378,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     try {
       let visibilityChanged = false;
       const delivered = await this.dispatch([recipient], campaignId, event, actor?.id ?? null, actor?.id ?? null, (tx) => {
-        const encounter = tx
-          .select({ hidden: encounters.hidden })
-          .from(encounters)
-          .where(and(eq(encounters.id, encounterId), eq(encounters.campaignId, campaignId)))
-          .get();
-        if (!encounter?.hidden) {
+        if (!this.encounterHiddenTx(tx, campaignId, encounterId)) {
           visibilityChanged = true;
           return false;
         }
@@ -402,6 +402,17 @@ export class NotificationsService implements OnApplicationBootstrap {
       this.logger.warn(`notifyUserIfHiddenEncounterRecipient failed for user ${recipient} in campaign ${campaignId}: ${String(err)}`);
       return 'skipped';
     }
+  }
+
+  private encounterHiddenTx(tx: SyncDb, campaignId: number, encounterId: number): boolean {
+    return tx.select({ hidden: encounters.hidden })
+      .from(encounters)
+      .where(and(eq(encounters.id, encounterId), eq(encounters.campaignId, campaignId)))
+      .get()?.hidden === true;
+  }
+
+  private encounterHiddenAtBoundary(campaignId: number, encounterId: number): boolean {
+    return this.db.transaction((tx) => this.encounterHiddenTx(tx, campaignId, encounterId));
   }
 
   /**
@@ -449,7 +460,15 @@ export class NotificationsService implements OnApplicationBootstrap {
     writeGuard?: (tx: SyncDb) => boolean,
     hiddenStatusContext?: HiddenStatusContext,
   ): Promise<boolean> {
-    if (recipients.length === 0) return true;
+    const guardWithoutWrite = () => {
+      if (!writeGuard) return true;
+      let guardPassed = true;
+      this.db.transaction((tx) => {
+        if (!writeGuard(tx)) guardPassed = false;
+      });
+      return guardPassed;
+    };
+    if (recipients.length === 0) return guardWithoutWrite();
     const category = notificationCategory(event.type);
 
     // ISSUE #597 — THE ONE PLACE A BLOCK STOPS A NOTIFICATION.
@@ -486,7 +505,7 @@ export class NotificationsService implements OnApplicationBootstrap {
       entityId: event.entityId ?? hiddenStatusContext?.encounterId ?? null,
     });
     const allowed = suppressed.size === 0 ? recipients : recipients.filter((id) => !suppressed.has(String(id)));
-    if (allowed.length === 0) return true;
+    if (allowed.length === 0) return guardWithoutWrite();
 
     // Critical categories are always delivered immediately — no gating. Note that the
     // safety filter above applies even here: `access`/`security` bypass a recipient's
@@ -532,7 +551,7 @@ export class NotificationsService implements OnApplicationBootstrap {
       });
       return guardPassed;
     }
-    return true;
+    return guardWithoutWrite();
   }
 
   /** Stored category mode per recipient (absent => undefined => category default). */

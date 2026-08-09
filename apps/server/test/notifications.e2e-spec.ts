@@ -1204,6 +1204,40 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect((await waitForRevealRace(player)).entityId).toBe(revealRaceEncounter.body.id);
     expect((await waitForRevealRace(coDm)).entityId).toBe(revealRaceEncounter.body.id);
     expect((await waitForRevealRace(spectator)).entityId).toBe(revealRaceEncounter.body.id);
+
+    // A muted co-DM produces no narrow durable row, but its suppressed path
+    // must still observe a reveal and restart the visible fan-out.
+    const suppressedRevealCharacter = await player.post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Suppressed Reveal Hero', hpCurrent: 10, hpMax: 10 });
+    const suppressedRevealEncounter = await dm.post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Suppressed Reveal Window', hidden: true });
+    const suppressedRevealRoster = await dm.get(`/api/v1/encounters/${suppressedRevealEncounter.body.id}`);
+    const suppressedRevealCombatant = suppressedRevealRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === suppressedRevealCharacter.body.id,
+    );
+    const coDmMute = await coDm.post(`/api/v1/campaigns/${hiddenCampaignId}/safety/mutes`)
+      .send({ entityType: 'encounter', entityId: suppressedRevealEncounter.body.id });
+    expect(coDmMute.status).toBe(201);
+    const revealAtSuppressedWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[0] === coDmId && args[5] === suppressedRevealEncounter.body.id) {
+        db.update(encounters).set({ hidden: false }).where(eq(encounters.id, suppressedRevealEncounter.body.id)).run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      expect((await dm.patch(`/api/v1/encounters/${suppressedRevealEncounter.body.id}/combatants/${suppressedRevealCombatant.id}`)
+        .send({ hpSet: 0 })).status).toBe(200);
+    } finally {
+      revealAtSuppressedWrite.mockRestore();
+    }
+    let suppressedRows: Notification[] = [];
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      suppressedRows = (await listFor(spectator)).filter((row) => row.body.includes('Suppressed Reveal Hero was downed'));
+      if (suppressedRows.length === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(suppressedRows).toHaveLength(1);
+    expect(suppressedRows[0].entityId).toBe(suppressedRevealEncounter.body.id);
   });
 
   it('removes persisted hidden-status rows when a recipient loses DM or owner authority, including before digest delivery (#2112)', async () => {
