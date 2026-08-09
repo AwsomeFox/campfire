@@ -4,7 +4,7 @@ import { AddCombatantPanel } from './combat/AddCombatantPanel';
 import { CombatantRow, hpDisplay, type CombatantRowProps } from './combat/CombatantRow';
 import { combatantPatchUrl } from './combat/combatantPatchUrl';
 import { useCombatantDragReorder } from './combat/useCombatantDragReorder';
-import { afterCombatantIdForMoveDown, afterCombatantIdForMoveUp, isAwaitingReorderResync, reorderMenuTargets } from './combatantReorder';
+import { afterCombatantIdForMoveDown, afterCombatantIdForMoveUp, isAwaitingReorderResync, reorderMenuTargets, shouldArmReorderResyncLatch } from './combatantReorder';
 import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
@@ -2574,10 +2574,25 @@ export default function RunSessionPage() {
    * A 409 (or any other failure) still refetches via `onSettled` below, so the roster
    * always re-renders server-authoritative order — the "refetch" half of "409 → refetch +
    * toast"; `reportError` below is the toast half.
+   *
+   * `encounterId` is threaded through the mutation variables for the same reason as
+   * `expectedTurnVersion`, but the hazard it closes is sharper (issue #2116 review round 7):
+   * this page is REUSED across encounters — the route has no `key={encounterId}`, so
+   * navigating from encounter A to encounter B re-renders this same component instance
+   * instead of remounting it. `useMutation`'s effect calls `observer.setOptions(options)` on
+   * every render (`@tanstack/react-query`'s `useMutation.js`), and
+   * `MutationObserver.setOptions` splices those newest options straight into the in-flight
+   * `Mutation` instance whenever `state.status === 'pending'` (`@tanstack/query-core`'s
+   * `mutationObserver.js`) — so `onSettled` below, if it closed over `eid`, would run with
+   * whichever encounter happens to be on screen when the request FINISHES, not the one the
+   * write actually belongs to. Reading `encounterId` from `variables` instead is safe: variables
+   * are fixed as the argument to the mutation's one `execute()` call and are never subject to
+   * that options swap (see `handleReorderDrop`'s call site, which passes the `eid` that was
+   * active at the moment of the drag).
    */
   const reorderCombatant = useMutation({
-    mutationFn: ({ combatantId, afterCombatantId, expectedTurnVersion }: { combatantId: number; afterCombatantId: number | 'top'; expectedTurnVersion: number }) =>
-      api.post<Combatant>(`${API}/encounters/${eid}/combatants/${combatantId}/reorder`, { afterCombatantId, expectedTurnVersion }),
+    mutationFn: ({ combatantId, afterCombatantId, expectedTurnVersion, encounterId }: { combatantId: number; afterCombatantId: number | 'top'; expectedTurnVersion: number; encounterId: number }) =>
+      api.post<Combatant>(`${API}/encounters/${encounterId}/combatants/${combatantId}/reorder`, { afterCombatantId, expectedTurnVersion }),
     onMutate: ({ combatantId }) => {
       setActionError(null);
       markCombatantPending(combatantId, true);
@@ -2586,11 +2601,21 @@ export default function RunSessionPage() {
       announce(t('encounters.reorder.announcement', 'Moved {{name}} in the initiative order.', { name: updated.name }));
     },
     onError: reportError,
-    onSettled: (_data, _err, { combatantId }) => {
+    onSettled: (_data, _err, { combatantId, encounterId }) => {
       markCombatantPending(combatantId, false);
-      // See `reorderResyncArmedAt`'s own doc comment above for why this is armed here.
-      setReorderResyncArmedAt(encounterReadRevisionRef.current);
-      invalidateEncounter(queryClient, eid);
+      // Only re-arm the resync latch when the write's encounter is STILL the one on screen —
+      // see `shouldArmReorderResyncLatch`'s own doc comment (and this mutation's, above) for
+      // why arming it for a write that belongs to an encounter the DM has since navigated away
+      // from would spuriously disable the CURRENTLY DISPLAYED encounter's reorder affordances
+      // for a drag it never made.
+      if (shouldArmReorderResyncLatch(encounterId, activeEncounterIdRef.current)) {
+        setReorderResyncArmedAt(encounterReadRevisionRef.current);
+      }
+      // Invalidate the encounter the write actually belongs to, not whatever `eid` this
+      // callback's closure happens to carry — see the doc comment above. Invalidating a
+      // currently-inactive query key just marks it stale for its next mount; it does not
+      // force a refetch of an encounter the DM is no longer looking at.
+      invalidateEncounter(queryClient, encounterId);
     },
   });
 
@@ -3966,13 +3991,15 @@ export default function RunSessionPage() {
       // mutation's `onSettled` and its triggered refetch actually landing, during which a drag
       // would be authored against the pre-reorder roster.
       if (reconcileBlocks || riskyBlocked || reorderCombatant.isPending || isAwaitingReorderResyncNow) return;
-      reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion });
+      reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion, encounterId: eid });
     },
     // `reorderCombatant` covers `.isPending` — the mutation object is a new reference on each
     // status change, so the closure re-forms when pending flips. `isAwaitingReorderResyncNow`
     // is plain state (not a ref), so it MUST be listed here too, or a stale closure would keep
-    // authoring drags against it after it flips.
-    [encounter, reorderCombatant, reconcileBlocks, riskyBlocked, isAwaitingReorderResyncNow],
+    // authoring drags against it after it flips. `eid` is read directly at the moment of the
+    // drag (not resolved later) — see `reorderCombatant`'s own doc comment for why `onSettled`
+    // must consult this captured value instead of its own closure.
+    [encounter, reorderCombatant, reconcileBlocks, riskyBlocked, isAwaitingReorderResyncNow, eid],
   );
   const rosterDragReorder = useCombatantDragReorder({
     axis: 'y',

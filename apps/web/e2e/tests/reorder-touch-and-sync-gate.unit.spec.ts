@@ -236,8 +236,9 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
     const onSettledStart = fn.indexOf('onSettled:');
     expect(onSettledStart).toBeGreaterThan(-1);
     // `onSettled`'s signature ignores the error argument (`_err`) — it does not branch away
-    // from arming the latch on a failed reorder.
-    expect(fn.slice(onSettledStart, onSettledStart + 80)).toMatch(/onSettled:\s*\(_data,\s*_err,\s*\{\s*combatantId\s*\}\)/);
+    // from arming the latch on a failed reorder. It destructures `encounterId` too (issue
+    // #2116 review round 7) — see the describe block below for why.
+    expect(fn.slice(onSettledStart, onSettledStart + 90)).toMatch(/onSettled:\s*\(_data,\s*_err,\s*\{\s*combatantId,\s*encounterId\s*\}\)/);
   });
 
   test('reorderCombatant.onSettled arms the state with the read-revision baseline, before invalidateEncounter', () => {
@@ -257,7 +258,9 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
     expect(onSettledStart).toBeGreaterThan(-1);
     const onSettledBlock = fn.slice(onSettledStart);
     const armIndex = onSettledBlock.indexOf('setReorderResyncArmedAt(encounterReadRevisionRef.current);');
-    const invalidateIndex = onSettledBlock.indexOf('invalidateEncounter(queryClient, eid);');
+    // Issue #2116 review round 7: invalidates the write's OWN encounter (from variables), not
+    // the bare `eid` identifier — see the describe block below for the full defect.
+    const invalidateIndex = onSettledBlock.indexOf('invalidateEncounter(queryClient, encounterId);');
     expect(armIndex).toBeGreaterThan(-1);
     expect(invalidateIndex).toBeGreaterThan(-1);
     expect(armIndex).toBeLessThan(invalidateIndex);
@@ -265,6 +268,9 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
     // `encounterQuery.dataUpdatedAt` anywhere in this mutation would silently reopen the
     // wrong-order hazard.
     expect(fn).not.toContain('encounterQuery.dataUpdatedAt');
+    // Regression guard for review round 7: `eid` (this callback's own, potentially STALE
+    // closure — see the describe block below) must never be the invalidation target again.
+    expect(onSettledBlock.slice(0, onSettledBlock.indexOf('\n  });'))).not.toContain('invalidateEncounter(queryClient, eid)');
   });
 
   test('the eid-change reset effect clears reorderResyncArmedAt via its state setter, not a ref write', () => {
@@ -275,6 +281,81 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
     expect(effectEnd).toBeGreaterThan(effectStart);
     const block = source.slice(effectStart, effectEnd);
     expect(block).toContain('setReorderResyncArmedAt(null);');
+  });
+});
+
+test.describe('reorder settlement is scoped to the encounter the write belongs to, not whichever is on screen when it lands (issue #2116 review round 7)', () => {
+  /**
+   * `RunSessionPage` is reused across encounters — its route carries no `key={encounterId}`
+   * (see `app/router.tsx`), so navigating the DM from encounter A to encounter B re-renders
+   * this same component instance instead of remounting it. `useMutation`'s effect calls
+   * `observer.setOptions(options)` on every render, and `MutationObserver.setOptions`
+   * (`@tanstack/query-core`) splices those newest options straight into an in-flight
+   * `Mutation` instance whenever it is still pending — so `onSettled`, if it closed over
+   * `eid` directly, would run with WHICHEVER encounter is on screen when the request
+   * finishes, not the one the completed write actually belongs to. That would re-arm the
+   * NEW encounter's resync latch (disabling its reorder affordances for a drag it never
+   * made) and invalidate the NEW encounter's cache instead of the one that actually changed.
+   *
+   * This describe block only pins that the wiring reads `encounterId` from the mutation's
+   * OWN variables rather than the `eid` closure, and gates arming through the real
+   * `shouldArmReorderResyncLatch`. The mechanism itself — that `useMutation` really does
+   * splice a later render's options into an in-flight mutation — is proven against the real,
+   * unmodified `@tanstack/react-query` + `@tanstack/query-core` (not source-scanned) in
+   * `test/component/RunSessionPage.reorderCrossEncounterSettlement.spec.tsx`, which drives the
+   * actual race and asserts on its real DOM/query-cache outcome; `shouldArmReorderResyncLatch`
+   * itself is unit-tested against real values in `combatant-reorder.unit.spec.ts`.
+   */
+  test('mutationFn takes encounterId as a variable and builds the URL from it, not from the eid closure', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const fnStart = source.indexOf('const reorderCombatant = useMutation({');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = source.indexOf('\n  });', fnStart);
+    const fn = source.slice(fnStart, fnEnd);
+
+    const mutationFnStart = fn.indexOf('mutationFn:');
+    expect(mutationFnStart).toBeGreaterThan(-1);
+    const onMutateStart = fn.indexOf('onMutate:', mutationFnStart);
+    expect(onMutateStart).toBeGreaterThan(mutationFnStart);
+    const mutationFnBlock = fn.slice(mutationFnStart, onMutateStart);
+
+    expect(mutationFnBlock).toContain('encounterId: number');
+    expect(mutationFnBlock).toContain('`${API}/encounters/${encounterId}/combatants/${combatantId}/reorder`');
+    // Regression guard: the URL must not be built from the outer `eid` — that closure is
+    // exactly what review round 7 found unsafe.
+    expect(mutationFnBlock).not.toContain('`${API}/encounters/${eid}/combatants/${combatantId}/reorder`');
+  });
+
+  test("onSettled guards arming through the real shouldArmReorderResyncLatch, comparing the write's own encounterId against activeEncounterIdRef.current — never a bare `===` re-derived inline", () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    expect(source).toContain(
+      "import { afterCombatantIdForMoveDown, afterCombatantIdForMoveUp, isAwaitingReorderResync, reorderMenuTargets, shouldArmReorderResyncLatch } from './combatantReorder';",
+    );
+
+    const fnStart = source.indexOf('const reorderCombatant = useMutation({');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = source.indexOf('\n  });', fnStart);
+    const fn = source.slice(fnStart, fnEnd);
+    const onSettledStart = fn.indexOf('onSettled:');
+    const onSettledBlock = fn.slice(onSettledStart);
+
+    expect(onSettledBlock).toContain('if (shouldArmReorderResyncLatch(encounterId, activeEncounterIdRef.current)) {');
+    // Regression guard: arming must not be unconditional again (round 7's exact regression —
+    // the shape review found before this round's fix).
+    expect(onSettledBlock.indexOf('setReorderResyncArmedAt(encounterReadRevisionRef.current);')).toBeGreaterThan(
+      onSettledBlock.indexOf('if (shouldArmReorderResyncLatch('),
+    );
+  });
+
+  test('handleReorderDrop passes encounterId: eid at the moment of the drag — the one point where eid is guaranteed current', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const callSite = source.indexOf('reorderCombatant.mutate({ combatantId, afterCombatantId, expectedTurnVersion: encounter.turnVersion, encounterId: eid });');
+    expect(callSite).toBeGreaterThan(-1);
+
+    // `eid` must be in handleReorderDrop's own dependency array, or a stale closure could
+    // keep authoring the wrong `encounterId` after navigation.
+    const depsStart = source.indexOf('[encounter, reorderCombatant, reconcileBlocks, riskyBlocked, isAwaitingReorderResyncNow, eid]', callSite);
+    expect(depsStart).toBeGreaterThan(callSite);
   });
 });
 

@@ -9,6 +9,7 @@ import {
   afterCombatantIdForMoveUp,
   isAwaitingReorderResync,
   reorderMenuTargets,
+  shouldArmReorderResyncLatch,
 } from '../../src/features/encounters/combatantReorder';
 
 const ORDER = [10, 20, 30, 40]; // Wizard, Fighter, Rogue, Cleric
@@ -160,5 +161,27 @@ test.describe('isAwaitingReorderResync (issue #2116)', () => {
     // The triggered refetch (or another completed read, e.g. an SSE-driven one) lands after.
     const refetchLandedAtRevision = settleTimeReadRevision + 1;
     expect(isAwaitingReorderResync(settleTimeReadRevision, refetchLandedAtRevision)).toBe(false);
+  });
+});
+
+test.describe('shouldArmReorderResyncLatch (issue #2116 review round 7)', () => {
+  /**
+   * `RunSessionPage` is reused across encounters (no `key={encounterId}` on its route), so a
+   * reorder's `onSettled` can fire after the DM has navigated to a DIFFERENT encounter. See
+   * this function's own doc comment, and the real-race component test in
+   * `RunSessionPage.reorderCrossEncounterSettlement.spec.tsx`, for why this matters and how it
+   * is provably a real `@tanstack/react-query` behavior, not a hypothetical one.
+   */
+  test('a write settling while its OWN encounter is still active arms the latch', () => {
+    expect(shouldArmReorderResyncLatch(101, 101)).toBe(true);
+  });
+
+  test('a write settling AFTER the DM has navigated to a different encounter does not arm the latch', () => {
+    // Encounter 101's reorder settles while encounter 202 is now the one on screen.
+    expect(shouldArmReorderResyncLatch(101, 202)).toBe(false);
+  });
+
+  test('order of the two ids does not matter — only equality does', () => {
+    expect(shouldArmReorderResyncLatch(202, 101)).toBe(false);
   });
 });

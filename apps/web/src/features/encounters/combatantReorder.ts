@@ -86,3 +86,26 @@ export function reorderMenuTargets<T extends { id: number }>(orderedCombatants: 
 export function isAwaitingReorderResync(armedAt: number | null, readRevision: number): boolean {
   return armedAt !== null && readRevision <= armedAt;
 }
+
+/**
+ * Issue #2116 review round 7. `RunSessionPage` is reused across encounters — its route carries
+ * no `key={encounterId}`, so navigating the DM from encounter A to encounter B re-renders the
+ * SAME component instance instead of remounting it. `useMutation` (`@tanstack/react-query`)
+ * calls `observer.setOptions(options)` in an effect on every render, and
+ * `MutationObserver.setOptions` (`@tanstack/query-core`) splices those newest options straight
+ * into an in-flight `Mutation` instance whenever its status is still `'pending'`. So if a drag
+ * starts on encounter A and the DM navigates to encounter B before A's POST resolves, the
+ * `onSettled` callback that actually executes is the one captured on B's most recent render —
+ * closing over B, even though the completed write and its variables still belong to A.
+ *
+ * `writeEncounterId` must therefore come from the mutation's own variables (fixed once, as the
+ * argument to its one `execute()` call, never subject to that options swap); `activeEncounterId`
+ * must come from a ref updated fresh on every render (e.g. `activeEncounterIdRef.current`), read
+ * at the moment `onSettled` actually runs. Only when the two still agree does a just-settled
+ * write belong to the encounter currently on screen — arming the resync latch for anything else
+ * would spuriously disable the DISPLAYED encounter's reorder affordances for a drag that was
+ * never made against it.
+ */
+export function shouldArmReorderResyncLatch(writeEncounterId: number, activeEncounterId: number): boolean {
+  return writeEncounterId === activeEncounterId;
+}
