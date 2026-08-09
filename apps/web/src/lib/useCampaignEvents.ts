@@ -75,6 +75,7 @@ export function isCampaignEvent(value: unknown): value is CampaignEvent {
     return (
       (v.round === undefined || (typeof v.round === 'number' && Number.isInteger(v.round) && v.round >= 0))
       && (v.turnIndex === undefined || (typeof v.turnIndex === 'number' && Number.isInteger(v.turnIndex) && v.turnIndex >= 0))
+      && (v.turnVersion === undefined || (typeof v.turnVersion === 'number' && Number.isInteger(v.turnVersion) && v.turnVersion >= 0))
       && (v.currentCombatantId === undefined || v.currentCombatantId === null || typeof v.currentCombatantId === 'number')
       && (v.combatantKind === undefined || v.combatantKind === null || CombatantKind.safeParse(v.combatantKind).success)
       && (v.turnReverted === undefined || v.turnReverted === true)

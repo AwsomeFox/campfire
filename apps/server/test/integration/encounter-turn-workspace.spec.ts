@@ -217,6 +217,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       type: string;
       currentCombatantId?: number | null;
       round?: number;
+      turnVersion?: number;
       combatantKind?: string | null;
       turnReverted?: true;
     }> = [];
@@ -234,6 +235,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
         encounterId,
         currentCombatantId: c1,
         round: 1,
+        turnVersion: 2,
         combatantKind: 'character',
         turnReverted: true,
       }),
@@ -250,6 +252,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
       currentCombatantId?: number | null;
       round?: number;
       turnIndex?: number;
+      turnVersion?: number;
       combatantKind?: string | null;
       turnReverted?: true;
     }> = [];
@@ -265,6 +268,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
         currentCombatantId: c2,
         round: 1,
         turnIndex: 0,
+        turnVersion: 1,
         combatantKind: 'character',
       }),
     ]);
@@ -281,6 +285,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
         currentCombatantId: c1,
         round: 1,
         turnIndex: 0,
+        turnVersion: 2,
         combatantKind: 'character',
         turnReverted: true,
       }),

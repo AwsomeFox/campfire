@@ -3,12 +3,13 @@ import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { formatDocumentTitle, setDocumentTitlePrefix } from '../../src/app/routeFocus';
 import { isCampaignEvent } from '../../src/lib/useCampaignEvents';
-import { detectSseTurnBeat, detectTurnBeat, turnBeatKey, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
+import { detectSseTurnBeat, detectTurnBeat, isStaleTurnBeatFrame, previousTurnBeatForFrame, shouldConsumeTurnBeatResync, shouldReconcileTurnBeatRead, turnBeatKey, type PendingPolledTurnBeat, type TurnBeatSnapshot } from '../../src/features/encounters/turnBeat';
 
 const initial: TurnBeatSnapshot = {
   encounterId: 8,
   combatantId: 12,
   round: 1,
+  turnVersion: 4,
   isYourTurn: false,
 };
 
@@ -24,12 +25,143 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(detectSseTurnBeat(initial, initial)).toBeNull();
   });
 
-  test('clears a previous encounter baseline and silently updates it from an encounter refetch', () => {
+  test('clears a previous encounter baseline on encounter switch, and only resyncs it from a REST refetch on load or reconnect (issue #2092)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
-    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = null;\s*pendingPolledTurnBeatRef\.current = null;\s*awaitingTurnBeatResyncRef\.current = turnBeatLoadWatermark\.readRevision;\s*ownedTurnFeedbackRef\.current = null;\s*setTurnOwnerFromEvent\(null\);\s*setTurnOwnerPendingCombatantId\(null\);\s*setTurnBeat\(null\);\s*setTurnPulse\(false\);/);
     expect(source).toMatch(/const previous = previousTurnBeatRef\.current\?\.encounterId === eid\s*\? previousTurnBeatRef\.current\s*:\s*null;/);
-    expect(source).toMatch(/if \(!encounter \|\| encounter\.id !== eid\) return;[\s\S]*previousTurnBeatRef\.current = \{/);
+    expect(source).toMatch(/const completedRead = latestEncounterReadRef\.current;\s*if \(!completedRead \|\| completedRead\.encounterId !== eid\) return;[\s\S]*if \(!shouldReconcileTurnBeatRead\([\s\S]*?completedRead\.encounter\.turnVersion,[\s\S]*?\)\) return;\s*awaitingTurnBeatResyncRef\.current = null;[\s\S]*previousTurnBeatRef\.current = \{/);
     expect(source).not.toContain('previousTurnBeatRef.current?.encounterId === eid ||');
+  });
+
+  test('captures the actual-read watermark before useQuery can finish the mount refetch', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const watermarkCapture = source.indexOf('const [turnBeatLoadWatermark, setTurnBeatLoadWatermark] = useState');
+    const encounterQuery = source.indexOf('const encounterQuery = useQuery({');
+
+    expect(watermarkCapture).toBeGreaterThan(-1);
+    expect(watermarkCapture).toBeLessThan(encounterQuery);
+    expect(source).toMatch(/const \[turnBeatLoadWatermark, setTurnBeatLoadWatermark\] = useState\(\(\) => \(\{\s*encounterId: eid,\s*readRevision: encounterReadRevisionRef\.current,\s*\}\)\);/);
+    expect(source).toMatch(/if \(turnBeatLoadWatermark\.encounterId !== eid\) \{\s*setTurnBeatLoadWatermark\(\{\s*encounterId: eid,\s*readRevision: encounterReadRevisionRef\.current,\s*\}\);\s*\}/);
+  });
+
+  test('consumes a resync only after a newer successful encounter query function completes', () => {
+    expect(shouldConsumeTurnBeatResync(null, 20)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(20, 20)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(20, 21)).toBe(true);
+  });
+
+  test('lets a newer-turn poll repair one missed frame without regressing an SSE baseline', () => {
+    expect(shouldReconcileTurnBeatRead(null, 21, 4, 5)).toBe(true);
+    expect(shouldReconcileTurnBeatRead(null, 22, 5, 5)).toBe(false);
+    expect(shouldReconcileTurnBeatRead(null, 23, 5, 4)).toBe(false);
+    expect(shouldReconcileTurnBeatRead(20, 21, 4, 4)).toBe(true);
+  });
+
+  test('rejects only stream frames older than the current server turn revision', () => {
+    expect(isStaleTurnBeatFrame(5, 4)).toBe(true);
+    expect(isStaleTurnBeatFrame(5, 5)).toBe(false);
+    expect(isStaleTurnBeatFrame(5, 6)).toBe(false);
+    expect(isStaleTurnBeatFrame(5, undefined)).toBe(false);
+    expect(isStaleTurnBeatFrame(null, 4)).toBe(false);
+  });
+
+  test('drops a stale stream frame before applying turn-owner or beat state', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const handlerStart = source.indexOf("if (event.type === 'encounter.turn_changed') {");
+    const staleGuard = source.indexOf('if (isStaleTurnBeatFrame(currentBaseline?.turnVersion ?? null, event.turnVersion)) return;', handlerStart);
+    const ownerWrite = source.indexOf('setTurnOwnerFromEvent(', handlerStart);
+    expect(handlerStart).toBeGreaterThan(-1);
+    expect(staleGuard).toBeGreaterThan(handlerStart);
+    expect(staleGuard).toBeLessThan(ownerWrite);
+  });
+
+  test('preserves the edge when a poll wins the race with its equal-version frame', () => {
+    const polled = { ...initial, combatantId: 13, turnVersion: 5 };
+    const pendingPoll: PendingPolledTurnBeat = { turnVersion: 5, previous: initial };
+
+    expect(detectSseTurnBeat(previousTurnBeatForFrame(polled, pendingPoll, 5), polled)).toBe('turn');
+    expect(previousTurnBeatForFrame(polled, pendingPoll, 4)).toBe(polled);
+    expect(previousTurnBeatForFrame(polled, pendingPoll, 6)).toBe(polled);
+  });
+
+  test('records only ordinary poll reconciliation as a pending visible edge', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/pendingPolledTurnBeatRef\.current = armedAfterReadRevision == null && previous != null\s*\? \{ turnVersion: readEncounter\.turnVersion, previous \}\s*: null;/);
+    expect(source).toMatch(/const previous = previousTurnBeatForFrame\(\s*currentBaseline,\s*pendingPolledTurnBeatRef\.current,\s*event\.turnVersion,\s*\);/);
+    expect(source).toMatch(/previousTurnBeatRef\.current = next;\s*pendingPolledTurnBeatRef\.current = null;/);
+  });
+
+  test('does not let an optimistic cache write impersonate the catch-up encounter read', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const encounterQueryStart = source.indexOf('const encounterQuery = useQuery({');
+    const encounterQueryEnd = source.indexOf('const encounter = encounterQuery.data ?? null;', encounterQueryStart);
+    const encounterQueryBody = source.slice(encounterQueryStart, encounterQueryEnd);
+
+    expect(encounterQueryBody).toMatch(/queryFn: async \(\{ signal \}\) => \{\s*const reconciled = reconcileEncounterPatchResponse\([\s\S]*?await api\.get<EncounterWithCombatants>\(`\$\{API\}\/encounters\/\$\{eid\}`, \{ signal \}\)/);
+    expect(encounterQueryBody).toMatch(/signal\.throwIfAborted\(\);\s*const revision = encounterReadRevisionRef\.current \+ 1;/);
+    expect(encounterQueryBody).toMatch(/encounterReadRevisionRef\.current = revision;\s*latestEncounterReadRef\.current = \{ revision, encounterId: eid, encounter: reconciled \};\s*setEncounterReadRevision\(revision\);\s*return reconciled;/);
+    expect(source.match(/encounterReadRevisionRef\.current = revision;/g)).toHaveLength(1);
+    expect(source).not.toContain('shouldConsumeTurnBeatResync(\n      awaitingTurnBeatResyncRef.current,\n      encounterQuery.dataUpdatedAt');
+  });
+
+  // Issue #2092: `dataUpdatedAt` records when a response LANDED, not when the server
+  // captured it. So a catch-up GET issued at reconnect can still land AFTER the live
+  // `encounter.turn_changed` frame it raced, and would then overwrite the newer
+  // SSE-established baseline with pre-turn state — leaving the next edge compared against
+  // a stale baseline (misread as a round wrap, or dropped as a no-op). The SSE handler
+  // therefore disarms the pending resync at the same point it establishes the baseline: a
+  // live turn frame is by construction at least as fresh as any GET already in flight.
+  //
+  // (A window this PR left partly open rather than introduced — on main the resync effect
+  // re-ran on EVERY refetch, so the same overwrite could happen far more often.)
+  test('an SSE turn edge disarms a pending REST resync so a late catch-up read cannot overwrite it', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    // The disarm must sit with the SSE baseline write itself, not somewhere it can be skipped.
+    expect(source).toMatch(/previousTurnBeatRef\.current = next;[\s\S]{0,700}?awaitingTurnBeatResyncRef\.current = null;/);
+
+    // And once disarmed, the gate refuses every completed-fetch shape — including a fetch
+    // strictly newer than the one that armed it, which is precisely the late catch-up read.
+    expect(shouldConsumeTurnBeatResync(null, 21)).toBe(false);
+    expect(shouldConsumeTurnBeatResync(null, Number.MAX_SAFE_INTEGER)).toBe(false);
+  });
+
+  // Issue #2092: initial load and reconnect/recovery explicitly arm a catch-up read.
+  // Ordinary polls need no such arm: the monotonic turnVersion predicate above lets them
+  // repair only a genuinely newer missed edge while rejecting same/older paired reads.
+  test('only explicitly arms the REST turn-beat baseline after a reconnect or stream recovery', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    expect(source).toMatch(/const awaitingTurnBeatResyncRef = useRef<number \| null>\(0\);/);
+    const reconnectStart = source.indexOf('onReconnect: useCallback');
+    const reconnectBranch = source.slice(reconnectStart, source.indexOf('onStreamRecovery: useCallback', reconnectStart));
+    expect(reconnectBranch).toContain('awaitingTurnBeatResyncRef.current = encounterReadRevisionRef.current;');
+    const recoveryStart = source.indexOf('onStreamRecovery: useCallback');
+    const recoveryBranch = source.slice(recoveryStart, source.indexOf('onStatusChange: useCallback', recoveryStart));
+    expect(recoveryBranch).toContain('awaitingTurnBeatResyncRef.current = encounterReadRevisionRef.current;');
+  });
+
+  // Issue #2092: the Next Turn button re-enables (`headerBusy` tracks only
+  // `nextTurnMut.isPending`) the instant the mutation's own POST resolves — well before
+  // `onSettled`'s invalidate-triggered GET has round-tripped. A second next-turn click in
+  // that window built `expectedCurrentCombatantId` from the still-stale cached
+  // `encounter.currentCombatantId`, so the server's own CAS guard rejected the DM's own very
+  // next legitimate click with 409 TURN_ALREADY_ADVANCED — no `encounter.turn_changed` frame
+  // was ever emitted for the rejected click, which is what actually made the OTHER client's
+  // takeover/ticker look like it "never updated". The mutation response IS the advanced
+  // encounter (same shape as GET) — seed the cache with it synchronously in `onSuccess`.
+  test('seeds the encounter cache with the next-turn response before the button can re-fire (issue #2092)', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const nextTurnMutStart = source.indexOf('const nextTurnMut = useKeyedMutation({');
+    const nextTurnMutBody = source.slice(nextTurnMutStart, source.indexOf('const undoTurnMut', nextTurnMutStart));
+    expect(nextTurnMutBody).toMatch(/api\.post<EncounterWithCombatants>\(`\$\{API\}\/encounters\/\$\{eid\}\/next-turn`/);
+    expect(nextTurnMutBody).toMatch(/onSuccess: \(data\) => \{\s*queryClient\.setQueryData<EncounterWithCombatants>\(\s*queryKeys\.encounter\(eid\),\s*\(current: EncounterWithCombatants \| undefined\) => preferNewerEncounterSnapshot\(\s*current,\s*reconcileEncounterPatchResponse\(data, pendingEncounterPatches\.current\.values\(\), '', eid\),\s*\),\s*\);/);
+  });
+
+  test('orders a delayed encounter PATCH response against the seeded turn before replacing the cache', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
+    const setMapStart = source.indexOf('const setMap = useMutation({');
+    const setMapBody = source.slice(setMapStart, source.indexOf('const mutateQueuedPatch', setMapStart));
+
+    expect(setMapBody).toMatch(/onSuccess: \(updated, variables\) => \{[\s\S]*?setQueryData<EncounterWithCombatants>\(queryKeys\.encounter\(variables\.encounterId\), \(current\) =>\s*preferNewerEncounterSnapshot\(\s*current,\s*reconcileEncounterPatchResponse\(updated, pendingEncounterPatches\.current\.values\(\), variables\.queueId, variables\.encounterId\),\s*\),\s*\);/);
   });
 
   test('emits an undo edge after a silent refetch baseline advances past a missed frame', () => {
@@ -93,7 +225,7 @@ test.describe('turn-change beat (issue #1906)', () => {
   test('accepts the optional turn_changed frame fields and rejects malformed values', () => {
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
-      round: 2, currentCombatantId: 15, combatantKind: 'character',
+      round: 2, turnVersion: 9, currentCombatantId: 15, combatantKind: 'character',
     })).toBe(true);
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
@@ -106,6 +238,10 @@ test.describe('turn-change beat (issue #1906)', () => {
     expect(isCampaignEvent({
       type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
       turnReverted: false,
+    })).toBe(false);
+    expect(isCampaignEvent({
+      type: 'encounter.turn_changed', campaignId: 2, encounterId: 8, at: '2026-08-05T00:00:00.000Z',
+      turnVersion: -1,
     })).toBe(false);
   });
 
