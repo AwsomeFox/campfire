@@ -882,9 +882,20 @@ export class EncountersController {
   }
 
   @Post(':id/start')
-  @ApiOperation({ summary: 'Start the encounter', description: 'dm role required. Requires initiative to have been rolled for all combatants; sorts by initiative desc, sets round=1, turnIndex=0.' })
+  @ApiOperation({
+    summary: 'Start the encounter',
+    description:
+      'dm role required. Requires initiative to have been rolled for all combatants; sorts by initiative desc, sets round=1, turnIndex=0. ' +
+      'A rule system with no initiative roll (issue #2123) is exempt from that requirement — POST .../roll-initiative 400s there, so ' +
+      'requiring it would make the fight unstartable: the turn order is the roster order (sortOrder ascending, arranged via POST ' +
+      '.../combatants/:cid/reorder), and an entirely unrolled roster starts as-is.',
+  })
   @ApiResponse({ status: 201, description: 'Started encounter.' })
-  @ApiResponse({ status: 400, description: 'Initiative not yet rolled for all combatants.' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Initiative not yet rolled for all combatants (not raised for a rule system with no initiative roll), or the roster is empty.',
+  })
   async start(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
