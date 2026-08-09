@@ -26,6 +26,7 @@ import { nowIso } from '../../common/time';
 
 export const WEB_PUSH_TRANSPORT = Symbol('WEB_PUSH_TRANSPORT');
 export const MAX_PUSH_SUBSCRIPTIONS_PER_USER = 10;
+export const MAX_CONCURRENT_PUSH_SENDS = 8;
 
 /** Narrow transport seam so delivery is deterministic in integration tests. */
 export interface WebPushTransport {
@@ -60,6 +61,12 @@ interface PushPayload {
   badge: string;
   tag: string;
   url: string;
+}
+
+interface QueuedPushSend {
+  run: () => Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
 }
 
 const ALLOWED_PUSH_HOSTS = new Set([
@@ -127,6 +134,8 @@ function statusCodeOf(error: unknown): number | null {
 export class PushNotificationsService {
   private readonly logger = new Logger(PushNotificationsService.name);
   private readonly publicKey: string | null;
+  private readonly sendQueue: QueuedPushSend[] = [];
+  private activeSends = 0;
 
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
@@ -222,6 +231,33 @@ export class PushNotificationsService {
     return { removed: result.changes > 0 };
   }
 
+  private enqueueSend(run: () => Promise<void>): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.sendQueue.push({ run, resolve, reject });
+      this.drainSendQueue();
+    });
+  }
+
+  private drainSendQueue(): void {
+    while (this.activeSends < MAX_CONCURRENT_PUSH_SENDS) {
+      const queued = this.sendQueue.shift();
+      if (!queued) return;
+      this.activeSends += 1;
+      void queued.run().then(
+        () => {
+          this.activeSends -= 1;
+          queued.resolve();
+          this.drainSendQueue();
+        },
+        (error: unknown) => {
+          this.activeSends -= 1;
+          queued.reject(error);
+          this.drainSendQueue();
+        },
+      );
+    }
+  }
+
   /**
    * Deliver already-materialized notification rows. Preferences and quiet hours
    * are not re-evaluated, but account state and campaign membership are checked
@@ -290,7 +326,7 @@ export class PushNotificationsService {
           tag: `campfire-${delivery.campaignId}-${delivery.type}-${delivery.entityId ?? 'event'}-${delivery.createdAt}`,
           url: pushPath(delivery),
         };
-        return userSubscriptions.map(async (subscription) => {
+        return userSubscriptions.map((subscription) => this.enqueueSend(async () => {
           try {
             await this.transport.sendNotification(
               {
@@ -299,7 +335,10 @@ export class PushNotificationsService {
               },
               JSON.stringify(payload),
               {
-                TTL: 24 * 60 * 60,
+                // Campaign excerpts must not sit in a vendor queue after access
+                // is revoked. Deliver immediately or discard; the in-app row is
+                // the durable notification source.
+                TTL: 0,
                 timeout: 5_000,
                 urgency: delivery.critical ? 'high' : 'normal',
               },
@@ -319,7 +358,7 @@ export class PushNotificationsService {
                 (statusCode === null ? '' : ` (status ${statusCode})`),
             );
           }
-        });
+        }));
       }),
     );
   }

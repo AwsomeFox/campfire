@@ -2936,7 +2936,6 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       sqlite.close();
     }
   });
-<<<<<<< HEAD
 
   it('0180 purges every legacy context-less encounter-status row before a later hide can expose it (#2112)', () => {
     expect(MIGRATION_NAMES).toContain('0180_hidden_status_notification_authorization_2112');

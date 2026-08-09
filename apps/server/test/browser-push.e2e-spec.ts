@@ -12,7 +12,9 @@ import {
 import { nowIso } from '../src/common/time';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import {
+  MAX_CONCURRENT_PUSH_SENDS,
   MAX_PUSH_SUBSCRIPTIONS_PER_USER,
+  PushNotificationsService,
   WEB_PUSH_TRANSPORT,
   type WebPushTransport,
 } from '../src/modules/notifications/push-notifications.service';
@@ -116,7 +118,7 @@ describe('browser push notifications (issue #1323, e2e)', () => {
 
     const [sentSubscription, rawPayload, options] = sendNotification.mock.calls[0];
     expect(sentSubscription.endpoint).toBe(subscription.endpoint);
-    expect(options).toEqual(expect.objectContaining({ urgency: 'normal', timeout: 5_000 }));
+    expect(options).toEqual(expect.objectContaining({ TTL: 0, urgency: 'normal', timeout: 5_000 }));
     const payload = JSON.parse(String(rawPayload));
     expect(payload).toEqual(expect.objectContaining({
       title: 'A note was shared',
@@ -293,6 +295,36 @@ describe('browser push notifications (issue #1323, e2e)', () => {
     sendNotification.mockClear();
   });
 
+  it('does not push or expose an inbox resolution from a blocked resolver', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const resolution = 'BLOCKED DM INBOX RESOLUTION';
+    const block = await player
+      .post(`/api/v1/campaigns/${campaignId}/safety/blocks`)
+      .send({ targetUserId: String(adminId) });
+    expect(block.status).toBe(201);
+    const inbox = await player.post(`/api/v1/campaigns/${campaignId}/inbox`).send({
+      body: 'The resolver is blocked before this is answered.',
+    });
+    expect(inbox.status).toBe(201);
+    sendNotification.mockClear();
+
+    expect((await admin.post(`/api/v1/notes/${inbox.body.id}/resolve`).send({ resolvedNote: resolution })).status)
+      .toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(sendNotification).not.toHaveBeenCalled();
+    expect(db.select({ actorUserId: notificationRows.actorUserId }).from(notificationRows)
+      .where(and(
+        eq(notificationRows.userId, playerId),
+        eq(notificationRows.campaignId, campaignId),
+        eq(notificationRows.type, 'note_reply'),
+        eq(notificationRows.body, resolution),
+      )).get()).toEqual({ actorUserId: String(adminId) });
+    const visible = (await player.get('/api/v1/notifications')).body.items as Array<{ body: string }>;
+    expect(visible.some((row) => row.body === resolution)).toBe(false);
+
+    expect((await player.delete(`/api/v1/campaigns/${campaignId}/safety/controls/${block.body.id}`)).status).toBe(200);
+  });
+
   it('rechecks membership for immediate comment push while preserving access lifecycle delivery', async () => {
     const db = ctx.app.get<DrizzleDb>(DB);
     await player.put(`/api/v1/notifications/preferences/${campaignId}`).send({
@@ -414,7 +446,7 @@ describe('browser push notifications (issue #1323, e2e)', () => {
     expect(sendNotification).toHaveBeenCalledTimes(deliveriesBefore);
   });
 
-  it('bounds each account to the newest browser subscriptions', async () => {
+  it('bounds subscriptions per account and vendor sends across concurrent fan-outs', async () => {
     sendNotification.mockClear();
     const endpoints = Array.from(
       { length: MAX_PUSH_SUBSCRIPTIONS_PER_USER + 1 },
@@ -427,11 +459,32 @@ describe('browser push notifications (issue #1323, e2e)', () => {
       })).status).toBe(201);
     }
 
-    await ctx.app.get(NotificationsService).notifyUser(playerId, campaignId, null, {
-      type: 'note_shared',
-      title: 'Bounded browser fan-out',
+    let activeSends = 0;
+    let peakActiveSends = 0;
+    sendNotification.mockImplementation(async () => {
+      activeSends += 1;
+      peakActiveSends = Math.max(peakActiveSends, activeSends);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      activeSends -= 1;
+      return { statusCode: 201, body: '', headers: {} };
     });
-    await waitForCalls(MAX_PUSH_SUBSCRIPTIONS_PER_USER);
+    const push = ctx.app.get(PushNotificationsService);
+    const delivery = {
+      userId: playerId,
+      campaignId,
+      type: 'note_shared' as const,
+      title: 'Bounded browser fan-out',
+      body: '',
+      entityId: null,
+      critical: false,
+    };
+    await Promise.all([
+      push.deliver([{ ...delivery, createdAt: '2026-08-09T17:30:00.000Z' }]),
+      push.deliver([{ ...delivery, createdAt: '2026-08-09T17:30:01.000Z' }]),
+    ]);
+    expect(sendNotification).toHaveBeenCalledTimes(MAX_PUSH_SUBSCRIPTIONS_PER_USER * 2);
+    expect(peakActiveSends).toBeLessThanOrEqual(MAX_CONCURRENT_PUSH_SENDS);
+    expect(activeSends).toBe(0);
     const deliveredEndpoints = sendNotification.mock.calls.map(([sent]) => sent.endpoint);
     expect(deliveredEndpoints).not.toContain(endpoints[0]);
     expect(deliveredEndpoints).toContain(endpoints.at(-1));

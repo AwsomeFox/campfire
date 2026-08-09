@@ -15,11 +15,13 @@ const PAGE = resolve(__dirname, '../../src/features/preferences/PreferencesPage.
 const BROWSER_PUSH = resolve(__dirname, '../../src/lib/browserPush.ts');
 const AUTH_PROVIDER = resolve(__dirname, '../../src/app/AuthProvider.tsx');
 const PUSH_WORKER = resolve(__dirname, '../../public/sw-push.js');
+const PWA_UPDATE = resolve(__dirname, '../../src/lib/pwaUpdate.ts');
 const CARD_SOURCE = readFileSync(CARD, 'utf8');
 const PAGE_SOURCE = readFileSync(PAGE, 'utf8');
 const BROWSER_PUSH_SOURCE = readFileSync(BROWSER_PUSH, 'utf8');
 const AUTH_PROVIDER_SOURCE = readFileSync(AUTH_PROVIDER, 'utf8');
 const PUSH_WORKER_SOURCE = readFileSync(PUSH_WORKER, 'utf8');
+const PWA_UPDATE_SOURCE = readFileSync(PWA_UPDATE, 'utf8');
 
 test.describe('Notification preferences card (#789)', () => {
   test('is rendered on the Preferences page', () => {
@@ -85,9 +87,9 @@ test.describe('Notification preferences card (#789)', () => {
     );
     expect(permissionCleanupSource).toContain('subscription.unsubscribe().catch(() => false)');
     expect(permissionCleanupSource).toContain('if (unsubscribed)');
-    expect(permissionCleanupSource).toContain('blockAutomaticRebind()');
+    expect(permissionCleanupSource).toContain('blockAutomaticRebind(registration)');
     expect(permissionCleanupSource).toContain('rebindBlocked = true');
-    expect(permissionCleanupSource.indexOf('blockAutomaticRebind()')).toBeLessThan(
+    expect(permissionCleanupSource.indexOf('blockAutomaticRebind(registration)')).toBeLessThan(
       permissionCleanupSource.indexOf('subscription && !rebindBlocked'),
     );
   });
@@ -161,14 +163,23 @@ test.describe('Notification preferences card (#789)', () => {
     );
     expect(BROWSER_PUSH_SOURCE).toContain("const PUSH_REBIND_BLOCKED_STORAGE_KEY = 'cf.browserPushRebindBlocked'");
     expect(detachSource).toContain('if (!unsubscribed)');
-    expect(detachSource.match(/blockAutomaticRebind\(\)/g)?.length).toBeGreaterThanOrEqual(2);
-    expect(detachSource.indexOf('setPushDisplaySuppressed(registration, true)')).toBeLessThan(
+    expect(detachSource.match(/blockAutomaticRebind\(registration\)/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(detachSource.indexOf('blockAutomaticRebind(registration)')).toBeLessThan(
       detachSource.indexOf('subscription.unsubscribe()'),
     );
     expect(PUSH_WORKER_SOURCE).toContain('if (await pushDisplaySuppressed()) return');
+    expect(inspectSource).toContain('await automaticRebindBlocked(registration)');
+    expect(BROWSER_PUSH_SOURCE).toContain('return pushDisplaySuppressed(registration)');
+    expect(BROWSER_PUSH_SOURCE).toContain('Boolean(await cache.match(key))');
+    expect(PWA_UPDATE_SOURCE).toContain('if (key === PUSH_DISPLAY_STATE_CACHE) continue');
     expect(inspectSource).toContain('subscription && !rebindBlocked');
     expect(inspectSource).toContain('enabled: subscription !== null && !rebindBlocked');
-    expect(enableSource.indexOf('api.post')).toBeLessThan(enableSource.indexOf('allowAutomaticRebind()'));
+    expect(enableSource.indexOf('api.post')).toBeLessThan(enableSource.indexOf('allowAutomaticRebind(registration)'));
+    expect(enableSource).toContain('serverBound = true');
+    expect(enableSource).toContain('!existing && !serverBound');
+    expect(enableSource.indexOf('serverBound = true')).toBeLessThan(
+      enableSource.indexOf('allowAutomaticRebind(registration)'),
+    );
   });
 
   test('routes status through the shared Announcer, not a new aria-live region', () => {

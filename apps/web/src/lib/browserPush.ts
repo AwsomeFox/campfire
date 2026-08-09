@@ -19,7 +19,7 @@ const PUSH_WORKER_CAPABILITY_REQUEST = 'campfire:push-capability';
 const PUSH_WORKER_CAPABILITY_RESPONSE = 'campfire:push-capable:v1';
 const PUSH_ENDPOINT_STORAGE_KEY = 'cf.browserPushEndpoint';
 const PUSH_REBIND_BLOCKED_STORAGE_KEY = 'cf.browserPushRebindBlocked';
-const PUSH_DISPLAY_STATE_CACHE = 'cf-push-display-state-v1';
+export const PUSH_DISPLAY_STATE_CACHE = 'cf-push-display-state-v1';
 const PUSH_DISPLAY_SUPPRESSED_PATH = '__campfire_push_suppressed__';
 let pendingLocalDetach: Promise<void> = Promise.resolve();
 let pushEndpointInMemory: string | null = null;
@@ -76,24 +76,29 @@ function forgetEndpoint(): void {
   }
 }
 
-function blockAutomaticRebind(): void {
+async function blockAutomaticRebind(registration: ServiceWorkerRegistration | undefined): Promise<void> {
   pushRebindBlockedInMemory = true;
   try {
     localStorage.setItem(PUSH_REBIND_BLOCKED_STORAGE_KEY, '1');
   } catch {
-    /* The in-memory guard still protects this page session. */
+    /* Cache Storage below remains durable across a reload. */
   }
+  await setPushDisplaySuppressed(registration, true).catch(() => {
+    /* localStorage/in-memory remain as fallbacks; auth transition still completes. */
+  });
 }
 
-function automaticRebindBlocked(): boolean {
+async function automaticRebindBlocked(registration: ServiceWorkerRegistration | undefined): Promise<boolean> {
   try {
-    return pushRebindBlockedInMemory || localStorage.getItem(PUSH_REBIND_BLOCKED_STORAGE_KEY) === '1';
+    if (pushRebindBlockedInMemory || localStorage.getItem(PUSH_REBIND_BLOCKED_STORAGE_KEY) === '1') return true;
   } catch {
-    return pushRebindBlockedInMemory;
+    if (pushRebindBlockedInMemory) return true;
   }
+  return pushDisplaySuppressed(registration);
 }
 
-function allowAutomaticRebind(): void {
+async function allowAutomaticRebind(registration: ServiceWorkerRegistration | undefined): Promise<void> {
+  await setPushDisplaySuppressed(registration, false);
   pushRebindBlockedInMemory = false;
   try {
     localStorage.removeItem(PUSH_REBIND_BLOCKED_STORAGE_KEY);
@@ -129,6 +134,18 @@ async function setPushDisplaySuppressed(
   }
 }
 
+async function pushDisplaySuppressed(registration: ServiceWorkerRegistration | undefined): Promise<boolean> {
+  if (!registration || !('caches' in window)) return false;
+  try {
+    const cache = await window.caches.open(PUSH_DISPLAY_STATE_CACHE);
+    const key = new URL(PUSH_DISPLAY_SUPPRESSED_PATH, registration.scope).href;
+    return Boolean(await cache.match(key));
+  } catch {
+    // Match the service worker: an unreadable transition marker is fail-closed.
+    return true;
+  }
+}
+
 /**
  * Stop this browser capability without requiring a live session. AuthProvider
  * calls this for explicit, cross-tab, expired-session, and account-switch paths.
@@ -139,26 +156,24 @@ export function detachBrowserPushLocally(): Promise<void> {
   forgetEndpoint();
   if (!browserPushSupported()) return pendingLocalDetach;
   pendingLocalDetach = pendingLocalDetach.then(async () => {
+    let registration: ServiceWorkerRegistration | undefined;
     try {
-      const registration = await currentRegistration();
+      registration = await currentRegistration();
       const subscription = (await registration?.pushManager.getSubscription()) ?? null;
       if (!subscription) {
-        await setPushDisplaySuppressed(registration, false);
-        allowAutomaticRebind();
+        await allowAutomaticRebind(registration);
         return;
       }
-      await setPushDisplaySuppressed(registration, true);
+      await blockAutomaticRebind(registration);
       const unsubscribed = await subscription.unsubscribe();
       if (!unsubscribed) {
-        blockAutomaticRebind();
         return;
       }
-      await setPushDisplaySuppressed(registration, false);
-      allowAutomaticRebind();
+      await allowAutomaticRebind(registration);
     } catch {
       // Auth transitions must complete even if browser cleanup fails. Persist a
       // fail-closed marker so another account cannot inherit the subscription.
-      blockAutomaticRebind();
+      await blockAutomaticRebind(registration);
     }
   });
   return pendingLocalDetach;
@@ -253,10 +268,9 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
   }
 
   if (!subscription) {
-    await setPushDisplaySuppressed(registration, false);
-    allowAutomaticRebind();
+    await allowAutomaticRebind(registration);
   }
-  let rebindBlocked = automaticRebindBlocked();
+  let rebindBlocked = await automaticRebindBlocked(registration);
 
   // Permission can be revoked outside Campfire. The next preferences visit
   // cleans up both sides so the server does not retain a dead capability.
@@ -269,19 +283,17 @@ export async function inspectBrowserPush(): Promise<BrowserPushUiState> {
     }
     forgetEndpoint();
     if (subscription) {
-      await setPushDisplaySuppressed(registration, true);
+      await blockAutomaticRebind(registration);
       const unsubscribed = await subscription.unsubscribe().catch(() => false);
       if (unsubscribed) {
-        await setPushDisplaySuppressed(registration, false);
-        allowAutomaticRebind();
+        await allowAutomaticRebind(registration);
         rebindBlocked = false;
         subscription = null;
       } else {
-        blockAutomaticRebind();
         rebindBlocked = true;
       }
     } else {
-      allowAutomaticRebind();
+      await allowAutomaticRebind(registration);
       rebindBlocked = false;
     }
   } else if (subscription && !rebindBlocked) {
@@ -316,13 +328,17 @@ export async function enableBrowserPush(publicKey: string): Promise<void> {
       userVisibleOnly: true,
       applicationServerKey: applicationServerKey(publicKey),
     }));
+  let serverBound = false;
   try {
     await api.post(`${API}/notifications/push-subscribe`, subscriptionBody(subscription));
-    await setPushDisplaySuppressed(registration, false);
-    allowAutomaticRebind();
+    serverBound = true;
+    await allowAutomaticRebind(registration);
     rememberEndpoint(subscription.endpoint);
   } catch (error) {
-    if (!existing) await subscription.unsubscribe().catch(() => false);
+    // Once POST succeeds, retain the local subscription even if clearing the
+    // fail-closed display marker fails. A retry can idempotently rebind and clear
+    // it; unsubscribing here would leave a server row pointing at a dead endpoint.
+    if (!existing && !serverBound) await subscription.unsubscribe().catch(() => false);
     throw error;
   }
 }
@@ -336,4 +352,5 @@ export async function disableBrowserPush(): Promise<void> {
   await api.delete(`${API}/notifications/push-subscribe`, { json: { endpoint } });
   await subscription?.unsubscribe();
   forgetEndpoint();
+  await allowAutomaticRebind(registration);
 }

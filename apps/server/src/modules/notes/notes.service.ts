@@ -38,7 +38,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { canSee } from '../../common/note-visibility';
 import { assertMayInteract, noteVisibilityIsOutbound } from '../../common/interactive-capability';
-import { blockedTargetsOf } from '../../common/safety-controls';
+import { blockedTargetsOf, suppressedRecipients } from '../../common/safety-controls';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
@@ -1091,7 +1091,11 @@ export class NotesService {
         return { transitioned: false as const, row: current, push: null };
       }
 
-      let push: { recipient: number; event: Parameters<NotificationsService['pushMaterializedNotification']>[2] } | null = null;
+      let push: {
+        recipient: number;
+        actorUserId: string;
+        event: Parameters<NotificationsService['pushMaterializedNotification']>[2];
+      } | null = null;
 
       tx.insert(auditLog)
         .values({
@@ -1146,11 +1150,12 @@ export class NotesService {
                 entityType: null,
                 entityId: null,
                 actorName: event.actorName,
+                actorUserId: user.id,
                 readAt: null,
                 createdAt: ts,
               })
               .run();
-            if (recipientStillMember) push = { recipient, event };
+            if (recipientStillMember) push = { recipient, actorUserId: user.id, event };
           } catch {
             // Match NotificationsService.notifyUser: notification delivery is
             // best-effort and must never roll back the canonical terminal
@@ -1177,12 +1182,26 @@ export class NotesService {
       }
     }
     if (outcome.push) {
-      this.notifications.pushMaterializedNotification(
-        outcome.push.recipient,
-        row.campaignId,
-        outcome.push.event,
-        ts,
-      );
+      try {
+        const suppressed = await suppressedRecipients(this.db, [String(outcome.push.recipient)], {
+          campaignId: row.campaignId,
+          actorUserId: outcome.push.actorUserId,
+          entityType: null,
+          entityId: null,
+        });
+        if (!suppressed.has(String(outcome.push.recipient))) {
+          this.notifications.pushMaterializedNotification(
+            outcome.push.recipient,
+            row.campaignId,
+            outcome.push.event,
+            ts,
+          );
+        }
+      } catch {
+        // The canonical resolution and its notification row are already committed.
+        // Fail closed for OS push without turning an optional safety lookup failure
+        // into a false failure response for the successful domain transition.
+      }
     }
     return toDomain(row);
   }
