@@ -3815,9 +3815,30 @@ export const ApplyDamageBar = memo(function ApplyDamageBar({
   const ref = useRef<HTMLDivElement>(null);
   const announce = useAnnounce();
   useEffect(() => {
-    ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    ref.current?.focus({ preventScroll: true });
+    // Retried across frames rather than taken once. In the encounter cockpit this bar can
+    // mount inside a COLLAPSED side panel — a damage roll from the still-reachable dice
+    // tray does exactly that — and a browser refuses `focus()` anywhere inside a hidden
+    // subtree. The panel reopens a moment later without remounting this bar, so a single
+    // attempt left the keyboard back in the dice controls with the target picker never
+    // reached. Keep asking until it is accepted, then scroll it into view.
+    let frame = 0;
+    let attemptsLeft = 40;
+    const settle = () => {
+      frame = 0;
+      const node = ref.current;
+      if (!node) return;
+      node.focus({ preventScroll: true });
+      if (document.activeElement === node) {
+        node.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        return;
+      }
+      if (attemptsLeft-- > 0) frame = requestAnimationFrame(settle);
+    };
+    frame = requestAnimationFrame(settle);
     announce(`Apply ${amount} ${label}. Pick a target.`);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+    };
   }, [amount, label, announce]);
   return (
     <div

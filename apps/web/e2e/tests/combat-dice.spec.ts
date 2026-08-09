@@ -378,6 +378,10 @@ test.describe('encounter dice — apply rolled damage', () => {
       const advanceRes = await dm.post(`/api/v1/encounters/${drill.encounterId}/next-turn`);
       expect(advanceRes.ok(), `advance to Brixi: ${await advanceRes.text()}`).toBeTruthy();
       await expect(page.getByTestId(`combatant-row-${drill.brixiCombatantId}`)).toHaveAttribute('data-current-turn', 'true');
+      // An owned turn beat now takes the player to their Turn workspace — the cockpit
+      // reveals it rather than scrolling a panel that may be hidden. Come back to the
+      // roster, which is the surface whose controls this test is about.
+      await openCockpitTab(page, 'party');
       await expect(playerBrixiCard.getByTestId('check-roll-ability:STR')).toBeVisible();
       await expect(playerBrixiCard.getByTestId('attack-roll-control')).toBeVisible();
     } finally {

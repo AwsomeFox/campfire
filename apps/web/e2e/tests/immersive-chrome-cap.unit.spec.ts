@@ -55,3 +55,32 @@ test.describe('the cockpit deep-link resolver', () => {
     expect(SHELL).toContain('if (attemptsLeft-- > 0) frame = requestAnimationFrame(settle);');
   });
 });
+
+const RUN_SESSION = readFileSync(
+  resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'),
+  'utf8',
+);
+const BATTLE_MAP = readFileSync(resolve(__dirname, '../../src/features/encounters/map/BattleMap.tsx'), 'utf8');
+
+/**
+ * Two more "reveal before you act on it" invariants of the cockpit's everything-stays-
+ * mounted model. Both need a state a browser test cannot cheaply stage — an SSE turn beat
+ * arriving while the player is on another tab, and a damage roll made from the dice tray
+ * while the panel is collapsed — so they are pinned here, at the source, next to the code
+ * that carries them.
+ */
+test.describe('acting on something the cockpit is currently hiding', () => {
+  test('an owned turn reveals the workspace before scrolling to it', () => {
+    // `scrollIntoView()` on a node under a hidden tab scrolls nothing and leaves the
+    // player on an unrelated surface at the moment their turn begins.
+    expect(RUN_SESSION).toContain("revealCockpitPanel('turn-workspace', () => {");
+    expect(RUN_SESSION).toContain("document.getElementById('turn-workspace')?.scrollIntoView({");
+  });
+
+  test('the apply-damage bar keeps asking for focus until it is accepted', () => {
+    // It can mount inside a COLLAPSED panel — a roll from the still-reachable dice tray —
+    // where focus is refused, and the reopen that follows does not remount it.
+    expect(BATTLE_MAP).toContain('if (document.activeElement === node) {');
+    expect(BATTLE_MAP).toContain('if (attemptsLeft-- > 0) frame = requestAnimationFrame(settle);');
+  });
+});

@@ -59,6 +59,7 @@ import { shouldRevealInitiative } from './initiativeReveal';
 import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
 import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
 import { ActionUsePanel, legalTargets } from './ActionUseFlow';
+import { revealCockpitPanel } from './vtt/revealCockpitPanel';
 import { waitingPromptsKey } from './vtt/attentionKey';
 import { EncounterVttShell, VttPanelSection } from './vtt/EncounterVttShell';
 import { GroupActionRunner } from './GroupActionRunner.tsx';
@@ -1525,9 +1526,15 @@ export default function RunSessionPage() {
     // A turn change must not pull a player away from an active form or dialog.
     const active = document.activeElement as HTMLElement | null;
     if (!active?.closest('form, [role="dialog"], input, textarea, select')) {
-      document.querySelector<HTMLElement>('[data-testid="turn-workspace"]')?.scrollIntoView({
-        behavior: scrollBehavior(),
-        block: 'nearest',
+      // Reveal first. In the cockpit the workspace stays MOUNTED under whichever tab is
+      // not showing, and the whole panel can be collapsed, so a bare `scrollIntoView()`
+      // scrolled something invisible and left the player on an unrelated surface at the
+      // exact moment their turn began.
+      revealCockpitPanel('turn-workspace', () => {
+        document.getElementById('turn-workspace')?.scrollIntoView({
+          behavior: scrollBehavior(),
+          block: 'nearest',
+        });
       });
     }
   }, []);
