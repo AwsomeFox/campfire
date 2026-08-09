@@ -1,9 +1,39 @@
 import request from 'supertest';
 import { and, eq, sql } from 'drizzle-orm';
-import { DB, type DrizzleDb } from '../src/db/db.module';
+import { DB, DB_HOLDER, type DbHolder, type DrizzleDb } from '../src/db/db.module';
 import { campaignMembers, characters, encounters, notificationDigestQueue, notifications as notificationRows } from '../src/db/schema';
+import type { RequestUser } from '../src/common/user.types';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+
+type InstrumentedStatementMethod = (...args: unknown[]) => unknown;
+type InstrumentedStatement = Partial<Record<'run' | 'get' | 'all' | 'iterate', InstrumentedStatementMethod>>;
+type InstrumentedDatabase = { prepare: (source: string) => InstrumentedStatement };
+
+function instrumentSql(ctx: TestAppContext): { executed: string[]; restore: () => void } {
+  const raw = ctx.app.get<DbHolder>(DB_HOLDER).raw as unknown as InstrumentedDatabase;
+  const executed: string[] = [];
+  const originalPrepare = raw.prepare.bind(raw);
+  raw.prepare = (source: string) => {
+    const statement = originalPrepare(source);
+    for (const method of ['run', 'get', 'all', 'iterate'] as const) {
+      const originalMethod = statement[method];
+      if (typeof originalMethod === 'function') {
+        statement[method] = function tracked(...args: unknown[]) {
+          executed.push(source);
+          return originalMethod.apply(statement, args);
+        };
+      }
+    }
+    return statement;
+  };
+  return {
+    executed,
+    restore: () => {
+      raw.prepare = originalPrepare;
+    },
+  };
+}
 
 /**
  * In-app notifications (issue #11): recap posted, note reply, added to
@@ -1335,6 +1365,37 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       entityType: 'encounter',
       entityId: scopedVisibleOwner.encounter.body.id,
     });
+
+    // Bell polling must not re-run membership, encounter, and ownership
+    // lookups for every retained hidden-status row. Several rows now exercise
+    // the guard, yet each authorization table is prepared exactly once.
+    const retainedHiddenRows = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+    )).all().filter((row) => row.hiddenStatusContext !== null);
+    expect(retainedHiddenRows.length).toBeGreaterThan(1);
+    const queryProbe = instrumentSql(ctx);
+    try {
+      const scopedOwnerUser: RequestUser = {
+        id: String(coDmId),
+        name: 'Co-DM',
+        serverRole: 'user',
+        tokenContext: {
+          tokenId: 0,
+          name: 'hidden-status-viewer-read',
+          scope: 'viewer',
+          writeScope: 'none',
+          campaignId: guardedCampaignId,
+          adminEnabled: false,
+        },
+      };
+      expect((await notifications.unreadSummary(scopedOwnerUser)).count).toBeGreaterThan(0);
+    } finally {
+      queryProbe.restore();
+    }
+    for (const table of ['campaign_members', 'encounters', 'characters']) {
+      expect(queryProbe.executed.filter((source) => new RegExp(`from\\s+["\`]${table}["\`]`, 'i').test(source))).toHaveLength(1);
+    }
     expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
 
     const removed = await createHiddenCombatant('Removal Digest Hero');

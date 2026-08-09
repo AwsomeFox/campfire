@@ -694,6 +694,73 @@ export class NotificationsService implements OnApplicationBootstrap {
   }
 
   /**
+   * Bell reads retain hidden-status rows indefinitely, so evaluate every
+   * candidate from a bounded set of membership, encounter, and ownership
+   * queries rather than repeating the same three lookups per notification.
+   * The caller keeps this evaluation and its exposing query in one SQLite
+   * transaction, preserving the read-boundary authorization guarantee.
+   */
+  private hiddenStatusDispositionsTx(
+    tx: SyncDb,
+    userId: number,
+    rows: Array<{ id: number; campaignId: number; hiddenStatusContext: string | null }>,
+    user: RequestUser,
+  ): Array<{ id: number; disposition: HiddenStatusDisposition }> {
+    const tokenContext = user.tokenContext;
+    const parsed = rows.map((row) => ({ ...row, context: parseHiddenStatusContext(row.hiddenStatusContext) }));
+    const candidates = parsed.filter((row) => (
+      row.context && !(tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== row.campaignId)
+    ));
+    const campaignIds = [...new Set(candidates.map((row) => row.campaignId))];
+    const memberships = campaignIds.length === 0
+      ? []
+      : tx.select({ campaignId: campaignMembers.campaignId, role: campaignMembers.role })
+        .from(campaignMembers)
+        .where(and(eq(campaignMembers.userId, userId), inArray(campaignMembers.campaignId, campaignIds)))
+        .all();
+    const membershipsByCampaign = new Map(memberships.map((membership) => [membership.campaignId, membership.role as Role]));
+    const memberCandidates = candidates.filter((row) => membershipsByCampaign.has(row.campaignId));
+    const encounterIds = [...new Set(memberCandidates.map((row) => row.context!.encounterId))];
+    const encounterRows = encounterIds.length === 0
+      ? []
+      : tx.select({ id: encounters.id, campaignId: encounters.campaignId, hidden: encounters.hidden })
+        .from(encounters)
+        .where(inArray(encounters.id, encounterIds))
+        .all();
+    const encountersByKey = new Map(encounterRows.map((encounter) => [`${encounter.campaignId}:${encounter.id}`, encounter]));
+    const characterIds = [...new Set(memberCandidates.map((row) => row.context!.characterId))];
+    const ownedCharacters = characterIds.length === 0
+      ? []
+      : tx.select({ id: characters.id, campaignId: characters.campaignId })
+        .from(characters)
+        .where(and(eq(characters.ownerUserId, String(userId)), inArray(characters.id, characterIds)))
+        .all();
+    const ownedCharacterKeys = new Set(ownedCharacters.map((character) => `${character.campaignId}:${character.id}`));
+
+    return parsed.map((row) => {
+      const context = row.context;
+      if (!context) return { id: row.id, disposition: 'deny' };
+      if (tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== row.campaignId) {
+        return { id: row.id, disposition: 'filter' };
+      }
+      const membershipRole = membershipsByCampaign.get(row.campaignId);
+      if (!membershipRole) return { id: row.id, disposition: 'deny' };
+      const encounter = encountersByKey.get(`${row.campaignId}:${context.encounterId}`);
+      if (!encounter) return { id: row.id, disposition: 'deny' };
+      if (!encounter.hidden) return { id: row.id, disposition: 'allow' };
+      const effectiveRole = user.devRole ?? (tokenContext ? minRole(tokenContext.scope, membershipRole) : membershipRole);
+      const isOwner = ownedCharacterKeys.has(`${row.campaignId}:${context.characterId}`);
+      if (context.audience === 'permanent_dm') {
+        if (membershipRole === 'dm') return { id: row.id, disposition: effectiveRole === 'dm' ? 'allow' : isOwner ? 'project_redact' : 'filter' };
+        return { id: row.id, disposition: isOwner ? 'redact' : 'deny' };
+      }
+      if (context.audience === 'character_owner') return { id: row.id, disposition: isOwner ? 'allow' : 'deny' };
+      if (membershipRole === 'dm') return { id: row.id, disposition: effectiveRole === 'dm' ? 'allow' : isOwner ? 'project_redact' : 'filter' };
+      return { id: row.id, disposition: isOwner ? 'redact' : 'deny' };
+    });
+  }
+
+  /**
    * Remove private-context rows whose recipient has durably lost access, while
    * returning PAT-scoped rows for request-only filtering or owner-safe
    * projection. Callers keep their exposing SELECT or UPDATE in this same
@@ -706,10 +773,7 @@ export class NotificationsService implements OnApplicationBootstrap {
       .from(notifications)
       .where(and(eq(notifications.userId, userId), isNotNull(notifications.hiddenStatusContext)))
       .all();
-    const dispositions = guarded.map((row) => ({
-      id: row.id,
-      disposition: this.hiddenStatusAuthorizedTx(tx, userId, row.campaignId, row.hiddenStatusContext, user),
-    }));
+    const dispositions = this.hiddenStatusDispositionsTx(tx, userId, guarded, user);
     const unauthorizedIds = dispositions.filter((row) => row.disposition === 'deny').map((row) => row.id);
     const redactIds = dispositions.filter((row) => row.disposition === 'redact').map((row) => row.id);
     const filteredIds = dispositions.filter((row) => row.disposition === 'filter').map((row) => row.id);
