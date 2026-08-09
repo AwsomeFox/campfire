@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { and, eq, sql } from 'drizzle-orm';
 import { DB, DB_HOLDER, type DbHolder, type DrizzleDb } from '../src/db/db.module';
-import { campaignMembers, characters, encounters, notificationDigestQueue, notifications as notificationRows } from '../src/db/schema';
+import { campaignMembers, campaigns, characters, encounters, notificationDigestQueue, notifications as notificationRows } from '../src/db/schema';
 import type { RequestUser } from '../src/common/user.types';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
@@ -1394,6 +1394,76 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .set({ role: 'dm' })
       .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
       .run();
+
+    // Context preloads use their own ID lists. Distinct, nonexistent entity
+    // references make the guard deny these rows after exercising both the
+    // encounter and character lookup batches without creating 32,767 entities.
+    const sqlitePreloadTitle = 'SQLite preload notification';
+    for (let start = 0; start < sqliteVariableLimitRows; start += 500) {
+      const rows = Array.from({ length: Math.min(500, sqliteVariableLimitRows - start) }, (_, offset) => {
+        const id = start + offset + 1;
+        return {
+          userId: coDmId,
+          campaignId: guardedCampaignId,
+          type: 'character_downed',
+          title: sqlitePreloadTitle,
+          body: 'SQLite preload notification body',
+          entityType: 'encounter',
+          entityId: 1_000_000 + id,
+          commentId: null,
+          data: null,
+          hiddenStatusContext: JSON.stringify({
+            encounterId: 1_000_000 + id,
+            characterId: 2_000_000 + id,
+            audience: 'permanent_dm',
+          }),
+          actorName: '',
+          actorUserId: null,
+          readAt: null,
+          createdAt: sqliteGuardCreatedAt,
+        };
+      });
+      db.insert(notificationRows).values(rows).run();
+    }
+    await notifications.unreadSummary({ id: String(coDmId), name: 'Co-DM', serverRole: 'user' });
+    expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      eq(notificationRows.title, sqlitePreloadTitle),
+    )).get()?.value).toBe(0);
+
+    // The membership preload has a separate campaign-ID predicate. Distinct
+    // campaigns with no seats exercise that path before the guard denies and
+    // removes the rows without needing a matching encounter or character.
+    const sqliteCampaignPreloadTitle = 'SQLite campaign preload notification';
+    for (let start = 0; start < sqliteVariableLimitRows; start += 500) {
+      const campaignRows = Array.from({ length: Math.min(500, sqliteVariableLimitRows - start) }, (_, offset) => {
+        const id = 3_000_000 + start + offset + 1;
+        return { id, name: `SQLite preload campaign ${id}`, createdAt: sqliteGuardCreatedAt, updatedAt: sqliteGuardCreatedAt };
+      });
+      db.insert(campaigns).values(campaignRows).run();
+      db.insert(notificationRows).values(campaignRows.map((campaign) => ({
+        userId: coDmId,
+        campaignId: campaign.id,
+        type: 'character_downed',
+        title: sqliteCampaignPreloadTitle,
+        body: 'SQLite campaign preload notification body',
+        entityType: 'encounter',
+        entityId: demoted.encounter.body.id,
+        commentId: null,
+        data: null,
+        hiddenStatusContext: sqliteGuardContext,
+        actorName: '',
+        actorUserId: null,
+        readAt: null,
+        createdAt: sqliteGuardCreatedAt,
+      }))).run();
+    }
+    await notifications.unreadSummary({ id: String(coDmId), name: 'Co-DM', serverRole: 'user' });
+    expect(db.select({ value: sql<number>`count(*)` }).from(notificationRows).where(eq(
+      notificationRows.title,
+      sqliteCampaignPreloadTitle,
+    )).get()?.value).toBe(0);
 
     expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
     const visibleThenHidden = await createHiddenCombatant('Visible Then Hidden Hero', false);

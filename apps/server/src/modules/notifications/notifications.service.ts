@@ -717,29 +717,32 @@ export class NotificationsService implements OnApplicationBootstrap {
       row.context && !(tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== row.campaignId)
     ));
     const campaignIds = [...new Set(candidates.map((row) => row.campaignId))];
-    const memberships = campaignIds.length === 0
-      ? []
-      : tx.select({ campaignId: campaignMembers.campaignId, role: campaignMembers.role })
+    const memberships: Array<{ campaignId: number; role: string }> = [];
+    this.forEachSqliteIdBatch(campaignIds, (batch) => {
+      memberships.push(...tx.select({ campaignId: campaignMembers.campaignId, role: campaignMembers.role })
         .from(campaignMembers)
-        .where(and(eq(campaignMembers.userId, userId), inArray(campaignMembers.campaignId, campaignIds)))
-        .all();
+        .where(and(eq(campaignMembers.userId, userId), inArray(campaignMembers.campaignId, batch)))
+        .all());
+    });
     const membershipsByCampaign = new Map(memberships.map((membership) => [membership.campaignId, membership.role as Role]));
     const memberCandidates = candidates.filter((row) => membershipsByCampaign.has(row.campaignId));
     const encounterIds = [...new Set(memberCandidates.map((row) => row.context!.encounterId))];
-    const encounterRows = encounterIds.length === 0
-      ? []
-      : tx.select({ id: encounters.id, campaignId: encounters.campaignId, hidden: encounters.hidden })
+    const encounterRows: Array<{ id: number; campaignId: number; hidden: boolean }> = [];
+    this.forEachSqliteIdBatch(encounterIds, (batch) => {
+      encounterRows.push(...tx.select({ id: encounters.id, campaignId: encounters.campaignId, hidden: encounters.hidden })
         .from(encounters)
-        .where(inArray(encounters.id, encounterIds))
-        .all();
+        .where(inArray(encounters.id, batch))
+        .all());
+    });
     const encountersByKey = new Map(encounterRows.map((encounter) => [`${encounter.campaignId}:${encounter.id}`, encounter]));
     const characterIds = [...new Set(memberCandidates.map((row) => row.context!.characterId))];
-    const ownedCharacters = characterIds.length === 0
-      ? []
-      : tx.select({ id: characters.id, campaignId: characters.campaignId })
+    const ownedCharacters: Array<{ id: number; campaignId: number }> = [];
+    this.forEachSqliteIdBatch(characterIds, (batch) => {
+      ownedCharacters.push(...tx.select({ id: characters.id, campaignId: characters.campaignId })
         .from(characters)
-        .where(and(eq(characters.ownerUserId, String(userId)), inArray(characters.id, characterIds)))
-        .all();
+        .where(and(eq(characters.ownerUserId, String(userId)), inArray(characters.id, batch)))
+        .all());
+    });
     const ownedCharacterKeys = new Set(ownedCharacters.map((character) => `${character.campaignId}:${character.id}`));
 
     return parsed.map((row) => {
@@ -766,20 +769,20 @@ export class NotificationsService implements OnApplicationBootstrap {
   }
 
   /** SQLite caps bind variables at 32,766; retained bells can exceed that after a demotion. */
-  private forEachNotificationIdBatch(ids: readonly number[], action: (batch: number[]) => void): void {
+  private forEachSqliteIdBatch(ids: readonly number[], action: (batch: number[]) => void): void {
     for (let start = 0; start < ids.length; start += SQLITE_ID_BATCH_SIZE) {
       action(ids.slice(start, start + SQLITE_ID_BATCH_SIZE));
     }
   }
 
   private deleteNotificationIdsTx(tx: SyncDb, ids: readonly number[]): void {
-    this.forEachNotificationIdBatch(ids, (batch) => {
+    this.forEachSqliteIdBatch(ids, (batch) => {
       tx.delete(notifications).where(inArray(notifications.id, batch)).run();
     });
   }
 
   private redactNotificationIdsTx(tx: SyncDb, ids: readonly number[]): void {
-    this.forEachNotificationIdBatch(ids, (batch) => {
+    this.forEachSqliteIdBatch(ids, (batch) => {
       tx.update(notifications)
         .set({ entityType: null, entityId: null, data: null })
         .where(inArray(notifications.id, batch))
@@ -789,7 +792,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 
   private updateNotificationReadStateTx(tx: SyncDb, ids: readonly number[], readAt: string | null): Array<{ id: number }> {
     const updated: Array<{ id: number }> = [];
-    this.forEachNotificationIdBatch(ids, (batch) => {
+    this.forEachSqliteIdBatch(ids, (batch) => {
       updated.push(...tx.update(notifications)
         .set({ readAt })
         .where(inArray(notifications.id, batch))
