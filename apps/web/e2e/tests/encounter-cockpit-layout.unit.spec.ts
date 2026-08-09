@@ -44,8 +44,14 @@ test.describe('encounter cockpit layout', () => {
       ['table', 'tabTable'],
     ]) {
       expect(source).toContain(`id: '${id}', label: t('encounters.vtt.${key}')`);
-      expect(source).toMatch(new RegExp(`<VttPanelSection id="${id}" activeTabId=\\{panelTab\\}`));
+      expect(source).toMatch(new RegExp(`<VttPanelSection id="${id}" activeTabId=\\{activePanelTab\\}`));
     }
+
+    // ...but Turn is offered only when it has something in it — outside combat its whole
+    // body is `running`-gated except the viewer's own vitals, so a DM clicking it got a
+    // blank panel where the aftermath had been.
+    expect(source).toContain("turnTabAvailable ? [{ id: 'turn'");
+    expect(source).toContain("const turnTabAvailable = encounterRunning || (!isDm && myCombatants.length > 0);");
 
     // The combat log lives in the Log tab; the shared dice tray moved to the
     // floating Roll control, so it must not be duplicated back into the panel.

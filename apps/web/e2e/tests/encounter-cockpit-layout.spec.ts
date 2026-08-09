@@ -430,6 +430,31 @@ test.describe('encounter cockpit panel collapse', () => {
     }
   });
 
+  test('the Turn tab is gone for a DM outside combat, not merely unselected', async ({ page }) => {
+    const fixture = await createRunningEncounter(page);
+    try {
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible();
+      await expect(page.getByTestId('encounter-vtt-tab-turn')).toBeVisible();
+
+      // Turn holds the viewer's own vitals plus two `running`-gated blocks, so once
+      // combat is over a DM clicking it got a blank panel where the aftermath had been.
+      const ended = await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`);
+      expect(ended.ok(), `end encounter: ${await ended.text()}`).toBe(true);
+
+      await expect(page.getByTestId('encounter-vtt-tab-turn')).toHaveCount(0, { timeout: 15_000 });
+      await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true');
+      // The other three are untouched.
+      for (const tab of ['party', 'log', 'table']) {
+        await expect(page.getByTestId(`encounter-vtt-tab-${tab}`)).toBeVisible();
+      }
+    } finally {
+      await page.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
+      await page.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
+      await restoreSeedEncounter(page);
+    }
+  });
+
   test('an explicit Turn choice expires when the fight ends', async ({ page }) => {
     const fixture = await createRunningEncounter(page);
     try {

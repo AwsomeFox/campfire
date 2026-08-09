@@ -3899,6 +3899,14 @@ export default function RunSessionPage() {
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
   const myCombatants = orderedCombatants.filter(c => c.characterId != null && ownedCharacterIds.has(c.characterId));
+  // The Turn section holds exactly three things: the viewer's own vitals, and two blocks
+  // gated on `status === 'running'`. Outside combat it is therefore empty for a DM, and
+  // for any player with no combatant of their own — and the tab was still selectable, so
+  // clicking it replaced the roster or the aftermath with a blank panel. The lifecycle
+  // default only kept people from LANDING there. Drop the tab instead, and fall back to
+  // Party if it disappears while selected.
+  const turnTabAvailable = encounterRunning || (!isDm && myCombatants.length > 0);
+  const activePanelTab: PanelTab = panelTab === 'turn' && !turnTabAvailable ? 'party' : panelTab;
   // Prefer a combatant the viewer can resolve. Fall back only to character combatants
   // (party HP is shared table knowledge); never surface monster/NPC concentration
   // queues to non-resolvers — those embed secret exact damage/DC (#43 / #606).
@@ -4315,12 +4323,12 @@ export default function RunSessionPage() {
         </>
       }
       tabs={[
-        { id: 'turn', label: t('encounters.vtt.tabTurn') },
+        ...(turnTabAvailable ? [{ id: 'turn', label: t('encounters.vtt.tabTurn') }] : []),
         { id: 'party', label: t('encounters.vtt.tabParty'), badge: orderedCombatants.length > 0 ? orderedCombatants.length : undefined },
         { id: 'log', label: t('encounters.vtt.tabLog') },
         { id: 'table', label: t('encounters.vtt.tabTable') },
       ]}
-      activeTabId={panelTab}
+      activeTabId={activePanelTab}
       onSelectTab={(id) => setPanelTabChoice({ eid, running: encounterRunning, tab: id as PanelTab })}
       panelOpen={panelOpen}
       onPanelOpenChange={setPanelOpen}
@@ -4472,7 +4480,7 @@ export default function RunSessionPage() {
               onDismiss={() => setPendingGroupActionUse(null)}
             />
           )}
-          <VttPanelSection id="turn" activeTabId={panelTab}>
+          <VttPanelSection id="turn" activeTabId={activePanelTab}>
               {/* Sticky Player Vitals Header */}
               {!isDm && myCombatants.length > 0 && (
                 <PlayerVitalsHeader
@@ -4643,7 +4651,7 @@ export default function RunSessionPage() {
                 />
               )}
           </VttPanelSection>
-          <VttPanelSection id="party" activeTabId={panelTab}>
+          <VttPanelSection id="party" activeTabId={activePanelTab}>
               {/* The outcome belongs with the roster it describes — and this is the tab an
                   ended encounter opens on, whereas the Turn tab has no content once combat
                   is over, so a summary parked there was effectively hidden. */}
@@ -4888,11 +4896,11 @@ export default function RunSessionPage() {
                 />
               )}
           </VttPanelSection>
-          <VttPanelSection id="log" activeTabId={panelTab}>
+          <VttPanelSection id="log" activeTabId={activePanelTab}>
               <CombatLog events={events} />
               <RulesLookupPanel campaignId={cid} ruleSystem={campaign?.ruleSystem || ''} customMechanicsProfile={campaign?.customMechanicsProfile} />
           </VttPanelSection>
-          <VttPanelSection id="table" activeTabId={panelTab}>
+          <VttPanelSection id="table" activeTabId={activePanelTab}>
               {/* Player display / Cast controls (issue #547). In the cockpit these live
                   with the other table-wide setup rather than in the 54px header, which the
                   design reserves for identity, round state and the turn controls. */}
