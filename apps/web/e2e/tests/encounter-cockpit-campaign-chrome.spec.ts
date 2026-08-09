@@ -123,6 +123,59 @@ async function privateFixture(baseURL: string | undefined) {
 test.describe('encounter cockpit — campaign-wide chrome', () => {
   test.use({ storageState: stateFor('player'), viewport: { width: 1280, height: 800 } });
 
+  test('tall campaign chrome is honoured, not clipped at half the viewport', async ({ page, baseURL }) => {
+    const fixture = await privateFixture(baseURL || undefined);
+    try {
+      // Archived banner plus a raised safety hold, on a short viewport: together they can
+      // reach past half the screen, which is where the old share-of-viewport clamp stopped
+      // ceding and the opaque, scroll-locked cockpit began covering the lower banner.
+      await page.setViewportSize({ width: 320, height: 560 });
+      const archived = await fixture.dm.patch(`/api/v1/campaigns/${fixture.campaignId}`, {
+        data: { status: 'paused' },
+      });
+      expect(archived.ok(), `archive campaign: ${await archived.text()}`).toBe(true);
+      const held = await fixture.dm.post(`/api/v1/campaigns/${fixture.campaignId}/safety/hold`, {
+        data: { anonymous: true },
+      });
+      expect(held.ok(), `raise hold: ${await held.text()}`).toBe(true);
+
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+      // Every bit of Layout chrome above the cockpit must still be on screen: the cockpit
+      // starts at or below the lowest of it, and keeps a usable height for itself.
+      await expect
+        .poll(
+          async () =>
+            page.evaluate(() => {
+              const main = document.getElementById('main-content');
+              const shell = document.querySelector('.cf-vtt');
+              if (!(main instanceof HTMLElement) || !(shell instanceof HTMLElement)) return null;
+              const shellTop = shell.getBoundingClientRect().top;
+              let lowest = 0;
+              for (let el = main.previousElementSibling; el; el = el.previousElementSibling) {
+                if (!(el instanceof HTMLElement)) continue;
+                const r = el.getBoundingClientRect();
+                if (r.height > 0) lowest = Math.max(lowest, r.bottom);
+              }
+              return Math.round(shellTop - lowest);
+            }),
+          { timeout: 10_000 },
+        )
+        .toBeGreaterThanOrEqual(0);
+
+      const shellHeight = await page.evaluate(
+        () => Math.round(document.querySelector('.cf-vtt')?.getBoundingClientRect().height ?? 0),
+      );
+      expect(shellHeight, 'the cockpit keeps a usable height of its own').toBeGreaterThanOrEqual(200);
+    } finally {
+      await fixture.dm
+        .patch(`/api/v1/campaigns/${fixture.campaignId}`, { data: { status: 'active' } })
+        .catch(() => undefined);
+      await fixture.dispose();
+    }
+  });
+
   test('the inset follows chrome that grows after the first paint', async ({ page, baseURL }) => {
     const fixture = await privateFixture(baseURL || undefined);
     try {

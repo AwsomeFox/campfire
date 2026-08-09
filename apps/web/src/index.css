@@ -3153,8 +3153,16 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
      would make them invisible AND unclickable. Starting below them keeps them on
      screen with their single mount and their own hit-testing. */
   /* Whichever clears more. A nonzero chrome inset is measured from the viewport top and
-     therefore already past the notch; with no chrome at all the notch is all there is. */
-  top: min(max(var(--cf-immersive-chrome-inset, 0px), var(--cf-vtt-safe-top)), 50vh);
+     therefore already past the notch; with no chrome at all the notch is all there is.
+     The ceiling is a FLOOR ON THIS SURFACE, not a share of the viewport: every pixel of
+     Layout's chrome is honoured — including its mobile header and any wrapped offline or
+     archived banners, which no cap of ours reaches — right up to the point where the
+     cockpit would have too little left to be usable. `--cf-immersive-chrome-cap` is
+     derived from the same budget, so the two never disagree. */
+  top: min(
+    max(var(--cf-immersive-chrome-inset, 0px), var(--cf-vtt-safe-top)),
+    max(50vh, calc(100dvh - var(--cf-vtt-min-height, 240px)))
+  );
   z-index: var(--cf-layer-immersive);
   display: grid;
   /* The body keeps a floor. The header wraps hard (the whole DM control set) and the

@@ -34,7 +34,19 @@ const INSET_VAR = '--cf-immersive-chrome-inset';
  * everything above it without this hook having to know what that is.
  */
 const CAP_VAR = '--cf-immersive-chrome-cap';
-/** The cockpit never cedes more than this share of the viewport. Matches `.cf-vtt`'s clamp. */
+/**
+ * The cockpit keeps at least this much of the viewport for itself; everything above it may
+ * have the rest. Matches `.cf-vtt`'s own clamp, and the two must stay in step — the cockpit
+ * applies that clamp to its `top` regardless of what this hook publishes, so a cap derived
+ * from a different budget is a cap it will not honour.
+ *
+ * A floor on the cockpit rather than a share of the viewport, because a share is the wrong
+ * shape on a tall screen: half of a 900px viewport needlessly refuses chrome that would
+ * fit comfortably. Taken as whichever of the two is MORE generous, so the short-viewport
+ * case does not regress — at 400px tall the old half-viewport rule is still the kinder
+ * one, and Layout's own header and banners (which no cap of ours reaches) get the benefit.
+ */
+const MIN_COCKPIT_HEIGHT_PX = 240;
 const CHROME_BUDGET_RATIO = 0.5;
 
 /**
@@ -93,8 +105,8 @@ export function measureImmersiveChromeCapPx(): number {
     top = Math.min(top, element.getBoundingClientRect().top);
   }
   const above = Number.isFinite(top) ? Math.max(0, top) : 0;
-  const budget = window.innerHeight * CHROME_BUDGET_RATIO;
-  // Exactly what is left under the cockpit's own 50vh clamp, which `.cf-vtt` applies to
+  const budget = Math.max(window.innerHeight * CHROME_BUDGET_RATIO, window.innerHeight - MIN_COCKPIT_HEIGHT_PX);
+  // Exactly what is left under the cockpit's own clamp, which `.cf-vtt` applies to
   // its `top` regardless of what this returns — so any floor added here is a floor the
   // cockpit will not honour. There used to be a 72px one, on the reasoning that a
   // scroller too short to show a row helps nobody; but once Layout's own header and
