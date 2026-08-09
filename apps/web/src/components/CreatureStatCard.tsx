@@ -22,7 +22,7 @@ export function CreatureStatCard({
   const { open, buttonProps, regionProps } = useDisclosure({ initialOpen: false, focusManagement: false, regionLabel: `${creatureName} creature mechanics` });
   const queryClient = useQueryClient();
   const { showRoll } = useRollResultToast();
-  const { data: checks = [] } = useQuery({
+  const { data: checks = [], error: loadError } = useQuery({
     queryKey: [...queryKeys.encounter(encounterId), 'creature-checks', combatantId],
     queryFn: () => api.get<RollCheckDefinition[]>(`${API}/encounters/${encounterId}/combatants/${combatantId}/checks`),
     enabled: open,
@@ -66,7 +66,7 @@ export function CreatureStatCard({
       </button>
       {open && (
         <div {...regionProps} style={{ marginTop: 6, padding: '10px 12px', border: '1px solid var(--color-divider)', borderRadius: 'var(--radius-md)', maxWidth: 460, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {ordered.length === 0 ? <span className="text-muted" style={{ fontSize: 12 }}>No rollable mechanics are supplied by this statblock.</span> : (
+          {loadError ? <span role="alert" className="text-muted" style={{ fontSize: 12 }}>{loadError instanceof ApiError ? loadError.message : "Couldn't load creature mechanics."}</span> : ordered.length === 0 ? <span className="text-muted" style={{ fontSize: 12 }}>No rollable mechanics are supplied by this statblock.</span> : (
             (['ability', 'save', 'skill'] as const).map((category) => {
               const entries = byCategory(category);
               if (!entries.length) return null;
