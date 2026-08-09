@@ -1481,6 +1481,23 @@ CREATE TABLE IF NOT EXISTS notification_digest_queue (
 CREATE INDEX IF NOT EXISTS idx_notification_digest_queue_campaign
   ON notification_digest_queue(campaign_id, user_id);
 
+-- Issue #1323: browser Push API subscriptions. Endpoint is globally unique so
+-- one browser subscription cannot remain attached to two Campfire accounts.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  user_agent TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint
+  ON push_subscriptions(endpoint);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
+  ON push_subscriptions(user_id);
+
 -- Issue #789: dedup ledger for session reminders / unanswered-RSVP nudges.
 CREATE TABLE IF NOT EXISTS notification_reminders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

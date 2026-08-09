@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import {
   CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
@@ -34,6 +34,10 @@ import { nowIso } from '../../common/time';
 import { minRole, type RequestUser } from '../../common/user.types';
 import { blockedTargetsOf, suppressedRecipients } from '../../common/safety-controls';
 import { decideDelivery, isWithinQuietHours } from './notification-preferences.util';
+import {
+  PushNotificationsService,
+  type BrowserPushDelivery,
+} from './push-notifications.service';
 
 /**
  * What a domain service passes when something notification-worthy happens.
@@ -174,9 +178,9 @@ function defaultQuietHours(): QuietHoursType {
 
 /**
  * In-app notification store. Deliberately transport-agnostic: rows are written
- * synchronously by domain services and read by polling clients today; a
- * real-time push channel (SSE — issue #4) can later observe the same writes
- * without any change to emitters or the table.
+ * synchronously by domain services and read by polling clients. Browser Web
+ * Push (#1323) observes only rows that this service has materialized after the
+ * same preference gate; future live transports can do the same.
  *
  * Emission is best-effort by design: callers `await` it inside the same request
  * but a notification failure must never fail the triggering write, so both
@@ -193,7 +197,12 @@ export class NotificationsService implements OnApplicationBootstrap {
   private readonly logger = new Logger(NotificationsService.name);
   private flushingDigests = false;
 
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    @Optional()
+    @Inject(PushNotificationsService)
+    private readonly push?: Pick<PushNotificationsService, 'deliver'>,
+  ) {}
 
   /**
    * Drain deferred notifications on a cadence. No boot-time flush (nothing is
@@ -508,13 +517,17 @@ export class NotificationsService implements OnApplicationBootstrap {
     // and an abuser must not be able to reach a blocker by choosing an event type.
     if (isCriticalNotificationCategory(category)) {
       let guardPassed = true;
+      let createdAt: string | null = null;
       this.db.transaction((tx) => {
         if (writeGuard && !writeGuard(tx)) {
           guardPassed = false;
           return;
         }
-        this.insertRowsTx(tx, allowed, campaignId, event, actorUserId, hiddenStatusContext);
+        createdAt = this.insertRowsTx(tx, allowed, campaignId, event, actorUserId, hiddenStatusContext);
       });
+      if (guardPassed && createdAt) {
+        this.schedulePush(this.pushDeliveries(allowed, campaignId, event, createdAt, true));
+      }
       return guardPassed;
     }
 
@@ -533,6 +546,7 @@ export class NotificationsService implements OnApplicationBootstrap {
       else quiet.push(userId);
     }
 
+    let immediateCreatedAt: string | null = null;
     if (immediate.length > 0 || digest.length > 0 || quiet.length > 0) {
       let guardPassed = true;
       this.db.transaction((tx) => {
@@ -540,10 +554,15 @@ export class NotificationsService implements OnApplicationBootstrap {
           guardPassed = false;
           return;
         }
-        if (immediate.length > 0) this.insertRowsTx(tx, immediate, campaignId, event, actorUserId, hiddenStatusContext);
+        if (immediate.length > 0) {
+          immediateCreatedAt = this.insertRowsTx(tx, immediate, campaignId, event, actorUserId, hiddenStatusContext);
+        }
         if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest', actorUserId, hiddenStatusContext);
         if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours', actorUserId, hiddenStatusContext);
       });
+      if (guardPassed && immediateCreatedAt) {
+        this.schedulePush(this.pushDeliveries(immediate, campaignId, event, immediateCreatedAt, false));
+      }
       return guardPassed;
     }
     return guardWithoutWrite();
@@ -595,8 +614,8 @@ export class NotificationsService implements OnApplicationBootstrap {
     event: NotificationEvent,
     actorUserId: string | null,
     hiddenStatusContext?: HiddenStatusContext,
-  ): void {
-    if (recipients.length === 0) return;
+  ): string | null {
+    if (recipients.length === 0) return null;
     const ts = nowIso();
     const dataJson = event.data == null ? null : JSON.stringify(event.data);
     tx.insert(notifications)
@@ -621,8 +640,62 @@ export class NotificationsService implements OnApplicationBootstrap {
         })),
       )
       .run();
+    return ts;
   }
 
+  private async insertRows(
+    recipients: number[],
+    campaignId: number,
+    event: NotificationEvent,
+    actorUserId: string | null,
+    hiddenStatusContext?: HiddenStatusContext,
+  ): Promise<string | null> {
+    return Promise.resolve(this.insertRowsTx(this.db, recipients, campaignId, event, actorUserId, hiddenStatusContext));
+  }
+
+  private pushDeliveries(
+    recipients: number[],
+    campaignId: number,
+    event: NotificationEvent,
+    createdAt: string,
+    critical: boolean,
+  ): BrowserPushDelivery[] {
+    return recipients.map((userId) => ({
+      userId,
+      campaignId,
+      type: event.type,
+      title: event.title,
+      body: event.body ?? '',
+      entityId: event.entityId ?? null,
+      createdAt,
+      critical,
+    }));
+  }
+
+  /** Fire-and-contain: a vendor outage never delays or rejects the domain write. */
+  private schedulePush(deliveries: BrowserPushDelivery[]): void {
+    if (!this.push || deliveries.length === 0) return;
+    void this.push.deliver(deliveries).catch((error) => {
+      this.logger.warn(`Browser push fan-out failed: ${String(error)}`);
+    });
+  }
+
+  /**
+   * Push a notification row that another service materialized inside its own
+   * atomic domain transaction. This does not write or re-gate the row; it only
+   * keeps the browser transport aligned with that already-committed in-app item.
+   */
+  pushMaterializedNotification(
+    userId: number,
+    campaignId: number,
+    event: NotificationEvent,
+    createdAt: string,
+  ): void {
+    const critical = isCriticalNotificationCategory(notificationCategory(event.type));
+    this.schedulePush(this.pushDeliveries([userId], campaignId, event, createdAt, critical));
+  }
+
+>>>>>>> f8abe458f (Add browser push notifications)
   /** Persist deferred notifications for later flush (digest cadence / after quiet hours). */
   private enqueueDeferredTx(
     tx: SyncDb,
@@ -980,8 +1053,21 @@ export class NotificationsService implements OnApplicationBootstrap {
           const consumedIds = [...authorizedDeliveredIds, ...removedIds];
           if (consumedIds.length > 0) tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, consumedIds)).run();
         });
-
         if (authorizedDeliveredIds.length === 0 && removedIds.length === 0) break;
+        if (authorizedDeliverRows.length > 0) {
+          this.schedulePush(
+            authorizedDeliverRows.map((row) => ({
+              userId: row.userId,
+              campaignId: row.campaignId,
+              type: row.type as NotificationType,
+              title: row.title,
+              body: row.body ?? '',
+              entityId: row.entityId ?? null,
+              createdAt: row.createdAt,
+              critical: isCriticalNotificationCategory(notificationCategory(row.type as NotificationType)),
+            })),
+          );
+        }
         delivered += authorizedDeliveredIds.length;
 
         if (queued.length < DIGEST_BATCH_SIZE) break;

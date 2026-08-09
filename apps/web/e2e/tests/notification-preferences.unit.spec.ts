@@ -12,8 +12,12 @@ import { resolve } from 'node:path';
 
 const CARD = resolve(__dirname, '../../src/features/preferences/NotificationPreferencesCard.tsx');
 const PAGE = resolve(__dirname, '../../src/features/preferences/PreferencesPage.tsx');
+const BROWSER_PUSH = resolve(__dirname, '../../src/lib/browserPush.ts');
+const PUSH_WORKER = resolve(__dirname, '../../public/sw-push.js');
 const CARD_SOURCE = readFileSync(CARD, 'utf8');
 const PAGE_SOURCE = readFileSync(PAGE, 'utf8');
+const BROWSER_PUSH_SOURCE = readFileSync(BROWSER_PUSH, 'utf8');
+const PUSH_WORKER_SOURCE = readFileSync(PUSH_WORKER, 'utf8');
 
 test.describe('Notification preferences card (#789)', () => {
   test('is rendered on the Preferences page', () => {
@@ -38,6 +42,23 @@ test.describe('Notification preferences card (#789)', () => {
     expect(CARD_SOURCE).toContain('notif-quiet-from-');
     expect(CARD_SOURCE).toContain('notif-quiet-to-');
     expect(CARD_SOURCE).toContain('notif-quiet-tz-');
+  });
+
+  test('offers an explicit per-browser Web Push opt-in with server cleanup', () => {
+    expect(CARD_SOURCE).toContain('data-testid="browser-push-toggle"');
+    expect(BROWSER_PUSH_SOURCE).toContain('Notification.requestPermission()');
+    expect(BROWSER_PUSH_SOURCE).toContain('pushManager.subscribe');
+    expect(BROWSER_PUSH_SOURCE).toContain('/notifications/push-subscribe');
+    expect(BROWSER_PUSH_SOURCE).toContain('subscription.unsubscribe()');
+    expect(BROWSER_PUSH_SOURCE).toContain("Notification.permission === 'denied'");
+  });
+
+  test('service worker displays pushes and opens/focuses their Campfire link', () => {
+    expect(PUSH_WORKER_SOURCE).toContain("addEventListener('push'");
+    expect(PUSH_WORKER_SOURCE).toContain("addEventListener('notificationclick'");
+    expect(PUSH_WORKER_SOURCE).toContain('showNotification');
+    expect(PUSH_WORKER_SOURCE).toContain('client.navigate(target)');
+    expect(PUSH_WORKER_SOURCE).toContain('openWindow(target)');
   });
 
   test('routes status through the shared Announcer, not a new aria-live region', () => {

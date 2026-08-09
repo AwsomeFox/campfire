@@ -1088,8 +1088,10 @@ export class NotesService {
 
       if (!row) {
         const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
-        return { transitioned: false as const, row: current };
+        return { transitioned: false as const, row: current, push: null };
       }
+
+      let push: { recipient: number; event: Parameters<NotificationsService['pushMaterializedNotification']>[2] } | null = null;
 
       tx.insert(auditLog)
         .values({
@@ -1115,20 +1117,29 @@ export class NotesService {
         const recipientExists = tx.select({ id: users.id }).from(users).where(eq(users.id, recipient)).limit(1).get();
         if (recipientExists) {
           try {
+            const event = {
+              type: 'note_reply' as const,
+              title: `${user.name || 'The DM'} resolved your inbox note`,
+              body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(row.body),
+              entityType: null,
+              entityId: null,
+              actorName: user.name,
+            };
             tx.insert(notifications)
               .values({
                 userId: recipient,
                 campaignId: row.campaignId,
-                type: 'note_reply',
-                title: `${user.name || 'The DM'} resolved your inbox note`,
-                body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(row.body),
+                type: event.type,
+                title: event.title,
+                body: event.body,
                 entityType: null,
                 entityId: null,
-                actorName: user.name,
+                actorName: event.actorName,
                 readAt: null,
                 createdAt: ts,
               })
               .run();
+            push = { recipient, event };
           } catch {
             // Match NotificationsService.notifyUser: notification delivery is
             // best-effort and must never roll back the canonical terminal
@@ -1137,7 +1148,7 @@ export class NotesService {
         }
       }
 
-      return { transitioned: true as const, row };
+      return { transitioned: true as const, row, push };
     });
 
     const row = outcome.row;
@@ -1153,6 +1164,14 @@ export class NotesService {
       if (!identical) {
         throw new ConflictException(`Inbox item ${id} already has a different terminal result`);
       }
+    }
+    if (outcome.push) {
+      this.notifications.pushMaterializedNotification(
+        outcome.push.recipient,
+        row.campaignId,
+        outcome.push.event,
+        ts,
+      );
     }
     return toDomain(row);
   }
