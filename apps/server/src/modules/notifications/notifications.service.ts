@@ -22,6 +22,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaignMembers,
   campaigns,
+  encounters,
   notificationDigestQueue,
   notificationPreferences,
   notificationQuietHours,
@@ -254,6 +255,49 @@ export class NotificationsService implements OnApplicationBootstrap {
   }
 
   /**
+   * Broadcast only while the encounter is visible at the durable-write
+   * boundary. The visibility predicate and notification/digest inserts share
+   * one SQLite transaction, so a hide that wins before that transaction
+   * commits cannot leave an encounter id in a campaign-wide bell or digest.
+   *
+   * The boolean distinguishes a visible fan-out from a guarded refusal. Its
+   * caller may then select a narrower, secrecy-safe recipient set.
+   */
+  async notifyCampaignIfEncounterVisible(
+    campaignId: number,
+    encounterId: number,
+    actor: RequestUser | null,
+    event: NotificationEvent,
+  ): Promise<boolean> {
+    try {
+      const members = await this.db
+        .select({ userId: campaignMembers.userId })
+        .from(campaignMembers)
+        .where(eq(campaignMembers.campaignId, campaignId));
+      const actorId = actor ? numericUserId(actor.id) : null;
+      const recipients = members.map((member) => member.userId).filter((id) => actorId === null || id !== actorId);
+      return this.dispatch(
+        recipients,
+        campaignId,
+        event,
+        actor?.id ?? null,
+        actor?.id ?? null,
+        (tx) => {
+          const encounter = tx
+            .select({ hidden: encounters.hidden })
+            .from(encounters)
+            .where(and(eq(encounters.id, encounterId), eq(encounters.campaignId, campaignId)))
+            .get();
+          return encounter?.hidden === false;
+        },
+      );
+    } catch (err) {
+      this.logger.warn(`notifyCampaignIfEncounterVisible failed for encounter ${encounterId} in campaign ${campaignId}: ${String(err)}`);
+      return false;
+    }
+  }
+
+  /**
    * Notify every campaign member, including an attributed actor. This is deliberately
    * narrow: table-safety signals must never reveal an actor by their missing bell item,
    * but attributed signals still need the durable id so later account privacy changes can
@@ -295,8 +339,9 @@ export class NotificationsService implements OnApplicationBootstrap {
     event: NotificationEvent,
     actorUserId: string | null,
     blockActorUserId: string | null = actorUserId,
-  ): Promise<void> {
-    if (recipients.length === 0) return;
+    writeGuard?: (tx: SyncDb) => boolean,
+  ): Promise<boolean> {
+    if (recipients.length === 0) return true;
     const category = notificationCategory(event.type);
 
     // ISSUE #597 — THE ONE PLACE A BLOCK STOPS A NOTIFICATION.
@@ -330,15 +375,22 @@ export class NotificationsService implements OnApplicationBootstrap {
       entityId: event.entityId ?? null,
     });
     const allowed = suppressed.size === 0 ? recipients : recipients.filter((id) => !suppressed.has(String(id)));
-    if (allowed.length === 0) return;
+    if (allowed.length === 0) return true;
 
     // Critical categories are always delivered immediately — no gating. Note that the
     // safety filter above applies even here: `access`/`security` bypass a recipient's
     // *preferences*, which are convenience settings, but a block is a safety decision
     // and an abuser must not be able to reach a blocker by choosing an event type.
     if (isCriticalNotificationCategory(category)) {
-      await this.insertRows(allowed, campaignId, event, actorUserId);
-      return;
+      let guardPassed = true;
+      this.db.transaction((tx) => {
+        if (writeGuard && !writeGuard(tx)) {
+          guardPassed = false;
+          return;
+        }
+        this.insertRowsTx(tx, allowed, campaignId, event, actorUserId);
+      });
+      return guardPassed;
     }
 
     const now = Date.now();
@@ -357,12 +409,19 @@ export class NotificationsService implements OnApplicationBootstrap {
     }
 
     if (immediate.length > 0 || digest.length > 0 || quiet.length > 0) {
+      let guardPassed = true;
       this.db.transaction((tx) => {
+        if (writeGuard && !writeGuard(tx)) {
+          guardPassed = false;
+          return;
+        }
         if (immediate.length > 0) this.insertRowsTx(tx, immediate, campaignId, event, actorUserId);
         if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest', actorUserId);
         if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours', actorUserId);
       });
+      return guardPassed;
     }
+    return true;
   }
 
   /** Stored category mode per recipient (absent => undefined => category default). */
@@ -435,15 +494,6 @@ export class NotificationsService implements OnApplicationBootstrap {
         })),
       )
       .run();
-  }
-
-  private async insertRows(
-    recipients: number[],
-    campaignId: number,
-    event: NotificationEvent,
-    actorUserId: string | null,
-  ): Promise<void> {
-    this.insertRowsTx(this.db, recipients, campaignId, event, actorUserId);
   }
 
   /** Persist deferred notifications for later flush (digest cadence / after quiet hours). */

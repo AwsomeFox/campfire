@@ -6132,9 +6132,9 @@ export class EncountersService {
    * does not receive a durable hidden-status row: notifications and digests
    * can outlive a grant's revocation, handback, or expiry, while the guest can
    * inspect the hidden encounter directly for the grant's active lifetime.
-   * Visibility is re-read at send time so a concurrent hide cannot turn a
-   * once-visible encounter notification into an id leak. Visible encounters
-   * keep the established whole-campaign fan-out.
+   * A visible fan-out is guarded at its durable-write boundary, so a
+   * concurrent hide cannot turn it into an id leak. Visible encounters keep
+   * the established whole-campaign fan-out.
    */
   private async notifyCharacterStatusChange(
     encounterRow: Pick<typeof encounters.$inferSelect, 'id' | 'campaignId'>,
@@ -6142,15 +6142,7 @@ export class EncountersService {
     user: RequestUser,
     event: NotificationEvent,
   ): Promise<void> {
-    const [currentEncounter] = await this.db
-      .select({ hidden: encounters.hidden })
-      .from(encounters)
-      .where(eq(encounters.id, encounterRow.id))
-      .limit(1);
-    // A missing row must not downgrade to a campaign-wide notification: after
-    // deletion there is no safe visibility state to disclose.
-    if (currentEncounter && !currentEncounter.hidden) {
-      await this.notifications.notifyCampaign(encounterRow.campaignId, user, event);
+    if (await this.notifications.notifyCampaignIfEncounterVisible(encounterRow.campaignId, encounterRow.id, user, event)) {
       return;
     }
 

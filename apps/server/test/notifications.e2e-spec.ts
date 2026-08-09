@@ -1,6 +1,8 @@
 import request from 'supertest';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../src/db/db.module';
+import { encounters } from '../src/db/schema';
+import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 /**
@@ -998,6 +1000,68 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     const spectatorVisible = await statusNotifications(spectator, 'Character downed!', 1);
     expect(spectatorVisible[0].title).toBe('Character downed!');
     expect(spectatorVisible[0].entityId).toBe(visibleEncounter.body.id);
+
+    // #2112 P1: make the only real interleaving deterministic. The encounter
+    // starts visible, recipient resolution begins, then another DM hides it at
+    // the campaign-fan-out boundary. The guarded transaction must decline the
+    // broad durable write and fall back to the hidden-recipient policy.
+    const raceCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Race Hero', hpCurrent: 10, hpMax: 10 });
+    expect(raceCharacter.status).toBe(201);
+    const raceEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Race Window', hidden: false });
+    expect(raceEncounter.status).toBe(201);
+    const raceRoster = await dm.get(`/api/v1/encounters/${raceEncounter.body.id}`);
+    const raceCombatant = raceRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === raceCharacter.body.id,
+    );
+    expect(raceCombatant).toBeDefined();
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const notifications = ctx.app.get(NotificationsService);
+    const notifyWhenVisible = notifications.notifyCampaignIfEncounterVisible.bind(notifications);
+    const hideAtFanout = jest.spyOn(notifications, 'notifyCampaignIfEncounterVisible').mockImplementation(async (...args) => {
+      if (args[1] === raceEncounter.body.id) {
+        db.update(encounters).set({ hidden: true }).where(eq(encounters.id, raceEncounter.body.id)).run();
+      }
+      return notifyWhenVisible(...args);
+    });
+    try {
+      const racedDowned = await dm
+        .patch(`/api/v1/encounters/${raceEncounter.body.id}/combatants/${raceCombatant.id}`)
+        .send({ hpSet: 0 });
+      expect(racedDowned.status).toBe(200);
+    } finally {
+      hideAtFanout.mockRestore();
+    }
+
+    const racedStatusNotifications = async (agent: ReturnType<typeof request.agent>, expected: number) => {
+      let matching: Notification[] = [];
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        matching = (await listFor(agent)).filter(
+          (notification) => notification.type === 'character_downed' && notification.body.includes('Race Hero was downed'),
+        );
+        if (matching.length === expected) {
+          if (expected > 0) return matching;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          matching = (await listFor(agent)).filter(
+            (notification) => notification.type === 'character_downed' && notification.body.includes('Race Hero was downed'),
+          );
+          if (matching.length === 0) return matching;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error(`Timed out waiting for ${expected} raced hidden-status notifications; found ${matching.length}`);
+    };
+
+    const raceOwner = await racedStatusNotifications(player, 1);
+    const raceCoDm = await racedStatusNotifications(coDm, 1);
+    expect(await racedStatusNotifications(spectator, 0)).toEqual([]);
+    expect(raceOwner[0].entityType).toBeNull();
+    expect(raceOwner[0].entityId).toBeNull();
+    expect(raceCoDm[0].entityId).toBe(raceEncounter.body.id);
   });
 
   it('sharing a note with the party notifies the party (not the author)', async () => {
