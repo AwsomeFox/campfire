@@ -18,6 +18,52 @@ import { registerErrorSchemas } from './common/openapi-error-schemas';
 patchNestJsSwagger();
 
 /**
+ * Issue #2126: a process-level safety net so a stray unhandled stream-write error on a
+ * destroyed SSE response can never silently kill the server. Without this, writing to a
+ * closed socket after a client disconnect emits an 'error' with no listener, which Node
+ * treats as a fatal uncaught exception — tearing the process down with zero log output.
+ * The SSE controller's takeUntil(req 'close') is the primary fix; this handler is
+ * defense-in-depth so any future long-lived stream that races the same way is LOGGED
+ * (never again "no output when it dies") rather than silently terminating the process.
+ *
+ * We only swallow ERR_STREAM_WRITE_AFTER_END — the specific error Node raises when writing
+ * to an already-ended response stream, which is unambiguously the SSE heartbeat case. We do
+ * NOT swallow broader codes like EPIPE or ECONNRESET: those can originate from outbound HTTP
+ * clients and other unrelated streams, and swallowing a genuine programming failure would
+ * leave the process in a potentially inconsistent state (review feedback). Everything else
+ * is logged at FATAL and exits for a clean supervisor restart.
+ */
+const bootstrapLogger = new Logger('Bootstrap');
+const SSE_WRITE_AFTER_END = 'ERR_STREAM_WRITE_AFTER_END';
+
+function isBenignSseWriteAfterEnd(err: unknown): boolean {
+  return err instanceof Error && (err as NodeJS.ErrnoException).code === SSE_WRITE_AFTER_END;
+}
+
+process.on('uncaughtException', (err) => {
+  if (isBenignSseWriteAfterEnd(err)) {
+    bootstrapLogger.warn(`Benign SSE write-after-end on a disconnected client (swallowed): ${err.message}`);
+    return;
+  }
+  // A non-benign uncaught exception means the process may be in an undefined state (partial
+  // writes, corrupted in-memory state). Log loudly, then exit non-zero so a supervisor (Docker,
+  // systemd) restarts cleanly — matching Node's default fail-fast behavior, just no longer silent.
+  bootstrapLogger.error(`FATAL uncaught exception (exiting): ${err.message}`, err.stack);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  if (isBenignSseWriteAfterEnd(reason)) {
+    bootstrapLogger.warn(`Benign SSE write-after-end rejection on a disconnected client (swallowed): ${reason instanceof Error ? reason.message : String(reason)}`);
+    return;
+  }
+  bootstrapLogger.error(
+    `FATAL unhandled promise rejection (exiting): ${reason instanceof Error ? reason.message : String(reason)}`,
+    reason instanceof Error ? reason.stack : undefined,
+  );
+  process.exit(1);
+});
+
+/**
  * CORS origin resolution:
  *  - ORIGIN env (comma-split, e.g. "https://campfire.example.com,https://alt.example.com")
  *    takes priority whenever set, in any environment.
