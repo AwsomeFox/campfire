@@ -1116,6 +1116,17 @@ export class NotesService {
         // best-effort behavior without letting a notification FK abort canon.
         const recipientExists = tx.select({ id: users.id }).from(users).where(eq(users.id, recipient)).limit(1).get();
         if (recipientExists) {
+          const recipientStillMember = tx
+            .select({ id: campaignMembers.id })
+            .from(campaignMembers)
+            .where(
+              and(
+                eq(campaignMembers.campaignId, row.campaignId),
+                eq(campaignMembers.userId, recipient),
+              ),
+            )
+            .limit(1)
+            .get();
           try {
             const event = {
               type: 'note_reply' as const,
@@ -1139,7 +1150,7 @@ export class NotesService {
                 createdAt: ts,
               })
               .run();
-            push = { recipient, event };
+            if (recipientStillMember) push = { recipient, event };
           } catch {
             // Match NotificationsService.notifyUser: notification delivery is
             // best-effort and must never roll back the canonical terminal

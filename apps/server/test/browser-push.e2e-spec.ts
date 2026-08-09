@@ -255,6 +255,38 @@ describe('browser push notifications (issue #1323, e2e)', () => {
     sendNotification.mockClear();
   });
 
+  it('does not push an inbox resolution to an author whose membership was revoked', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const resolution = 'FORMER MEMBER INBOX RESOLUTION';
+    const inbox = await player.post(`/api/v1/campaigns/${campaignId}/inbox`).send({
+      body: 'Preserve this authored history after departure.',
+    });
+    expect(inbox.status).toBe(201);
+    const membership = db.select({ id: campaignMembers.id }).from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, playerId))).get();
+    expect(membership).toBeDefined();
+    expect((await admin.delete(`/api/v1/campaigns/${campaignId}/members/${membership!.id}`)).status).toBe(204);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    sendNotification.mockClear();
+
+    expect((await admin.post(`/api/v1/notes/${inbox.body.id}/resolve`).send({ resolvedNote: resolution })).status)
+      .toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(sendNotification).not.toHaveBeenCalled();
+    expect(db.select({ id: notificationRows.id }).from(notificationRows)
+      .where(and(
+        eq(notificationRows.userId, playerId),
+        eq(notificationRows.campaignId, campaignId),
+        eq(notificationRows.type, 'note_reply'),
+        eq(notificationRows.body, resolution),
+      )).get()).toBeDefined();
+
+    expect((await admin.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' })).status)
+      .toBe(201);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    sendNotification.mockClear();
+  });
+
   it('does not deliver to an account after an administrator disables it', async () => {
     const deliveriesBefore = sendNotification.mock.calls.length;
     expect((await admin.patch(`/api/v1/users/${playerId}`).send({ disabled: true })).status).toBe(200);
