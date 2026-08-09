@@ -419,6 +419,23 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
     expect(out.damage).toBe('1d8+4 slashing');
   });
 
+  it('detects a round-tripped spec even when the client reserialized its keys', () => {
+    // Review (chatgpt-codex-connector P2): a client that reads an action and sends it back
+    // with a different key order produces a different JSON string for an identical spec.
+    // A textual comparison classified that as newly authored and kept the stale numbers.
+    const withSpec = CharacterAction.parse({ ...derived, toHit: '+7', damage: '1d8+4 slashing' });
+    const reordered = JSON.parse(JSON.stringify(withSpec.spec), (_k, v) =>
+      v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).reverse()) : v,
+    );
+    const out = rebuildEditedActionSpec(
+      CharacterAction.parse({ ...withSpec, spec: reordered }),
+      'dnd5e',
+      DND5E_DAMAGE_TYPES,
+      derived,
+    );
+    expect(out.spec?.attack?.bonus).toBe('+7');
+  });
+
   it('leaves a caller-supplied spec alone — the MCP path for a richer action', () => {
     const authored = CharacterAction.parse({ ...derived, toHit: '+99', damage: 'nonsense' });
     expect(rebuildEditedActionSpec(authored, 'dnd5e')).toEqual(authored);

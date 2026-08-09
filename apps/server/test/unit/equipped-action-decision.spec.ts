@@ -97,6 +97,20 @@ describe('resolveEquippedActionWrite — the whole reachable state (#2097)', () 
     }
   });
 
+  it('a losing rename never destroys the action a concurrent writer just derived', () => {
+    // Review (chatgpt-codex-connector P2). A rename arms nothing, so a stale one has no
+    // safety reason to clear — and clearing would erase a fresh, correct action from the
+    // writer that won, leaving the item granting nothing until someone equips again. An
+    // ownership change is excluded: discarding the action there is a privacy rule, not a
+    // safety-of-numbers one, and it outranks preserving anyone's work.
+    for (const s of STATES) {
+      if (!shouldDeriveEquippedAction(s)) continue;
+      const staleOrEmpty = !s.derivationInputsUnchanged || !s.derivationProducedAction;
+      if (!staleOrEmpty || s.equipTransition || s.moved || !s.freshHasAction) continue;
+      expect(resolveEquippedActionWrite(s).kind).toBe('leave');
+    }
+  });
+
   it('never leaves a stale action in place once a derivation was attempted', () => {
     // The round-10 defect: a fence miss that SKIPPED the write while the transaction went on
     // to equip the item, arming mechanics computed from inputs the row no longer had. When a
@@ -107,7 +121,11 @@ describe('resolveEquippedActionWrite — the whole reachable state (#2097)', () 
       const write = resolveEquippedActionWrite(s);
       const staleOrEmpty = !s.derivationInputsUnchanged || !s.derivationProducedAction;
       const concurrentManual = !s.moved && s.freshHasAction && s.freshProvenance === 'manual';
-      if (staleOrEmpty && !concurrentManual) expect(write.kind).toBe('clear');
+      // A rename-only request arms nothing, so it leaves the winner's action alone rather
+      // than clearing — see the case above. This invariant is about the EQUIP path, which is
+      // the one that would otherwise go on to arm stale mechanics.
+      const renameLosingTheRace = !s.equipTransition && !s.moved && s.freshHasAction;
+      if (staleOrEmpty && !concurrentManual && !renameLosingTheRace) expect(write.kind).toBe('clear');
     }
   });
 

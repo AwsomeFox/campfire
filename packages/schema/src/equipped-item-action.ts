@@ -38,6 +38,7 @@
 import { z } from 'zod';
 import { CharacterAction } from './character-action';
 import { expandRawStatblockAction } from './combatant-statblock';
+import { canonicalJson } from './canonical-json';
 import { isRollableDamageExpression } from './dice-bounds';
 
 /**
@@ -423,9 +424,13 @@ export function rebuildEditedActionSpec(
     // action economy the five text fields cannot express. A spec that is byte-identical to
     // the persisted one while the combat fields moved is not authored, it is carried along,
     // and it is stale by definition. Rebuild that; trust everything else.
+    // Compared CANONICALLY (chatgpt-codex-connector P2): a client that reserializes the spec
+    // it read — different key order, identical content — would otherwise look like it authored
+    // a new one, and the stale spec would be kept while the displayed numbers moved. Exactly
+    // the failure this check exists to prevent, reached through serialization order.
     const roundTripped =
       !!previous &&
-      JSON.stringify(edited.spec) === JSON.stringify(previous.spec) &&
+      canonicalJson(edited.spec) === canonicalJson(previous.spec) &&
       (edited.toHit !== previous.toHit || edited.damage !== previous.damage || edited.targetAc !== previous.targetAc);
     if (!roundTripped) return edited;
   }

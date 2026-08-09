@@ -97,11 +97,28 @@ export function resolveEquippedActionWrite(state: EquippedActionDecision): Equip
     const concurrentManual = !state.moved && state.freshHasAction && state.freshProvenance === 'manual';
     if (concurrentManual) return { kind: 'leave' };
 
-    // A derivation only lands if it is still current AND produced something. Otherwise the
-    // pair is CLEARED, never left as-is: leaving a stale derived action while the transaction
-    // goes on to equip the item would arm mechanics computed from inputs the row no longer
-    // has — the failure mode the fences exist to prevent, reached by doing nothing.
-    return state.derivationInputsUnchanged && state.derivationProducedAction ? { kind: 'derived' } : { kind: 'clear' };
+    if (state.derivationInputsUnchanged && state.derivationProducedAction) return { kind: 'derived' };
+
+    // The derivation cannot land. What that MEANS depends on why this request was deriving.
+    //
+    // An equip must clear: the transaction goes on to set `equipped = true`, so leaving an
+    // action computed from inputs the row no longer has would arm stale mechanics — the
+    // failure mode the fences exist to prevent, reached by doing nothing.
+    //
+    // A rename-only request arms nothing. Review (chatgpt-codex-connector P2): when a DM's
+    // name-only PATCH derives for character A while a concurrent move-and-equip commits a
+    // fresh, correct action for character B, this request's fingerprint fails — and clearing
+    // would erase B's brand-new action, leaving the item granting nothing until someone
+    // equips again. The winning writer's action is current for the state that actually
+    // exists; the rename simply loses the race for the action's title. Leave it be.
+    // …but never when the item is CHANGING HANDS. An action is private to the character it
+    // was granted to, so an ownership change discards it whatever else is true — that rule
+    // outranks preserving a concurrent writer's work, and the state sweep caught the carve-out
+    // violating it.
+    const equipWouldArmIt = state.equipTransition;
+    if (!equipWouldArmIt && !state.moved && state.freshHasAction) return { kind: 'leave' };
+
+    return { kind: 'clear' };
   }
 
   if (state.moved) return { kind: 'clear' };

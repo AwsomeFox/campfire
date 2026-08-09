@@ -6,6 +6,7 @@ import { and, count, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-or
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
+  canonicalJson,
   CAMPAIGN_PURGE_CONFIRM_TOKEN,
   CampaignClone,
   CampaignCloneMode,
@@ -436,26 +437,6 @@ const characterConditionWriteSetForImport = (row: Rec): { conditions: string; co
   if (names) return sheetConditionWriteSetFromNames(names, instancesText);
   return sheetConditionWriteSetFromInstances(readConditionInstances(instancesText, '[]'));
 };
-
-/**
- * Stable, key-sorted JSON for value comparison (issue #2097 review). Two objects that are
- * equal but were built in different key orders — a client's PATCH body versus a row parsed
- * back out of storage — must compare equal, which plain `JSON.stringify` does not guarantee.
- */
-function canonicalJson(value: unknown): string {
-  const walk = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(walk);
-    if (node && typeof node === 'object') {
-      return Object.fromEntries(
-        Object.keys(node as Record<string, unknown>)
-          .sort()
-          .map((key) => [key, walk((node as Record<string, unknown>)[key])]),
-      );
-    }
-    return node;
-  };
-  return JSON.stringify(walk(value) ?? null);
-}
 
 /** Parse JSON without throwing — a malformed stored value compares as null rather than crashing. */
 function safeJson(text: string): unknown {

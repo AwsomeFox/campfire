@@ -78,6 +78,7 @@ export * from './spell-slots';
 export * from './rest';
 export * from './character-action';
 export * from './combatant-statblock';
+export * from './canonical-json';
 export * from './dice-bounds';
 export * from './equipped-item-action';
 export * from './osr-adapter';
