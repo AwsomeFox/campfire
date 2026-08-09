@@ -5,6 +5,7 @@ import {
   findViewerRsvp,
   viewerRsvpIds,
 } from '../../src/lib/dashboardRsvp';
+import { effectiveRailTab } from '../../src/features/dashboard/TableRail';
 
 /**
  * Issue #785 — dashboard next-session RSVP cue.
@@ -97,5 +98,21 @@ test.describe('dashboard RSVP cue (issue #785)', () => {
         changeLabel: 'Change RSVP',
       });
     });
+  });
+});
+
+/**
+ * The dashboard table rail's tab is derived from what the viewer can actually reach, so a role
+ * change cannot strand it on a tab that no longer exists (#2127 review).
+ */
+test.describe('effectiveRailTab — the shown tab is always one the viewer has', () => {
+  test('keeps the chosen tab while it exists', () => {
+    expect(effectiveRailTab('checks', ['notes', 'checks', 'talk'])).toBe('checks');
+    expect(effectiveRailTab('talk', ['notes', 'talk'])).toBe('talk');
+  });
+
+  test('falls back to the first tab when the role gate takes the chosen one away', () => {
+    // A DM sitting on Checks, live-demoted: without this the rail renders a tablist and no panel.
+    expect(effectiveRailTab('checks', ['notes', 'talk'])).toBe('notes');
   });
 });

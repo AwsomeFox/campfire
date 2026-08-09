@@ -59,3 +59,30 @@ test.describe('campaign access flags (issue #704)', () => {
     );
   });
 });
+
+/**
+ * Codex review on #2115 — `canMemberWrite` excludes viewers, which is right for surfaces the
+ * product reserves for participants and WRONG for an endpoint the server opens to every
+ * member. `POST /campaigns/:id/roll` runs `requireMemberOnWritableCampaign`, which asserts
+ * membership and writability and no role floor, so a viewer who owns a character can roll
+ * from their own sheet. The two flags must stay distinguishable.
+ */
+test.describe('canAnyMemberWrite — membership + writability, viewers included', () => {
+  test('a viewer on an active campaign may write where the server allows any member', () => {
+    const viewer = deriveCampaignAccess('viewer', { status: 'active' } as never);
+    expect(viewer.canAnyMemberWrite).toBe(true);
+    // ...and still cannot reach the participant-only surfaces.
+    expect(viewer.canMemberWrite).toBe(false);
+    expect(viewer.canPlayerWrite).toBe(false);
+  });
+
+  test('an archived campaign blocks every member regardless of role', () => {
+    for (const role of ['dm', 'player', 'viewer'] as const) {
+      expect(deriveCampaignAccess(role, { status: 'paused' } as never).canAnyMemberWrite).toBe(false);
+    }
+  });
+
+  test('a non-member never qualifies', () => {
+    expect(deriveCampaignAccess(null, { status: 'active' } as never).canAnyMemberWrite).toBe(false);
+  });
+});

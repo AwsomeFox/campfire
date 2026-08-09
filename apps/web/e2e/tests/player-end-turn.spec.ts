@@ -1,6 +1,7 @@
 import { test, expect, request } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #487 — a player whose character has the turn can end it from the combatant row
@@ -79,11 +80,14 @@ test.describe('player end turn (issue #487)', () => {
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();
 
+      // A player's own End turn lives in the cockpit's Turn tab.
+      await openCockpitTab(page, 'turn');
       const endTurnBtn = page.getByTestId('workspace-end-turn');
       await expect(endTurnBtn).toBeVisible();
       await expect(endTurnBtn).toHaveText(/End (?:my )?turn/i);
 
       await endTurnBtn.click();
+      await openCockpitTab(page, 'party');
       await expect(page.getByTestId(`combatant-row-${dummy.id}`)).toHaveAttribute('data-current-turn', 'true');
       await expect(endTurnBtn).toHaveCount(0);
     } finally {

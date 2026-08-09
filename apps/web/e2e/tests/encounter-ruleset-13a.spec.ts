@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #1465 — 13th Age (Archmage) ruleset browser spec.
@@ -13,6 +14,8 @@ test.describe('13th Age ruleset encounter panel (#1465)', () => {
   test('renders 13th Age escalation die panel and accepts valid 0-6 overrides', async ({ page }) => {
     const { archmageCampaignId, archmageEncounterId } = seed();
     await page.goto(`/c/${archmageCampaignId}/encounters/${archmageEncounterId}`);
+    // Ruleset panels are table-wide setup: the cockpit keeps them in the Table tab.
+    await openCockpitTab(page, 'table');
 
     const panel = page.getByTestId('archmage-escalation-panel');
     await expect(panel).toBeVisible();

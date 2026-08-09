@@ -53,6 +53,23 @@ export function reconcileEncounterPatchResponse<T extends object>(
 }
 
 /**
+ * A keyed turn mutation may replay the original committed response after another
+ * client has already changed the cached encounter again. `turnVersion` protects
+ * later turn advances; `updatedAt` protects newer same-turn writes such as HP,
+ * conditions, and token movement. Never replace either with an older replay while
+ * the settled refetch is still in flight.
+ */
+export function preferNewerEncounterSnapshot<T extends { id: number; turnVersion: number; updatedAt: string }>(
+  current: T | undefined,
+  updated: T,
+): T {
+  if (current?.id !== updated.id) return updated;
+  if (current.turnVersion > updated.turnVersion) return current;
+  if (current.turnVersion === updated.turnVersion && current.updatedAt > updated.updatedAt) return current;
+  return updated;
+}
+
+/**
  * When an encounter patch mutation fails, remove its optimistic patch from the query cache.
  * Any key modified by the failed patch is restored to its previous value unless another
  * remaining queued patch also modifies that key.

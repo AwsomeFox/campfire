@@ -7,10 +7,71 @@ export type TurnBeatSnapshot = {
   encounterId: number;
   combatantId: number | null;
   round: number | null;
+  turnVersion: number;
   isYourTurn: boolean;
 };
 
+export type PendingPolledTurnBeat = {
+  turnVersion: number;
+  previous: TurnBeatSnapshot;
+};
+
 export type TurnBeatKind = 'your-turn' | 'turn' | 'round-wrap';
+
+/**
+ * A reconnect/load baseline must come from a completed encounter query function
+ * newer than the read revision that armed it. Cache timestamps are insufficient:
+ * TanStack Query advances `dataUpdatedAt` for local `setQueryData` writes too.
+ */
+export function shouldConsumeTurnBeatResync(
+  armedAfterReadRevision: number | null,
+  completedReadRevision: number,
+): boolean {
+  return armedAfterReadRevision != null
+    && completedReadRevision > armedAfterReadRevision;
+}
+
+/**
+ * Initial-load/reconnect reads establish a requested silent baseline. Ordinary
+ * backstop polls may also repair a missed SSE edge, but only when the server's
+ * monotonic turn revision is strictly newer than the last SSE/REST baseline.
+ */
+export function shouldReconcileTurnBeatRead(
+  armedAfterReadRevision: number | null,
+  completedReadRevision: number,
+  previousTurnVersion: number | null,
+  completedTurnVersion: number,
+): boolean {
+  if (shouldConsumeTurnBeatResync(armedAfterReadRevision, completedReadRevision)) return true;
+  return armedAfterReadRevision == null
+    && previousTurnVersion != null
+    && completedTurnVersion > previousTurnVersion;
+}
+
+/** A delayed stream frame must never replace a baseline established by a newer read/frame. */
+export function isStaleTurnBeatFrame(
+  previousTurnVersion: number | null,
+  eventTurnVersion: number | undefined,
+): boolean {
+  return previousTurnVersion != null
+    && eventTurnVersion != null
+    && eventTurnVersion < previousTurnVersion;
+}
+
+/**
+ * A poll may observe a committed turn immediately before its matching stream
+ * frame is emitted. Compare that one equal-version frame with the pre-poll
+ * snapshot so the real-time edge remains visible.
+ */
+export function previousTurnBeatForFrame(
+  current: TurnBeatSnapshot | null,
+  pendingPoll: PendingPolledTurnBeat | null,
+  eventTurnVersion: number | undefined,
+): TurnBeatSnapshot | null {
+  return pendingPoll != null && eventTurnVersion === pendingPoll.turnVersion
+    ? pendingPoll.previous
+    : current;
+}
 
 export function turnBeatKey(snapshot: TurnBeatSnapshot): string | null {
   if (snapshot.combatantId == null || snapshot.round == null) return null;

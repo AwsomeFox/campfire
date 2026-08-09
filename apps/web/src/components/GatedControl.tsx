@@ -44,6 +44,7 @@ import {
   isValidElement,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type FocusEvent,
@@ -51,6 +52,7 @@ import {
   type PointerEvent,
   type ReactElement,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { sanitizeFieldPrefix } from './Field';
 import {
   applyGatedHintEvent,
@@ -139,6 +141,13 @@ export type GatedControlProps = {
 };
 
 /** Shared gating-reason affordance — see the module doc comment above. */
+/** Matches `.cf-gated-hint`'s own `max-width`; the clamp has to know how wide it can get. */
+const GATED_HINT_MAX_WIDTH_PX = 220;
+/** Three lines at the hint's line-height plus its padding — the tallest it realistically gets. */
+const GATED_HINT_ESTIMATED_HEIGHT_PX = 72;
+/** Breathing room from the viewport edges, so a clamped bubble never sits flush against one. */
+const GATED_HINT_VIEWPORT_MARGIN_PX = 8;
+
 export function GatedControl({ reason, className, children }: GatedControlProps): ReactElement {
   const wrapperClass = className ? `cf-gated-control ${className}` : 'cf-gated-control';
   // React's useId() returns colon-delimited values (e.g. ":r1:"), which are invalid inside a
@@ -150,6 +159,18 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
 
   const [hint, setHint] = useState<GatedHintState>(GATED_HINT_STATE_IDLE);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapperRef = useRef<HTMLSpanElement>(null);
+  /**
+   * Where to paint the bubble when the wrapper sits inside something that clips.
+   *
+   * The hint is normally absolutely positioned against this wrapper, which is right until
+   * an ancestor scrolls: the encounter cockpit's 58px tool rail has `overflow-y: auto`,
+   * and that establishes a clip box in BOTH axes, so a 220px bubble is sliced to the rail
+   * width in every viewport. Rather than change how the hint is positioned everywhere,
+   * detect a clipping ancestor and, only then, portal the same element to `<body>` with
+   * viewport coordinates measured from the trigger.
+   */
+  const [escapeAt, setEscapeAt] = useState<{ left: number; top: number | null; bottom: number | null } | null>(null);
 
   const clearTapTimer = () => {
     if (tapTimerRef.current != null) {
@@ -160,6 +181,73 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
 
   // Unmount-time cleanup only — the gated-clearing effect below handles every other case.
   useEffect(() => clearTapTimer, []);
+
+  const tooltipVisible = gatedTooltipVisible(hint);
+
+  useLayoutEffect(() => {
+    if (!tooltipVisible) {
+      setEscapeAt(null);
+      return;
+    }
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+    let clipping: HTMLElement | null = wrapper.parentElement;
+    while (clipping) {
+      const overflow = getComputedStyle(clipping);
+      if (overflow.overflowX !== 'visible' || overflow.overflowY !== 'visible') break;
+      clipping = clipping.parentElement;
+    }
+    // `document.body`/`html` clip nothing that matters here — only a real inner scroller does.
+    if (!clipping || clipping === document.body || clipping === document.documentElement) {
+      setEscapeAt(null);
+      return;
+    }
+    // Above the trigger only when the bubble actually fits there. The cockpit header is
+    // itself a clipping ancestor (`overflow-y: auto`) AND sits at the top of the viewport
+    // with 8px of padding, so anchoring a gated lifecycle action's hint to `rect.top`
+    // pushed it off the top of the screen — during exactly the safety hold or sync outage
+    // that made it worth reading. Both axes are clamped for the same reason: a trigger
+    // near the right edge would otherwise put a 220px bubble past it.
+    const place = () => {
+      frame = 0;
+      const node = wrapperRef.current;
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      const left = Math.round(
+        Math.min(Math.max(GATED_HINT_VIEWPORT_MARGIN_PX, rect.left), Math.max(GATED_HINT_VIEWPORT_MARGIN_PX, window.innerWidth - GATED_HINT_MAX_WIDTH_PX - GATED_HINT_VIEWPORT_MARGIN_PX)),
+      );
+      const fitsAbove = rect.top >= GATED_HINT_ESTIMATED_HEIGHT_PX + GATED_HINT_VIEWPORT_MARGIN_PX;
+      const next = fitsAbove
+        ? { left, top: null, bottom: Math.round(window.innerHeight - rect.top) }
+        : { left, top: Math.round(rect.bottom), bottom: null };
+      // Compared, not blindly set: a scroll listener that produced a fresh object every
+      // frame would re-render this control on every pixel of an unrelated scroll.
+      setEscapeAt((previous) =>
+        previous && previous.left === next.left && previous.top === next.top && previous.bottom === next.bottom
+          ? previous
+          : next,
+      );
+    };
+
+    // The bubble is `position: fixed` at coordinates measured from the trigger, and the
+    // thing that made it escape in the first place is an ancestor that SCROLLS — the map
+    // rail, the wrapped cockpit header. Scroll that container with focus still on the
+    // control and a one-shot measurement leaves the bubble behind, detached from what it
+    // is explaining. Capture phase because scroll does not bubble.
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(place);
+    };
+    place();
+    window.addEventListener('scroll', schedule, true);
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', schedule, true);
+      window.removeEventListener('resize', schedule);
+    };
+  }, [tooltipVisible, reason]);
 
   // The moment the reason clears (e.g. sync recovers), drop any lingering hover/focus/tap
   // hint state so a stale bubble never survives past the control actually becoming enabled.
@@ -233,19 +321,37 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
     },
   } as Partial<GatableProps>);
 
-  const tooltipVisible = gatedTooltipVisible(hint);
+
+
+  const hintNode = tooltipVisible ? (
+    <span
+      // The escaped copy needs its own tier: portaled to `<body>` it leaves the trigger's
+      // stacking context, and the base `z-index: 30` sits UNDER an immersive surface like
+      // the encounter cockpit (41) — so escaping the clip would have hidden it completely
+      // instead. Note a visibility assertion cannot see that; only hit-testing can.
+      className={escapeAt ? 'cf-gated-hint cf-gated-hint--escaped' : 'cf-gated-hint'}
+      role="presentation"
+      aria-hidden="true"
+      data-testid="gated-control-hint"
+      style={
+        escapeAt
+          ? escapeAt.bottom != null
+            ? { position: 'fixed', left: escapeAt.left, top: 'auto', bottom: escapeAt.bottom, marginBottom: 6, marginTop: 0 }
+            : { position: 'fixed', left: escapeAt.left, top: escapeAt.top ?? 0, bottom: 'auto', marginTop: 6, marginBottom: 0 }
+          : undefined
+      }
+    >
+      {reason}
+    </span>
+  ) : null;
 
   return (
-    <span className={wrapperClass} data-gated="true">
+    <span className={wrapperClass} data-gated="true" ref={wrapperRef}>
       {child}
       <span id={reasonId} className="sr-only">
         {reason}
       </span>
-      {tooltipVisible && (
-        <span className="cf-gated-hint" role="presentation" aria-hidden="true" data-testid="gated-control-hint">
-          {reason}
-        </span>
-      )}
+      {escapeAt && hintNode ? createPortal(hintNode, document.body) : hintNode}
     </span>
   );
 }

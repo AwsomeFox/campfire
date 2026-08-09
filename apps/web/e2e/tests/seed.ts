@@ -109,16 +109,34 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
     // drills (combat-dice / combat-mobile / combat-log) end Ambush, start their own
     // fight, and may leave that fight running if cleanup delete fails — reopen then
     // 409s with ENCOUNTER_ALREADY_RUNNING and the silent catch left Ambush ended.
-    const liveRes = await dm.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`);
-    if (liveRes.ok()) {
+    //
+    // Issue #2092: a test that fails mid-run can itself be interrupted by
+    // Playwright's own per-test timeout before ITS finally block finishes ending
+    // its throwaway encounter, leaving that encounter running when THIS function
+    // runs (either as that same test's own teardown, racing the abort, or as the
+    // next test's setup). A single end-then-throw pass here used to give up on
+    // the very first non-2xx/400 response and abort the whole sweep, then throw
+    // immediately on the first ENCOUNTER_ALREADY_RUNNING from `/reopen` — masking
+    // whatever assertion actually failed with a teardown error that then repeats
+    // on every subsequent run, since nothing ever retried the sweep. Sweep + reopen
+    // are now retried as a bounded unit so a leftover encounter (however it was
+    // left running) gets swept before we give up.
+    const sweepLiveFights = async (): Promise<void> => {
+      const liveRes = await dm.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`);
+      if (!liveRes.ok()) return;
       for (const enc of (await liveRes.json()) as { id: number }[]) {
         if (enc.id === encounterId) continue;
         const ended = await dm.post(`/api/v1/encounters/${enc.id}/end`);
-        if (!ended.ok() && ended.status() !== 400) {
-          throw new Error(`end other live fight ${enc.id} -> ${ended.status()}: ${await readError(ended)}`);
+        // 400 (not running / already ended) and 404 (deleted by its own cleanup
+        // after we listed it) both mean the slot is already free — keep sweeping
+        // the rest rather than aborting on the first one that isn't a clean 2xx.
+        if (!ended.ok() && ended.status() !== 400 && ended.status() !== 404) {
+          // Diagnostic only — the caller retries the sweep, so one bad entry here must
+          // not abort ending the rest of the running encounters in this campaign.
+          console.warn(`restoreSeedEncounter: end other live fight ${enc.id} -> ${ended.status()}: ${await readError(ended)}`);
         }
       }
-    }
+    };
 
     const getAmbush = async (): Promise<{ status: string; combatants?: Array<{ id: number }> }> => {
       const res = await dm.get(`/api/v1/encounters/${encounterId}`);
@@ -126,10 +144,18 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
       return (await res.json()) as { status: string; combatants?: Array<{ id: number }> };
     };
 
-    const ambushData = await getAmbush();
-    let status = ambushData.status;
+    let status: string | undefined;
+    const REOPEN_ATTEMPTS = 4;
+    let lastReopenFailure: string | null = null;
+    for (let attempt = 0; attempt < REOPEN_ATTEMPTS; attempt++) {
+      await sweepLiveFights();
+      const ambushData = await getAmbush();
+      status = ambushData.status;
+      if (status !== 'ended') {
+        lastReopenFailure = null;
+        break;
+      }
 
-    if (status === 'ended') {
       // /reopen → running (preserving round/turn). May 409 with HP_SYNC_CONFLICT when
       // character sheets advanced after the previous End — resolve keep_combatant so
       // the seed fight resumes with its snapshot values.
@@ -148,12 +174,24 @@ export async function restoreSeedEncounter(_page?: { request: APIRequestContext 
               })),
             },
           });
+        } else if (body.code === 'ENCOUNTER_ALREADY_RUNNING') {
+          // Something is still running — a leftover from an aborted test, or a
+          // narrow race with a concurrent worker on this same fixture. Retry the
+          // sweep-and-reopen cycle rather than giving up on the first attempt.
+          lastReopenFailure = `reopen seed encounter -> 409 ENCOUNTER_ALREADY_RUNNING (attempt ${attempt + 1}/${REOPEN_ATTEMPTS})`;
+          await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+          continue;
         }
       }
       if (!reopenRes.ok()) {
         throw new Error(`reopen seed encounter -> ${reopenRes.status()}: ${await readError(reopenRes)}`);
       }
       status = 'running';
+      lastReopenFailure = null;
+      break;
+    }
+    if (lastReopenFailure) {
+      throw new Error(`${lastReopenFailure} — a running encounter kept blocking reopen after ${REOPEN_ATTEMPTS} sweep attempts`);
     }
 
     const currentAmbush = await getAmbush();

@@ -9,6 +9,16 @@ import { isEntityDeepLinkHash } from './routeFocus';
  * app root makes direct loads, client navigation, and browser back/forward all
  * converge on the same keyboard-visible target without feature-specific timers.
  */
+/**
+ * How long a deep link keeps waiting for its target to render.
+ *
+ * Exported because the encounter cockpit runs its own resolver against the same hash (see
+ * `useDeepLinkedPanel`) and the two windows have to match: this observer takes its single
+ * focus attempt the moment the target mounts, so if the cockpit has already given up by
+ * then, that attempt lands on an element inside a hidden panel and nothing retries it.
+ */
+export const ENTITY_DEEP_LINK_WINDOW_MS = 10_000;
+
 export function EntityDeepLinkFocus() {
   const location = useLocation();
 
@@ -36,7 +46,7 @@ export function EntityDeepLinkFocus() {
       observer.observe(document.getElementById('root') ?? document.body, { childList: true, subtree: true });
       // Deleted/hidden records never render. Do not retain an app-wide observer
       // for the rest of the session when a stale external link is opened.
-      timeout = window.setTimeout(() => observer?.disconnect(), 10_000);
+      timeout = window.setTimeout(() => observer?.disconnect(), ENTITY_DEEP_LINK_WINDOW_MS);
     }
 
     return () => {

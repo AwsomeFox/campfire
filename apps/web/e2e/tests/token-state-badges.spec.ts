@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 function encounterUrl(): string {
   const { campaignId, encounterId } = seed();
@@ -39,6 +40,11 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await restoreSeedEncounter();
     await placeTokenStateFixture(dm.request);
     await Promise.all([dmPage.goto(encounterUrl()), playerPage.goto(encounterUrl())]);
+    // Deliberately NOT opening the Party tab here. The roster rows this drill focuses live
+    // in it, but activating a map token's condition badge is supposed to reveal that panel
+    // by itself — opening it up front would hide exactly that regression, which is how it
+    // slipped through the first time. The player also lands on Turn by default, so this is
+    // the real starting state for the badge shortcut.
 
     const dmBoss = dmPage.getByTestId(`map-token-${bossId}`);
     const playerBoss = playerPage.getByTestId(`map-token-${bossId}`);
@@ -63,6 +69,10 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await expect(playerBoss).toBeVisible();
     await overflowCondition.click();
     await expect(playerPage.locator(`#combatant-${bossId}-conditions`)).toBeFocused();
+
+    // The badge revealed the Party panel on its own; the DM client has not been asked to,
+    // so bring it forward before reading that client's roster.
+    await openCockpitTab(dmPage, 'party');
 
     // Map-surface tools own their gestures, even when one begins over a badge.
     await dmPage.getByTestId('map-tool-reveal').click();
@@ -146,14 +156,20 @@ test('40-token map smoke keeps token drag feedback available (#1905)', async ({ 
       expect(placed.ok()).toBeTruthy();
     }
     await page.goto(encounterUrl());
+    // Map tokens only — no need to open the roster, and with 40+ combatants rendering it
+    // is the expensive part of this smoke test.
     const tokens = page.locator('[data-testid^="map-token-"][role="button"]');
     await expect(tokens).toHaveCount(combatants.length);
-    const token = tokens.first();
+    // NOT `.first()`: token 0 sits at 5%/10% of the board, under the cockpit's floating
+    // map chrome (the DM token-detail selector lives there permanently, as it does in any
+    // VTT). A drag started beneath a real control is delivered to that control. Take a
+    // token further down the board, which is what this smoke test is actually about.
+    const token = tokens.last();
     const beforeLeft = await token.evaluate((element) => (element as HTMLElement).style.left);
     // Playwright's drag gesture uses the same mouse/pointer path as the table. The
     // opacity preview is intentionally transient and returns to 1 after mouseup, so
     // assert the durable server-backed position rather than sampling that animation.
-    await token.dragTo(tokens.nth(1));
+    await token.dragTo(tokens.nth(Math.max(0, combatants.length - 2)));
     await expect.poll(() => token.evaluate((element) => (element as HTMLElement).style.left)).not.toBe(beforeLeft);
   } finally {
     await restoreSeedEncounter();
