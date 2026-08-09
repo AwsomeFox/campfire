@@ -126,7 +126,9 @@ export function EncounterAiDriverPanel({
   const myCharacter = charactersQuery.data?.find((c) => c.id === myMembership?.characterId);
   const memberName = me?.user.displayName || me?.user.username || t('table.you');
   const characterName = myCharacter?.name;
-  const playerAttributionPending = !isDm && myMembership?.characterId !== undefined && (!charactersQuery.isFetched || charactersQuery.isError || !myCharacter);
+  // A player without a linked character can still speak as their member name. Only defer
+  // attribution while resolving a real linked id, where sending early would lose the name.
+  const playerAttributionPending = !isDm && myMembership?.characterId != null && (!charactersQuery.isFetched || charactersQuery.isError || !myCharacter);
 
   useLayoutEffect(() => {
     // Clear before paint: a role-projected transcript may change between renders, and the

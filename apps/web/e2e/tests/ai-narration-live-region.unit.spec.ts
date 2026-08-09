@@ -18,6 +18,7 @@ import {
 import {
   dmEntryText,
   emptyTranscript,
+  transcriptEntryId,
   transcriptReducer,
   type DmEntry,
   type TranscriptEntry,
@@ -338,6 +339,31 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     // Failure mode: silencing the whole transcript with no exceptIds drops the line.
     const silencedAway = silenceNarrationLogBaseline(earlyTurn);
     expect(advanceNarrationLog(earlyTurn, silencedAway).additions).toEqual([]);
+  });
+
+  test('pre-hydration authoritative narration keeps its folded DM bubble pending', () => {
+    const narration = {
+      eventId: 'narration-row', seq: 1, campaignId: 1, kind: 'narration' as const,
+      actorUserId: null, actorName: null, clientRef: null, turnId: 'turn-1',
+      payload: { text: 'The gate opens.' }, at,
+    };
+    const ended = {
+      eventId: 'turn-end-row', seq: 2, campaignId: 1, kind: 'turn.ended' as const,
+      actorUserId: null, actorName: null, clientRef: null, turnId: 'turn-1',
+      payload: { stopReason: 'end_turn', steps: 1, tokensUsed: 2, budgetRemaining: 98 }, at,
+    };
+    const transcript = transcriptReducer(
+      transcriptReducer(emptyTranscript, { type: 'authoritative' }),
+      { type: 'serverEvents', events: [narration, ended] },
+    );
+
+    // The streamed server rows fold into `dm:<turnId>`; raw event ids would silence this
+    // completed addition when hydration releases the live region.
+    const pending = new Set([transcriptEntryId(narration), transcriptEntryId(ended)]);
+    expect(pending).toEqual(new Set(['dm:turn-1']));
+    expect(beginNarrationLogLive(transcript.entries, pending).additions).toMatchObject([
+      { id: 'dm:turn-1', kind: 'dm', text: 'The gate opens.' },
+    ]);
   });
 
   test('go-live still silences hydrated history and batched session seed', () => {

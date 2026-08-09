@@ -47,6 +47,7 @@ import {
   loadTranscript,
   clearTranscript,
   emptyTranscript,
+  transcriptEntryId,
   type TranscriptAction,
   type TranscriptState,
 } from './transcript';
@@ -318,7 +319,10 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     {
       onEvent: (event) => {
         if (!transcriptFetched && event.type === 'transcript') {
-          setPreHydrationLiveEntryIds((ids) => new Set(ids).add(event.event.eventId));
+          // Some durable rows fold into a single DM bubble (`dm:<turnId>`), rather than
+          // retaining their server event id. Keep the final rendered id so go-live does
+          // not baseline an SSE addition that arrived during hydration.
+          setPreHydrationLiveEntryIds((ids) => new Set(ids).add(transcriptEntryId(event.event)));
         }
         setState((prev) => reduce(prev, event));
         if (enabled) {

@@ -214,6 +214,17 @@ export function dmEntryText(entry: DmEntry): string {
   return [...entry.committed, entry.live].filter((s) => s.length > 0).join('\n\n');
 }
 
+/**
+ * The durable event id normally becomes the rendered entry id. Narration and its terminal
+ * turn row deliberately fold into one stable DM bubble instead, so callers tracking a live
+ * server row must use this id when they later address the rendered transcript.
+ */
+export function transcriptEntryId(event: Pick<AiDmTranscriptEvent, 'eventId' | 'kind' | 'turnId'>): string {
+  return event.kind === 'narration' || event.kind === 'turn.ended'
+    ? `dm:${event.turnId ?? event.eventId}`
+    : event.eventId;
+}
+
 // ---- Actions --------------------------------------------------------------
 
 export type TranscriptAction =
@@ -705,8 +716,6 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
     lastSeq: Math.max(state.lastSeq ?? 0, event.seq),
   };
   const entries = state.entries;
-  const bubbleId = event.turnId ? `dm:${event.turnId}` : null;
-
   /** Replace an entry in place (id-keyed merge), or append when it is new. */
   const upsert = (entry: TranscriptEntry): TranscriptState => {
     const idx = indexOfId(entries, entry.id);
@@ -744,7 +753,7 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
     case 'narration': {
       const text = asText(event.payload.text);
       if (!text) return base;
-      const id = bubbleId ?? `dm:${event.eventId}`;
+      const id = transcriptEntryId(event);
       // Adopt the bubble the live token stream already opened, so the typing effect and the
       // authoritative text are the same bubble rather than two stacked ones — but never a
       // bubble that already belongs to another turn (see foldTargetIndex).
@@ -787,7 +796,7 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
     }
 
     case 'turn.ended': {
-      const id = bubbleId ?? `dm:${event.eventId}`;
+      const id = transcriptEntryId(event);
       const idx = foldTargetIndex(entries, id);
       const meta: DmTurnMeta = {
         stopReason: asText(event.payload.stopReason),
