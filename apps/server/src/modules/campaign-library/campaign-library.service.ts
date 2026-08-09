@@ -266,11 +266,11 @@ export class CampaignLibraryService {
         // finding on other paths.
         const row = request.operation === 'move_inventory_owner'
           ? tx.get(
-              sql`select owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction, equipped_action_source as equippedActionSource from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
+              sql`select owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
             )
           : target.entityType === 'inventory_item'
             ? tx.get(
-                sql`select ${sql.raw(field)} as value, owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction, equipped_action_source as equippedActionSource from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
+                sql`select ${sql.raw(field)} as value, owner_type as ownerType, character_id as characterId, equipped as equipped, equip_slot as equipSlot, equipped_action as equippedAction from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`,
               )
             : tx.get(sql`select ${sql.raw(field)} as value from ${sql.raw(name)} where id=${target.entityId} and campaign_id=${campaignId}`);
         if (!row) throw new NotFoundException(`${target.entityType} ${target.entityId} not found in this campaign`);
@@ -329,7 +329,7 @@ export class CampaignLibraryService {
           const moved = before.ownerType !== request.ownerType || before.characterId !== (request.characterId ?? null);
           if (moved) {
             tx.run(
-              sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, equipped_action=NULL, equipped_action_source=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`,
+              sql`update inventory_items set owner_type=${request.ownerType}, character_id=${request.characterId ?? null}, equipped=0, equip_slot=NULL, equipped_action=NULL, updated_at=${ts} where id=${target.entityId} and campaign_id=${campaignId}`,
             );
             // Issue #1901 review (chatgpt-codex-connector P2): the previous owner just lost
             // this item's merged action (if any) — invalidate their cached actions/turn
@@ -367,7 +367,7 @@ export class CampaignLibraryService {
             affectedCharacterIds.add(archiveSnapshot.characterId);
           }
           tx.run(
-            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL${archiveClearAction ? sql`, equipped_action=NULL, equipped_action_source=NULL` : sql``}` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
+            sql`update ${sql.raw(name)} set deleted_at=${request.operation === 'archive' ? ts : null}, updated_at=${ts}${clearEquipOnArchive ? sql`, equipped=0, equip_slot=NULL${archiveClearAction ? sql`, equipped_action=NULL` : sql``}` : sql``} where id=${target.entityId} and campaign_id=${campaignId}`,
           );
         }
       }
@@ -449,7 +449,6 @@ export class CampaignLibraryService {
                 equipped: z.number().int().optional(),
                 equipSlot: z.string().nullable().optional(),
                 equippedAction: z.string().nullable().optional(),
-                equippedActionSource: z.string().nullable().optional(),
               })
               .parse(value);
             if (!tx.get(sql`select id from inventory_items where id=${row.entityId} and campaign_id=${campaignId} and owner_type=${request.ownerType} and character_id is ${request.characterId ?? null}${versionFence(row)}`)) throw new ConflictException('A target changed after this bulk operation; undo would overwrite it');
@@ -467,12 +466,9 @@ export class CampaignLibraryService {
             // Issue #1326 review: an unequipped-but-authored item can legitimately carry
             // an equippedAction, so the snapshot's action should round-trip with the
             // owner. Only party-stash destinations must remain action-free.
-            const restorable =
-              before.ownerType === 'character'
-                ? this.restorableEquippedAction(before.equippedAction, before.equippedActionSource)
-                : { action: null, source: null };
+            const restoreEquippedAction = before.ownerType === 'character' ? (before.equippedAction ?? null) : null;
             tx.run(
-              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${restorable.action}, equipped_action_source=${restorable.source}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+              sql`update inventory_items set owner_type=${before.ownerType}, character_id=${before.characterId}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? before.equipSlot : null}, equipped_action=${restoreEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
             );
             // Issue #1901 review (chatgpt-codex-connector P2): the restored character gains
             // this item's action back into their merged list — invalidate their cache.
@@ -486,7 +482,6 @@ export class CampaignLibraryService {
                 equipped: z.number().int().optional(),
                 equipSlot: z.string().nullable().optional(),
                 equippedAction: z.string().nullable().optional(),
-                equippedActionSource: z.string().nullable().optional(),
               })
               .parse(value);
             const after = request.operation === 'archive' ? operation.createdAt : null;
@@ -501,15 +496,8 @@ export class CampaignLibraryService {
               const owner = z
                 .object({ ownerType: z.string(), characterId: z.number().int().nullable() })
                 .parse(tx.get(sql`select owner_type as ownerType, character_id as characterId from inventory_items where id=${row.entityId} and campaign_id=${campaignId}`));
-              const keepRestorable =
-                owner.ownerType === 'character'
-                  ? this.restorableEquippedAction(scalar.equippedAction, scalar.equippedActionSource)
-                  : { action: null, source: null };
-              // The provenance is written in the same statement as the action, never left
-              // behind describing a null; see `restorableEquippedAction`.
-              const keepEquippedAction = keepRestorable.action;
-              const keepEquippedActionSource = keepRestorable.source;
-              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
+              const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
+              tx.run(sql`update inventory_items set deleted_at=${scalar.value}, equipped=0, equip_slot=NULL, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`);
               // Issue #1901 review (chatgpt-codex-connector P2): re-archiving may drop this
               // item's action back out of the owner's merged list — invalidate their cache
               // whenever the owner is a character (harmless extra invalidation if the item
@@ -528,16 +516,9 @@ export class CampaignLibraryService {
               if (canRestoreEquip && this.inventoryEquipSlotConflict(tx, campaignId, owner.characterId!, scalar.equipSlot!, row.entityId)) {
                 throw new ConflictException('Undo would re-equip this item into a slot another item now occupies; unequip that item first.');
               }
-              const keepRestorable =
-                owner.ownerType === 'character'
-                  ? this.restorableEquippedAction(scalar.equippedAction, scalar.equippedActionSource)
-                  : { action: null, source: null };
-              // The provenance is written in the same statement as the action, never left
-              // behind describing a null; see `restorableEquippedAction`.
-              const keepEquippedAction = keepRestorable.action;
-              const keepEquippedActionSource = keepRestorable.source;
+              const keepEquippedAction = owner.ownerType === 'character' ? (scalar.equippedAction ?? null) : null;
               tx.run(
-                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, equipped_action_source=${keepEquippedActionSource}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
+                sql`update inventory_items set deleted_at=${scalar.value}, equipped=${canRestoreEquip ? 1 : 0}, equip_slot=${canRestoreEquip ? scalar.equipSlot : null}, equipped_action=${keepEquippedAction}, updated_at=${nowIso()} where id=${row.entityId} and campaign_id=${campaignId}`,
               );
               // Issue #1901 review (chatgpt-codex-connector P2): undoing the archive can
               // restore this item's action into the owner's merged list.
@@ -1001,29 +982,6 @@ export class CampaignLibraryService {
    * invariant `InventoryService.update` enforces (409 INVENTORY_SLOT_CONFLICT), reused
    * here so undoBulk can decide whether restoring a snapshotted equip is safe.
    */
-  /**
-   * What a bulk UNDO may restore into `equipped_action` (issue #2097 review).
-   *
-   * Everything the journal recorded, verbatim — including a `derived` action.
-   *
-   * That is safe because the journals are SCRUBBED at the one moment their derived copies
-   * become invalid: `CampaignsService` nulls them, in the same transaction as the live rows,
-   * whenever the campaign's mechanics change. An earlier version of this method refused to
-   * restore derived actions at all, which did close that hole but broke every ordinary undo
-   * — an item came back equipped and granting nothing when nothing had changed. Scrubbing at
-   * the source keeps the common case correct and still leaves nothing stale to resurrect.
-   *
-   * A party-stash destination is the one thing still filtered here: such an item can never
-   * carry an action whatever the journal says.
-   */
-  private restorableEquippedAction(
-    action: string | null | undefined,
-    source: string | null | undefined,
-  ): { action: string | null; source: string | null } {
-    if (!action) return { action: null, source: null };
-    return { action, source: source ?? null };
-  }
-
   private inventoryEquipSlotConflict(tx: LibraryTransaction, campaignId: number, characterId: number, slot: string, excludeId: number): boolean {
     return !!tx.get(
       sql`select id from inventory_items where campaign_id=${campaignId} and character_id=${characterId} and equipped=1 and deleted_at is null and lower(equip_slot)=lower(${slot}) and id!=${excludeId}`,

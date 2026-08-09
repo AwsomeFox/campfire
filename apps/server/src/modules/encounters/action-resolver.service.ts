@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import {
+  deriveEquippedItemAction,
   ActionApplyPolicy,
   ActionApplyRequest,
   ActionResolution,
@@ -391,14 +392,32 @@ export class ActionResolverService {
    * equipping item's name (issue #1901) so callers can label it "equipped: <item>"
    * without a second inventory lookup.
    */
-  private equippedItemActionRows(characterId: number, campaignId: number): Array<{ action: CharacterAction; itemName: string }> {
+  /**
+   * The actions this character's equipped items grant (issues #1326, #1901, #2097).
+   *
+   * An item's stored `equippedAction` is only ever a HUMAN-authored one. When there is none,
+   * the action is DERIVED here, at read time, from the item's accepted compendium snapshot and
+   * this wielder — the same computation `InventoryService` runs when it serves the item, so
+   * the encounter and the inventory sheet cannot disagree about what a weapon does. Nothing is
+   * cached: the derivation's inputs (snapshot, stats, level, rule system, item name) belong to
+   * four different modules, and computing on the way out is what makes a stale action
+   * unrepresentable rather than merely unlikely.
+   */
+  private equippedItemActionRows(
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'stats' | 'level'>,
+  ): Array<{ action: CharacterAction; itemName: string }> {
     const rows = this.db
-      .select({ name: inventoryItems.name, equippedAction: inventoryItems.equippedAction })
+      .select({
+        name: inventoryItems.name,
+        equippedAction: inventoryItems.equippedAction,
+        compendiumSnapshot: inventoryItems.compendiumSnapshot,
+        ruleEntryId: inventoryItems.ruleEntryId,
+      })
       .from(inventoryItems)
       .where(
         and(
-          eq(inventoryItems.characterId, characterId),
-          eq(inventoryItems.campaignId, campaignId),
+          eq(inventoryItems.characterId, character.id),
+          eq(inventoryItems.campaignId, character.campaignId),
           eq(inventoryItems.equipped, true),
           isNull(inventoryItems.deletedAt),
         ),
@@ -406,12 +425,40 @@ export class ActionResolverService {
       .orderBy(inventoryItems.id)
       .all();
     const actions: Array<{ action: CharacterAction; itemName: string }> = [];
+    let adapter: RuleSystemAdapter | null = null;
+    const wielder = { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level };
     for (const row of rows) {
-      if (!row.equippedAction) continue;
-      const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
-      if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
+      if (row.equippedAction) {
+        const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
+        if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
+        continue;
+      }
+      const data = this.equippedItemCompendiumData(row.compendiumSnapshot, row.ruleEntryId);
+      if (!data) continue;
+      // Resolved lazily and reused: an inventory of non-weapons should not cost a campaign
+      // lookup, and one with ten weapons should not cost ten.
+      adapter ??= this.adapterForCampaign(character.campaignId);
+      const derived = deriveEquippedItemAction({ itemName: row.name, data, character: wielder, adapter });
+      if (derived) actions.push({ action: derived, itemName: row.name });
     }
     return actions;
+  }
+
+  /**
+   * An equipped item's compendium payload: its ACCEPTED snapshot first, falling back to the
+   * live rule entry only for an item that never took one. The snapshot is authoritative for
+   * the same reason it exists — a compendium edit nobody has accepted must not silently change
+   * what a character's weapon does mid-encounter.
+   */
+  private equippedItemCompendiumData(snapshotJson: string | null, ruleEntryId: number | null): Record<string, unknown> | null {
+    const snapshot = fromJsonText<{ dataJson?: string } | null>(snapshotJson, null);
+    const dataJson =
+      snapshot?.dataJson ??
+      (ruleEntryId != null
+        ? (this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, ruleEntryId)).get()?.dataJson ?? null)
+        : null);
+    if (!dataJson) return null;
+    return fromJsonText<Record<string, unknown> | null>(dataJson, null);
   }
 
   /**
@@ -424,10 +471,10 @@ export class ActionResolverService {
    * of the merge for a caller that wants to label the source (issue #1901).
    */
   characterUsableActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level'>,
   ): Array<{ row: Record<string, unknown>; itemName: string | null }> {
     const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
-    const equipped = this.equippedItemActionRows(character.id, character.campaignId);
+    const equipped = this.equippedItemActionRows(character);
     // Issue #1901 review (chatgpt-codex-connector P2): `character.actions` is itself capped
     // at 100 entries (packages/schema `actions: z.array(CharacterAction).max(100)`), and
     // `ActionResolveRequest.actionIndex` only accepts 0-99 — so a character already at the
@@ -443,7 +490,7 @@ export class ActionResolverService {
   }
 
   private characterActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level'>,
   ): Array<Record<string, unknown>> {
     return this.characterUsableActionRows(character).map((x) => x.row);
   }

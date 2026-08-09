@@ -50,7 +50,7 @@ describe('compendium inventory acquisition (#738)', () => {
     expect(service).toContain('withCompendiumStates');
     expect(service).toContain('inArray(ruleEntries.id, linkedIds)');
     expect(service).toContain('const refreshed = await this.withCompendiumState(row);');
-    expect(service).toContain('return (await this.redactEquippedActions([refreshed], user, role))[0];');
+    expect(service).toContain('return (await this.resolveEquippedActions([refreshed], user, role))[0];');
     expect(service).toContain("action: 'item.refresh_compendium'");
     expect(service).toContain("action: 'item.compendium_state'");
     // Handoff/publish allowlists must retain portable provenance (ruleEntryId is nulled on import).

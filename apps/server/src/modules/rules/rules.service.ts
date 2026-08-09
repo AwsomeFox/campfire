@@ -26,7 +26,6 @@ import {
 } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
 import { rulePacks, ruleEntries, ruleEntryRevisions, combatants, campaigns, importJobs } from '../../db/schema';
-import { clearDerivedEquippedActionsIn } from '../inventory/derived-action-cleanup';
 import { nowIso } from '../../common/time';
 import { foldForSearch } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
@@ -2513,18 +2512,6 @@ export class RulesService implements OnModuleInit {
       // Trashed campaigns do not use live rules and cannot block the uninstall, but clear
       // their dormant slug before deleting the pack so a later restore cannot retain a
       // dangling reference or silently link to a different reinstalled pack.
-      // Issue #2097 review (chatgpt-codex-connector P1): resetting the slug is a mechanics
-      // change like any other, so the derived actions computed under it are invalidated in the
-      // same transaction. These campaigns are trashed, so no live encounter screen needs
-      // telling — but a RESTORE would otherwise bring back actions derived under a rule system
-      // the campaign no longer names.
-      for (const stale of tx
-        .select({ id: campaigns.id })
-        .from(campaigns)
-        .where(and(eq(campaigns.ruleSystem, pack.slug), isNotNull(campaigns.deletedAt)))
-        .all()) {
-        clearDerivedEquippedActionsIn(tx, stale.id, nowIso());
-      }
       tx
         .update(campaigns)
         .set({ ruleSystem: '' })

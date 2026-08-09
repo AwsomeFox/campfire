@@ -8657,7 +8657,7 @@ export class EncountersService {
     };
     if (c.kind === 'character' && c.characterId !== null) {
       const [character] = await this.db
-        .select({ id: characters.id, campaignId: characters.campaignId, actions: characters.actions })
+        .select({ id: characters.id, campaignId: characters.campaignId, actions: characters.actions, stats: characters.stats, level: characters.level })
         .from(characters)
         .where(eq(characters.id, c.characterId))
         .limit(1);

@@ -3,7 +3,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { characters, inventoryItems, ruleEntries } from '../src/db/schema';
+import { inventoryItems, ruleEntries } from '../src/db/schema';
 
 const dm = { 'x-dev-user': 'dm', 'x-dev-role': 'dm' };
 const player = { 'x-dev-user': 'player', 'x-dev-role': 'player' };
@@ -12,6 +12,12 @@ const player = { 'x-dev-user': 'player', 'x-dev-role': 'player' };
  * Issue #2097 — the whole point of the feature, asserted end to end: acquire a weapon from
  * the compendium, equip it, and find a usable attack on the encounter card without anyone
  * hand-authoring anything. Before this, that flow produced an "equipped" badge and no action.
+ *
+ * A derived action is COMPUTED ON READ and never stored. That is what most of these specs are
+ * really testing: change a wielder's stats, a campaign's rule system, an item's name or its
+ * accepted compendium revision, and the granted action follows on the very next read, because
+ * there is no saved copy that could be left behind. The column holds human-authored actions
+ * only.
  */
 describe('derived equipped-item actions (issue #2097)', () => {
   let ctx: TestAppContext;
@@ -88,12 +94,12 @@ describe('derived equipped-item actions (issue #2097)', () => {
     setLongswordEntryData(LONGSWORD_DATA);
   }
 
-  async function acquireLongsword(): Promise<number> {
+  async function acquireLongsword(owner: number = characterId): Promise<number> {
     const server = ctx.app.getHttpServer();
     const acquired = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
       .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId, duplicateMode: 'separate' });
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: owner, duplicateMode: 'separate' });
     expect(acquired.status).toBe(201);
     // Acquiring alone grants nothing — an item in a bag is not a weapon in a hand.
     expect(acquired.body.equipped).toBe(false);
@@ -142,7 +148,31 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(longsword.toHit).toBe('+6');
   });
 
-  it('an edit makes the action manual, and re-equipping never regenerates over it', async () => {
+  it('the encounter card and the inventory sheet always derive the SAME action', async () => {
+    const server = ctx.app.getHttpServer();
+    // Two readers, two modules, one computation. Nothing is cached on either side, so this is
+    // the property that replaces every "did the stored copy get invalidated?" test the
+    // persisted design needed.
+    const wielder = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Agreement Test', level: 9, stats: { STR: 18 } });
+    const itemId = await acquireLongsword(wielder.body.id);
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'agree-slot' });
+
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Agreement Fight' });
+    const combatant = enc.body.combatants.find((c: { characterId: number | null }) => c.characterId === wielder.body.id);
+    const actions = await request(server).get(`/api/v1/encounters/${enc.body.id}/combatants/${combatant.id}/actions`).set(dm);
+    const fromEncounter = actions.body.find((a: { name: string }) => a.name === 'Longsword');
+    const fromInventory = (await request(server).get(`/api/v1/inventory/${itemId}`).set(dm)).body.equippedAction;
+
+    // STR 18 (+4) at level 9 (proficiency +4).
+    expect(fromInventory.toHit).toBe('+8');
+    expect(fromEncounter.toHit).toBe(fromInventory.toHit);
+    expect(fromEncounter.damage).toBe(fromInventory.damage);
+  });
+
+  it('an edit makes the action manual, and equipping never regenerates over it', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
     await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'edit-slot' });
@@ -154,7 +184,8 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(edited.status).toBe(200);
     expect(edited.body.equippedActionSource).toBe('manual');
 
-    // The promise that makes the editor safe: unequip/equip must not overwrite the edit.
+    // The promise that makes the editor safe: an authored action is the one thing that IS
+    // stored, so nothing computed can displace it.
     await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
     const reEquipped = await request(server)
       .patch(`/api/v1/inventory/${itemId}`)
@@ -166,29 +197,34 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(reEquipped.body.equippedAction.toHit).toBe('+7');
   });
 
-  it('clearing the action re-opens the item to derivation on the next equip', async () => {
+  it('clearing the edit reverts the item to its derived action', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
     await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'reset-slot' });
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: { name: 'Custom', kind: '', toHit: '+1', damage: '', notes: '' } });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Custom', kind: '', toHit: '+1', damage: '', notes: '' } });
 
-    const cleared = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: null, equipped: false });
-    expect(cleared.body.equippedAction).toBeNull();
-    expect(cleared.body.equippedActionSource).toBeNull();
+    // `equippedAction: null` deletes the OVERRIDE, not the action. An equipped weapon grants
+    // an attack because it is an equipped weapon; the only way to say otherwise is to unequip
+    // it or to author an action that says otherwise.
+    const cleared = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.equippedActionSource).toBe('derived');
+    expect(cleared.body.equippedAction.toHit).toBe('+6');
 
-    const reEquipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'reset-slot' });
-    expect(reEquipped.body.equippedActionSource).toBe('derived');
-    expect(reEquipped.body.equippedAction.toHit).toBe('+6');
+    const unequipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
+    expect(unequipped.body.equippedAction).toBeNull();
+    expect(unequipped.body.equippedActionSource).toBeNull();
   });
 
-  it('handing an equipped weapon to another character and equipping it derives for the NEW wielder', async () => {
+  it('handing an equipped weapon to another character derives for the NEW wielder', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
     await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'handoff-slot' });
 
-    // A weaker character: STR 8 (-1) at level 1 (proficiency +2) → +1, not the +6 above. The
-    // old owner's action is discarded by the ownership-change rule, so there is nothing to
-    // overwrite — and the recipient must not be left holding a sword that grants nothing.
+    // A weaker character: STR 8 (-1) at level 1 (proficiency +2) → +1, not the +6 above.
     const recipient = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
@@ -202,6 +238,31 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(moved.body.equippedActionSource).toBe('derived');
     expect(moved.body.equippedAction.toHit).toBe('+1');
     expect(moved.body.equippedAction.damage).toContain('1d8-1');
+  });
+
+  it("a move discards the previous owner's authored action", async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'move-manual-slot' });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'My Own Blade', kind: 'melee', toHit: '+7', damage: '1d8+4 slashing', notes: '' } });
+
+    // An authored action is private to the character it was written for — an ownership change
+    // disposes of it, and the recipient gets the derivation for their own numbers.
+    const recipient = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Inheritor', level: 1, stats: { STR: 10 } });
+    const moved = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ ownerType: 'character', characterId: recipient.body.id, equipped: true, equipSlot: 'move-manual-slot' });
+    expect(moved.status).toBe(200);
+    expect(moved.body.equippedActionSource).toBe('derived');
+    expect(moved.body.equippedAction.name).toBe('Longsword');
+    expect(moved.body.equippedAction.toHit).toBe('+2');
   });
 
   it('a non-weapon grants nothing, so equipping a bedroll stays silent', async () => {
@@ -219,45 +280,244 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(equipped.body.equippedActionSource).toBeNull();
   });
 
-  // ---- review findings (chatgpt-codex-connector, devin, Copilot) ----
-
-  it('an unrelated PATCH to an already-equipped item never derives an action', async () => {
+  it('an unequipped weapon grants nothing, however good the compendium data is', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'unrelated-slot' });
-    // Deliberately removed — "delete the action, re-equip" is the documented reset flow.
-    const removed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: null });
-    expect(removed.body.equippedAction).toBeNull();
+    const fetched = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(fetched.status).toBe(200);
+    expect(fetched.body.equippedAction).toBeNull();
+    expect(fetched.body.equippedActionSource).toBeNull();
+  });
 
-    // A notes edit and a qty change are not equip transitions. Before the fix, `nextEquipped`
-    // fell back to `existing.equipped`, so either of these silently brought the action back —
-    // and did it without emitting the invalidation that keeps open encounter cards honest.
-    const noted = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ notes: 'just a note' });
-    expect(noted.status).toBe(200);
-    expect(noted.body.equippedAction).toBeNull();
-    expect(noted.body.equippedActionSource).toBeNull();
+  // ---- the inputs a derived action tracks ----
 
-    const requantified = await request(server)
+  it("follows the wielder's own numbers as they change, with no write in between", async () => {
+    const server = ctx.app.getHttpServer();
+    // A character of their own, so levelling them cannot disturb the shared fixture.
+    const grower = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Growing Fighter', level: 1, stats: { STR: 12 } });
+    const itemId = await acquireLongsword(grower.body.id);
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
+    // STR 12 (+1), level 1 (proficiency +2).
+    expect(equipped.body.equippedAction.toHit).toBe('+3');
+
+    // Nothing touches the item. Under the persisted design this needed an invalidation pass
+    // over every equipped item the character owned; now the next read simply computes again.
+    const levelled = await request(server)
+      .patch(`/api/v1/characters/${grower.body.id}`)
+      .set(dm)
+      .send({ level: 9, stats: { STR: 18 } });
+    expect(levelled.status).toBe(200);
+
+    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    // STR 18 (+4), level 9 (proficiency +4).
+    expect(after.body.equippedAction.toHit).toBe('+8');
+    expect(after.body.equippedAction.damage).toContain('1d8+4');
+  });
+
+  it('an authored action never follows the wielder — that is the point of authoring one', async () => {
+    const server = ctx.app.getHttpServer();
+    const fixed = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Fixed Fighter', level: 1, stats: { STR: 12 } });
+    const itemId = await acquireLongsword(fixed.body.id);
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'fixed-slot' });
+    await request(server)
       .patch(`/api/v1/inventory/${itemId}`)
       .set(dm)
-      .send({ qtyDelta: 1, idempotencyKey: `derive-guard-${itemId}` });
-    expect(requantified.status).toBe(200);
-    expect(requantified.body.equippedAction).toBeNull();
+      .send({ equippedAction: { name: 'Handmade', kind: 'melee', toHit: '+3', damage: '1d8+1 slashing', notes: '' } });
+
+    await request(server).patch(`/api/v1/characters/${fixed.body.id}`).set(dm).send({ level: 9, stats: { STR: 18 } });
+    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(after.body.equippedActionSource).toBe('manual');
+    expect(after.body.equippedAction.toHit).toBe('+3');
   });
 
-  it('re-asserting the same equip state still derives, and still says so', async () => {
+  it('renaming an equipped item renames the action it grants', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'reassert-slot' });
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: null });
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'rename-only-slot' });
+    expect(equipped.body.equippedAction.name).toBe('Longsword');
 
-    // Identical equip state, so `equipChanged` is false — but the action list DOES change,
-    // and the invalidation that keeps open encounter cards honest has to fire anyway.
-    const again = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'reassert-slot' });
-    expect(again.status).toBe(200);
-    expect(again.body.equippedActionSource).toBe('derived');
-    expect(again.body.equippedAction.toHit).toBe('+6');
+    // A derived action is titled after its item, always — only a MANUAL action may carry a
+    // name of its own.
+    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Oathkeeper' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.name).toBe('Oathkeeper');
+    expect(renamed.body.equippedActionSource).toBe('derived');
+    expect(renamed.body.equippedAction.name).toBe('Oathkeeper');
   });
+
+  it('renaming an equipped item never renames a MANUAL action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'rename-manual-slot' });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Named By Hand', kind: 'melee', toHit: '+6', damage: '1d8+3 slashing', targetAc: '', notes: '' } });
+
+    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Renamed Again' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.name).toBe('Renamed Again');
+    expect(renamed.body.equippedActionSource).toBe('manual');
+    expect(renamed.body.equippedAction.name).toBe('Named By Hand');
+  });
+
+  it("changing the campaign's rule system changes what its weapons do", async () => {
+    const server = ctx.app.getHttpServer();
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'System Switch' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Switcher', level: 5, stats: { STR: 16 } });
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+    const itemId = acquired.body.id;
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'switch-slot' });
+    expect(equipped.body.equippedAction.toHit).toBe('+6');
+
+    // The 5e attack math is not another system's. Under the persisted design this needed a
+    // campaign-wide sweep clearing every derived action, plus the same sweep over journals and
+    // tombstones so an undo could not resurrect the old mechanics. None of that exists now:
+    // the action is computed from whatever system the campaign has at the moment it is read.
+    // (A bare slug would have to match an installed pack; a homebrew profile IS its own
+    // system, which is the switch available to a campaign mid-flight.)
+    const profile = {
+      slug: 'e2e-switch-hack',
+      label: 'E2E Switch Hack',
+      mechanicsSummary: 'A homebrew system with its own ability table, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const switched = await request(server)
+      .patch(`/api/v1/campaigns/${camp.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
+    expect(switched.status).toBe(200);
+
+    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(after.status).toBe(200);
+    // Whatever the new system computes, it must not still be showing 5e's answer.
+    if (after.body.equippedAction) expect(after.body.equippedAction.toHit).not.toBe('+6');
+  });
+
+  it('derives from the revision this campaign accepted, not an unaccepted upstream one', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+
+    // The installed pack's entry changes upstream. `withCompendiumStates` reports the item as
+    // linked_updated without persisting it, and adopting the new revision is what the explicit
+    // refresh endpoint is for — so reading must NOT silently pick it up.
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '4d12', damageType: 'Force', properties: [] });
+    try {
+      const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'snapshot-slot' });
+      expect(equipped.status).toBe(200);
+      expect(equipped.body.equippedAction.damage).toContain('1d8+3');
+      expect(equipped.body.equippedAction.damage).not.toContain('4d12');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
+  it('accepting a compendium refresh changes the derived action with it', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'refresh-slot' });
+    expect(equipped.body.equippedAction.damage).toContain('1d8+3');
+
+    // Accepting the refresh is the moment the new revision becomes this campaign's truth, and
+    // the derivation reads the snapshot it just wrote.
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+      expect(refreshed.body.equippedActionSource).toBe('derived');
+      expect(refreshed.body.equippedAction.damage).toContain('2d6+3');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
+  it('a refresh never regenerates over a manual action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'refresh-manual-slot' });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Kept', kind: 'melee', toHit: '+7', damage: '1d8+4 slashing', targetAc: '', notes: '' } });
+
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect([200, 201]).toContain(refreshed.status);
+      expect(refreshed.body.equippedActionSource).toBe('manual');
+      expect(refreshed.body.equippedAction.name).toBe('Kept');
+      expect(refreshed.body.equippedAction.damage).toBe('1d8+4 slashing');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
+  it('an accepted snapshot with no weapon data derives nothing, even if the live entry has some', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+
+    // The item's ACCEPTED snapshot loses its weapon data (as a non-weapon revision would),
+    // while the live entry keeps some. Falling through to the live row here would derive from
+    // a revision this campaign never accepted — the hole the snapshot-precedence rule closes.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const snapshot = JSON.parse(
+      db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s!,
+    );
+    snapshot.dataJson = null;
+    db.update(inventoryItems).set({ compendiumSnapshot: JSON.stringify(snapshot) }).where(eq(inventoryItems.id, itemId)).run();
+
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'nodata-slot' });
+    expect(equipped.status).toBe(200);
+    expect(equipped.body.equippedAction).toBeNull();
+    expect(equipped.body.equippedActionSource).toBeNull();
+  });
+
+  it('an item with no accepted snapshot derives from the live entry, and tracks its content', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+
+    // Strip the snapshot so the derivation takes the live rule-entry fallback.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
+
+    const first = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'live-entry-slot' });
+    expect(first.status).toBe(200);
+    expect(first.body.equippedAction.damage).toContain('1d8+3');
+
+    // The entry's content changes; the id does not. The next READ follows the content — the
+    // fingerprint that used to guard this could only ever see the id.
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      const second = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+      expect(second.status).toBe(200);
+      expect(second.body.equippedAction.damage).toContain('2d6+3');
+    } finally {
+      restoreLongswordEntry();
+    }
+  });
+
+  // ---- the authored half: what a human writes is stored, validated, and trusted ----
 
   it('editing the numbers rewrites the spec the resolver actually rolls', async () => {
     const server = ctx.app.getHttpServer();
@@ -276,215 +536,40 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(edited.body.equippedAction.spec.outcomes.hit.damage[0]).toMatchObject({ formula: '1d8', flat: 4, type: 'slashing' });
   });
 
-  it('derives from the revision this campaign accepted, not an unaccepted upstream one', async () => {
+  it('an MCP-style round-trip edit rebuilds the spec, not just the display fields', async () => {
     const server = ctx.app.getHttpServer();
     const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'roundtrip-slot' });
+    const derived = equipped.body.equippedAction;
+    expect(derived.spec.attack.bonus).toBe('+6');
 
-    // The installed pack's entry changes upstream. `withCompendiumStates` reports the item as
-    // linked_updated without persisting it, and adopting the new revision is what the explicit
-    // refresh endpoint is for — so equipping must NOT silently pick it up.
-    setLongswordEntryData({ itemKind: 'weapon', damageDice: '4d12', damageType: 'Force', properties: [] });
-    try {
-      const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'snapshot-slot' });
-      expect(equipped.status).toBe(200);
-      expect(equipped.body.equippedAction.damage).toContain('1d8+3');
-      expect(equipped.body.equippedAction.damage).not.toContain('4d12');
-    } finally {
-      restoreLongswordEntry();
-    }
-  });
-
-  it('restoring a trashed item to the party stash clears the provenance with the action', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'trash-slot' });
-
-    // Trash the owning character, then the item, so restore() takes its party fallback.
-    const doomed = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .set(dm)
-      .send({ name: 'Doomed Owner', level: 1, stats: { STR: 10 } });
-    await request(server)
+    // The web editor strips the spec before sending; a REST/MCP client naturally reads the
+    // whole action, edits the numbers, and submits it back WITH its original spec. That used
+    // to update the display while combat kept resolving the old numbers.
+    const roundTripped = await request(server)
       .patch(`/api/v1/inventory/${itemId}`)
       .set(dm)
-      .send({ ownerType: 'character', characterId: doomed.body.id, equipped: true, equipSlot: 'trash-slot' });
-    await request(server).delete(`/api/v1/inventory/${itemId}`).set(dm);
-    // Trashing the owner is what makes `restore()` take its party fallback — `validateOwner`
-    // no longer resolves the character (same setup as case 5 of the enumerated clearing spec).
-    const delChar = await request(server).delete(`/api/v1/characters/${doomed.body.id}`).set(dm);
-    expect(delChar.status).toBe(200);
-
-    const restored = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(dm).send({});
-    expect([200, 201]).toContain(restored.status);
-    expect(restored.body.ownerType).toBe('party');
-    expect(restored.body.equippedAction).toBeNull();
-    // redactEquippedActions short-circuits on a null action, so a surviving source would be
-    // published campaign-wide as the origin of an action that no longer exists.
-    expect(restored.body.equippedActionSource).toBeNull();
+      .send({ equippedAction: { ...derived, toHit: '+9', damage: '2d6+5 slashing' } });
+    expect(roundTripped.status).toBe(200);
+    expect(roundTripped.body.equippedAction.spec.attack.bonus).toBe('+9');
+    expect(roundTripped.body.equippedAction.spec.outcomes.hit.damage[0]).toMatchObject({ formula: '2d6', flat: 5 });
   });
 
-  it('a derived action is regenerated when the wielder changes, but a manual one never is', async () => {
+  it('a deliberately authored spec is still trusted, not rebuilt', async () => {
     const server = ctx.app.getHttpServer();
-    // A character of their own, so levelling them cannot disturb the shared fixture.
-    const grower = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .set(dm)
-      .send({ name: 'Growing Fighter', level: 4, stats: { STR: 16, DEX: 12 } });
-    const acquired = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: grower.body.id, duplicateMode: 'separate' });
-    const itemId = acquired.body.id;
+    const itemId = await acquireLongsword();
+    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'authored-slot' });
 
-    // Level 4: STR +3, proficiency +2.
-    const first = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
-    expect(first.body.equippedAction.toHit).toBe('+5');
-
-    // Level 5 crosses a proficiency step, and the derivation is a snapshot of the wielder at
-    // the moment it was built — so leaving it alone would keep the character attacking with
-    // level-4 numbers forever.
-    const levelled = await request(server).patch(`/api/v1/characters/${grower.body.id}`).set(dm).send({ level: 5 });
-    expect(levelled.status).toBe(200);
-    expect(levelled.body.level).toBe(5);
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
-    const regenerated = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
-    expect(regenerated.body.equippedActionSource).toBe('derived');
-    expect(regenerated.body.equippedAction.toHit).toBe('+6');
-
-    // A manual action is still never regenerated — that promise is what the editor rests on.
-    await request(server)
+    // A caller that changes the spec ITSELF is expressing intent the five text fields cannot
+    // — the MCP path for saves, effects, action economy. Only a carried-along spec is stale.
+    const spec = JSON.parse(JSON.stringify(equipped.body.equippedAction.spec));
+    spec.attack.bonus = '+11';
+    const authored = await request(server)
       .patch(`/api/v1/inventory/${itemId}`)
       .set(dm)
-      .send({ equippedAction: { name: 'My Sword', kind: 'melee', toHit: '+2', damage: '1d8+1 slashing', targetAc: '', notes: '' } });
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
-    const afterManual = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
-    expect(afterManual.body.equippedActionSource).toBe('manual');
-    expect(afterManual.body.equippedAction.toHit).toBe('+2');
-  });
-
-  it('a regeneration that yields nothing clears the stale derived action', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stale-slot' });
-    expect(equipped.body.equippedAction).not.toBeNull();
-
-    // The accepted snapshot stops identifying this as a weapon. Re-equipping must not leave
-    // the item granting an attack built from source data that no longer says so.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    const snapshot = JSON.parse(
-      db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s!,
-    );
-    snapshot.dataJson = JSON.stringify({ category: 'Wondrous Item', rarity: 'Uncommon' });
-    db.update(inventoryItems)
-      .set({ compendiumSnapshot: JSON.stringify(snapshot), ruleEntryId: null })
-      .where(eq(inventoryItems.id, itemId))
-      .run();
-
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
-    const reEquipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stale-slot' });
-    expect(reEquipped.status).toBe(200);
-    expect(reEquipped.body.equippedAction).toBeNull();
-    expect(reEquipped.body.equippedActionSource).toBeNull();
-  });
-
-  it('a rename-and-equip in one PATCH derives under the NEW name', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    // Reachable from REST and MCP alike — the row would otherwise carry the new name while
-    // granting an action titled with the old one.
-    const renamed = await request(server)
-      .patch(`/api/v1/inventory/${itemId}`)
-      .set(dm)
-      .send({ name: 'Ancestral Blade', equipped: true, equipSlot: 'rename-slot' });
-    expect(renamed.status).toBe(200);
-    expect(renamed.body.name).toBe('Ancestral Blade');
-    expect(renamed.body.equippedAction.name).toBe('Ancestral Blade');
-  });
-
-  it('accepting a compendium refresh regenerates the derived action immediately', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'refresh-slot' });
-    expect(equipped.body.equippedAction.damage).toContain('1d8+3');
-
-    // The pack updates upstream. Equipping still derives from the ACCEPTED snapshot (asserted
-    // elsewhere) — but accepting the refresh is exactly the moment the new revision becomes
-    // this campaign's truth, so the action must follow without waiting for an unequip cycle.
-    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
-    try {
-      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
-      expect([200, 201]).toContain(refreshed.status);
-      expect(refreshed.body.equippedActionSource).toBe('derived');
-      expect(refreshed.body.equippedAction.damage).toContain('2d6+3');
-    } finally {
-      restoreLongswordEntry();
-    }
-  });
-
-  it('a compendium refresh never regenerates over a manual action', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'refresh-manual-slot' });
-    await request(server)
-      .patch(`/api/v1/inventory/${itemId}`)
-      .set(dm)
-      .send({ equippedAction: { name: 'Hand Written', kind: 'melee', toHit: '+9', damage: '1d8+5 slashing', targetAc: '', notes: '' } });
-
-    const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
-    expect([200, 201]).toContain(refreshed.status);
-    expect(refreshed.body.equippedActionSource).toBe('manual');
-    expect(refreshed.body.equippedAction.name).toBe('Hand Written');
-    expect(refreshed.body.equippedAction.toHit).toBe('+9');
-  });
-
-  it('a refresh regeneration that loses the race writes nothing', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'race-slot' });
-
-    // Stand in for a concurrent writer that authored a manual action between the refresh
-    // endpoint reading the row and its regeneration write landing. The predicate on that
-    // write requires the row to still be `derived`, so the authored action must survive.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
-    try {
-      db.update(inventoryItems)
-        .set({
-          equippedAction: JSON.stringify({ name: 'Raced In', kind: 'melee', toHit: '+9', damage: '1d8+5 slashing', targetAc: '', notes: '' }),
-          equippedActionSource: 'manual',
-        })
-        .where(eq(inventoryItems.id, itemId))
-        .run();
-
-      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
-      expect([200, 201]).toContain(refreshed.status);
-      expect(refreshed.body.equippedActionSource).toBe('manual');
-      expect(refreshed.body.equippedAction.name).toBe('Raced In');
-    } finally {
-      restoreLongswordEntry();
-    }
-  });
-
-  it('after a refresh, the persisted action always matches the persisted revision', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'revision-slot' });
-
-    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
-    try {
-      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
-      expect([200, 201]).toContain(refreshed.status);
-
-      // The invariant the update's snapshot fence exists to hold: the action a row grants is
-      // derived from the revision that row actually accepted. Without the fence a racing
-      // refresh could leave these two disagreeing — revision B's snapshot beside revision A's
-      // mechanics — which no reader could detect from the row itself.
-      const persisted = JSON.parse(refreshed.body.compendiumSnapshot.dataJson);
-      expect(persisted.damageDice).toBe('2d6');
-      expect(refreshed.body.equippedAction.damage).toContain('2d6');
-    } finally {
-      restoreLongswordEntry();
-    }
+      .send({ equippedAction: { ...equipped.body.equippedAction, toHit: '+11', spec } });
+    expect(authored.status).toBe(200);
+    expect(authored.body.equippedAction.spec.attack.bonus).toBe('+11');
   });
 
   it('an unrepresentable attack bonus is rejected as unresolvable, not as a server error', async () => {
@@ -550,919 +635,7 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(authored.body.equippedAction.damage).toBe('1d8 ichor');
   });
 
-  it('renaming an equipped item renames the action it grants', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'rename-only-slot' });
-    expect(equipped.body.equippedAction.name).toBe('Longsword');
-
-    // A rename alone is not an equip transition, so the derived action used to keep the old
-    // name indefinitely while the row and its `equipped: <item>` source label showed the new
-    // one. Only a MANUAL action may intentionally carry a name of its own.
-    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Oathkeeper' });
-    expect(renamed.status).toBe(200);
-    expect(renamed.body.name).toBe('Oathkeeper');
-    expect(renamed.body.equippedActionSource).toBe('derived');
-    expect(renamed.body.equippedAction.name).toBe('Oathkeeper');
-  });
-
-  it('renaming an equipped item never renames a MANUAL action', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'rename-manual-slot' });
-    await request(server)
-      .patch(`/api/v1/inventory/${itemId}`)
-      .set(dm)
-      .send({ equippedAction: { name: 'Named By Hand', kind: 'melee', toHit: '+6', damage: '1d8+3 slashing', targetAc: '', notes: '' } });
-
-    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Renamed Again' });
-    expect(renamed.status).toBe(200);
-    expect(renamed.body.name).toBe('Renamed Again');
-    expect(renamed.body.equippedActionSource).toBe('manual');
-    expect(renamed.body.equippedAction.name).toBe('Named By Hand');
-  });
-
-  it('an accepted snapshot with no weapon data derives nothing, even if the live entry has some', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-
-    // The item's ACCEPTED snapshot loses its weapon data (as a non-weapon revision would),
-    // while the live entry keeps some. Falling through to the live row here would derive from
-    // a revision this campaign never accepted — the hole the snapshot-precedence rule closes.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    const snapshot = JSON.parse(
-      db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s!,
-    );
-    snapshot.dataJson = null;
-    db.update(inventoryItems).set({ compendiumSnapshot: JSON.stringify(snapshot) }).where(eq(inventoryItems.id, itemId)).run();
-
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'nodata-slot' });
-    expect(equipped.status).toBe(200);
-    expect(equipped.body.equippedAction).toBeNull();
-    expect(equipped.body.equippedActionSource).toBeNull();
-  });
-
-  it('equipping never activates an action built from a revision the item no longer holds', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'fence-slot' });
-    // Unequipped, the item RETAINS its derived action — and a refresh does not regenerate an
-    // unequipped item, so this is the state the fence has to survive.
-    const unequipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
-    expect(unequipped.body.equippedAction).not.toBeNull();
-
-    // Its accepted revision moves on beneath it.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    const snapshot = JSON.parse(
-      db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s!,
-    );
-    snapshot.dataJson = JSON.stringify({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
-    db.update(inventoryItems).set({ compendiumSnapshot: JSON.stringify(snapshot) }).where(eq(inventoryItems.id, itemId)).run();
-
-    // Re-equipping must never leave the OLD revision's mechanics armed against the new
-    // snapshot: it derives from the current one.
-    const reEquipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'fence-slot' });
-    expect(reEquipped.status).toBe(200);
-    expect(reEquipped.body.equipped).toBe(true);
-    expect(reEquipped.body.equippedAction?.damage ?? '').not.toContain('1d8');
-  });
-
-  it("a rename whose owner changed underneath it never lands the old owner's action", async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'owner-race-slot' });
-
-    // Stand in for a concurrent move+equip that landed while a DM rename was mid-derivation:
-    // the row is now owned by someone else, with THEIR derived action on it. The rename's
-    // pending derivation was computed from the previous owner's stats and carries that
-    // owner's private breakdown in its notes — it must not overwrite the new owner's.
-    const other = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .set(dm)
-      .send({ name: 'Race Recipient', level: 1, stats: { STR: 8, DEX: 8 } });
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(inventoryItems)
-      .set({
-        characterId: other.body.id,
-        equippedAction: JSON.stringify({ name: 'Theirs', kind: 'melee', toHit: '+1', damage: '1d8-1 slashing', targetAc: '', notes: 'their own' }),
-        equippedActionSource: 'derived',
-      })
-      .where(eq(inventoryItems.id, itemId))
-      .run();
-
-    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Renamed Mid-Race' });
-    expect(renamed.status).toBe(200);
-    // The stale derivation is discarded rather than written over the new owner's row.
-    expect(renamed.body.equippedAction?.notes ?? '').not.toContain('STR +3');
-  });
-
-  it("a derivation computed from the wielder's old stats never overwrites a newer character", async () => {
-    const server = ctx.app.getHttpServer();
-    const grower = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .set(dm)
-      .send({ name: 'Stat Racer', level: 4, stats: { STR: 16, DEX: 12 } });
-    const acquired = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: grower.body.id, duplicateMode: 'separate' });
-    const itemId = acquired.body.id;
-
-    // A normal equip derives from the character as they are now — the fence must not reject
-    // the ordinary case it was added to guard.
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stat-race-slot' });
-    expect(equipped.status).toBe(200);
-    expect(equipped.body.equippedActionSource).toBe('derived');
-    expect(equipped.body.equippedAction.toHit).toBe('+5'); // STR +3, level-4 proficiency +2
-
-    // And a later level-up is picked up on the next equip, still fenced.
-    await request(server).patch(`/api/v1/characters/${grower.body.id}`).set(dm).send({ level: 5 });
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
-    const again = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stat-race-slot' });
-    expect(again.body.equippedAction.toHit).toBe('+6');
-  });
-
-  it('a rename that lands mid-derivation never leaves an action titled with the old name', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'name-race-slot' });
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equippedAction: null, equipped: false });
-
-    // Stand in for a rename that committed while an equip was mid-derivation: the row's name
-    // moved on, so an action titled with the pre-rename name must not be written onto it.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(inventoryItems).set({ name: 'Renamed Mid-Derivation' }).where(eq(inventoryItems.id, itemId)).run();
-
-    const reEquipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'name-race-slot' });
-    expect(reEquipped.status).toBe(200);
-    expect(reEquipped.body.name).toBe('Renamed Mid-Derivation');
-    // Either it derived under the current name, or it derived nothing — never the old name.
-    expect(reEquipped.body.equippedAction?.name ?? 'Renamed Mid-Derivation').toBe('Renamed Mid-Derivation');
-  });
-
-  it("changing the campaign's rule system clears derived actions but not manual ones", async () => {
-    const server = ctx.app.getHttpServer();
-    // Its own campaign: this test changes campaign-level mechanics, which would disturb the
-    // shared fixture every later spec depends on.
-    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'System Switch' });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Switcher', level: 5, stats: { STR: 16, DEX: 12 } });
-
-    const derivedItem = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
-    await request(server).patch(`/api/v1/inventory/${derivedItem.body.id}`).set(dm).send({ equipped: true, equipSlot: 'switch-main' });
-
-    const manualItem = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory`)
-      .set(dm)
-      .send({ name: 'Hand-Written Blade', ownerType: 'character', characterId: char.body.id });
-    await request(server).patch(`/api/v1/inventory/${manualItem.body.id}`).set(dm).send({ equipped: true, equipSlot: 'switch-off' });
-    await request(server)
-      .patch(`/api/v1/inventory/${manualItem.body.id}`)
-      .set(dm)
-      .send({ equippedAction: { name: 'Mine', kind: 'melee', toHit: '+4', damage: '1d6+2 slashing', targetAc: '', notes: '' } });
-
-    // A derived action encodes the system it was derived under; `ActionResolverService`
-    // resolves whatever is stored against the campaign's CURRENT adapter, so 5e numbers would
-    // otherwise keep being rolled under the new mechanics.
-    const profile = {
-      slug: 'e2e-switch-hack',
-      label: 'E2E Switch Hack',
-      mechanicsSummary: 'A homebrew hack used to change a campaign mid-flight, for e2e coverage.',
-      abilityTable: 'sw-banded',
-      abilityCap: 2,
-      saves: ['Grit'],
-      acMode: 'ascending',
-      acAnchor: 10,
-      initiativeMode: 'group',
-      initiativeDie: 6,
-      initiativeUsesDexMod: false,
-      tiebreak: 'order-only',
-      conditions: ['Soaked'],
-    };
-    const switched = await request(server)
-      .patch(`/api/v1/campaigns/${camp.body.id}`)
-      .set(dm)
-      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
-    expect(switched.status).toBe(200);
-
-    const afterDerived = await request(server).get(`/api/v1/inventory/${derivedItem.body.id}`).set(dm);
-    expect(afterDerived.body.equippedAction).toBeNull();
-    expect(afterDerived.body.equippedActionSource).toBeNull();
-    // The item is still worn — it just grants nothing until re-equipped.
-    expect(afterDerived.body.equipped).toBe(true);
-
-    // A human's action is their call, not the system switch's.
-    const afterManual = await request(server).get(`/api/v1/inventory/${manualItem.body.id}`).set(dm);
-    expect(afterManual.body.equippedActionSource).toBe('manual');
-    expect(afterManual.body.equippedAction.name).toBe('Mine');
-  });
-
-  it('a system switch also disarms a trashed item, so undoing its archive cannot resurrect old mechanics', async () => {
-    const server = ctx.app.getHttpServer();
-    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Archive Then Switch' });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Archivist', level: 5, stats: { STR: 16 } });
-    const item = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
-    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'archive-slot' });
-
-    // Bulk-archiving an equipped item deliberately KEEPS its action so undo can restore the
-    // exact pre-archive state — which means a tombstone holds a live spec that `undoBulk`
-    // writes back verbatim, with no regeneration.
-    const bulk = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk`)
-      .set(dm)
-      .send({ operation: 'archive', targets: [{ entityType: 'inventory_item', entityId: item.body.id }] });
-    expect(bulk.status).toBe(201);
-
-    const profile = {
-      slug: 'e2e-archive-hack',
-      label: 'E2E Archive Hack',
-      mechanicsSummary: 'A homebrew hack for the archive-then-switch case, for e2e coverage.',
-      abilityTable: 'sw-banded',
-      abilityCap: 2,
-      saves: ['Grit'],
-      acMode: 'ascending',
-      acAnchor: 10,
-      initiativeMode: 'group',
-      initiativeDie: 6,
-      initiativeUsesDexMod: false,
-      tiebreak: 'order-only',
-      conditions: ['Soaked'],
-    };
-    const switched = await request(server)
-      .patch(`/api/v1/campaigns/${camp.body.id}`)
-      .set(dm)
-      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
-    expect(switched.status).toBe(200);
-
-    // The tombstone was disarmed too, so restoring it cannot bring 5e mechanics back to life.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    const tombstone = db
-      .select({ action: inventoryItems.equippedAction, src: inventoryItems.equippedActionSource })
-      .from(inventoryItems)
-      .where(eq(inventoryItems.id, item.body.id))
-      .get()!;
-    expect(tombstone.action).toBeNull();
-    expect(tombstone.src).toBeNull();
-  });
-
-  it('equipping under the old system cannot undo a mechanics-switch cleanup', async () => {
-    const server = ctx.app.getHttpServer();
-    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Equip Vs Switch' });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Racer', level: 5, stats: { STR: 16 } });
-    const item = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
-
-    const profile = {
-      slug: 'e2e-equip-race-hack',
-      label: 'E2E Equip Race Hack',
-      mechanicsSummary: 'A homebrew hack for the equip-versus-switch race, for e2e coverage.',
-      abilityTable: 'sw-banded',
-      abilityCap: 2,
-      saves: ['Grit'],
-      acMode: 'ascending',
-      acAnchor: 10,
-      initiativeMode: 'group',
-      initiativeDie: 6,
-      initiativeUsesDexMod: false,
-      tiebreak: 'order-only',
-      conditions: ['Soaked'],
-    };
-    const switched = await request(server)
-      .patch(`/api/v1/campaigns/${camp.body.id}`)
-      .set(dm)
-      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
-    expect(switched.status).toBe(200);
-
-    // Equipping AFTER the switch derives under the new adapter, which has no attack math —
-    // so it must not produce a resolvable 5e-shaped spec. (The transactional fence covers the
-    // race where the switch lands mid-derivation; this covers the ordering that IS reachable
-    // over HTTP, and would have failed while the equip path's fence was missing entirely.)
-    const equipped = await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'race-slot' });
-    expect(equipped.status).toBe(200);
-    expect(equipped.body.equippedAction?.spec).toBeUndefined();
-    expect(equipped.body.equippedAction?.toHit ?? '').toBe('');
-  });
-
-  it('a no-op campaign PATCH that resends the same mechanics keeps derived actions', async () => {
-    const server = ctx.app.getHttpServer();
-    // A full-object REST/MCP client resends every field on every update. Treating the mere
-    // PRESENCE of `customMechanicsProfile` as a mechanics change erased every generated
-    // weapon action during an otherwise no-op PATCH.
-    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'No-Op Update' });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Unchanged', level: 5, stats: { STR: 16 } });
-    const item = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
-    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'noop-slot' });
-
-    // Same ruleSystem (unset) and same profile (none) as the campaign already has.
-    const noOp = await request(server)
-      .patch(`/api/v1/campaigns/${camp.body.id}`)
-      .set(dm)
-      .send({ name: 'No-Op Update Renamed', customMechanicsProfile: null });
-    expect(noOp.status).toBe(200);
-
-    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
-    expect(after.body.equippedActionSource).toBe('derived');
-    expect(after.body.equippedAction).not.toBeNull();
-  });
-
-  it('resending an identical NON-NULL profile is also a no-op', async () => {
-    const server = ctx.app.getHttpServer();
-    // The case the first attempt at this comparison missed entirely: the incoming profile is
-    // serialized for storage while the persisted one has already been parsed back into an
-    // object, so a strict comparison was unequal for every input and cleared unconditionally.
-    const profile = {
-      slug: 'e2e-resend-hack',
-      label: 'E2E Resend Hack',
-      mechanicsSummary: 'A homebrew hack resent unchanged by a full-object client, for e2e coverage.',
-      abilityTable: 'sw-banded',
-      abilityCap: 2,
-      saves: ['Grit'],
-      acMode: 'ascending',
-      acAnchor: 10,
-      initiativeMode: 'group',
-      initiativeDie: 6,
-      initiativeUsesDexMod: false,
-      tiebreak: 'order-only',
-      conditions: ['Soaked'],
-    };
-    const camp = await request(server)
-      .post('/api/v1/campaigns')
-      .set(dm)
-      .send({ name: 'Resend Profile', ruleSystem: profile.slug, customMechanicsProfile: profile });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Resender', level: 5, stats: { STR: 16 } });
-    const item = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory`)
-      .set(dm)
-      .send({ name: 'Ichor Lash', ownerType: 'character', characterId: char.body.id });
-    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'resend-slot' });
-    await request(server)
-      .patch(`/api/v1/inventory/${item.body.id}`)
-      .set(dm)
-      .send({ equippedAction: { name: 'Lash', kind: 'melee', toHit: '+3', damage: 'd8 ichor', targetAc: '', notes: '' } });
-
-    // Resent unchanged, with the keys in a DIFFERENT order — an identical profile can
-    // serialize two ways, so the comparison has to be canonical, not textual.
-    const reordered = Object.fromEntries(Object.entries(profile).reverse());
-    const noOp = await request(server)
-      .patch(`/api/v1/campaigns/${camp.body.id}`)
-      .set(dm)
-      .send({ name: 'Resend Profile Renamed', ruleSystem: profile.slug, customMechanicsProfile: reordered });
-    expect(noOp.status).toBe(200);
-
-    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
-    expect(after.body.equippedActionSource).toBe('manual');
-    expect(after.body.equippedAction).not.toBeNull();
-  });
-
-  it('an identical concurrent rename does not clear the action the other one derived', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'twin-rename-slot' });
-
-    // Stand in for the first of two identical renames having already committed: the row is
-    // named B and carries B's derived action. The second request read A and derived B too —
-    // its derivation is perfectly valid, and must not be declared stale and cleared.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(inventoryItems).set({ name: 'Twin Name' }).where(eq(inventoryItems.id, itemId)).run();
-
-    const second = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Twin Name' });
-    expect(second.status).toBe(200);
-    expect(second.body.name).toBe('Twin Name');
-    // The point: the surviving action is NOT cleared. Before the fix, comparing the row's
-    // name against `existing.name` made the second request declare its own derivation stale.
-    //
-    // Note what this test can and cannot show: driven over HTTP, the second request reads the
-    // already-renamed row, so the server sees a no-op rename and does not re-derive — which
-    // is why the action keeps its original title. The genuine interleaving (read A, other
-    // commits B, derive B) is not reachable without real concurrency; the
-    // `equipped-action-decision` sweep covers the decision side of it.
-    expect(second.body.equippedActionSource).toBe('derived');
-    expect(second.body.equippedAction).not.toBeNull();
-  });
-
-  it('a refresh never regenerates an action for an owner the caller may not write', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'authz-slot' });
-
-    // The item now belongs to a character owned by someone else — standing in for a DM move
-    // that landed while this caller's refresh was awaiting its entry/pack reads. The caller's
-    // own authorization was checked against the PREVIOUS owner.
-    const theirs = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .set(dm)
-      .send({ name: 'Someone Else', level: 1, stats: { STR: 10 }, ownerUserId: 'someone-else' });
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(inventoryItems).set({ characterId: theirs.body.id }).where(eq(inventoryItems.id, itemId)).run();
-
-    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 'player', role: 'player' });
-    const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(player);
-    // Whatever the endpoint decides about the refresh itself, this caller must never have
-    // caused a write to another player's private action.
-    if (refreshed.status === 200 || refreshed.status === 201) {
-      const row = db.select({ src: inventoryItems.equippedActionSource, action: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get();
-      // The action is whatever the previous owner's derivation left; it was not recomputed
-      // for the new owner on this caller's behalf.
-      expect(row).toBeDefined();
-    }
-  });
-
-  it('an MCP-style round-trip edit rebuilds the spec, not just the display fields', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'roundtrip-slot' });
-    const derived = equipped.body.equippedAction;
-    expect(derived.spec.attack.bonus).toBe('+6');
-
-    // The web editor strips the spec before sending; a REST/MCP client naturally reads the
-    // whole action, edits the numbers, and submits it back WITH its original spec. That used
-    // to update the display while combat kept resolving the old numbers.
-    const roundTripped = await request(server)
-      .patch(`/api/v1/inventory/${itemId}`)
-      .set(dm)
-      .send({ equippedAction: { ...derived, toHit: '+9', damage: '2d6+5 slashing' } });
-    expect(roundTripped.status).toBe(200);
-    expect(roundTripped.body.equippedAction.spec.attack.bonus).toBe('+9');
-    expect(roundTripped.body.equippedAction.spec.outcomes.hit.damage[0]).toMatchObject({ formula: '2d6', flat: 5 });
-  });
-
-  it('a deliberately authored spec is still trusted, not rebuilt', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'authored-slot' });
-
-    // A caller that changes the spec ITSELF is expressing intent the five text fields cannot
-    // — the MCP path for saves, effects, action economy. Only a carried-along spec is stale.
-    const spec = JSON.parse(JSON.stringify(equipped.body.equippedAction.spec));
-    spec.attack.bonus = '+11';
-    const authored = await request(server)
-      .patch(`/api/v1/inventory/${itemId}`)
-      .set(dm)
-      .send({ equippedAction: { ...equipped.body.equippedAction, toHit: '+11', spec } });
-    expect(authored.status).toBe(200);
-    expect(authored.body.equippedAction.spec.attack.bonus).toBe('+11');
-  });
-
-  it("a player's refresh can never write a character they do not own, even mid-flight", async () => {
-    const server = ctx.app.getHttpServer();
-    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 'player', role: 'player' });
-
-    // A character owned by the requesting player, holding a derived action.
-    const mine = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .set(dm)
-      .send({ name: 'Mine To Refresh', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player' });
-    const acquired = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: mine.body.id, duplicateMode: 'separate' });
-    const itemId = acquired.body.id;
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'authz-race-slot' });
-
-    // The DM reassigns that character to someone else. A pre-write authorization check that
-    // has already passed must not be enough — the write itself has to re-assert it, because
-    // the revision fence answers "is this current?", never "may this caller write it?".
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(characters).set({ ownerUserId: 'dev:someone-else' }).where(eq(characters.id, mine.body.id)).run();
-    const before = db.select({ a: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.a;
-
-    setLongswordEntryData({ itemKind: 'weapon', damageDice: '3d12', damageType: 'Slashing', properties: [] });
-    try {
-      await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(player);
-      const after = db.select({ a: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.a;
-      // Whatever the endpoint returned, this caller did not rewrite another user's character's
-      // private action.
-      expect(after).toBe(before);
-      expect(after ?? '').not.toContain('3d12');
-    } finally {
-      restoreLongswordEntry();
-    }
-  });
-
-  it('a refresh whose new revision has no weapon data clears the stale action', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'nodata-refresh-slot' });
-    expect(equipped.body.equippedAction).not.toBeNull();
-
-    // The upstream entry stops describing a weapon. The regeneration legitimately produces
-    // nothing — and must CLEAR, not silently leave the old mechanics in place because the
-    // fence had no revision to match on.
-    setLongswordEntryData({ category: 'Wondrous Item', rarity: 'Uncommon' });
-    try {
-      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
-      expect([200, 201]).toContain(refreshed.status);
-      expect(refreshed.body.equippedAction).toBeNull();
-      expect(refreshed.body.equippedActionSource).toBeNull();
-    } finally {
-      restoreLongswordEntry();
-    }
-  });
-
-  it('a derived action created after a system switch survives the switch cleanup', async () => {
-    const server = ctx.app.getHttpServer();
-    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Switch Then Equip' });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Late Equipper', level: 5, stats: { STR: 16 } });
-    const item = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
-
-    // Switch first, THEN equip. The cleanup and the campaign write share a transaction, so an
-    // equip that follows the switch derives under the new system and must be left alone —
-    // before, a cleanup committing after the equip deleted a brand-new, perfectly valid
-    // action purely because its source was `derived`.
-    const profile = {
-      slug: 'e2e-late-equip-hack',
-      label: 'E2E Late Equip Hack',
-      mechanicsSummary: 'A homebrew hack for the switch-then-equip ordering, for e2e coverage.',
-      abilityTable: 'sw-banded',
-      abilityCap: 2,
-      saves: ['Grit'],
-      acMode: 'ascending',
-      acAnchor: 10,
-      initiativeMode: 'group',
-      initiativeDie: 6,
-      initiativeUsesDexMod: false,
-      tiebreak: 'order-only',
-      conditions: ['Soaked'],
-    };
-    await request(server)
-      .patch(`/api/v1/campaigns/${camp.body.id}`)
-      .set(dm)
-      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
-
-    const equipped = await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'late-slot' });
-    expect(equipped.status).toBe(200);
-    expect(equipped.body.equippedActionSource).toBe('derived');
-    expect(equipped.body.equippedAction).not.toBeNull();
-
-    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
-    expect(after.body.equippedActionSource).toBe('derived');
-    expect(after.body.equippedAction).not.toBeNull();
-  });
-
-  it('an ORDINARY bulk undo restores the derived action it recorded', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'undo-ordinary-slot' });
-    const other = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .set(dm)
-      .send({ name: 'Ordinary Undo Recipient', level: 1, stats: { STR: 10 } });
-
-    const moved = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/library/bulk`)
-      .set(dm)
-      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: other.body.id, targets: [{ entityType: 'inventory_item', entityId: itemId }] });
-    expect(moved.status).toBe(201);
-
-    const undone = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/library/bulk/${moved.body.operationId}/undo`)
-      .set(dm);
-    expect(undone.status).toBe(201);
-
-    // Nothing about the campaign's mechanics changed, so the journal's copy is still valid.
-    // Refusing to restore it (an earlier version of this feature) returned the item equipped
-    // and granting nothing, for no safety benefit.
-    const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
-    expect(after.body.equipped).toBe(true);
-    expect(after.body.equippedAction).not.toBeNull();
-    expect(after.body.equippedActionSource).toBe('derived');
-  });
-
-  it('a bulk undo after a system switch restores no derived action, because the journal was scrubbed', async () => {
-    const server = ctx.app.getHttpServer();
-    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Undo After Switch' });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Undo Switcher', level: 5, stats: { STR: 16 } });
-    const other = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Undo Switch Recipient', level: 1, stats: { STR: 10 } });
-    const item = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
-    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'undo-switch-slot' });
-
-    // The bulk move journals the 5e-derived action, and the forward move clears the live row
-    // — so only the journal still holds it.
-    const moved = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk`)
-      .set(dm)
-      .send({ operation: 'move_inventory_owner', ownerType: 'character', characterId: other.body.id, targets: [{ entityType: 'inventory_item', entityId: item.body.id }] });
-    expect(moved.status).toBe(201);
-
-    const profile = {
-      slug: 'e2e-undo-switch-hack',
-      label: 'E2E Undo Switch Hack',
-      mechanicsSummary: 'A homebrew hack for the undo-after-switch case, for e2e coverage.',
-      abilityTable: 'sw-banded',
-      abilityCap: 2,
-      saves: ['Grit'],
-      acMode: 'ascending',
-      acAnchor: 10,
-      initiativeMode: 'group',
-      initiativeDie: 6,
-      initiativeUsesDexMod: false,
-      tiebreak: 'order-only',
-      conditions: ['Soaked'],
-    };
-    const switched = await request(server)
-      .patch(`/api/v1/campaigns/${camp.body.id}`)
-      .set(dm)
-      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
-    expect(switched.status).toBe(200);
-
-    const undone = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk/${moved.body.operationId}/undo`)
-      .set(dm);
-    expect(undone.status).toBe(201);
-
-    // The switch scrubbed the journal's derived copy, so undo has nothing stale to resurrect.
-    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
-    expect(after.body.equippedAction).toBeNull();
-    expect(after.body.equippedActionSource).toBeNull();
-  });
-
-  it('a rename never resurrects an action the owner just deleted', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'removal-race-slot' });
-
-    // Stand in for a `PATCH { equippedAction: null }` landing while a rename was deriving:
-    // the removal changes no fingerprint input, so nothing else would notice it.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(inventoryItems)
-      .set({ equippedAction: null, equippedActionSource: null })
-      .where(eq(inventoryItems.id, itemId))
-      .run();
-
-    const renamed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ name: 'Renamed After Removal' });
-    expect(renamed.status).toBe(200);
-    expect(renamed.body.name).toBe('Renamed After Removal');
-    // The human's removal stands; the rename applies with nothing to mismatch.
-    expect(renamed.body.equippedAction).toBeNull();
-    expect(renamed.body.equippedActionSource).toBeNull();
-  });
-
-  it('a refresh whose item changed hands mid-flight applies nothing at all', async () => {
-    const server = ctx.app.getHttpServer();
-    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 'player', role: 'player' });
-
-    const mine = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .set(dm)
-      .send({ name: 'Half Apply Owner', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player' });
-    const acquired = await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: mine.body.id, duplicateMode: 'separate' });
-    const itemId = acquired.body.id;
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'half-apply-slot' });
-
-    const db = ctx.app.get<DrizzleDb>(DB);
-    const before = db
-      .select({ snap: inventoryItems.compendiumSnapshot, action: inventoryItems.equippedAction })
-      .from(inventoryItems)
-      .where(eq(inventoryItems.id, itemId))
-      .get()!;
-
-    // The DM hands the character to someone else mid-request.
-    db.update(characters).set({ ownerUserId: 'dev:not-the-caller' }).where(eq(characters.id, mine.body.id)).run();
-
-    setLongswordEntryData({ itemKind: 'weapon', damageDice: '3d12', damageType: 'Slashing', properties: [] });
-    try {
-      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(player);
-      // 403 from the up-front owner check, which is the ordering reachable over HTTP; the
-      // conditional snapshot write returns 409 for the genuine race, where the handoff lands
-      // AFTER that check and before the write. Either way the request is refused.
-      expect([403, 409]).toContain(refreshed.status);
-
-      // The property that matters and holds under both: neither half landed. Accepting a new
-      // snapshot while refusing to regenerate the action would leave the item's accepted
-      // revision and its granted attack describing different versions of the same weapon.
-      const after = db
-        .select({ snap: inventoryItems.compendiumSnapshot, action: inventoryItems.equippedAction })
-        .from(inventoryItems)
-        .where(eq(inventoryItems.id, itemId))
-        .get()!;
-      expect(after.snap).toBe(before.snap);
-      expect(after.action).toBe(before.action);
-    } finally {
-      restoreLongswordEntry();
-    }
-  });
-
-  it("a redundant equip never erases a concurrent rename's regenerated action", async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'redundant-slot' });
-
-    // Stand in for a rename that committed while a redundant equip was mid-derivation: the
-    // row now carries the rename's own freshly regenerated, correctly-named action.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(inventoryItems)
-      .set({
-        name: 'Renamed By The Winner',
-        equippedAction: JSON.stringify({ name: 'Renamed By The Winner', kind: 'melee', toHit: '+6', damage: '1d8+3 slashing', targetAc: '', notes: '' }),
-        equippedActionSource: 'derived',
-      })
-      .where(eq(inventoryItems.id, itemId))
-      .run();
-
-    // Re-asserting the same equip state must not destroy it. Either the request is refused
-    // as unreconcilable, or it leaves the winner's action alone — never silently erased.
-    const redundant = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'redundant-slot' });
-    expect([200, 409]).toContain(redundant.status);
-
-    const after = db
-      .select({ action: inventoryItems.equippedAction, src: inventoryItems.equippedActionSource })
-      .from(inventoryItems)
-      .where(eq(inventoryItems.id, itemId))
-      .get()!;
-    expect(after.action).not.toBeNull();
-    expect(JSON.parse(after.action!).name).toBe('Renamed By The Winner');
-    expect(after.src).toBe('derived');
-  });
-
-  it('undoing an archive still works after a system switch disarmed the tombstone', async () => {
-    const server = ctx.app.getHttpServer();
-    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Archive Undo After Switch' });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Archive Undoer', level: 5, stats: { STR: 16 } });
-    const item = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
-    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'archive-undo-slot' });
-
-    const archived = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk`)
-      .set(dm)
-      .send({ operation: 'archive', targets: [{ entityType: 'inventory_item', entityId: item.body.id }] });
-    expect(archived.status).toBe(201);
-
-    const profile = {
-      slug: 'e2e-archive-undo-hack',
-      label: 'E2E Archive Undo Hack',
-      mechanicsSummary: 'A homebrew hack for the archive-undo-after-switch case, for e2e coverage.',
-      abilityTable: 'sw-banded',
-      abilityCap: 2,
-      saves: ['Grit'],
-      acMode: 'ascending',
-      acAnchor: 10,
-      initiativeMode: 'group',
-      initiativeDie: 6,
-      initiativeUsesDexMod: false,
-      tiebreak: 'order-only',
-      conditions: ['Soaked'],
-    };
-    await request(server)
-      .patch(`/api/v1/campaigns/${camp.body.id}`)
-      .set(dm)
-      .send({ ruleSystem: profile.slug, customMechanicsProfile: profile });
-
-    // Disarming the tombstone must not advance the version `undoBulk` fences on — otherwise
-    // the switch silently makes the archive un-undoable.
-    const undone = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/library/bulk/${archived.body.operationId}/undo`)
-      .set(dm);
-    expect(undone.status).toBe(201);
-
-    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
-    expect(after.body.deletedAt).toBeNull();
-    // …and the restore brings back no old-system mechanics.
-    expect(after.body.equippedAction).toBeNull();
-    expect(after.body.equippedActionSource).toBeNull();
-  });
-
-  it('a refresh never leaves a new snapshot beside an old-revision action', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'payload-fence-slot' });
-    // Unequipped, the item RETAINS its derived action — the shape the non-regenerating path
-    // reads, and the one whose fence this exercises.
-    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
-
-    const db = ctx.app.get<DrizzleDb>(DB);
-    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
-    try {
-      // Re-equip, so the row carries a derived action AND the entry has moved on.
-      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'payload-fence-slot' });
-
-      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
-      expect([200, 201, 409]).toContain(refreshed.status);
-
-      // The invariant the payload fence protects, and the only part of it HTTP can stage: a
-      // committed snapshot and the action beside it always describe the same revision. The
-      // interleaving the fence exists for — another writer regenerating from the old snapshot
-      // between this request's read and its UPDATE — is not reachable without real
-      // concurrency; the fence is what makes it a 409 rather than a mismatch.
-      const after = db
-        .select({ snap: inventoryItems.compendiumSnapshot, action: inventoryItems.equippedAction })
-        .from(inventoryItems)
-        .where(eq(inventoryItems.id, itemId))
-        .get()!;
-      const persistedDice = JSON.parse(JSON.parse(after.snap!).dataJson).damageDice;
-      if (after.action) expect(JSON.parse(after.action).damage).toContain(persistedDice);
-    } finally {
-      restoreLongswordEntry();
-    }
-  });
-
-  it("an admin catalog rule-system change clears derived actions too", async () => {
-    const server = ctx.app.getHttpServer();
-    // Review (chatgpt-codex-connector P1): `campaigns.ruleSystem` is written from three
-    // places, and only CampaignsService.update ran the cleanup. The resolver uses whichever
-    // adapter the campaign currently names, so any other writer left 5e numbers being rolled
-    // under the new system.
-    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Admin Switched' });
-    const char = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
-      .set(dm)
-      .send({ name: 'Admin Switch Wielder', level: 5, stats: { STR: 16 } });
-    const item = await request(server)
-      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
-      .set(dm)
-      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
-    const equipped = await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'admin-slot' });
-    expect(equipped.body.equippedActionSource).toBe('derived');
-
-    // Drive the catalog's own module update, which writes `campaigns.ruleSystem` directly.
-    const applied = await request(server)
-      .post('/api/v1/admin/catalog/apply')
-      .set(dm)
-      .send({ operations: [{ kind: 'update_module', campaignId: camp.body.id, module: 'ruleSystem', value: 'open5e-srd' }] });
-
-    // Whatever the endpoint's own shape, the invariant holds: if the rule system moved, no
-    // derived action outlives it.
-    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
-    const campAfter = await request(server).get(`/api/v1/campaigns/${camp.body.id}`).set(dm);
-    if (applied.status < 400 && campAfter.body.ruleSystem === 'open5e-srd') {
-      expect(after.body.equippedAction).toBeNull();
-      expect(after.body.equippedActionSource).toBeNull();
-    }
-  });
-
-  it('an item with no accepted snapshot derives from the live entry, and tracks its content', async () => {
-    const server = ctx.app.getHttpServer();
-    const itemId = await acquireLongsword();
-
-    // Strip the snapshot so the derivation takes the live rule-entry fallback — the path
-    // whose fence previously recorded only `ruleEntryId`, which stays constant even when
-    // `RulesService.updatePack()` rewrites the row's content underneath it.
-    const db = ctx.app.get<DrizzleDb>(DB);
-    db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
-
-    const first = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'live-entry-slot' });
-    expect(first.status).toBe(200);
-    expect(first.body.equippedAction.damage).toContain('1d8+3');
-
-    // The entry's content changes; the id does not. A re-equip must follow the content.
-    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
-    try {
-      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: false });
-      const second = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'live-entry-slot' });
-      expect(second.status).toBe(200);
-      expect(second.body.equippedAction.damage).toContain('2d6+3');
-    } finally {
-      restoreLongswordEntry();
-    }
-  });
+  // ---- ownership and secrecy ----
 
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
@@ -1475,6 +648,41 @@ describe('derived equipped-item actions (issue #2097)', () => {
       .set(dm)
       .send({ equippedAction: { name: 'Nope', kind: '', toHit: '+1', damage: '', targetAc: '', notes: '' } });
     expect(rejected.status).toBe(400);
+  });
+
+  it('a compendium weapon in the party stash derives nothing — there is no wielder', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'stash-derive-slot' });
+    const stashed = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ ownerType: 'party', characterId: null });
+    expect(stashed.status).toBe(200);
+    expect(stashed.body.equippedAction).toBeNull();
+    expect(stashed.body.equippedActionSource).toBeNull();
+  });
+
+  it('restoring a trashed item to the party stash clears the provenance with the action', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'trash-slot' });
+
+    // Trash the owning character, then the item, so restore() takes its party fallback.
+    const doomed = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Doomed Owner', level: 1, stats: { STR: 10 } });
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ ownerType: 'character', characterId: doomed.body.id, equipped: true, equipSlot: 'trash-slot' });
+    await request(server).delete(`/api/v1/inventory/${itemId}`).set(dm);
+    const delChar = await request(server).delete(`/api/v1/characters/${doomed.body.id}`).set(dm);
+    expect(delChar.status).toBe(200);
+
+    const restored = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(dm).send({});
+    expect([200, 201]).toContain(restored.status);
+    expect(restored.body.ownerType).toBe('party');
+    expect(restored.body.equippedAction).toBeNull();
+    expect(restored.body.equippedActionSource).toBeNull();
   });
 
   it('a reader who is neither DM nor owner sees neither the derived action nor its provenance', async () => {
@@ -1490,4 +698,42 @@ describe('derived equipped-item actions (issue #2097)', () => {
     // character has a granted action, which is the fact being hidden.
     expect(asPlayer.body.equippedActionSource).toBeNull();
   });
+
+  it('the owning player sees their own derived action', async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ userId: 'player', role: 'player' });
+    const owned = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Player Blade', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player' });
+    const itemId = await acquireLongsword(owned.body.id);
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'owned-slot' });
+
+    // Redaction runs AFTER derivation, so the owner's own computed action survives it — the
+    // failure mode being guarded is the reverse of the case above.
+    const asPlayer = await request(server).get(`/api/v1/inventory/${itemId}`).set(player);
+    expect(asPlayer.status).toBe(200);
+    expect(asPlayer.body.equippedActionSource).toBe('derived');
+    expect(asPlayer.body.equippedAction.toHit).toBe('+6');
+  });
+
+  it('nothing derived is ever written to the row', async () => {
+    const server = ctx.app.getHttpServer();
+    // The invariant the whole simplification rests on: if a derived action never reaches
+    // storage, no writer anywhere has to invalidate it and no copy of it can go stale.
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'never-stored-slot' });
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const stored = db.select({ a: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get();
+    expect(stored?.a).toBeNull();
+
+    // ...and an authored one is, because that is the only thing worth saving.
+    await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Written Down', kind: 'melee', toHit: '+6', damage: '1d8+3 slashing', targetAc: '', notes: '' } });
+    const after = db.select({ a: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get();
+    expect(after?.a).toContain('Written Down');
+  });
+
 });

@@ -6,7 +6,6 @@ import { and, count, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-or
 import JSZip from 'jszip';
 import type { z } from 'zod';
 import {
-  canonicalJson,
   CAMPAIGN_PURGE_CONFIRM_TOKEN,
   CampaignClone,
   CampaignCloneMode,
@@ -28,7 +27,6 @@ import {
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignStatus, CampaignStatusTransition, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { fromJsonText } from '../../common/json';
-import { clearDerivedEquippedActionsIn } from '../inventory/derived-action-cleanup';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
@@ -438,15 +436,6 @@ const characterConditionWriteSetForImport = (row: Rec): { conditions: string; co
   if (names) return sheetConditionWriteSetFromNames(names, instancesText);
   return sheetConditionWriteSetFromInstances(readConditionInstances(instancesText, '[]'));
 };
-
-/** Parse JSON without throwing — a malformed stored value compares as null rather than crashing. */
-function safeJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
 
 function toDomain(row: typeof campaigns.$inferSelect): Campaign {
   return {
@@ -990,53 +979,6 @@ export class CampaignsService {
     }
     const customMechanicsProfilePatch =
       nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
-    /**
-     * Whether this PATCH actually changes the campaign's MECHANICS (issue #2097 review).
-     *
-     * A derived equipped action encodes the rule system it was derived under, and
-     * `ActionResolverService` resolves whatever is stored against the campaign's CURRENT
-     * adapter — so a system switch has to drop them or 5e numbers keep being rolled under the
-     * new mechanics.
-     *
-     * Compared by EFFECTIVE VALUE, not field presence: a full-object REST or MCP client
-     * resends `customMechanicsProfile` unchanged on every update, and treating that as a
-     * change would erase every generated weapon action during an otherwise no-op PATCH.
-     *
-     * Both sides go through `canonicalJson` (chatgpt-codex-connector P2, twice). The first
-     * attempt compared `nextCustomMechanicsProfile` — a JSON STRING, serialized for storage —
-     * against `existing.customMechanicsProfile`, which `toDomain` has already parsed into an
-     * OBJECT, so the comparison was unequal for every input and cleared unconditionally. A
-     * plain `JSON.stringify` on both sides would still be wrong: the incoming object's key
-     * order is the client's, the stored one's is whatever was serialized before, so an
-     * identical profile can serialize two different ways. Canonical (key-sorted) form is what
-     * makes "unchanged" mean unchanged.
-     */
-    const nextProfileCanonical =
-      nextCustomMechanicsProfile === undefined
-        ? undefined
-        : canonicalJson(nextCustomMechanicsProfile ? (safeJson(nextCustomMechanicsProfile) ?? null) : null);
-    /**
-     * Answered INSIDE the transaction, against the row as it stands there (chatgpt-codex-
-     * connector P2). Comparing against the pre-transaction `existing` gets it wrong whenever
-     * two campaign PATCHes overlap: request A reads 5e and intends to write 5e, request B
-     * switches to PF2e, an item is equipped and derives under PF2e, then A commits 5e with
-     * `mechanicsChanged = false` and leaves that PF2e action in place under 5e rules. What
-     * matters is whether this write CHANGES the mechanics the row actually has, which only
-     * the transaction can know.
-     */
-    const mechanicsWillChange = (tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0]): boolean => {
-      const current = tx
-        .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
-        .from(campaigns)
-        .where(eq(campaigns.id, id))
-        .get();
-      const ruleSystemChanges =
-        campaignInput.ruleSystem !== undefined && campaignInput.ruleSystem !== (current?.ruleSystem ?? '');
-      const profileChanges =
-        nextProfileCanonical !== undefined &&
-        nextProfileCanonical !== canonicalJson(current?.customMechanicsProfile ? safeJson(current.customMechanicsProfile) : null);
-      return ruleSystemChanges || profileChanges;
-    };
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of
@@ -1138,10 +1080,7 @@ export class CampaignsService {
     // while the campaign stays active (#857 Bugbot).
     if (archiving && opts?.revokeInvites) {
       const ts = nowIso();
-      const { row, revoked, wasEnabled, pinsCleared, clearedCharacterIds } = this.db.transaction((tx) => {
-        // Sampled BEFORE this transaction's own update — otherwise it reads back the value
-        // it is about to write and never sees a change.
-        const willChangeMechanics = mechanicsWillChange(tx);
+      const { row, revoked, wasEnabled, pinsCleared } = this.db.transaction((tx) => {
         const before = tx
           .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
           .from(campaigns)
@@ -1186,14 +1125,11 @@ export class CampaignsService {
           .where(eq(campaignInvites.campaignId, id))
           .returning({ id: campaignInvites.id })
           .all();
-        // In the SAME transaction as the mechanics write — see `clearDerivedEquippedActionsIn`.
-        const clearedCharacterIds = willChangeMechanics ? clearDerivedEquippedActionsIn(tx, id, nowIso()) : [];
         return {
           row,
           revoked: deleted.length,
           wasEnabled: Boolean(before?.publicInvitesEnabled),
           pinsCleared,
-          clearedCharacterIds,
         };
       });
       await this.audit.log({
@@ -1228,11 +1164,6 @@ export class CampaignsService {
       if (statusChanging) {
         await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
       }
-      // The archive+revoke path returns HERE, so the ordinary path's cleanup never ran for a
-      // PATCH that switched systems while archiving; the stale action reappeared with the old
-      // system's numbers the moment the campaign was reactivated. The clear itself happened
-      // inside the transaction above; only its invalidations are emitted here.
-      this.emitClearedDerivedActions(id, clearedCharacterIds, user);
       return toDomain(row);
     }
 
@@ -1242,11 +1173,8 @@ export class CampaignsService {
     // pin in the same transaction, so an unrelated image never inherits old coordinates.
     let updatedRow: typeof campaigns.$inferSelect | undefined;
     let pinsCleared = 0;
-    let ordinaryClearedCharacterIds: number[] = [];
     if (shouldResetPins) {
       const resetResult = this.db.transaction((tx) => {
-        // Sampled before this transaction's own update — see the archive path above.
-        const willChangeMechanics = mechanicsWillChange(tx);
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
             .set({ hidden: false, updatedAt: ts })
@@ -1277,15 +1205,10 @@ export class CampaignsService {
             ),
           )
           .run();
-        // Same transaction as the mechanics write here too — see
-        // `clearDerivedEquippedActionsIn`. This branch also persists `campaignInput`, so a
-        // map-reset PATCH that ALSO switches systems has to clear atomically as well.
-        const clearedCharacterIds = willChangeMechanics ? clearDerivedEquippedActionsIn(tx, id, nowIso()) : [];
-        return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0, clearedCharacterIds };
+        return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0 };
       });
       updatedRow = resetResult.row;
       pinsCleared = resetResult.changes;
-      ordinaryClearedCharacterIds = resetResult.clearedCharacterIds;
     }
 
     if (updatedRow === undefined) {
@@ -1305,22 +1228,16 @@ export class CampaignsService {
           );
       }
 
-      // One transaction with the cleanup — see `clearDerivedEquippedActionsIn`. An equip that
-      // starts after the new system is visible must not have its correctly-derived action
-      // deleted by a cleanup that commits afterwards.
       const written = this.db.transaction((tx) => {
-        // Sampled before this transaction's own update — see the archive path above.
-        const willChangeMechanics = mechanicsWillChange(tx);
         const row = tx
           .update(campaigns)
           .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
-        return { row, clearedCharacterIds: willChangeMechanics ? clearDerivedEquippedActionsIn(tx, id, nowIso()) : [] };
+        return { row };
       });
       updatedRow = written.row;
-      ordinaryClearedCharacterIds = written.clearedCharacterIds;
     }
 
     // Issue #2097 review (chatgpt-codex-connector P1): a DERIVED equipped action is
@@ -1334,8 +1251,6 @@ export class CampaignsService {
     // text-only rows anyway. This module's rule throughout is that stale numbers are worse
     // than none — an empty action is visibly unfinished, a wrong one is not. `manual` actions
     // are untouched: a human wrote those and it is their call whether they still apply.
-
-    this.emitClearedDerivedActions(id, ordinaryClearedCharacterIds, user);
 
     await this.audit.log({
       actor: auditActor(user),
@@ -1360,13 +1275,6 @@ export class CampaignsService {
       return toDomain(fresh ?? updatedRow);
     }
     return toDomain(updatedRow);
-  }
-
-  /** Emit the invalidations for a completed cleanup, after its transaction has committed. */
-  private emitClearedDerivedActions(campaignId: number, characterIds: number[], user: RequestUser): void {
-    for (const characterId of characterIds) {
-      this.events.emit({ type: 'character.updated', campaignId, characterId, userId: user.id });
-    }
   }
 
   /**
@@ -2111,11 +2019,6 @@ export class CampaignsService {
               equipped: resolvedOwner === 'character' && item.equipped,
               equipSlot: resolvedOwner === 'character' ? item.equipSlot : null,
               equippedAction: resolvedOwner === 'character' ? item.equippedAction : null,
-              // Issue #2097: same rule as the action itself — a clone that keeps the action
-              // keeps its provenance, and the party-stash fallback that drops the action
-              // drops the provenance with it. A surviving 'manual' on an action-less row
-              // would permanently block the item from ever deriving one in the new campaign.
-              equippedActionSource: resolvedOwner === 'character' ? item.equippedActionSource : null,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -3243,13 +3146,10 @@ export class CampaignsService {
             compendiumState: safeImportedCompendiumRef(item.compendiumRef) && safeImportedCompendiumSnapshot(item.compendiumSnapshot) ? 'detached' : null,
             equipped: grantEquip,
             equipSlot: grantEquip ? trimmedSlot : null,
-            // Issue #2097: an imported action is treated as 'manual'. The export carries no
-            // trustworthy provenance (and an older export carries none at all), so the safe
-            // reading is "a human wrote this" — that only ever protects the row from being
-            // regenerated. Assuming 'derived' would invite overwriting authored work on the
-            // first equip in the importing campaign.
+            // Only the HUMAN-authored action is imported; a derived one is recomputed on
+            // read in the importing campaign, under ITS rule system and ITS characters'
+            // numbers (issue #2097), so there is nothing to carry across an install.
             equippedAction: importedActionParse?.success ? JSON.stringify(importedActionParse.data) : null,
-            equippedActionSource: importedActionParse?.success ? 'manual' : null,
             createdAt: ts,
             updatedAt: ts,
           })

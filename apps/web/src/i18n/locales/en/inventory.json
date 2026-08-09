@@ -99,7 +99,7 @@
       "swapButton": "Replace {{incumbent}}",
       "swapping": "Replacing…",
       "derivedBadge": "Auto-derived",
-      "derivedHelp": "Built from this item's compendium entry and your character. Edit it and it stays yours.",
+      "derivedHelp": "Built from this item's compendium entry and your character, and kept in step with both. Edit it and your version stays put instead.",
       "editAction": "Edit action",
       "editActionAria": "Edit the combat action {{name}} grants",
       "addAction": "Add combat action",
@@ -113,7 +113,7 @@
       "actionDamagePlaceholder": "1d8+3 slashing",
       "actionNotes": "Notes",
       "actionNameRequired": "The action needs a name.",
-      "removeAction": "Remove action",
+      "removeAction": "Reset to auto-derived",
       "saveAction": "Save action",
       "savingAction": "Saving…",
       "slotSuggestions": {

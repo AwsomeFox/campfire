@@ -99,7 +99,7 @@
       "swapButton": "استبدال {{incumbent}}",
       "swapping": "جارٍ الاستبدال…",
       "derivedBadge": "مُشتق تلقائيًا",
-      "derivedHelp": "مبني من مدخل هذا العنصر في الموسوعة ومن شخصيتك. عدّله ويبقى تعديلك محفوظًا.",
+      "derivedHelp": "مبني من مدخل هذا العنصر في الموسوعة ومن شخصيتك، ويظل متوافقًا معهما. عدّله فيبقى تعديلك ثابتًا بدلًا من ذلك.",
       "editAction": "تعديل الإجراء",
       "editActionAria": "تعديل الإجراء القتالي الذي يمنحه {{name}}",
       "addAction": "إضافة إجراء قتالي",
@@ -113,7 +113,7 @@
       "actionDamagePlaceholder": "1d8+3 تقطيع",
       "actionNotes": "ملاحظات",
       "actionNameRequired": "الإجراء يحتاج إلى اسم.",
-      "removeAction": "إزالة الإجراء",
+      "removeAction": "إعادة التعيين إلى الاشتقاق التلقائي",
       "saveAction": "حفظ الإجراء",
       "savingAction": "جارٍ الحفظ…",
       "slotSuggestions": {

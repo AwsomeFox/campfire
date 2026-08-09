@@ -61,7 +61,12 @@ test.describe('editable equipped-item actions (#2097)', () => {
     expect(inventoryShared).toContain("setActionError(t('inventory.equip.actionNameRequired'))");
   });
 
-  test('the action can be removed, which re-opens the item to derivation', () => {
+  test('only a MANUAL action offers the reset control', () => {
+    // Issue #2097: a derived action is computed on read, not stored, so there is nothing for
+    // a Remove button to remove — clearing discards the manual edit and hands the item back
+    // to its derivation. Offering it on a derived action promised a deletion the server
+    // cannot perform (the way to stop granting an action is to unequip the item).
+    expect(inventoryShared).toContain("{committed.equippedActionSource === 'manual' && (");
     expect(inventoryShared).toContain('data-testid="inventory-action-remove-btn"');
     expect(inventoryShared).toContain('equippedAction: null');
   });

@@ -612,7 +612,10 @@ export function ItemRow({
                   >
                     {t('common.cancel')}
                   </Btn>
-                  {committed.equippedAction && (
+                  {/* Issue #2097: a derived action is COMPUTED, so there is nothing to
+                      remove — clearing only discards a manual edit and hands the item back to
+                      its derivation. The way to stop granting an action is to unequip. */}
+                  {committed.equippedActionSource === 'manual' && (
                     <Btn
                       density="xs"
                       ghost
