@@ -60,15 +60,29 @@ export function reorderMenuTargets<T extends { id: number }>(orderedCombatants: 
  * turn advance does), so the request would silently apply relative to an order the DM can no
  * longer see: a wrong-result path, not the recoverable-409 the CAS otherwise guards.
  *
- * `armedAt` is the `encounterQuery.dataUpdatedAt` baseline captured the moment a reorder
- * settled (`null` when no reorder has settled since the last resync, or since this last
- * cleared). This returns `true` — "still waiting, keep the gate closed" — until a read
- * STRICTLY NEWER than that baseline lands (`dataUpdatedAt > armedAt`); the read that merely
- * triggered the refetch does not itself count. Deliberately independent of
+ * What this function's `true` result actually MEANS: "since the reorder that armed this gate
+ * settled, no real `GET /encounters/:id` has completed yet" — the precondition that must hold
+ * before a further drag is authored, because only a completed GET can have observed the
+ * server's post-reorder roster. `armedAt`/`readRevision` must therefore both be values of
+ * `encounterReadRevisionRef` (see RunSessionPage.tsx) — a counter `encounterQuery`'s `queryFn`
+ * increments ONLY after a fetch it started actually resolves (guarded by
+ * `signal.throwIfAborted()` so a superseded in-flight request cannot count). It is
+ * DELIBERATELY NOT `encounterQuery.dataUpdatedAt`: that TanStack-managed timestamp advances on
+ * ANY `setQueryData` call for this query key, including the several local OPTIMISTIC writes
+ * elsewhere on this page (HP deltas, map/fog patch reconciliation, ...) that touch fields other
+ * than `combatants`/`turnVersion` and never round-trip to the server at all — gating on it
+ * would let one of those land inside the window and clear the gate while the roster was still
+ * stale, reopening exactly the silent-wrong-order hazard this function exists to prevent. (This
+ * codebase already discovered and documented that exact hazard for a sibling problem — see
+ * `encounterReadRevisionRef`'s own doc comment.)
+ *
+ * Returns `true` — "still waiting, keep the gate closed" — until `readRevision` is STRICTLY
+ * greater than `armedAt` (`false` when `armedAt` is `null`: no reorder has settled since the
+ * last resync, or since this last cleared). Deliberately independent of
  * `encounterQuery.isFetching`, which the issue rules out as the gating signal: `isFetching`
  * is true for ANY refetch (SSE invalidations, an unrelated write's own `onSettled`), so
  * gating on it would silently swallow a completed drag whenever one happened to overlap.
  */
-export function isAwaitingReorderResync(armedAt: number | null, dataUpdatedAt: number): boolean {
-  return armedAt !== null && dataUpdatedAt <= armedAt;
+export function isAwaitingReorderResync(armedAt: number | null, readRevision: number): boolean {
+  return armedAt !== null && readRevision <= armedAt;
 }

@@ -2505,18 +2505,24 @@ export default function RunSessionPage() {
 
   /**
    * Issue #2116 — see `isAwaitingReorderResync`'s doc comment in `combatantReorder.ts` for
-   * the full defect and why this is not gated on `encounterQuery.isFetching`. Armed (in
-   * `reorderCombatant`'s `onSettled` below) with the `dataUpdatedAt` baseline as of the
-   * moment a reorder settles; cleared here the moment a STRICTLY newer read lands — whether
-   * that is the refetch this reorder's own invalidate kicked off, or another one (SSE, the
-   * periodic poll) that happens to land first.
+   * the full defect and why this is gated on `encounterReadRevisionRef` specifically, not
+   * `encounterQuery.dataUpdatedAt` (which a local optimistic write — an HP delta, a map/fog
+   * patch — can advance without any real GET completing, letting the gate clear while the
+   * roster is still stale) and not `encounterQuery.isFetching` (true for any refetch, which
+   * would silently swallow a completed drag). Armed (in `reorderCombatant`'s `onSettled`
+   * below) with the read-revision counter's value as of the moment a reorder settles;
+   * cleared here once that counter has STRICTLY advanced — i.e. once a real completed GET
+   * has landed, whether it is the refetch this reorder's own invalidate kicked off, or
+   * another one (SSE, the periodic poll) that happens to land first. `encounterReadRevision`
+   * (state) is the reactive trigger; `encounterReadRevisionRef` (bumped synchronously
+   * alongside it inside the same `queryFn` call) is the value actually compared.
    */
   const awaitingReorderResyncRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!isAwaitingReorderResync(awaitingReorderResyncRef.current, encounterQuery.dataUpdatedAt)) {
+    if (!isAwaitingReorderResync(awaitingReorderResyncRef.current, encounterReadRevisionRef.current)) {
       awaitingReorderResyncRef.current = null;
     }
-  }, [encounterQuery.dataUpdatedAt]);
+  }, [encounterReadRevision]);
 
   /**
    * Manual initiative reorder (issue #1923) — drag (InitiativeStrip + roster) and the
@@ -2542,7 +2548,7 @@ export default function RunSessionPage() {
     onSettled: (_data, _err, { combatantId }) => {
       markCombatantPending(combatantId, false);
       // See `awaitingReorderResyncRef`'s own doc comment above for why this is armed here.
-      awaitingReorderResyncRef.current = encounterQuery.dataUpdatedAt;
+      awaitingReorderResyncRef.current = encounterReadRevisionRef.current;
       invalidateEncounter(queryClient, eid);
     },
   });

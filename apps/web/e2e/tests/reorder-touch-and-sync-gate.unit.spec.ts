@@ -128,12 +128,22 @@ test.describe('awaitingReorderResyncRef wiring in RunSessionPage.tsx (issue #211
    * Source-scan coverage that `isAwaitingReorderResync` (behaviorally unit-tested against
    * real values in `combatant-reorder.unit.spec.ts`, alongside this module's other pure
    * reorder helpers) is actually wired into the mutation lifecycle here: armed at settle
-   * time, consulted (and cleared) as `encounterQuery.dataUpdatedAt` changes, and consulted
-   * by the guard (pinned in the describe block above). `RunSessionPage.tsx` is too heavily
-   * wired to mount — see this file's top comment — so the call sites are pinned by source
-   * rather than by rendering.
+   * time, consulted (and cleared) as `encounterReadRevision` changes, and consulted by the
+   * guard (pinned in the describe block above). `RunSessionPage.tsx` is too heavily wired to
+   * mount — see this file's top comment — so the call sites are pinned by source rather than
+   * by rendering.
+   *
+   * Gated on `encounterReadRevisionRef`/`encounterReadRevision` — NOT
+   * `encounterQuery.dataUpdatedAt` — deliberately: `dataUpdatedAt` advances on ANY
+   * `setQueryData` for this query key, including this page's own local optimistic writes
+   * (an HP delta, a map/fog patch) that never round-trip to the server. Gating on it would
+   * let one of those land inside the window and clear the gate while the roster was still
+   * pre-reorder, reopening the exact silent-wrong-order hazard this mechanism exists to
+   * close. `encounterReadRevisionRef` only advances inside `encounterQuery`'s own `queryFn`,
+   * after a real fetch it started has actually resolved (guarded by
+   * `signal.throwIfAborted()`) — see that ref's own doc comment a few hundred lines above.
    */
-  test('reorderCombatant.onSettled arms the ref with the dataUpdatedAt baseline, before invalidateEncounter', () => {
+  test('reorderCombatant.onSettled arms the ref with the read-revision baseline, before invalidateEncounter', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     const fnStart = source.indexOf('const reorderCombatant = useMutation({');
     expect(fnStart).toBeGreaterThan(-1);
@@ -149,23 +159,28 @@ test.describe('awaitingReorderResyncRef wiring in RunSessionPage.tsx (issue #211
     const onSettledStart = fn.indexOf('onSettled:');
     expect(onSettledStart).toBeGreaterThan(-1);
     const onSettledBlock = fn.slice(onSettledStart);
-    const armIndex = onSettledBlock.indexOf('awaitingReorderResyncRef.current = encounterQuery.dataUpdatedAt;');
+    const armIndex = onSettledBlock.indexOf('awaitingReorderResyncRef.current = encounterReadRevisionRef.current;');
     const invalidateIndex = onSettledBlock.indexOf('invalidateEncounter(queryClient, eid);');
     expect(armIndex).toBeGreaterThan(-1);
     expect(invalidateIndex).toBeGreaterThan(-1);
     expect(armIndex).toBeLessThan(invalidateIndex);
+    // Regression guard for the exact defect found in review: arming (or clearing) from
+    // `encounterQuery.dataUpdatedAt` anywhere in this mutation would silently reopen the
+    // wrong-order hazard.
+    expect(fn).not.toContain('encounterQuery.dataUpdatedAt');
   });
 
-  test('a useEffect on encounterQuery.dataUpdatedAt clears the ref via isAwaitingReorderResync', () => {
+  test('a useEffect on encounterReadRevision clears the ref via isAwaitingReorderResync, reading the ref (not dataUpdatedAt)', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     const refStart = source.indexOf('const awaitingReorderResyncRef = useRef<number | null>(null);');
     expect(refStart).toBeGreaterThan(-1);
-    const effectEnd = source.indexOf('\n  }, [encounterQuery.dataUpdatedAt]);', refStart);
+    const effectEnd = source.indexOf('\n  }, [encounterReadRevision]);', refStart);
     expect(effectEnd).toBeGreaterThan(refStart);
     const block = source.slice(refStart, effectEnd);
 
-    expect(block).toMatch(/if \(!isAwaitingReorderResync\(awaitingReorderResyncRef\.current, encounterQuery\.dataUpdatedAt\)\) \{/);
+    expect(block).toMatch(/if \(!isAwaitingReorderResync\(awaitingReorderResyncRef\.current, encounterReadRevisionRef\.current\)\) \{/);
     expect(block).toContain('awaitingReorderResyncRef.current = null;');
+    expect(block).not.toContain('dataUpdatedAt');
   });
 });
 
