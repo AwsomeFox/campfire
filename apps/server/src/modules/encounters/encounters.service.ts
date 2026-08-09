@@ -947,15 +947,15 @@ export class EncountersService {
    * omitted guard is now a visible asymmetry in the diff (a call site not updated) rather than
    * a silent absence a reviewer has to notice by diffing the two branches against each other.
    *
-   * Checks, in order: the entry exists (and, for spell slots only, has a positive `max` — a
-   * `{max: 0}` slot means "no slots at this level" the same as no entry at all); `used`/`max`
-   * are both integers (an unvalidated legacy/imported row can hold a non-numeric value, which
-   * would otherwise make every bounds comparison below silently false in both directions and
-   * persist `used: NaN` → `null`); the optional `expectedUsed` CAS against the FRESH value;
-   * and the resulting bounds. Returns the original `entry` (never mutated) alongside the
-   * computed next `used` — deliberately NOT applying the delta itself, since the two branches
-   * apply it differently (the character branch mutates the parsed JSON object it owns in
-   * place; the statblock branch spreads a fresh `{...entry, used: nextUsed}` to avoid
+   * Checks, in order: the entry exists; `used`/`max` are both integers (an unvalidated
+   * legacy/imported row can hold a non-numeric value, which the spell-slot positive-max
+   * comparison could otherwise coerce and which would make later bounds comparisons silently
+   * false); for spell slots only, `max` is positive — a `{max: 0}` slot means "no slots at
+   * this level" the same as no entry at all; then the optional `expectedUsed` CAS against the
+   * FRESH value; and the resulting bounds. Returns the original `entry` (never mutated)
+   * alongside the computed next `used` — deliberately NOT applying the delta itself. The
+   * character branch mutates the parsed JSON object it owns in place; the statblock branch
+   * spreads a fresh `{...entry, used: nextUsed}` to avoid
    * disturbing the other fields of the Zod-parsed object it must merge back selectively — see
    * that branch's own comment on why).
    */
