@@ -105,6 +105,11 @@ function toDomain(row: typeof notifications.$inferSelect): Notification {
   };
 }
 
+/** Return the owner-safe projection without changing the durable DM row. */
+function toOwnerSafeDomain(row: typeof notifications.$inferSelect): Notification {
+  return toDomain({ ...row, entityType: null, entityId: null, data: null });
+}
+
 /**
  * Only real users (numeric users.id) can receive notifications — DEV_AUTH
  * `dev:<name>` synthetic users have no users row to hang them on.
@@ -128,7 +133,12 @@ const DIGEST_BATCH_SIZE = 500;
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 type HiddenStatusAudience = 'campaign_member' | 'permanent_dm' | 'character_owner';
-type HiddenStatusDisposition = 'allow' | 'redact' | 'deny' | 'filter';
+type HiddenStatusDisposition = 'allow' | 'redact' | 'project_redact' | 'deny' | 'filter';
+
+interface HiddenStatusReadGuard {
+  filteredIds: number[];
+  projectedRedactIds: number[];
+}
 
 /** Private persistence metadata; deliberately separate from public notification `data`. */
 interface HiddenStatusContext {
@@ -658,20 +668,6 @@ export class NotificationsService implements OnApplicationBootstrap {
     if (!encounter) return 'deny';
     if (!encounter.hidden) return 'allow';
     const effectiveRole = user?.devRole ?? (tokenContext ? minRole(tokenContext.scope, member.role as Role) : member.role);
-    if (context.audience === 'permanent_dm') {
-      if (member.role === 'dm') return effectiveRole === 'dm' ? 'allow' : 'filter';
-      const isOwner = Boolean(
-        tx.select({ id: characters.id })
-          .from(characters)
-          .where(and(
-            eq(characters.id, context.characterId),
-            eq(characters.campaignId, campaignId),
-            eq(characters.ownerUserId, String(userId)),
-          ))
-          .get(),
-      );
-      return isOwner ? 'redact' : 'deny';
-    }
     const isOwner = Boolean(
       tx.select({ id: characters.id })
         .from(characters)
@@ -682,19 +678,29 @@ export class NotificationsService implements OnApplicationBootstrap {
         ))
         .get(),
     );
+    if (context.audience === 'permanent_dm') {
+      if (member.role === 'dm') {
+        if (effectiveRole === 'dm') return 'allow';
+        return isOwner ? 'project_redact' : 'filter';
+      }
+      return isOwner ? 'redact' : 'deny';
+    }
     if (context.audience === 'character_owner') return isOwner ? 'allow' : 'deny';
-    if (member.role === 'dm') return effectiveRole === 'dm' ? 'allow' : 'filter';
+    if (member.role === 'dm') {
+      if (effectiveRole === 'dm') return 'allow';
+      return isOwner ? 'project_redact' : 'filter';
+    }
     return isOwner ? 'redact' : 'deny';
   }
 
   /**
    * Remove private-context rows whose recipient has durably lost access, while
-   * returning PAT-scoped rows for request-only filtering. Callers keep their
-   * exposing SELECT or UPDATE in this same transaction: a membership demotion
-   * or ownership transfer cannot land between cleanup and the row returned
-   * from the bell endpoint.
+   * returning PAT-scoped rows for request-only filtering or owner-safe
+   * projection. Callers keep their exposing SELECT or UPDATE in this same
+   * transaction: a membership demotion or ownership transfer cannot land
+   * between cleanup and the row returned from the bell endpoint.
    */
-  private purgeUnauthorizedHiddenStatusNotificationsTx(tx: SyncDb, user: RequestUser, userId: number): number[] {
+  private purgeUnauthorizedHiddenStatusNotificationsTx(tx: SyncDb, user: RequestUser, userId: number): HiddenStatusReadGuard {
     const guarded = tx
       .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
       .from(notifications)
@@ -707,6 +713,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     const unauthorizedIds = dispositions.filter((row) => row.disposition === 'deny').map((row) => row.id);
     const redactIds = dispositions.filter((row) => row.disposition === 'redact').map((row) => row.id);
     const filteredIds = dispositions.filter((row) => row.disposition === 'filter').map((row) => row.id);
+    const projectedRedactIds = dispositions.filter((row) => row.disposition === 'project_redact').map((row) => row.id);
     if (unauthorizedIds.length > 0) {
       tx.delete(notifications).where(inArray(notifications.id, unauthorizedIds)).run();
     }
@@ -716,7 +723,7 @@ export class NotificationsService implements OnApplicationBootstrap {
         .where(inArray(notifications.id, redactIds))
         .run();
     }
-    return filteredIds;
+    return { filteredIds, projectedRedactIds };
   }
 
   /**
@@ -1076,8 +1083,8 @@ export class NotificationsService implements OnApplicationBootstrap {
       conditions.push(lte(notifications.createdAt, endIso));
     }
 
-    const { total, rows } = this.db.transaction((tx) => {
-      const filteredIds = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+    const { total, rows, projectedRedactIds } = this.db.transaction((tx) => {
+      const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
       const readConditions = filteredIds.length > 0
         ? [...conditions, notInArray(notifications.id, filteredIds)]
         : conditions;
@@ -1101,12 +1108,14 @@ export class NotificationsService implements OnApplicationBootstrap {
         .orderBy(desc(notifications.id))
         .limit(limit + 1)
         .all();
-      return { total, rows };
+      return { total, rows, projectedRedactIds };
     });
 
     const hasMore = rows.length > limit;
     const pagedRows = hasMore ? rows.slice(0, limit) : rows;
-    const items = pagedRows.map((row) => toDomain(row.notification));
+    const items = pagedRows.map((row) => (
+      projectedRedactIds.includes(row.notification.id) ? toOwnerSafeDomain(row.notification) : toDomain(row.notification)
+    ));
     const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].id : null;
 
     return {
@@ -1149,7 +1158,7 @@ export class NotificationsService implements OnApplicationBootstrap {
       sql` OR `,
     );
     const row = this.db.transaction((tx) => {
-      const filteredIds = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
       const readConditions = filteredIds.length > 0
         ? [...conditions, notInArray(notifications.id, filteredIds)]
         : conditions;
@@ -1171,7 +1180,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     const userId = numericUserId(user.id);
     if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
     return this.db.transaction((tx) => {
-      const filteredIds = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
       if (filteredIds.includes(id)) throw new NotFoundException(`Notification ${id} not found`);
       const joined = tx
         .select({ notification: notifications })
@@ -1181,14 +1190,14 @@ export class NotificationsService implements OnApplicationBootstrap {
         .get();
       const row = joined?.notification;
       if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
-      if (row.readAt) return toDomain(row);
+      if (row.readAt) return projectedRedactIds.includes(id) ? toOwnerSafeDomain(row) : toDomain(row);
       const updated = tx
         .update(notifications)
         .set({ readAt: nowIso() })
         .where(eq(notifications.id, id))
         .returning()
         .get();
-      return toDomain(updated);
+      return projectedRedactIds.includes(id) ? toOwnerSafeDomain(updated) : toDomain(updated);
     });
   }
 
@@ -1196,7 +1205,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     const userId = numericUserId(user.id);
     if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
     return this.db.transaction((tx) => {
-      const filteredIds = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const { filteredIds, projectedRedactIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
       if (filteredIds.includes(id)) throw new NotFoundException(`Notification ${id} not found`);
       const joined = tx
         .select({ notification: notifications })
@@ -1206,14 +1215,14 @@ export class NotificationsService implements OnApplicationBootstrap {
         .get();
       const row = joined?.notification;
       if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
-      if (!row.readAt) return toDomain(row);
+      if (!row.readAt) return projectedRedactIds.includes(id) ? toOwnerSafeDomain(row) : toDomain(row);
       const updated = tx
         .update(notifications)
         .set({ readAt: null })
         .where(eq(notifications.id, id))
         .returning()
         .get();
-      return toDomain(updated);
+      return projectedRedactIds.includes(id) ? toOwnerSafeDomain(updated) : toDomain(updated);
     });
   }
 
@@ -1250,7 +1259,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     }
 
     const updated = this.db.transaction((tx) => {
-      const filteredIds = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
       return tx
         .update(notifications)
         .set({ readAt: nowIso() })
@@ -1296,7 +1305,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     }
 
     const updated = this.db.transaction((tx) => {
-      const filteredIds = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const { filteredIds } = this.purgeUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
       return tx
         .update(notifications)
         .set({ readAt: null })

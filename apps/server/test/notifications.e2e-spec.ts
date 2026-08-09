@@ -1245,6 +1245,30 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .some((row) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(true);
     expect((await listFor(coDm)).some((row) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(true);
 
+    // A same-campaign PAT capped below DM remains entitled to the affected
+    // character's owner-safe status projection, without rewriting the durable
+    // full-DM row that the ordinary session may still read.
+    const scopedOwner = await createHiddenCombatant('Scoped Owner PAT Hero', true, coDm);
+    expect((await dm
+      .patch(`/api/v1/encounters/${scopedOwner.encounter.body.id}/combatants/${scopedOwner.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Scoped Owner PAT Hero was downed');
+    const scopedOwnerRead = await request(server)
+      .get('/api/v1/notifications')
+      .set('Authorization', `Bearer ${viewerToken.body.token}`);
+    expect(scopedOwnerRead.status).toBe(200);
+    expect((scopedOwnerRead.body.items ?? scopedOwnerRead.body).find(
+      (row: Notification) => row.body.includes('Scoped Owner PAT Hero was downed'),
+    )).toMatchObject({ entityType: null, entityId: null });
+    const scopedOwnerRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Scoped Owner PAT Hero was downed%'}`,
+    )).get();
+    expect(scopedOwnerRow).toMatchObject({ entityType: 'encounter', entityId: scopedOwner.encounter.body.id });
+    expect((await listFor(coDm)).find((row) => row.body.includes('Scoped Owner PAT Hero was downed')))
+      .toMatchObject({ entityType: 'encounter', entityId: scopedOwner.encounter.body.id });
+
     const boundToken = await coDm.post('/api/v1/tokens').send({
       name: 'hidden-status-bound-read',
       scope: 'dm',
