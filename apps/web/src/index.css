@@ -3479,7 +3479,11 @@ html.cf-vtt-locked [data-testid='safety-bar'] {
      edge and could not be clicked at all, stranding the dice tray behind it. Ride down
      with the canvas instead of insisting on the clearance. */
   bottom: min(132px, max(8px, calc(100% - 54px)));
-  z-index: 13;
+  /* Above the tray it opens, not level with it. The tray follows this button in the DOM
+     (so the keyboard reaches it after the toggle), which at equal z-index means the tray
+     paints over the button — and on a canvas short enough for the two to overlap, that
+     left the tray covering its own toggle with no other way to dismiss it. */
+  z-index: 14;
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);

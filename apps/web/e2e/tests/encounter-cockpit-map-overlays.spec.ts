@@ -348,6 +348,23 @@ test.describe('encounter cockpit — short canvas', () => {
       expect(tray!.height).toBeGreaterThan(40);
       // Essentially all of it on screen, not a sliver.
       expect(tray!.visibleHeight).toBeGreaterThanOrEqual(tray!.height - 2);
+
+      // ...and the toggle that opened it is still the thing under its own centre. On a
+      // canvas short enough for the two to overlap, the tray — which follows the button
+      // in the DOM so the keyboard reaches it — painted over the button at equal z-index
+      // and there is no other control that dismisses the tray.
+      const rollHit = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="encounter-vtt-roll"]') as HTMLElement | null;
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2));
+        return { reachable: hit === el || !!hit?.closest('[data-testid="encounter-vtt-roll"]') };
+      });
+      expect(rollHit, 'the Roll toggle must exist').not.toBeNull();
+      expect(rollHit!.reachable, 'the open tray must not swallow its own toggle').toBe(true);
+      // And it really does close it.
+      await page.getByTestId('encounter-vtt-roll').click();
+      await expect(page.getByTestId('encounter-vtt-dice-tray')).not.toBeVisible();
     } finally {
       await page.request.delete(`/api/v1/encounters/${id}`).catch(() => undefined);
       await restoreSeedEncounter(page);
