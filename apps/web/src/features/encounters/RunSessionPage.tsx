@@ -1009,9 +1009,36 @@ export default function RunSessionPage() {
     null,
   );
   const defaultPanelTabRef = useRef<{ eid: number; running: boolean; tab: PanelTab } | null>(null);
-  const [panelOpen, setPanelOpen] = useState(true);
-  const [diceTrayOpen, setDiceTrayOpen] = useState(false);
-  const [turnBarCollapsed, setTurnBarCollapsed] = useState(false);
+  // Chrome the viewer collapses or opens, stamped with the encounter for the same reason
+  // the tab choice is: navigating between two CACHED encounters reuses this component
+  // without an unmount, so a panel collapsed in one fight arrived hidden in the next —
+  // as did an open dice tray and a collapsed initiative strip, none of which the viewer
+  // asked for on the encounter they just opened.
+  const [chrome, setChrome] = useState<{ eid: number; panelOpen: boolean; diceTrayOpen: boolean; turnBarCollapsed: boolean }>(
+    () => ({ eid, panelOpen: true, diceTrayOpen: false, turnBarCollapsed: false }),
+  );
+  const activeChrome = chrome.eid === eid ? chrome : { eid, panelOpen: true, diceTrayOpen: false, turnBarCollapsed: false };
+  const { panelOpen, diceTrayOpen, turnBarCollapsed } = activeChrome;
+  const setPanelOpen = useCallback(
+    (next: boolean) => setChrome((prev) => ({ ...(prev.eid === eid ? prev : { eid, panelOpen: true, diceTrayOpen: false, turnBarCollapsed: false }), eid, panelOpen: next })),
+    [eid],
+  );
+  const setDiceTrayOpen = useCallback(
+    (next: boolean | ((open: boolean) => boolean)) =>
+      setChrome((prev) => {
+        const base = prev.eid === eid ? prev : { eid, panelOpen: true, diceTrayOpen: false, turnBarCollapsed: false };
+        return { ...base, eid, diceTrayOpen: typeof next === 'function' ? next(base.diceTrayOpen) : next };
+      }),
+    [eid],
+  );
+  const setTurnBarCollapsed = useCallback(
+    (next: boolean | ((collapsed: boolean) => boolean)) =>
+      setChrome((prev) => {
+        const base = prev.eid === eid ? prev : { eid, panelOpen: true, diceTrayOpen: false, turnBarCollapsed: false };
+        return { ...base, eid, turnBarCollapsed: typeof next === 'function' ? next(base.turnBarCollapsed) : next };
+      }),
+    [eid],
+  );
 
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [confirmReopen, setConfirmReopen] = useState(false);
@@ -4300,14 +4327,6 @@ export default function RunSessionPage() {
               tray's initial load deliberately establishes a silent baseline.
               (Deliberately not naming the SSE type: death-save-table-moment.unit.spec.ts
               guards that this file never grows its own subscription to it.) */}
-          <div
-            className="cf-vtt-tray"
-            id="encounter-vtt-dice-tray"
-            data-testid="encounter-vtt-dice-tray"
-            hidden={!diceTrayOpen}
-          >
-            <SharedDiceLog campaignId={cid} compact />
-          </div>
           <button
             type="button"
             className="cf-vtt-fab"
@@ -4320,6 +4339,20 @@ export default function RunSessionPage() {
             <span aria-hidden style={{ fontSize: 17, lineHeight: 1 }}>🎲</span>
             {t('dice.roll', 'Roll')}
           </button>
+          {/* After its toggle, not before. Both are absolutely positioned so the order
+              here costs nothing visually, but a keyboard user who opens the tray keeps
+              focus on the button — and from a tray that PRECEDED it, Tab went on to the
+              panel controls and skipped every dice control, reachable only by tabbing
+              backwards through the whole tray. */}
+          <div
+            className="cf-vtt-tray"
+            id="encounter-vtt-dice-tray"
+            data-testid="encounter-vtt-dice-tray"
+            hidden={!diceTrayOpen}
+          >
+            <SharedDiceLog campaignId={cid} compact />
+          </div>
+
         </>
       }
       tabs={[

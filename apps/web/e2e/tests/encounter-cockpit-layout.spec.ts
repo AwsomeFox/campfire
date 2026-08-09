@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
-import { openCockpitTab } from '../lib/encounterCockpit';
+import { openCockpitDiceTray, openCockpitTab } from '../lib/encounterCockpit';
 
 test.use({ storageState: stateFor('dm') });
 
@@ -532,6 +532,73 @@ test.describe('encounter cockpit across navigations', () => {
       await expect(page.locator(`#entity-comment-${commentId}`)).toBeVisible();
     } finally {
       await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
+    }
+  });
+
+  test('collapsed chrome does not carry from one encounter into the next', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Chrome carryover drill', hidden: false },
+    });
+    expect(created.ok()).toBe(true);
+    const secondId = ((await created.json()) as { id: number }).id;
+
+    try {
+      const navigate = async (id: number) => {
+        await page.evaluate(
+          ([c, e]) => {
+            window.history.pushState({}, '', `/c/${c}/encounters/${e}`);
+            window.dispatchEvent(new PopStateEvent('popstate'));
+          },
+          [campaignId, id] as const,
+        );
+        await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible({ timeout: 15_000 });
+      };
+
+      // Warm the second encounter's read first — on a cold one the query goes pending and
+      // the page unmounts the cockpit, which resets this state for unrelated reasons.
+      await page.goto(`/c/${campaignId}/encounters/${secondId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await navigate(encounterId);
+
+      // Collapse the panel and open the dice tray on THIS fight only.
+      await page.getByTestId('encounter-vtt-panel-close').click();
+      await expect(page.getByTestId('encounter-vtt-panel')).not.toBeVisible();
+      await openCockpitDiceTray(page);
+
+      await navigate(secondId);
+      await expect(page).toHaveURL(new RegExp(`/encounters/${secondId}$`));
+      // The next fight opens with its own chrome: roster showing, tray closed.
+      await expect(page.getByTestId('encounter-vtt-panel')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('encounter-vtt-dice-tray')).not.toBeVisible();
+      await expect(page.getByTestId('encounter-vtt-roll')).toHaveAttribute('aria-expanded', 'false');
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${secondId}`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
+
+  test('the dice tray follows its toggle in tab order', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    try {
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+
+      const roll = page.getByTestId('encounter-vtt-roll');
+      await roll.click();
+      await expect(page.getByTestId('encounter-vtt-dice-tray')).toBeVisible();
+      await expect(roll).toBeFocused();
+
+      // Opening leaves focus on the toggle, so the very next Tab must land INSIDE the
+      // tray. With the tray earlier in the DOM it went to the panel controls instead and
+      // every dice control was reachable only by tabbing backwards through the lot.
+      await page.keyboard.press('Tab');
+      const inTray = await page.evaluate(
+        () => !!document.activeElement?.closest('[data-testid="encounter-vtt-dice-tray"]'),
+      );
+      expect(inTray, 'Tab from the Roll toggle must enter the tray it opened').toBe(true);
+    } finally {
+      await restoreSeedEncounter(page);
     }
   });
 
