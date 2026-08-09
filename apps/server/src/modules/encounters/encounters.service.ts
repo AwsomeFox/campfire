@@ -6142,7 +6142,7 @@ export class EncountersService {
     user: RequestUser,
     event: NotificationEvent,
   ): Promise<void> {
-    if (await this.notifications.notifyCampaignIfEncounterVisible(encounterRow.campaignId, encounterRow.id, user, event)) {
+    if (await this.notifications.notifyCampaignIfEncounterVisible(encounterRow.campaignId, encounterRow.id, characterId, user, event)) {
       return;
     }
 

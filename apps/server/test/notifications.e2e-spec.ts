@@ -1155,14 +1155,14 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       }
       throw new Error(`Timed out waiting for ${deferred ? 'deferred' : 'immediate'} hidden-status row: ${body}`);
     };
-    const createHiddenCombatant = async (name: string) => {
+    const createHiddenCombatant = async (name: string, hidden = true) => {
       const character = await player
         .post(`/api/v1/campaigns/${guardedCampaignId}/characters`)
         .send({ name, hpCurrent: 10, hpMax: 10 });
       expect(character.status).toBe(201);
       const encounter = await dm
         .post(`/api/v1/campaigns/${guardedCampaignId}/encounters`)
-        .send({ name: `${name} Encounter`, hidden: true });
+        .send({ name: `${name} Encounter`, hidden });
       expect(encounter.status).toBe(201);
       const roster = await dm.get(`/api/v1/encounters/${encounter.body.id}`);
       const combatant = roster.body.combatants.find(
@@ -1241,6 +1241,24 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(false);
 
     expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
+    const visibleThenHidden = await createHiddenCombatant('Visible Then Hidden Hero', false);
+    expect((await dm
+      .patch(`/api/v1/encounters/${visibleThenHidden.encounter.body.id}/combatants/${visibleThenHidden.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(playerId, 'Visible Then Hidden Hero was downed');
+    await waitForStoredRow(spectatorId, 'Visible Then Hidden Hero was downed');
+    await waitForStoredRow(coDmId, 'Visible Then Hidden Hero was downed', true);
+    db.update(encounters).set({ hidden: true }).where(eq(encounters.id, visibleThenHidden.encounter.body.id)).run();
+
+    const ownerAfterHide = (await listFor(player)).find((row) => row.body.includes('Visible Then Hidden Hero was downed'));
+    expect(ownerAfterHide).toMatchObject({ entityType: null, entityId: null });
+    expect((await listFor(spectator)).some((row) => row.body.includes('Visible Then Hidden Hero was downed'))).toBe(false);
+    expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, spectatorId), eq(notificationRows.campaignId, guardedCampaignId))).all()
+      .some((row) => row.body.includes('Visible Then Hidden Hero was downed'))).toBe(false);
+    await notifications.flushDigests();
+    const dmAfterHide = (await listFor(coDm)).find((row) => row.body.includes('Visible Then Hidden Hero was downed'));
+    expect(dmAfterHide).toMatchObject({ entityType: 'encounter', entityId: visibleThenHidden.encounter.body.id });
+
     const removed = await createHiddenCombatant('Removal Digest Hero');
     expect((await dm
       .patch(`/api/v1/encounters/${removed.encounter.body.id}/combatants/${removed.combatant.id}`)

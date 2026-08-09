@@ -5108,8 +5108,9 @@ function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): v
 /**
  * Issue #2112: hidden encounter status rows must carry private authority context
  * so bell reads and digest delivery can fail closed after a DM demotion, removal,
- * ownership transfer, or visibility change. Existing rows predate this contract
- * and remain null; only rows written by the guarded hidden-status path opt in.
+ * ownership transfer, or visibility change. Legacy rows cannot supply the affected
+ * character/audience safely, so context-less status rows that still point at an
+ * encounter which is now hidden are removed during the upgrade.
  */
 function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Database): void {
   for (const table of ['notifications', 'notification_digest_queue']) {
@@ -5119,6 +5120,13 @@ function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Datab
     if (!columns.some((column) => column.name === 'hidden_status_context')) {
       sqlite.exec(`ALTER TABLE ${table} ADD COLUMN hidden_status_context TEXT`);
     }
+    sqlite.prepare(
+      `DELETE FROM ${table}
+       WHERE hidden_status_context IS NULL
+         AND type = 'character_downed'
+         AND entity_type = 'encounter'
+         AND entity_id IN (SELECT id FROM encounters WHERE hidden = 1)`,
+    ).run();
   }
 }
 

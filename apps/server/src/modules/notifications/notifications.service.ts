@@ -127,7 +127,8 @@ const DIGEST_BATCH_SIZE = 500;
 
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
-type HiddenStatusAudience = 'permanent_dm' | 'character_owner';
+type HiddenStatusAudience = 'campaign_member' | 'permanent_dm' | 'character_owner';
+type HiddenStatusDisposition = 'allow' | 'redact' | 'deny';
 
 /** Private persistence metadata; deliberately separate from public notification `data`. */
 interface HiddenStatusContext {
@@ -146,7 +147,9 @@ function parseHiddenStatusContext(raw: string | null | undefined): HiddenStatusC
       !Array.isArray(parsed) &&
       Number.isInteger((parsed as HiddenStatusContext).encounterId) &&
       Number.isInteger((parsed as HiddenStatusContext).characterId) &&
-      ((parsed as HiddenStatusContext).audience === 'permanent_dm' || (parsed as HiddenStatusContext).audience === 'character_owner')
+      ((parsed as HiddenStatusContext).audience === 'campaign_member' ||
+        (parsed as HiddenStatusContext).audience === 'permanent_dm' ||
+        (parsed as HiddenStatusContext).audience === 'character_owner')
     ) {
       return parsed as HiddenStatusContext;
     }
@@ -297,6 +300,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   async notifyCampaignIfEncounterVisible(
     campaignId: number,
     encounterId: number,
+    characterId: number,
     actor: RequestUser | null,
     event: NotificationEvent,
   ): Promise<boolean> {
@@ -307,6 +311,7 @@ export class NotificationsService implements OnApplicationBootstrap {
         .where(eq(campaignMembers.campaignId, campaignId));
       const actorId = actor ? numericUserId(actor.id) : null;
       const recipients = members.map((member) => member.userId).filter((id) => actorId === null || id !== actorId);
+      const hiddenStatusContext: HiddenStatusContext = { encounterId, characterId, audience: 'campaign_member' };
       return await this.dispatch(
         recipients,
         campaignId,
@@ -321,6 +326,7 @@ export class NotificationsService implements OnApplicationBootstrap {
             .get();
           return encounter?.hidden === false;
         },
+        hiddenStatusContext,
       );
     } catch (err) {
       this.logger.warn(`notifyCampaignIfEncounterVisible failed for encounter ${encounterId} in campaign ${campaignId}: ${String(err)}`);
@@ -631,31 +637,31 @@ export class NotificationsService implements OnApplicationBootstrap {
     campaignId: number,
     rawContext: string | null | undefined,
     user?: RequestUser,
-  ): boolean {
+  ): HiddenStatusDisposition {
     const context = parseHiddenStatusContext(rawContext);
-    if (!context) return false;
+    if (!context) return 'deny';
     // Digest flushing runs without a request principal. Recipient-facing reads
     // must additionally honour the authenticating PAT's campaign and role cap.
     const tokenContext = user?.tokenContext;
-    if (tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== campaignId) return false;
+    if (tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== campaignId) return 'deny';
     const member = tx
       .select({ role: campaignMembers.role })
       .from(campaignMembers)
       .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, userId)))
       .get();
-    if (!member) return false;
+    if (!member) return 'deny';
     const encounter = tx
       .select({ hidden: encounters.hidden })
       .from(encounters)
       .where(and(eq(encounters.id, context.encounterId), eq(encounters.campaignId, campaignId)))
       .get();
-    if (!encounter) return false;
-    if (!encounter.hidden) return true;
+    if (!encounter) return 'deny';
+    if (!encounter.hidden) return 'allow';
+    const effectiveRole = user?.devRole ?? (tokenContext ? minRole(tokenContext.scope, member.role as Role) : member.role);
     if (context.audience === 'permanent_dm') {
-      const effectiveRole = user?.devRole ?? (tokenContext ? minRole(tokenContext.scope, member.role as Role) : member.role);
-      return effectiveRole === 'dm';
+      return effectiveRole === 'dm' ? 'allow' : 'deny';
     }
-    return Boolean(
+    const isOwner = Boolean(
       tx.select({ id: characters.id })
         .from(characters)
         .where(and(
@@ -665,6 +671,9 @@ export class NotificationsService implements OnApplicationBootstrap {
         ))
         .get(),
     );
+    if (context.audience === 'character_owner') return isOwner ? 'allow' : 'deny';
+    if (effectiveRole === 'dm') return 'allow';
+    return isOwner ? 'redact' : 'deny';
   }
 
   /**
@@ -679,11 +688,20 @@ export class NotificationsService implements OnApplicationBootstrap {
       .from(notifications)
       .where(and(eq(notifications.userId, userId), isNotNull(notifications.hiddenStatusContext)))
       .all();
-    const unauthorizedIds = guarded
-      .filter((row) => !this.hiddenStatusAuthorizedTx(tx, userId, row.campaignId, row.hiddenStatusContext, user))
-      .map((row) => row.id);
+    const dispositions = guarded.map((row) => ({
+      id: row.id,
+      disposition: this.hiddenStatusAuthorizedTx(tx, userId, row.campaignId, row.hiddenStatusContext, user),
+    }));
+    const unauthorizedIds = dispositions.filter((row) => row.disposition === 'deny').map((row) => row.id);
+    const redactIds = dispositions.filter((row) => row.disposition === 'redact').map((row) => row.id);
     if (unauthorizedIds.length > 0) {
       tx.delete(notifications).where(inArray(notifications.id, unauthorizedIds)).run();
+    }
+    if (redactIds.length > 0) {
+      tx.update(notifications)
+        .set({ entityType: null, entityId: null, data: null })
+        .where(inArray(notifications.id, redactIds))
+        .run();
     }
   }
 
@@ -746,16 +764,19 @@ export class NotificationsService implements OnApplicationBootstrap {
         this.db.transaction((tx) => {
           for (let index = 0; index < deliverRows.length; index += 1) {
             const row = deliverRows[index];
-            if (row.hiddenStatusContext && !this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext)) {
+            const disposition = row.hiddenStatusContext
+              ? this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext)
+              : 'allow';
+            if (disposition === 'deny') {
               removedIds.push(deliveredIds[index]);
               continue;
             }
-            authorizedDeliverRows.push(row);
+            authorizedDeliverRows.push(disposition === 'redact' ? { ...row, entityType: null, entityId: null, data: null } : row);
             authorizedDeliveredIds.push(deliveredIds[index]);
           }
           const heldRows = queued.filter((row) => !deliveredIds.includes(row.id));
           for (const row of heldRows) {
-            if (row.hiddenStatusContext && !this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext)) {
+            if (row.hiddenStatusContext && this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext) === 'deny') {
               removedIds.push(row.id);
             }
           }
