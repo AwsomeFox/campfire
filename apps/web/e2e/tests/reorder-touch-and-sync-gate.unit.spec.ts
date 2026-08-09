@@ -130,7 +130,7 @@ test.describe('reorder busy consults the live-sync gate (issue #2074 review find
   });
 });
 
-test.describe('reorder resync latch is REACTIVE state, correctly ordered against the rendered encounter (issue #2116 review rounds 2-5)', () => {
+test.describe('reorder resync latch is REACTIVE state, correctly ordered against the rendered encounter (issue #2116 review rounds 2-6)', () => {
   /**
    * Review round 2 on #2116: the round-1 fix gated on a plain `useRef`. A ref mutation does
    * NOT cause a re-render, so `buildReorderControls`'s `busy` and `InitiativeStrip`'s
@@ -142,11 +142,13 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
    * `encounterQuery.isFetching`, just rarer and therefore harder to diagnose.
    *
    * `reorderResyncArmedAt` is now `useState`, so a re-render always reflects the true value
-   * before any entry point acts on it — not `encounterQuery.dataUpdatedAt` (advances on ANY
-   * `setQueryData` for the query key, including this page's own local optimistic writes that
-   * never round-trip to the server) and, per review round 5, not a live comparison against
-   * `encounterReadRevision` on every render either (that state can tick before the `encounter`
-   * object a component actually renders catches up — see the clearing-effect test below).
+   * before any entry point acts on it — not a live comparison against `encounterReadRevision`
+   * on every render (round 5: that state can tick before the `encounter` object a component
+   * actually renders catches up), and the clearing effect's own dependency is neither
+   * `encounterReadRevision` (round 5) nor `encounter` itself (round 6: TanStack's structural
+   * sharing can leave `encounter`'s reference unchanged forever when a reorder fails without
+   * changing server state) — see that effect's own doc comment in `RunSessionPage.tsx` for the
+   * full reasoning, cross-checked against `@tanstack/query-core`'s actual source.
    * `RunSessionPage.tsx` is too heavily wired to mount — see this file's top comment — so
    * the call sites are pinned by source rather than by rendering; the underlying decision
    * function itself is behaviorally unit-tested against real values in
@@ -161,7 +163,7 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
     // BEFORE TanStack Query's cache-update-and-notify step publishes the new `encounter` a
     // component actually renders, so a render could see the bumped revision but the still-stale
     // `encounter`. The exposed gate must instead just read whether `reorderResyncArmedAt` has
-    // been cleared yet — see the clearing-effect test below for where that decision now lives.
+    // been cleared yet — see the clearing-effect tests below for where that decision now lives.
     expect(source).toContain('const isAwaitingReorderResyncNow = reorderResyncArmedAt !== null;');
     expect(source).not.toContain('isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevision)');
     // Regression guard: this must NOT be a ref. A ref read here would silently reintroduce
@@ -170,37 +172,72 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
   });
 
   /**
-   * Review round 5 (Codex, confirmed): `encounterReadRevisionRef`/`encounterReadRevision` are
-   * bumped SYNCHRONOUSLY inside `encounterQuery`'s `queryFn`, before that async function
-   * returns — strictly BEFORE TanStack Query's own separate cache-update-and-notify step
-   * publishes the new `encounter` object a component actually renders. A component could
-   * therefore render with the NEW `encounterReadRevision` but the OLD `encounter` (pre-reorder
-   * `combatants` order), releasing the gate for a render or more while the roster shown is
-   * still the one a drag must not be authored against — the exact silent-wrong-order hazard
-   * this whole mechanism exists to close, reopened by a fifth distinct proxy signal.
+   * Review rounds 5 and 6 (Codex, confirmed both times), pulling in OPPOSITE directions —
+   * which is exactly why the effect's dependency array has to satisfy both at once, and why
+   * these two tests exist side by side:
    *
-   * The fix: the clearing decision moves into an effect keyed on `encounter` ITSELF — the
-   * value the component renders and `handleReorderDrop` actually reads — so the clear can only
-   * run AFTER a render has already shown the update. `encounterReadRevisionRef.current`, read
-   * INSIDE that now-correctly-ordered effect, is still what distinguishes a real completed GET
-   * from a local optimistic write (both change `encounter`'s reference and fire the effect,
-   * but only a real GET advances that ref).
+   * - Round 5: `encounterReadRevisionRef`/`encounterReadRevision` are bumped SYNCHRONOUSLY
+   *   inside `encounterQuery`'s `queryFn`, before that async function returns — strictly
+   *   BEFORE TanStack's own separate cache-update-and-notify step publishes the new
+   *   `encounter` a component renders. Depending on `encounterReadRevision` lets a render see
+   *   the bumped revision but the still-stale `encounter` — releasing the gate too EARLY.
+   * - Round 6: depending on `encounter`'s object reference instead gets the gate STUCK armed
+   *   forever when a reorder fails without changing server state (e.g. the server refuses a
+   *   move of the current combatant) — the follow-up GET returns a payload identical to what's
+   *   cached, and `@tanstack/query-core`'s `replaceEqualDeep` preserves the OLD `encounter`
+   *   reference on a full deep-equal match, so an effect keyed on `encounter` never re-fires.
+   *
+   * The fix depends on `encounterQuery.dataUpdatedAt` instead — a TanStack-native field
+   * published atomically with `data` (so it can't arrive in an earlier render, unlike our own
+   * `encounterReadRevision` state) that also advances on EVERY completed fetch regardless of
+   * whether the resulting reference changed (so it can't get stuck the way `encounter` can).
+   * `encounterReadRevisionRef.current`, read INSIDE the now-correctly-triggered effect, is
+   * still what distinguishes a real completed GET from a local optimistic write (verified
+   * against `@tanstack/query-core`'s source: `setQueryData` ALSO bumps `dataUpdatedAt`, so
+   * that field alone cannot make the distinction — it is a wake-up trigger here, never the
+   * comparison itself).
    */
-  test("the clearing effect is keyed on `encounter` (not `encounterReadRevision`), and checks encounterReadRevisionRef.current inside", () => {
+  test("the clearing effect depends on encounterQuery.dataUpdatedAt — NOT encounterReadRevision (round 5) and NOT encounter (round 6) — and still checks encounterReadRevisionRef.current inside", () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     const stateStart = source.indexOf('const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);');
     expect(stateStart).toBeGreaterThan(-1);
-    const effectEnd = source.indexOf('\n  }, [encounter, reorderResyncArmedAt]);', stateStart);
+    const effectEnd = source.indexOf('\n  }, [encounterQuery.dataUpdatedAt, reorderResyncArmedAt]);', stateStart);
     expect(effectEnd).toBeGreaterThan(stateStart);
     const block = source.slice(stateStart, effectEnd);
 
-    // The load-bearing dependency is `encounter`, not the revision state — regression guard
-    // for the exact defect found in review round 5.
+    // Round 5 regression guard: the revision STATE must not be a dependency (it can advance
+    // in an earlier render than the `encounter` it's meant to certify).
     expect(block).not.toContain('[encounterReadRevision]');
+    expect(block).not.toContain(', encounterReadRevision]');
+    // Round 6 regression guard: `encounter`'s reference must not be the (sole) dependency
+    // either (structural sharing can leave it unchanged forever on an unchanged payload).
+    expect(block).not.toContain('[encounter,');
+    expect(block).not.toContain('[encounter]');
+    // The gating COMPARISON is still the ref, not `dataUpdatedAt` itself (round 3's mistake).
     expect(block).toMatch(
       /if \(reorderResyncArmedAt !== null && !isAwaitingReorderResync\(reorderResyncArmedAt, encounterReadRevisionRef\.current\)\) \{/,
     );
     expect(block).toContain('setReorderResyncArmedAt(null);');
+  });
+
+  /**
+   * Round 6's concrete deadlock, pinned directly: `reorderCombatant`'s `onSettled` arms the
+   * latch on EVERY settle, success or failure (`onSettled` has no `_err` branch that skips
+   * it) — so a reorder rejected by the server (learns nothing changed) must still be able to
+   * release the latch once the resulting no-op refetch completes, even though its payload,
+   * and therefore `encounter`'s reference, may be byte-identical to what was already cached.
+   */
+  test("onSettled arms the latch unconditionally (both success and failure), which is exactly why the clearing dependency cannot require encounter's reference to change", () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+    const fnStart = source.indexOf('const reorderCombatant = useMutation({');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = source.indexOf('\n  });', fnStart);
+    const fn = source.slice(fnStart, fnEnd);
+    const onSettledStart = fn.indexOf('onSettled:');
+    expect(onSettledStart).toBeGreaterThan(-1);
+    // `onSettled`'s signature ignores the error argument (`_err`) — it does not branch away
+    // from arming the latch on a failed reorder.
+    expect(fn.slice(onSettledStart, onSettledStart + 80)).toMatch(/onSettled:\s*\(_data,\s*_err,\s*\{\s*combatantId\s*\}\)/);
   });
 
   test('reorderCombatant.onSettled arms the state with the read-revision baseline, before invalidateEncounter', () => {

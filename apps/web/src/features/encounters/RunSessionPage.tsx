@@ -2506,36 +2506,54 @@ export default function RunSessionPage() {
   /**
    * Issue #2116 — see `isAwaitingReorderResync`'s doc comment in `combatantReorder.ts` for
    * the full defect this gate closes, and why it is not gated on `encounterQuery.isFetching`
-   * (true for any refetch, so it would silently swallow a completed drag) or on
-   * `encounterQuery.dataUpdatedAt` (a local optimistic write — an HP delta, a map/fog patch —
-   * advances it without any real GET completing, so the gate would clear while the roster on
-   * screen was still stale).
+   * (true for any refetch, so it would silently swallow a completed drag).
    *
    * `reorderResyncArmedAt` is REACT STATE, not a ref (review round 2), so `isAwaitingReorderResyncNow`
    * below is reactive: `buildReorderControls`'s `busy` and `InitiativeStrip`'s `canReorder`
-   * (both consult it) get a fresh value every render instead of silently swallowing an action
-   * on a control that still LOOKED enabled.
+   * get a fresh value every render instead of silently swallowing an action on a control that
+   * still LOOKED enabled.
    *
-   * `isAwaitingReorderResyncNow` reads `reorderResyncArmedAt` DIRECTLY (`!== null`) rather than
-   * recomputing "is `encounterReadRevisionRef` still behind `armedAt`" on every render (review
-   * round 3's fix, superseded here) — review round 4/5: `encounterReadRevisionRef` (and its
-   * companion state `encounterReadRevision`) is bumped SYNCHRONOUSLY inside `encounterQuery`'s
-   * `queryFn`, BEFORE that function returns and BEFORE TanStack Query's own separate
-   * cache-update-and-notify step publishes the new `encounter` object components actually
-   * render. A component CAN render with the bumped `encounterReadRevision` but the STILL-STALE
-   * `encounter` (pre-reorder `combatants` order) — releasing the gate for a render or more
-   * while the roster shown is still the one the drag must not be authored against. Comparing
-   * against `encounterReadRevision` at read time cannot avoid this: the comparison itself is a
-   * proxy that can tick ahead of the data it's meant to certify.
+   * The clearing effect's dependency is `encounterQuery.dataUpdatedAt` — NOT
+   * `encounterReadRevision` (review round 5) and NOT `encounter` itself (review round 6). Both
+   * of those were tried and both failed, for opposite reasons; `dataUpdatedAt` is the one
+   * TanStack-native signal that avoids both failure modes at once:
    *
-   * The effect below instead clears `reorderResyncArmedAt` from a dependency on `encounter`
-   * ITSELF — the exact value the component renders and `handleReorderDrop` reads when building
-   * its request — so the clear can only ever run AFTER a render has already shown the update.
-   * `encounterReadRevisionRef.current` is still what distinguishes "that update was a real GET"
-   * from "that update was a local optimistic write" (an HP delta/map/fog patch ALSO changes
-   * `encounter`'s reference and fires this effect, but never advances that ref, so the
-   * comparison inside stays false and the gate stays armed) — same distinction round 3
-   * established, just checked at the right time now instead of the wrong one.
+   * - Round 5's failure: `encounterReadRevisionRef`/`encounterReadRevision` are bumped by OUR
+   *   OWN code, synchronously inside `queryFn`, BEFORE that function returns — strictly before
+   *   TanStack's separate cache-update-and-notify step publishes the `encounter` a component
+   *   renders. A render could see the bumped revision but the still-stale `encounter`.
+   *   `dataUpdatedAt` has no such gap: it is one field on the SAME `QueryObserverResult` TanStack
+   *   computes and publishes to `useQuery` callers in one shot, atomically with `data` — there is
+   *   no TanStack-internal path that updates `dataUpdatedAt` in an earlier render than `data`.
+   * - Round 6's failure: gating on `encounter`'s object REFERENCE changing gets stuck armed
+   *   forever when a reorder fails without changing server state (the concrete case: the server
+   *   rejects a move of the current combatant) — the follow-up GET returns a payload identical to
+   *   what's cached, and `@tanstack/query-core`'s `replaceEqualDeep` (verified against its actual
+   *   source: on a full deep-equal match it returns the OLD reference `a`, not the new one)
+   *   preserves the OLD `encounter` reference, so an effect keyed on `encounter` never re-fires.
+   *   `dataUpdatedAt` has no such gap either: TanStack advances it on every completed fetch,
+   *   independent of whether the resulting reference changed.
+   *
+   * (`replaceEqualDeep` also rules out comparing `encounter`'s reference against
+   * `latestEncounterReadRef.current.encounter`, the raw pre-structural-sharing value `queryFn`
+   * captured: on a genuine content change it returns neither the old reference nor that literal
+   * new value, but a freshly reconstructed wrapper object, so that comparison would almost never
+   * match even right after an authentic update.)
+   *
+   * `dataUpdatedAt` ALSO advances on a local optimistic write (verified against
+   * `@tanstack/query-core`'s actual source: `QueryClient.setQueryData` → `Query.setData` →
+   * `successState(data, dataUpdatedAt)`, where a caller that (like every optimistic write on
+   * this page) omits `updatedAt` gets `dataUpdatedAt ?? Date.now()` — the SAME field round 3
+   * found unsuitable) — so on its own this dependency does not distinguish a real GET from an
+   * optimistic write. It doesn't need to: it is consulted here purely as a "something in the
+   * query settled — go re-examine" WAKE-UP, never as the gating comparison itself. The actual
+   * decision is still `encounterReadRevisionRef.current` (bumped ONLY by a real, non-aborted GET
+   * inside `queryFn`, never by `setQueryData`) versus `reorderResyncArmedAt`, exactly as before
+   * round 5. An optimistic write firing this effect still finds `encounterReadRevisionRef`
+   * unchanged and leaves the gate armed — it just wakes the check, it does not answer it. This is
+   * the opposite failure mode from round 3, which used `dataUpdatedAt` (there,
+   * `encounterQuery.dataUpdatedAt` directly) AS the comparison value, so an optimistic write's
+   * bump satisfied the check by itself.
    */
   const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);
   const isAwaitingReorderResyncNow = reorderResyncArmedAt !== null;
@@ -2543,13 +2561,9 @@ export default function RunSessionPage() {
     if (reorderResyncArmedAt !== null && !isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevisionRef.current)) {
       setReorderResyncArmedAt(null);
     }
-    // `encounter` (not `encounterReadRevision`) is the load-bearing dependency — see the doc
-    // comment above for why keying this on the revision counter directly reintroduces the
-    // exact race this effect exists to close. `reorderResyncArmedAt` is also read above, so
-    // it belongs here too (re-running the instant a reorder arms it is harmless: `encounter`
-    // is still the pre-reorder snapshot at that exact render, so the check inside still
-    // evaluates "still awaiting").
-  }, [encounter, reorderResyncArmedAt]);
+    // See the doc comment above for why `encounterQuery.dataUpdatedAt` — not
+    // `encounterReadRevision`, not `encounter` — is the correct dependency here.
+  }, [encounterQuery.dataUpdatedAt, reorderResyncArmedAt]);
 
   /**
    * Manual initiative reorder (issue #1923) — drag (InitiativeStrip + roster) and the
