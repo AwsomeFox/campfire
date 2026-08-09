@@ -375,26 +375,39 @@ export class StorylinesService {
 
   async createArc(campaignId: number, input: StoryArcCreateInput, user: RequestUser, role: Role): Promise<StoryArc> {
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(storyArcs)
-      .values({
+    const row = this.db.transaction((tx) => {
+      const row = tx
+        .insert(storyArcs)
+        .values({
+          campaignId,
+          title: input.title,
+          summary: input.summary ?? '',
+          status: input.status ?? 'planned',
+          sortOrder: input.sortOrder ?? 0,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .get();
+      this.revisions.commitProseVersionInTx(tx, {
+        entityType: 'story_arc',
+        entityId: row.id,
         campaignId,
-        title: input.title,
-        summary: input.summary ?? '',
-        status: input.status ?? 'planned',
-        sortOrder: input.sortOrder ?? 0,
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'storyline.arc.create',
-      entityType: 'story_arc',
-      entityId: row.id,
-      campaignId,
-    });
+        priorProse: '',
+        nextProse: row.summary,
+        user,
+        ts,
+      });
+      this.audit.logInTx(tx, {
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'storyline.arc.create',
+        entityType: 'story_arc',
+        entityId: row.id,
+        campaignId,
+      });
+      return row;
+    }, { behavior: 'immediate' });
     return arcToDomain(row);
   }
 

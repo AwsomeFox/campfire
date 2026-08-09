@@ -2313,6 +2313,7 @@ export class CampaignsService {
           faction: factionMap,
           note: noteMap,
           timeline_event: timelineEventMap,
+          story_arc: arcMap,
           story_beat: beatMap,
           comment: commentMap,
         };
@@ -3420,6 +3421,27 @@ export class CampaignsService {
         insertImportedComment(c, commentMap.get(parentSrc) ?? null);
       }
 
+      // Arcs must exist before prose revisions are imported so story_arc revision
+      // entity ids can be remapped to this campaign instead of being dropped.
+      const arcMap = new Map<number, number>();
+      for (const arc of storyArcRows) {
+        const srcId = intOrNull(arc.id);
+        const [row] = tx
+          .insert(storyArcs)
+          .values({
+            campaignId: cid,
+            title: str(arc.title, 'Untitled Arc'),
+            summary: str(arc.summary),
+            status: str(arc.status, 'planned'),
+            sortOrder: intOr(arc.sortOrder, 0),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        if (srcId != null) arcMap.set(srcId, row.id);
+      }
+
       // Issue #813: prose revision versions (author + replacer provenance). Entity ids and
       // restoredFromRevisionId are remapped; dangling entity links are dropped. Author
       // user ids are install-local provenance strings and travel as-is (like comment names).
@@ -3430,6 +3452,7 @@ export class CampaignsService {
         location: locMap,
         faction: factionMap,
         note: noteMap,
+        story_arc: arcMap,
       };
       const revisionSourceKinds = new Set(['human', 'ai', 'tool']);
       const revisionSource = (value: unknown): 'human' | 'ai' | 'tool' =>
@@ -3487,27 +3510,10 @@ export class CampaignsService {
         tx.update(entityRevisions).set({ restoredFromRevisionId: remapped }).where(eq(entityRevisions.id, newId)).run();
       }
 
-      // Storylines (issue #27/#266): the arc→beat→branch graph. Arcs first (arcMap),
-      // then ALL beats (beatMap, arcId remapped), then branches — a branch's toBeatId
+      // Storylines (issue #27/#266): finish the arc→beat→branch graph. Arcs were
+      // inserted above so their revisions could be remapped. Insert ALL beats next
+      // (beatMap, arcId remapped), then branches — a branch's toBeatId
       // may point at a beat that appears later, so branches run after every beat exists.
-      const arcMap = new Map<number, number>();
-      for (const arc of storyArcRows) {
-        const srcId = intOrNull(arc.id);
-        const [row] = tx
-          .insert(storyArcs)
-          .values({
-            campaignId: cid,
-            title: str(arc.title, 'Untitled Arc'),
-            summary: str(arc.summary),
-            status: str(arc.status, 'planned'),
-            sortOrder: intOr(arc.sortOrder, 0),
-            createdAt: ts,
-            updatedAt: ts,
-          })
-          .returning()
-          .all();
-        if (srcId != null) arcMap.set(srcId, row.id);
-      }
       const beatMap = new Map<number, number>();
       const pendingBranches: Rec[] = [];
       for (const arc of storyArcRows) {

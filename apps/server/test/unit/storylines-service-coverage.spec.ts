@@ -80,11 +80,20 @@ describe('StorylinesService unit coverage tests', () => {
 
     const updatedArc = await storylinesService.updateArc(
       arc.id,
-      { title: 'Act I: The Hero Rises' },
+      { title: 'Act I: The Hero Rises', summary: 'The hero answers the call.' },
       adminActor,
       'dm',
     );
     expect(updatedArc.title).toBe('Act I: The Hero Rises');
+    const arcRevisions = await revisions.listForEntity('story_arc', arc.id);
+    expect(arcRevisions).toHaveLength(1);
+    expect(arcRevisions[0]).toMatchObject({
+      snapshot: { summary: 'Opening story arc.' },
+      authorUserId: adminActor.id,
+      authorName: adminActor.name,
+      authorSource: 'human',
+      authorshipKnown: true,
+    });
 
     const beat = await storylinesService.addBeat(
       arc.id,
