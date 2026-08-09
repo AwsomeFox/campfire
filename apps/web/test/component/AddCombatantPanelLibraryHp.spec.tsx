@@ -89,6 +89,39 @@ function libraryPanel() {
 }
 
 describe('AddCombatantPanel Library tab HP affordance (issue #2080 regression)', () => {
+  test('a campaign without compatible global packs requests campaign homebrew explicitly', async () => {
+    getMock.mockImplementation(async (path: string) =>
+      path.includes('/rules/search') ? { items: [] } : [],
+    );
+    render(
+      <AddCombatantPanel
+        encounterId={1}
+        campaignId={7}
+        characters={[]}
+        existingCombatantCharacterIds={new Set()}
+        rulePack=""
+        onAdded={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Compendium' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search monsters and hazards in the compendium' }), {
+      target: { value: 'goblin' },
+    });
+
+    await waitFor(() => {
+      const searchUrls = getMock.mock.calls
+        .map(([path]) => String(path))
+        .filter((path) => path.includes('/rules/search'));
+      expect(searchUrls).toHaveLength(2);
+      for (const url of searchUrls) {
+        expect(url).toContain('homebrewOnly=true');
+        expect(url).toContain('campaignId=7');
+        expect(url).not.toContain('pack=');
+      }
+    });
+  });
+
   test('the Manual tab still exposes template Max HP for a not-yet-live combatant (issue #2093)', () => {
     getMock.mockResolvedValue([]);
     renderPanel();

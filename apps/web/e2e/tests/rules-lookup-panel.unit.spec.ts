@@ -7,7 +7,7 @@ import {
   getInitialCollapsedState,
   mergeRulesAndHomebrew,
   resolvePackName,
-  resolvePackSlug,
+  resolveStatblockSystem,
   updateRecentLookups,
 } from '../../src/features/encounters/RulesLookupPanel';
 
@@ -49,6 +49,16 @@ test.describe('RulesLookupPanel unit logic (#1929)', () => {
     const emptyQuery = buildSearchUrlParams('', 'open5e-srd');
     expect(emptyQuery.has('q')).toBe(false);
     expect(emptyQuery.get('pack')).toBe('open5e-srd');
+
+    const multiPack = buildSearchUrlParams('owl', 'open5e-srd', 8, ['shared-bestiary', 'open5e-srd']);
+    expect(multiPack.getAll('pack')).toEqual(['open5e-srd', 'shared-bestiary']);
+    expect(multiPack.has('packs')).toBe(false);
+
+    const stableOrder = buildSearchUrlParams('owl', 'z-core', 8, ['middle-pack', 'a-supplement']);
+    expect(stableOrder.getAll('pack')).toEqual(['a-supplement', 'middle-pack', 'z-core']);
+
+    const commaSlug = buildSearchUrlParams('owl', 'core,rules', 8, ['shared,bestiary']);
+    expect(commaSlug.getAll('pack')).toEqual(['core,rules', 'shared,bestiary']);
   });
 
   test('filterHomebrewEntries returns empty array when query is empty and filters homebrew when active', () => {
@@ -121,23 +131,23 @@ test.describe('RulesLookupPanel unit logic (#1929)', () => {
     expect(getInitialCollapsedState('false')).toBe(false);
   });
 
-  test('resolvePackName and resolvePackSlug resolve pack information correctly', () => {
+  test('resolves pack display names and statblock adapters without treating supplemental slugs as rule systems', () => {
     const packNameMap = new Map<number, string>([
       [1, '5e SRD'],
       [2, 'PF2e SRD'],
     ]);
-    const packSlugMap = new Map<number, string>([
-      [1, 'open5e-srd'],
-      [2, 'pf2e-srd'],
+    const packMap = new Map<number, { slug: string; extendsPackSlug: string | null }>([
+      [1, { slug: 'open5e-srd', extendsPackSlug: null }],
+      [2, { slug: 'pf2e-bestiary-extension', extendsPackSlug: 'pf2e-srd' }],
     ]);
 
     expect(resolvePackName(1, packNameMap)).toBe('5e SRD');
     expect(resolvePackName(99, packNameMap)).toBeNull();
     expect(resolvePackName(undefined, packNameMap)).toBeNull();
 
-    expect(resolvePackSlug(1, packSlugMap)).toBe('open5e-srd');
-    expect(resolvePackSlug(2, packSlugMap)).toBe('pf2e-srd');
-    expect(resolvePackSlug(99, packSlugMap)).toBeNull();
-    expect(resolvePackSlug(undefined, packSlugMap)).toBeNull();
+    expect(resolveStatblockSystem('pf2e-srd', 2, packMap)).toBe('pf2e-srd');
+    expect(resolveStatblockSystem('', 2, packMap)).toBe('pf2e-srd');
+    expect(resolveStatblockSystem('', 1, packMap)).toBe('open5e-srd');
+    expect(resolveStatblockSystem('', 99, packMap)).toBe('');
   });
 });

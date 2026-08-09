@@ -44,6 +44,9 @@ export const campaigns = sqliteTable('campaigns', {
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   ruleSystem: text('rule_system').notNull().default(''),
+  // JSON string[] of additional content-only rule-pack slugs enabled for this
+  // campaign. Kept separate from ruleSystem so supplements never affect adapters.
+  enabledPackSlugs: text('enabled_pack_slugs').notNull().default('[]'),
   // Issue #1502: a per-campaign homebrew mechanics profile (JSON-encoded HomebrewMechanicsProfile
   // from @campfire/schema), or NULL when unset. Only meaningful alongside a `ruleSystem` slug
   // that is NOT a built-in registered adapter — enforced in CampaignsService, not here. NULL in
@@ -1415,6 +1418,8 @@ export const rulePacks = sqliteTable('rule_packs', {
   version: text('version').notNull().default(''),
   license: text('license').notNull().default(''),
   sourceUrl: text('source_url').notNull().default(''),
+  kind: text('kind').notNull().default('base'),
+  extendsPackSlug: text('extends_pack_slug'),
   installedAt: text('installed_at').notNull(),
   entryCount: integer('entry_count').notNull().default(0),
   // sha256 of the pack's CONTENT-ONLY manifest (provenance + every entry's content hash,

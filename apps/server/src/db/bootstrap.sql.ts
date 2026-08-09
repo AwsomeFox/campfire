@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   session_count INTEGER NOT NULL DEFAULT 0,
   latest_session_number INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
+  enabled_pack_slugs TEXT NOT NULL DEFAULT '[]',
   -- Issue #1502: per-campaign homebrew mechanics profile (JSON), or NULL when unset.
   custom_mechanics_profile TEXT,
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
@@ -1194,6 +1195,8 @@ CREATE TABLE IF NOT EXISTS rule_packs (
   version TEXT NOT NULL DEFAULT '',
   license TEXT NOT NULL DEFAULT '',
   source_url TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'base',
+  extends_pack_slug TEXT,
   installed_at TEXT NOT NULL,
   entry_count INTEGER NOT NULL DEFAULT 0,
   manifest_hash TEXT NOT NULL DEFAULT ''

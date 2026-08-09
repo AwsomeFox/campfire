@@ -9,6 +9,13 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { RulePackInstallDto, RulePackUploadDto, RuleEntryUpdateDto, HomebrewRuleEntryDto, HomebrewRuleEntryUpdateDto, HomebrewImportPreviewDto, HomebrewImportApplyDto } from './rules.dto';
 
+function stringQueryValues(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(stringQueryValues);
+  if (value && typeof value === 'object') return Object.values(value).flatMap(stringQueryValues);
+  return [];
+}
+
 /**
  * Rule packs (Compendium backend). Reads (list packs, search, entry fetch, install-job
  * status) are open to any authenticated user — the Compendium screen is available to
@@ -184,7 +191,9 @@ export class RulesController {
   })
   @ApiQuery({ name: 'q', required: false, description: 'Free-text search against entry name/summary. Empty returns all (subject to type/pack filters).' })
   @ApiQuery({ name: 'type', required: false, enum: ['spell', 'monster', 'hazard', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other'], description: 'Filter to one entry type.' })
-  @ApiQuery({ name: 'pack', required: false, description: 'Filter to one pack by slug.' })
+  @ApiQuery({ name: 'pack', required: false, isArray: true, description: 'Filter by pack slug. Repeat the parameter to search a union without delimiter ambiguity.' })
+  @ApiQuery({ name: 'packs', required: false, description: 'Legacy comma-separated pack slugs. Prefer repeated `pack` parameters.' })
+  @ApiQuery({ name: 'homebrewOnly', required: false, type: Boolean, description: 'With campaignId, exclude global packs and search only that campaign\'s homebrew.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size (default 50, max 100).' })
   @ApiQuery({ name: 'cursor', required: false, description: 'Opaque cursor from a previous page\'s nextCursor.' })
   @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Campaign ID to include campaign homebrew for members.' })
@@ -192,7 +201,9 @@ export class RulesController {
   search(
     @Query('q') q: string | undefined,
     @Query('type') type: string | undefined,
-    @Query('pack') pack: string | undefined,
+    @Query('pack') pack: unknown,
+    @Query('packs') packs: unknown,
+    @Query('homebrewOnly') homebrewOnlyStr: string | undefined,
     @Query('limit') limit: string | undefined,
     @Query('cursor') cursor: string | undefined,
     @Query('campaignId') campaignIdStr: string | undefined,
@@ -214,10 +225,36 @@ export class RulesController {
       }
       campaignId = n;
     }
+    const repeatedPacks = stringQueryValues(pack);
+    const legacyPacks = stringQueryValues(packs).flatMap((value) => value.split(','));
+    const parsedPacks = pack === undefined && packs === undefined
+      ? undefined
+      : [...new Set([...repeatedPacks, ...legacyPacks].map((slug) => slug.trim()).filter(Boolean))];
+    if (parsedPacks && parsedPacks.length === 0) {
+      throw new BadRequestException('`packs` must contain at least one pack slug');
+    }
+    // Campaigns may select one primary plus the schema maximum of 50 supplemental packs.
+    if (parsedPacks && parsedPacks.length > 51) {
+      throw new BadRequestException('`packs` may contain at most 51 pack slugs');
+    }
+    if (parsedPacks?.some((slug) => slug.length > 80)) {
+      throw new BadRequestException('Each `packs` slug must be at most 80 characters');
+    }
+    if (homebrewOnlyStr !== undefined && homebrewOnlyStr !== 'true' && homebrewOnlyStr !== 'false') {
+      throw new BadRequestException('`homebrewOnly` must be true or false');
+    }
+    const homebrewOnly = homebrewOnlyStr === 'true';
+    if (homebrewOnly && campaignId === undefined) {
+      throw new BadRequestException('`homebrewOnly=true` requires `campaignId`');
+    }
+    if (homebrewOnly && parsedPacks !== undefined) {
+      throw new BadRequestException('`homebrewOnly=true` cannot be combined with `pack` or `packs`');
+    }
     return this.rules.search({
       q: q ?? '',
       type: type as RuleEntryType | undefined,
-      pack,
+      packs: parsedPacks,
+      ...(homebrewOnly ? { homebrewOnly: true } : {}),
       cursor,
       limit: parsedLimit,
       campaignId,

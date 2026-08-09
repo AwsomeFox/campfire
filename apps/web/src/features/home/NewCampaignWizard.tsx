@@ -134,15 +134,16 @@ export function NewCampaignWizard({
 
   const selectedProfile =
     packs === null ? null : rulesetCapabilitiesForSelection(ruleSystem, packs);
+  const basePacks = packs?.filter((pack) => pack.kind === 'base') ?? null;
 
   const focusRuleSystemChoice = useCallback((value: string | null) => {
     ruleSystemChoiceRefs.current[ruleSystemChoiceKey(value)]?.focus();
   }, []);
 
   function onRuleSystemChoiceKeyDown(e: KeyboardEvent<HTMLButtonElement>, value: string | null) {
-    if (packs === null) return;
+    if (basePacks === null) return;
 
-    const optionValues: Array<string | null> = [...packs.map((pack) => pack.slug), null];
+    const optionValues: Array<string | null> = [...basePacks.map((pack) => pack.slug), null];
     const idx = optionValues.indexOf(value);
     if (idx === -1) return;
 
@@ -252,11 +253,11 @@ export function NewCampaignWizard({
                 <p className="text-muted" style={{ fontSize: 13 }}>Loading installed rule systems…</p>
               ) : (
                 <div className="flex flex-col gap-3">
-                  {packs.length === 0 && (
+                  {basePacks?.length === 0 && (
                     <EmptyRulePacksNotice isAdmin={isAdmin} packsError={packsError} />
                   )}
                   <div className="flex flex-col gap-2" role="radiogroup" aria-label="Installed rule systems">
-                    {packs.map((pack) => (
+                    {basePacks?.map((pack) => (
                       <RuleSystemChoice
                         key={pack.id}
                         ref={(el) => {

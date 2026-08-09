@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { BadRequestException } from '@nestjs/common';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignsService } from '../../src/modules/campaigns/campaigns.service';
@@ -23,8 +24,8 @@ import { CampaignEventsService } from '../../src/modules/events/campaign-events.
 import { AiDmService } from '../../src/modules/ai-dm/ai-dm.service';
 import { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { UsersService } from '../../src/modules/users/users.service';
-import { campaigns as campaignsTable } from '../../src/db/schema';
-import { count } from 'drizzle-orm';
+import { campaigns as campaignsTable, rulePacks } from '../../src/db/schema';
+import { count, eq } from 'drizzle-orm';
 import type { RequestUser } from '../../src/common/user.types';
 
 describe('CampaignsService unit coverage tests', () => {
@@ -237,6 +238,191 @@ describe('CampaignsService unit coverage tests', () => {
     await campaignsService.purge(created.id, creatorActor, { confirm: 'PURGE' });
   });
 
+  it('revalidates enabled pack rows inside create and update transactions', async () => {
+    const creatorActor: RequestUser = {
+      id: String(creatorUserId),
+      name: 'Creator',
+      serverRole: 'user',
+    };
+    const ts = new Date().toISOString();
+    const [base] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'transaction-base',
+        name: 'Transaction Base',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'base',
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+    const insertSupplement = () =>
+      db
+        .insert(rulePacks)
+        .values({
+          slug: 'transaction-supplement',
+          name: 'Transaction Supplement',
+          version: '1',
+          license: 'CC0',
+          sourceUrl: '',
+          kind: 'supplement' as const,
+          installedAt: ts,
+          entryCount: 0,
+        })
+        .returning()
+        .get();
+    let supplement = insertSupplement();
+
+    (dummyGovernance.resolveContext as jest.Mock).mockImplementationOnce(async () => {
+      // Simulate uninstall after the async pack preflight but before create() reserves
+      // the writer slot for its governance+insert transaction.
+      db.delete(rulePacks).where(eq(rulePacks.id, supplement.id)).run();
+      return {
+        bypass: true,
+        policy: 'everyone',
+        isServerAdmin: false,
+        canCreateCampaigns: true,
+        userId: null,
+        limits: { activePerUser: null, totalPerUser: null, activeServerWide: null, totalServerWide: null },
+        defaultStorageQuotaBytes: null,
+      };
+    });
+    await expect(
+      campaignsService.create(
+        { name: 'Raced Create', ruleSystem: base.slug, enabledPackSlugs: [supplement.slug] },
+        creatorActor,
+      ),
+    ).rejects.toThrow(BadRequestException);
+
+    supplement = insertSupplement();
+    const target = await campaignsService.create(
+      { name: 'Raced Update', ruleSystem: base.slug },
+      creatorActor,
+    );
+    // The injected DB is a forwarding proxy, so stage the interleaving on the live ORM:
+    // remove the pack immediately before update() enters its first write transaction.
+    const orm = (holder as unknown as { orm: DrizzleDb }).orm;
+    const original = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const realTransaction = orm.transaction.bind(orm);
+    let staged = false;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      if (!staged) {
+        staged = true;
+        db.delete(rulePacks).where(eq(rulePacks.id, supplement.id)).run();
+      }
+      return realTransaction(fn);
+    };
+    try {
+      await expect(
+        campaignsService.update(target.id, { enabledPackSlugs: [supplement.slug] }, creatorActor),
+      ).rejects.toThrow(BadRequestException);
+    } finally {
+      if (original) Object.defineProperty(orm, 'transaction', original);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
+    expect((await campaignsService.getOrThrow(target.id)).enabledPackSlugs).toEqual([]);
+
+    const [otherBase] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'transaction-other-base',
+        name: 'Transaction Other Base',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'base',
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+    const [extension] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'transaction-extension',
+        name: 'Transaction Extension',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'extension',
+        extendsPackSlug: base.slug,
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+
+    const primaryRaceOriginal = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const primaryRaceTransaction = orm.transaction.bind(orm);
+    let primarySwitched = false;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      if (!primarySwitched) {
+        primarySwitched = true;
+        // Simulate a concurrent PATCH switching A -> B after this request validated E
+        // against A, but before its enabled-pack write transaction begins.
+        db.update(campaignsTable).set({ ruleSystem: otherBase.slug }).where(eq(campaignsTable.id, target.id)).run();
+      }
+      return primaryRaceTransaction(fn);
+    };
+    try {
+      await expect(
+        campaignsService.update(target.id, { enabledPackSlugs: [extension.slug] }, creatorActor),
+      ).rejects.toThrow(BadRequestException);
+    } finally {
+      if (primaryRaceOriginal) Object.defineProperty(orm, 'transaction', primaryRaceOriginal);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
+    expect(await campaignsService.getOrThrow(target.id)).toMatchObject({
+      ruleSystem: otherBase.slug,
+      enabledPackSlugs: [],
+    });
+
+    const [concurrentSupplement] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'transaction-concurrent-supplement',
+        name: 'Transaction Concurrent Supplement',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'supplement',
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+    db.update(campaignsTable)
+      .set({ ruleSystem: base.slug, enabledPackSlugs: '[]' })
+      .where(eq(campaignsTable.id, target.id))
+      .run();
+
+    const supplementRaceOriginal = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const supplementRaceTransaction = orm.transaction.bind(orm);
+    let supplementalSelectionChanged = false;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      if (!supplementalSelectionChanged) {
+        supplementalSelectionChanged = true;
+        // Simulate an enabled-pack PATCH committing after this primary-only request
+        // read the campaign, but before its write transaction begins. The requested
+        // primary is included so transaction-time normalization is covered too.
+        db.update(campaignsTable)
+          .set({ enabledPackSlugs: JSON.stringify([otherBase.slug, concurrentSupplement.slug]) })
+          .where(eq(campaignsTable.id, target.id))
+          .run();
+      }
+      return supplementRaceTransaction(fn);
+    };
+    try {
+      await campaignsService.update(target.id, { ruleSystem: otherBase.slug }, creatorActor);
+    } finally {
+      if (supplementRaceOriginal) Object.defineProperty(orm, 'transaction', supplementRaceOriginal);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
+    expect(await campaignsService.getOrThrow(target.id)).toMatchObject({
+      ruleSystem: otherBase.slug,
+      enabledPackSlugs: [concurrentSupplement.slug],
+    });
+  });
+
   it('previews and executes campaign cloning', async () => {
     const creatorActor: RequestUser = {
       id: String(creatorUserId),
@@ -270,6 +456,61 @@ describe('CampaignsService unit coverage tests', () => {
       creatorActor,
     );
     expect(clonedTmpl.name).toBe('Cloned Template Campaign');
+  });
+
+  it('re-reads and validates the source pack selection inside the clone transaction', async () => {
+    const creatorActor: RequestUser = {
+      id: String(creatorUserId),
+      name: 'Creator',
+      serverRole: 'user',
+    };
+    const ts = new Date().toISOString();
+    const [supplement] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'clone-race-supplement',
+        name: 'Clone Race Supplement',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'supplement',
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+    const source = await campaignsService.create(
+      { name: 'Clone Race Source', enabledPackSlugs: [supplement.slug] },
+      creatorActor,
+    );
+
+    const orm = (holder as unknown as { orm: DrizzleDb }).orm;
+    const original = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const realTransaction = orm.transaction.bind(orm);
+    let selectionDropped = false;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      if (!selectionDropped) {
+        selectionDropped = true;
+        // Simulate the source dropping its last reference and an admin uninstalling
+        // the pack after clone() reads the source but before its write transaction.
+        db.update(campaignsTable)
+          .set({ enabledPackSlugs: '[]' })
+          .where(eq(campaignsTable.id, source.id))
+          .run();
+        db.delete(rulePacks).where(eq(rulePacks.id, supplement.id)).run();
+      }
+      return realTransaction(fn);
+    };
+    try {
+      const cloned = await campaignsService.clone(
+        source.id,
+        { name: 'Clone Race Result', mode: 'full' },
+        creatorActor,
+      );
+      expect(cloned.enabledPackSlugs).toEqual([]);
+    } finally {
+      if (original) Object.defineProperty(orm, 'transaction', original);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
   });
 
   // Issue #851 — CampaignsService's WIRING to CampaignGovernanceService: the

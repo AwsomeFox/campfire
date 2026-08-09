@@ -8,6 +8,7 @@ import type { z } from 'zod';
 import {
   CAMPAIGN_PURGE_CONFIRM_TOKEN,
   canonicalJson,
+  Campaign as CampaignSchema,
   CampaignClone,
   CampaignCloneMode,
   CampaignCreate,
@@ -468,6 +469,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     sessionCount: row.sessionCount,
     latestSessionNumber: row.latestSessionNumber,
     ruleSystem: row.ruleSystem,
+    enabledPackSlugs: fromJsonText<string[]>(row.enabledPackSlugs, []),
     customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row.customMechanicsProfile, null),
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
@@ -681,10 +683,17 @@ export class CampaignsService {
    * gated above) keeps working unconditionally — this only blocks an explicit write that
    * (re)selects the adapterless slug going forward.
    */
-  private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
-    if (!ruleSystem) return;
+  private assertRuleSystemPack(
+    ruleSystem: string,
+    hasCustomMechanicsProfile: boolean,
+    pack: { kind: string } | undefined,
+  ): void {
+    if (pack && pack.kind !== 'base') {
+      throw new BadRequestException(
+        `ruleSystem "${ruleSystem}" is a ${pack.kind} content pack and cannot drive campaign mechanics. Enable it as additional content instead.`,
+      );
+    }
     if (hasCustomMechanicsProfile) return;
-    const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
     if (!pack) {
       throw new BadRequestException(
         `ruleSystem "${ruleSystem}" does not match any installed rule pack (or provide a matching customMechanicsProfile)`,
@@ -697,6 +706,94 @@ export class CampaignsService {
           'search, and AI rules lookups are unaffected.',
       );
     }
+  }
+
+  private async validateRuleSystem(ruleSystem: string | undefined, hasCustomMechanicsProfile: boolean): Promise<void> {
+    if (!ruleSystem) return;
+    const [pack] = await this.db.select({ kind: rulePacks.kind }).from(rulePacks).where(eq(rulePacks.slug, ruleSystem)).limit(1);
+    this.assertRuleSystemPack(ruleSystem, hasCustomMechanicsProfile, pack);
+  }
+
+  /**
+   * Authoritative counterpart to validateRuleSystem for a campaign write transaction.
+   * The async preflight gives callers an early error, but pack installation metadata may
+   * change before a later campaign insert/update reserves SQLite's writer slot.
+   */
+  private validateRuleSystemTx(
+    tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
+    ruleSystem: string | undefined,
+    hasCustomMechanicsProfile: boolean,
+  ): void {
+    if (!ruleSystem) return;
+    const pack = tx
+      .select({ kind: rulePacks.kind })
+      .from(rulePacks)
+      .where(eq(rulePacks.slug, ruleSystem))
+      .limit(1)
+      .get();
+    this.assertRuleSystemPack(ruleSystem, hasCustomMechanicsProfile, pack);
+  }
+
+  private normalizeEnabledPackSlugs(slugs: string[], primaryRuleSystem: string): string[] {
+    const normalized = [...new Set(slugs.map((slug) => slug.trim()).filter(Boolean))]
+      .filter((slug) => slug !== primaryRuleSystem);
+    const schemaResult = CampaignSchema.shape.enabledPackSlugs.safeParse(normalized);
+    if (!schemaResult.success) {
+      throw new BadRequestException(
+        `enabledPackSlugs violates the campaign schema: ${schemaResult.error.issues[0]?.message ?? 'invalid pack selection'}`,
+      );
+    }
+    return schemaResult.data;
+  }
+
+  private assertEnabledPackRows(
+    slugs: string[],
+    primaryRuleSystem: string,
+    rows: Array<{ slug: string; kind: string; extendsPackSlug: string | null }>,
+  ): void {
+    const bySlug = new Map(rows.map((row) => [row.slug, row]));
+    const missing = slugs.filter((slug) => !bySlug.has(slug));
+    if (missing.length > 0) {
+      throw new BadRequestException(`enabledPackSlugs contains pack(s) that are not installed: ${missing.join(', ')}`);
+    }
+    const enabled = new Set([primaryRuleSystem, ...slugs].filter(Boolean));
+    for (const slug of slugs) {
+      const pack = bySlug.get(slug)!;
+      if (pack.kind === 'extension' && (!pack.extendsPackSlug || !enabled.has(pack.extendsPackSlug))) {
+        throw new BadRequestException(
+          `Extension pack "${slug}" requires its base pack "${pack.extendsPackSlug ?? '(not declared)'}" to be primary or enabled`,
+        );
+      }
+    }
+  }
+
+  /** Validate and canonicalize content-only pack selection for one campaign. */
+  private async validateEnabledPackSlugs(slugs: string[] | undefined, primaryRuleSystem: string): Promise<string[] | undefined> {
+    if (slugs === undefined) return undefined;
+    const normalized = this.normalizeEnabledPackSlugs(slugs, primaryRuleSystem);
+    if (normalized.length === 0) return [];
+
+    const rows = await this.db
+      .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
+      .from(rulePacks)
+      .where(inArray(rulePacks.slug, normalized));
+    this.assertEnabledPackRows(normalized, primaryRuleSystem, rows);
+    return normalized;
+  }
+
+  /** Re-read enabled pack rows inside the transaction that stores their slugs. */
+  private validateEnabledPackSlugsTx(
+    tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
+    slugs: string[],
+    primaryRuleSystem: string,
+  ): void {
+    if (slugs.length === 0) return;
+    const rows = tx
+      .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
+      .from(rulePacks)
+      .where(inArray(rulePacks.slug, slugs))
+      .all();
+    this.assertEnabledPackRows(slugs, primaryRuleSystem, rows);
   }
 
   /**
@@ -775,6 +872,7 @@ export class CampaignsService {
   async create(input: CampaignCreateInput, user: RequestUser): Promise<Campaign> {
     this.validateCustomMechanicsProfile(input.ruleSystem ?? '', input.customMechanicsProfile ?? null);
     await this.validateRuleSystem(input.ruleSystem, input.customMechanicsProfile != null);
+    const enabledPackSlugs = await this.validateEnabledPackSlugs(input.enabledPackSlugs ?? [], input.ruleSystem ?? '');
     // A brand-new campaign has no locations/attachments of its own yet, so any
     // non-null currentLocationId/mapAttachmentId on create can never be valid.
     if (input.currentLocationId != null) {
@@ -789,6 +887,8 @@ export class CampaignsService {
     try {
       row = this.db.transaction((tx) => {
         this.governance.enforceTx(tx, govCtx);
+        this.validateRuleSystemTx(tx, input.ruleSystem, input.customMechanicsProfile != null);
+        this.validateEnabledPackSlugsTx(tx, enabledPackSlugs ?? [], input.ruleSystem ?? '');
         const [inserted] = tx
           .insert(campaigns)
           .values({
@@ -809,6 +909,7 @@ export class CampaignsService {
             sessionCount: 0,
             latestSessionNumber: 0,
             ruleSystem: input.ruleSystem ?? '',
+            enabledPackSlugs: JSON.stringify(enabledPackSlugs ?? []),
             customMechanicsProfile: input.customMechanicsProfile ? JSON.stringify(input.customMechanicsProfile) : null,
             mapAttachmentId: input.mapAttachmentId ?? null,
             // Issue #851: the operator's default quota, inherited atomically with the row
@@ -947,7 +1048,13 @@ export class CampaignsService {
     // customMechanicsProfile is pulled out too (issue #1502) — it needs cross-field validation
     // against the EFFECTIVE ruleSystem and JSON serialization before it can join campaignInput,
     // which is spread directly into `.set()` below.
-    const { mapAlignment, customMechanicsProfile: customMechanicsProfileInput, statusChangeReason, ...campaignInput } = input;
+    const {
+      mapAlignment,
+      customMechanicsProfile: customMechanicsProfileInput,
+      enabledPackSlugs: enabledPackSlugsInput,
+      statusChangeReason,
+      ...campaignInput
+    } = input;
     const shouldResetPins =
       mapAlignment === 'reset' && (existing.mapAttachmentId != null || campaignInput.mapAttachmentId != null);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
@@ -970,6 +1077,11 @@ export class CampaignsService {
     // value, or the campaign's existing one when this request doesn't touch ruleSystem — so a
     // customMechanicsProfile write is validated against the slug it will actually pair with.
     const effectiveRuleSystem = input.ruleSystem !== undefined ? input.ruleSystem : existing.ruleSystem;
+    // A primary-system switch can also change whether an extension still has its
+    // required base. Revalidate the stored list even when the PATCH only mentions
+    // ruleSystem, and remove a newly-primary slug from the supplemental set.
+    const nextEnabledPackSlugs = await this.validateEnabledPackSlugs(enabledPackSlugsInput, effectiveRuleSystem);
+    const shouldWritePackSelection = enabledPackSlugsInput !== undefined || input.ruleSystem !== undefined;
     // #1502 review: a homebrew slug is backed by its PROFILE, not by an installed rule pack, so
     // the rule-pack requirement has to be satisfied by the profile the campaign will actually
     // have after this write — not only by one re-sent in the same request. Without the second
@@ -1015,6 +1127,48 @@ export class CampaignsService {
     }
     const customMechanicsProfilePatch =
       nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
+    const revalidatePackSelectionTx = (
+      tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
+    ): { enabledPackSlugs?: string } => {
+      if (!shouldWritePackSelection) return {};
+      let transactionRuleSystem = effectiveRuleSystem;
+      let transactionEnabledPackSlugs = nextEnabledPackSlugs ?? [];
+      if (input.ruleSystem !== undefined) {
+        this.validateRuleSystemTx(tx, effectiveRuleSystem, profileBacksEffectiveRuleSystem);
+        if (enabledPackSlugsInput === undefined) {
+          // A primary-only PATCH must preserve the supplemental selection current when
+          // this transaction reserves the writer slot. Another PATCH may have changed
+          // that list since this request's preflight snapshot.
+          const current = tx
+            .select({ enabledPackSlugs: campaigns.enabledPackSlugs })
+            .from(campaigns)
+            .where(eq(campaigns.id, id))
+            .limit(1)
+            .get();
+          if (!current) throw new NotFoundException(`Campaign ${id} not found`);
+          transactionEnabledPackSlugs = fromJsonText<string[]>(current.enabledPackSlugs, []);
+        }
+      } else {
+        // An enabled-pack-only PATCH must validate against the primary that is current
+        // after this transaction reserves the writer slot, not the stale preflight row.
+        // A concurrent primary switch may already have committed while this request was
+        // awaiting validation.
+        const current = tx
+          .select({ ruleSystem: campaigns.ruleSystem })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1)
+          .get();
+        if (!current) throw new NotFoundException(`Campaign ${id} not found`);
+        transactionRuleSystem = current.ruleSystem;
+      }
+      transactionEnabledPackSlugs = this.normalizeEnabledPackSlugs(
+        transactionEnabledPackSlugs,
+        transactionRuleSystem,
+      );
+      this.validateEnabledPackSlugsTx(tx, transactionEnabledPackSlugs, transactionRuleSystem);
+      return { enabledPackSlugs: JSON.stringify(transactionEnabledPackSlugs) };
+    };
     await this.validateLocationRef(input.currentLocationId, id);
     await this.validateAttachmentRef(input.mapAttachmentId, id);
     // Assigning a map as the campaign background is an explicit, DM-only act of
@@ -1117,6 +1271,7 @@ export class CampaignsService {
     if (archiving && opts?.revokeInvites) {
       const ts = nowIso();
       const { row, revoked, wasEnabled, pinsCleared } = this.db.transaction((tx) => {
+        const txEnabledPackSlugsPatch = revalidatePackSelectionTx(tx);
         const before = tx
           .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
           .from(campaigns)
@@ -1137,7 +1292,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1227,6 +1382,7 @@ export class CampaignsService {
     };
     if (shouldResetPins) {
       const resetResult = this.db.transaction((tx) => {
+        const txEnabledPackSlugsPatch = revalidatePackSelectionTx(tx);
         sampleMechanics(tx);
         if (campaignInput.mapAttachmentId != null) {
           tx.update(attachments)
@@ -1242,7 +1398,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1282,10 +1438,11 @@ export class CampaignsService {
       }
 
       const written = this.db.transaction((tx) => {
+        const txEnabledPackSlugsPatch = revalidatePackSelectionTx(tx);
         sampleMechanics(tx);
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...customMechanicsProfilePatch, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1762,6 +1919,31 @@ export class CampaignsService {
       // Issue #851: the authoritative, race-free governance check — first statement
       // inside the transaction, atomic with the insert below.
       this.governance.enforceTx(tx, govCtx);
+      // The source may have changed its pack selection while the clone performed its
+      // bulk pre-transaction reads. Copy and validate the selection current after this
+      // transaction reserves the writer slot so a removed/reclassified pack cannot be
+      // persisted into the clone from the stale source snapshot.
+      const currentSourcePacks = tx
+        .select({
+          ruleSystem: campaigns.ruleSystem,
+          enabledPackSlugs: campaigns.enabledPackSlugs,
+          customMechanicsProfile: campaigns.customMechanicsProfile,
+        })
+        .from(campaigns)
+        .where(and(eq(campaigns.id, id), notDeleted(campaigns.deletedAt)))
+        .limit(1)
+        .get();
+      if (!currentSourcePacks) throw new NotFoundException(`Campaign ${id} not found`);
+      const clonedEnabledPackSlugs = this.normalizeEnabledPackSlugs(
+        fromJsonText<string[]>(currentSourcePacks.enabledPackSlugs, []),
+        currentSourcePacks.ruleSystem,
+      );
+      this.validateRuleSystemTx(
+        tx,
+        currentSourcePacks.ruleSystem,
+        currentSourcePacks.customMechanicsProfile != null,
+      );
+      this.validateEnabledPackSlugsTx(tx, clonedEnabledPackSlugs, currentSourcePacks.ruleSystem);
       const [campaignRow] = tx
         .insert(campaigns)
         .values({
@@ -1779,11 +1961,12 @@ export class CampaignsService {
           aiExternalContentPolicy: source.aiExternalContentPolicy ?? 'member_consent',
           sessionCount: template ? 0 : source.sessionCount,
           latestSessionNumber: template ? 0 : source.latestSessionNumber,
-          ruleSystem: source.ruleSystem,
+          ruleSystem: currentSourcePacks.ruleSystem,
+          enabledPackSlugs: JSON.stringify(clonedEnabledPackSlugs),
           // Issue #1502: carry the paired homebrew mechanics profile with its ruleSystem slug —
           // otherwise a clone of a homebrew campaign would silently resolve to the 5e adapter
           // fallback (no ADAPTERS entry for the slug, no profile to pair it with).
-          customMechanicsProfile: source.customMechanicsProfile ? JSON.stringify(source.customMechanicsProfile) : null,
+          customMechanicsProfile: currentSourcePacks.customMechanicsProfile,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
           // Issue #851: the operator's default quota, inherited atomically with the
           // row — deliberately NOT the source campaign's own storageQuotaBytes.
@@ -2653,14 +2836,38 @@ export class CampaignsService {
       ruleSystem = ruleSystemSrc;
       customMechanicsProfile = JSON.stringify(profileParsed.data);
     } else if (ruleSystemSrc) {
-      const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystemSrc)).limit(1);
+      const [pack] = await this.db
+        .select({ id: rulePacks.id, kind: rulePacks.kind })
+        .from(rulePacks)
+        .where(eq(rulePacks.slug, ruleSystemSrc))
+        .limit(1);
       // Issue #2081: an installed-but-importer-only pack (no ADAPTERS entry — see
       // isImporterOnlyRuleSystemSlug) is treated exactly like a dangling slug on this path —
       // dropped to '' rather than selected — matching this function's existing degrade-not-fail
       // philosophy for every other unusable ruleSystem case here (missing pack, invalid
       // narrationLanguage/aiExternalContentPolicy). The rest of the export still imports.
-      if (pack && !isImporterOnlyRuleSystemSlug(ruleSystemSrc, true)) ruleSystem = ruleSystemSrc;
+      if (pack?.kind === 'base' && !isImporterOnlyRuleSystemSlug(ruleSystemSrc, true)) ruleSystem = ruleSystemSrc;
     }
+    const requestedEnabledPackSlugs = Array.isArray(campaignSrc.enabledPackSlugs)
+      ? campaignSrc.enabledPackSlugs.filter((value): value is string => typeof value === 'string')
+      : [];
+    // Import degrades gracefully when supplemental packs are not installed on this
+    // server, matching the existing primary-ruleSystem policy. Invalid/missing
+    // dependencies are dropped rather than blocking the rest of the campaign document.
+    const installedEnabledRows = requestedEnabledPackSlugs.length
+      ? await this.db
+          .select({ slug: rulePacks.slug, kind: rulePacks.kind, extendsPackSlug: rulePacks.extendsPackSlug })
+          .from(rulePacks)
+          .where(inArray(rulePacks.slug, requestedEnabledPackSlugs))
+      : [];
+    const availableBases = new Set([ruleSystem, ...installedEnabledRows.filter((row) => row.kind === 'base').map((row) => row.slug)]);
+    const importableEnabledPackSlugs = requestedEnabledPackSlugs.filter((slug) => {
+      const row = installedEnabledRows.find((candidate) => candidate.slug === slug);
+      if (!row) return false;
+      if (row.kind !== 'extension') return true;
+      return Boolean(row.extendsPackSlug && availableBases.has(row.extendsPackSlug));
+    });
+    const enabledPackSlugs = (await this.validateEnabledPackSlugs(importableEnabledPackSlugs, ruleSystem)) ?? [];
     const narrationLanguageParsed = NarrationLanguage.safeParse(campaignSrc.narrationLanguage);
     const narrationLanguage = narrationLanguageParsed.success ? narrationLanguageParsed.data : 'en';
     const aiExternalContentPolicyParsed = AiExternalContentPolicy.safeParse(campaignSrc.aiExternalContentPolicy);
@@ -2847,6 +3054,8 @@ export class CampaignsService {
       // Issue #851: the authoritative, race-free governance check — first statement
       // inside the transaction, atomic with the insert below.
       this.governance.enforceTx(tx, govCtx);
+      this.validateRuleSystemTx(tx, ruleSystem, customMechanicsProfile != null);
+      this.validateEnabledPackSlugsTx(tx, enabledPackSlugs, ruleSystem);
       const [campaignRow] = tx
         .insert(campaigns)
         .values({
@@ -2867,6 +3076,7 @@ export class CampaignsService {
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           latestSessionNumber: Math.max(0, intOr(campaignSrc.latestSessionNumber, 0)),
           ruleSystem,
+          enabledPackSlugs: JSON.stringify(enabledPackSlugs),
           customMechanicsProfile,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
           // Issue #851: the operator's default quota, inherited atomically with the
