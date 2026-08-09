@@ -63,6 +63,7 @@ import {
   checkRollExpr,
   criticalDamageRuleForAdapter,
   hasCriticalHitsForAdapter,
+  hasDegreesOfSuccessForAdapter,
   hasAdapterOwnedAttackRoll,
   sortCheckCatalog,
   formatCheckBreakdown,
@@ -2239,6 +2240,7 @@ function ActionsCard({
   const criticalDamage = criticalDamageRuleForAdapter(adapter);
   const allowCritDamage = allowsCriticalDamageRoll(adapter);
   const hasCriticalHits = hasCriticalHitsForAdapter(adapter);
+  const hasDegreesOfSuccess = hasDegreesOfSuccessForAdapter(adapter);
   const adapterOwnsAttack = hasAdapterOwnedAttackRoll(adapter);
   const canRollAttack = canRoll && !adapterOwnsAttack;
   const canRollDamage = canRoll;
@@ -2532,6 +2534,7 @@ function ActionsCard({
                 onToggle={() => setOpenDetails((prev) => (prev === detailsKey ? null : detailsKey))}
                 criticalDamage={criticalDamage}
                 hasCriticalHits={hasCriticalHits}
+                hasDegreesOfSuccess={hasDegreesOfSuccess}
               />
             </div>
             {canEdit && (
@@ -2687,6 +2690,7 @@ function ActionsCard({
                     onToggle={() => setOpenDetails((prev) => (prev === detailsKey ? null : detailsKey))}
                     criticalDamage={criticalDamage}
                 hasCriticalHits={hasCriticalHits}
+                hasDegreesOfSuccess={hasDegreesOfSuccess}
                   />
                 </div>
               </div>
@@ -2709,6 +2713,7 @@ function ActionDetails({
   onToggle,
   criticalDamage,
   hasCriticalHits,
+  hasDegreesOfSuccess,
 }: {
   action: CharacterAction;
   open: boolean;
@@ -2717,11 +2722,13 @@ function ActionDetails({
   criticalDamage: CriticalDamageRule;
   /** False for a system whose attack resolution has no critical tier — see `actionSpecEffects`. */
   hasCriticalHits: boolean;
+  /** True for a system that reports degrees of success — see `actionSpecEffects`. */
+  hasDegreesOfSuccess: boolean;
 }) {
   const facts = useMemo(() => actionSpecFacts(action.spec), [action.spec]);
   const effects = useMemo(
-    () => actionSpecEffects(action.spec, criticalDamage, hasCriticalHits),
-    [action.spec, criticalDamage, hasCriticalHits],
+    () => actionSpecEffects(action.spec, criticalDamage, hasCriticalHits, hasDegreesOfSuccess),
+    [action.spec, criticalDamage, hasCriticalHits, hasDegreesOfSuccess],
   );
   const source = actionSourceText(action.spec);
   if (facts.length === 0 && effects.length === 0 && !source) return null;

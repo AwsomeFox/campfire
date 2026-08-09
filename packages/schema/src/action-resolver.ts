@@ -241,6 +241,18 @@ export function hasCriticalHitsForAdapter(adapter: Pick<ResolverAdapter, 'hasCri
 }
 
 /**
+ * Whether this system reports DEGREES of success (PF2e/SF2e) rather than a flat pass/fail.
+ *
+ * The same test `classifySaveOutcome` makes — a system only ever produces `critSuccess` /
+ * `critFailure` when it declares `degreeOfSuccess`. Distinct from {@link hasCriticalHitsForAdapter},
+ * which governs ATTACK crits: a system can have one without the other, so a caller reasoning
+ * about a degree outcome must ask this rather than the attack-crit capability.
+ */
+export function hasDegreesOfSuccessForAdapter(adapter: Pick<ResolverAdapter, 'degreeOfSuccess'>): boolean {
+  return typeof adapter.degreeOfSuccess === 'function';
+}
+
+/**
  * The one set of mechanics the structured resolver's own maths actually implements
  * (issue #1053 review). Named for what it IS rather than for a system, so declaring it is a
  * factual claim an adapter author can check rather than a badge:

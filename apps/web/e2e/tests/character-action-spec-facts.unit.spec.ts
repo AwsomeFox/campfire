@@ -502,6 +502,62 @@ test.describe('actionSpecEffects — player-safe branch prose, kept under its ow
     expect(actionSpecEffects(save, 'double-dice').map((g) => g.outcome)).toEqual(['failure']);
   });
 
+  /**
+   * #2115 review: the degree mirror of the hit-fallback case, and the resolver treats it
+   * separately. `pickOutcomeBranch` falls back `critFailure → failure`, and
+   * `basicSaveCriticalFailure` then rolls that branch under the system's critical rule — so a
+   * PF2e basic save really does double on a critical failure, which the disclosure omitted.
+   */
+  test('a PF2e basic save discloses the critical failure it doubles', () => {
+    const basicSave = ActionSpec.parse({
+      mode: 'save',
+      save: { ability: 'REF', dc: { kind: 'fixed', dc: 20 } },
+      outcomes: {
+        success: { halfDamage: true },
+        failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }] },
+      },
+    });
+    expect(actionSpecEffects(basicSave, 'double-total', true, true)).toEqual([
+      { outcome: 'success', label: 'On a success', lines: ['Half damage'] },
+      { outcome: 'failure', label: 'On a failure', lines: ['8d6 fire damage'] },
+      { outcome: 'critFailure', label: 'On a critical failure', lines: ['8d6 fire damage, total doubled on a critical'] },
+    ]);
+  });
+
+  test('nothing is synthesized for a critical failure the resolver would not double', () => {
+    const shape = {
+      mode: 'save',
+      save: { ability: 'REF', dc: { kind: 'fixed', dc: 20 } },
+      outcomes: {
+        success: { halfDamage: true },
+        failure: { damage: [{ formula: '8d6', flat: 0, type: 'fire' }] },
+      },
+    };
+
+    // A system with no degrees never reaches a critical failure. (Default is also false.)
+    expect(actionSpecEffects(ActionSpec.parse(shape), 'double-total', true, false).map((g) => g.outcome))
+      .toEqual(['success', 'failure']);
+    expect(actionSpecEffects(ActionSpec.parse(shape), 'double-total').map((g) => g.outcome))
+      .toEqual(['success', 'failure']);
+
+    // An AUTHORED critFailure turns `basicSaveCriticalFailure` off, so its damage is exactly as
+    // written — never re-multiplied by this disclosure.
+    const authored = ActionSpec.parse({
+      ...shape,
+      outcomes: { ...shape.outcomes, critFailure: { damage: [{ formula: '16d6', flat: 0, type: 'fire' }] } },
+    });
+    expect(actionSpecEffects(authored, 'double-total', true, true).find((g) => g.outcome === 'critFailure')?.lines)
+      .toEqual(['16d6 fire damage']);
+
+    // Not the bare save-for-half shape: the success branch has damage of its own.
+    const notBasic = ActionSpec.parse({
+      ...shape,
+      outcomes: { ...shape.outcomes, success: { halfDamage: true, damage: [{ formula: '1d6', flat: 0, type: 'fire' }] } },
+    });
+    expect(actionSpecEffects(notBasic, 'double-total', true, true).map((g) => g.outcome))
+      .toEqual(['success', 'failure']);
+  });
+
   test('a spec with no outcome branches yields nothing', () => {
     expect(actionSpecEffects(emptySpec())).toEqual([]);
   });

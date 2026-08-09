@@ -314,6 +314,36 @@ function syntheticCritBranch(
 }
 
 /**
+ * The consequence a PF2e/SF2e critical FAILURE has when the spec never authored a `critFailure`.
+ *
+ * The degree mirror of {@link syntheticCritBranch}, and the resolver treats it separately:
+ * `pickOutcomeBranch` falls back `critFailure → failure`, and `resolveOneTarget`'s
+ * `basicSaveCriticalFailure` then rolls that branch under the system's critical rule — a real
+ * doubling the disclosure omitted, leaving players applying base damage on the worst outcome
+ * (#2115 review).
+ *
+ * The conditions are the service's, one for one: save mode, a system that reports DEGREES at
+ * all (`hasDegreesOfSuccess` — attack crits are a different capability and answer nothing here),
+ * no authored `critFailure`, a success branch that is the bare save-for-half shape, and a
+ * failure branch with real damage to double. Anything else is either an authored consequence
+ * this must not second-guess or a doubling that does not happen.
+ */
+function syntheticCritFailureBranch(
+  spec: ActionSpec,
+  critNote: string,
+  hasDegreesOfSuccess: boolean,
+): OutcomeBranchLike | undefined {
+  if (spec.mode !== 'save' || !hasDegreesOfSuccess || critNote === '') return undefined;
+  const outcomes = spec.outcomes ?? {};
+  if (outcomes.critFailure !== undefined) return undefined;
+  const success = outcomes.success;
+  if (success?.halfDamage !== true || (success.damage ?? []).length !== 0) return undefined;
+  const failure = outcomes.failure;
+  if (!failure || !(failure.damage ?? []).some(partCanDealDamage)) return undefined;
+  return failure;
+}
+
+/**
  * Player-safe effect lines from the spec's outcome branches — the template's "Effects"
  * list. Branch prose, mechanical consequences, and applied conditions; never hidden
  * monster numbers.
@@ -340,6 +370,13 @@ export function actionSpecEffects(
    * reverse — so this capability has no authority over them.
    */
   hasCriticalHits = true,
+  /**
+   * Whether the system reports degrees of success (`hasDegreesOfSuccessForAdapter`). Defaults
+   * to FALSE: it only ever adds a synthesized `critFailure` group, and a system without degrees
+   * never reaches that outcome, so a caller that has not thought about it gets silence rather
+   * than an invented consequence.
+   */
+  hasDegreesOfSuccess = false,
 ): ActionEffectGroup[] {
   if (!spec) return [];
   const outcomes = spec.outcomes ?? {};
@@ -351,11 +388,22 @@ export function actionSpecEffects(
   for (const [outcome, label] of OUTCOME_LABELS) {
     if (reachable && !reachable.has(outcome)) continue;
     if (!hasCriticalHits && ATTACK_CRIT_OUTCOMES.has(outcome)) continue;
-    const branch =
-      (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome]
-      ?? (outcome === 'crit' ? syntheticCritBranch(spec, critNote, hasCriticalHits) : undefined);
+    const authored = (outcomes as Record<string, (typeof outcomes)[keyof typeof outcomes]>)[outcome];
+    const synthesized = authored
+      ? undefined
+      : outcome === 'crit'
+        ? syntheticCritBranch(spec, critNote, hasCriticalHits)
+        : outcome === 'critFailure'
+          ? syntheticCritFailureBranch(spec, critNote, hasDegreesOfSuccess)
+          : undefined;
+    const branch = authored ?? synthesized;
     if (!branch) continue;
-    const unique = [...new Set(branchLines(branch, outcome === 'crit' ? critNote : '', fallbackHasDamage))];
+    // The multiplication note belongs to the outcomes the resolver actually multiplies: an
+    // attack `crit` (authored or synthesized), and a SYNTHESIZED `critFailure` — an AUTHORED
+    // one turns `basicSaveCriticalFailure` off, so its damage is exactly as written. `critMiss`
+    // is never multiplied at all.
+    const note = outcome === 'crit' || (outcome === 'critFailure' && synthesized) ? critNote : '';
+    const unique = [...new Set(branchLines(branch, note, fallbackHasDamage))];
     if (unique.length > 0) groups.push({ outcome, label, lines: unique });
   }
   return groups;

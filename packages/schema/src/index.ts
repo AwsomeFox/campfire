@@ -38,6 +38,7 @@ import {
   PendingConcentrationCheck,
   RESOLVER_MATH_D20_5E,
   type CriticalDamageRule,
+  type ResolverDegree,
   type ResolverMathProfile,
   type AttackRollInput,
   type AttackRollResult,
@@ -4582,6 +4583,15 @@ export interface RuleSystemAdapter {
    * is the wrong field to gate a crit-offering control on.
    */
   readonly hasCriticalHits?: boolean;
+  /**
+   * OPTIONAL — this system's DEGREE-of-success classification (PF2e/SF2e's four degrees).
+   *
+   * Declared on the base adapter, not only on {@link Pf2eRuleSystemAdapter}, so a generic
+   * caller holding a `RuleSystemAdapter` can ASK whether degrees exist rather than testing the
+   * adapter's id. Read through {@link hasDegreesOfSuccessForAdapter}; `classifySaveOutcome`
+   * makes the same test, and a system without it only ever resolves a save to success/failure.
+   */
+  degreeOfSuccess?(total: number, dc: number, naturalRoll?: number): ResolverDegree;
   /**
    * OPTIONAL, OPT-IN — declare this only if the structured action resolver's OWN maths is this
    * system's maths (issue #1053 review): a single d20 plus a flat modifier, compared against
