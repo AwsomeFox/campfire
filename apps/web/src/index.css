@@ -511,6 +511,10 @@
      visible even while a dialog, notification, or the undo snackbar is on
      screen (issue #1532). */
   --cf-layer-tabbar: 40;
+  /* Immersive full-viewport surfaces (the encounter VTT cockpit). Above the tab
+     bar and the sticky mobile header it replaces, below dialogs — ConfirmDialog
+     portals to <body>, so confirmations still land on top of the cockpit. */
+  --cf-layer-immersive: 41;
   --cf-layer-dialog: 50;
   --cf-layer-notification: 50;
   --cf-layer-snackbar: 60;
@@ -1530,6 +1534,13 @@ h1, h2, h3, h4, h5, h6 {
   line-height: 1.3;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   pointer-events: none;
+}
+/* Portaled out of a clipping ancestor (see GatedControl): it has left the trigger's
+   stacking context, so it needs a tier above an immersive surface — but still below
+   dialogs, which legitimately cover the control the hint belongs to. Must come AFTER the
+   base rule: same specificity, so source order is what decides. */
+.cf-gated-hint--escaped {
+  z-index: calc(var(--cf-layer-immersive, 41) + 1);
 }
 .cf-dismiss-target {
   box-sizing: border-box;
@@ -3114,4 +3125,799 @@ a:hover .cf-name-reveal {
 .cf-safety-display-inner {
   display: flex; flex-direction: column; gap: var(--space-2);
   text-align: center; font-size: clamp(1.5rem, 4vw, 3rem);
+}
+
+/* ---------------------------------------------------------------------------
+   Encounter VTT cockpit — design import of
+   `templates/encounter-vtt/EncounterVtt.dc.html` (Campfire design system).
+
+   A full-viewport, no-scroll combat screen: 54px header, banner row, then a body
+   split between the map canvas (with the map's own tool rail on its left edge)
+   and a 356px tabbed panel. Colours resolve from the Nocturne tokens the
+   template was drawn against, so a retuned accent still carries through.
+   --------------------------------------------------------------------------- */
+html.cf-vtt-locked,
+html.cf-vtt-locked body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+/* The escape hatch, set by `useImmersiveChromeInset` when Layout's chrome above the
+   cockpit wants more room than the cockpit can cede. Locking the page and covering the
+   overflow is the one answer that leaves that chrome unreachable — a safety hold nobody
+   can release — so past that line the cockpit stops owning the viewport: the page scrolls
+   again and the surface takes its height in flow, below whatever is above it. Rare by
+   construction; it needs a viewport short enough that the header and banners alone fill
+   the entire budget. */
+html.cf-vtt-chrome-overflow,
+html.cf-vtt-chrome-overflow body {
+  overflow: visible;
+  overscroll-behavior: auto;
+}
+html.cf-vtt-chrome-overflow .cf-vtt {
+  position: static;
+  top: auto;
+  height: max(320px, calc(100dvh - var(--cf-immersive-chrome-inset, 0px)));
+}
+/* The page cannot scroll while the cockpit owns the viewport, so Layout's campaign-wide
+   chrome above it must never grow taller than the screen — a player with several pending
+   check requests would otherwise have the lower cards, and the cockpit itself, pushed
+   somewhere nothing can reach.
+   
+   The caps are a shared BUDGET, not two independent limits, and the budget is MEASURED
+   rather than assumed. Fixed `vh` pairs failed twice: as independent limits they were
+   additive and could push the prompts past the cockpit's clamp, and even summed they
+   ignored whatever Layout stacks above them — its sticky mobile header is ~51px, so at
+   667x320 landscape an 18vh + 22vh pair plus that header reached ~179px against a 160px
+   clamp and the cockpit covered the bottom of the prompt scroller. `--cf-immersive-chrome-cap`
+   is published by `useImmersiveChromeInset` as "half the viewport, minus everything already
+   above this chrome", so the two shares always land inside the clamp. Each keeps its own
+   scroller, so a queue longer than its share scrolls rather than growing. */
+html.cf-vtt-locked [data-testid='check-request-prompts'] {
+  max-height: calc(var(--cf-immersive-chrome-cap, 22vh) * 0.55);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+html.cf-vtt-locked [data-testid='safety-bar'] {
+  max-height: calc(var(--cf-immersive-chrome-cap, 18vh) * 0.45);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* ...and both caps come off when the escape hatch is up. They exist only because the
+   page cannot scroll; once it can, capping these against a budget that is by definition
+   exhausted (the cap is zero there — that is what tripped the hatch) collapses the safety
+   bar and the check prompts to their own padding and clips the buttons inside them.
+   Deliberately placed AFTER the two rules above: same specificity, so source order is the
+   only thing that decides which wins. */
+html.cf-vtt-chrome-overflow [data-testid='safety-bar'],
+html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
+  max-height: none;
+  overflow: visible;
+}
+
+.cf-vtt {
+  /* The chrome tone sits between the page ground and the card surface — the
+     template's #1c1e2b against #161826 / #232532. */
+  --cf-vtt-chrome: color-mix(in srgb, var(--color-surface) 52%, var(--color-bg));
+  --cf-vtt-rail-width: 58px;
+  /* The template draws a 356px panel. Campfire's roster rows carry far more per
+     combatant than the mock's (HP steppers, conditions, action rows), so the panel
+     starts at the template width and grows with the viewport instead of forcing
+     them to wrap on top of each other. */
+  --cf-vtt-panel-width: clamp(356px, 28vw, 460px);
+  --cf-vtt-scrim: color-mix(in srgb, var(--color-bg) 90%, transparent);
+  /* Device safe areas, indirected through variables ON PURPOSE: `env()` cannot be set
+     from a test, and a full-screen layer that gets this wrong is the kind of thing that
+     only shows up on someone's installed PWA. Overriding these on `.cf-vtt` lets a spec
+     assert the clearance without a notched device. */
+  --cf-vtt-safe-top: env(safe-area-inset-top, 0px);
+  --cf-vtt-safe-right: env(safe-area-inset-right, 0px);
+  --cf-vtt-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --cf-vtt-safe-left: env(safe-area-inset-left, 0px);
+
+  position: fixed;
+  inset: 0;
+  /* This layer covers the safe-area-aware mobile tab bar, so it inherits that duty: on an
+     installed display the Party/Table scroller ended its last controls inside the
+     home-indicator strip, and the tool rail sat under a landscape cutout. The background
+     still bleeds to the physical edges — only the content is inset. */
+  padding: 0 var(--cf-vtt-safe-right) var(--cf-vtt-safe-bottom) var(--cf-vtt-safe-left);
+  box-sizing: border-box;
+  /* Published by `useImmersiveChromeInset` while this shell is mounted: Layout's
+     campaign-wide interrupts (the safety hold bar, a player's check-request prompts)
+     sit above the routed page in normal flow, and an opaque full-viewport overlay
+     would make them invisible AND unclickable. Starting below them keeps them on
+     screen with their single mount and their own hit-testing. */
+  /* Whichever clears more. A nonzero chrome inset is measured from the viewport top and
+     therefore already past the notch; with no chrome at all the notch is all there is.
+     The ceiling is a FLOOR ON THIS SURFACE, not a share of the viewport: every pixel of
+     Layout's chrome is honoured — including its mobile header and any wrapped offline or
+     archived banners, which no cap of ours reaches — right up to the point where the
+     cockpit would have too little left to be usable. `--cf-immersive-chrome-cap` is
+     derived from the same budget, so the two never disagree. */
+  top: min(
+    max(var(--cf-immersive-chrome-inset, 0px), var(--cf-vtt-safe-top)),
+    max(50vh, calc(100dvh - var(--cf-vtt-min-height, 240px)))
+  );
+  z-index: var(--cf-layer-immersive);
+  display: grid;
+  /* The body keeps a floor. The header wraps hard (the whole DM control set) and the
+     banner row can stack several sync/error/reconcile rows, and with two `auto` rows over
+     `1fr` a tall pair could squeeze the map and panel to nothing inside a shell that is
+     itself already inset by the campaign chrome. Each of those rows is capped and scrolls
+     (below), and this floor is the backstop if they ever are not. */
+  grid-template-rows: auto auto minmax(96px, 1fr);
+  background: var(--color-bg);
+  color: var(--color-text);
+  overflow: hidden;
+}
+
+.cf-vtt-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 54px;
+  /* Bounded and scrollable rather than free to grow: see the grid comment above. */
+  max-height: 30vh;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-divider);
+  background: linear-gradient(180deg, var(--color-surface) 0%, var(--cf-vtt-chrome) 100%);
+  flex-wrap: wrap;
+  z-index: 20;
+}
+.cf-vtt-header-spacer { flex: 1 1 auto; }
+
+.cf-vtt-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.cf-vtt-back { flex: none; }
+.cf-vtt-back .btn { min-height: 32px; }
+
+.cf-vtt-title-text {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-display, Fraunces, Georgia, serif);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Round + turn-timer readout. Styled as the template's pill rather than the two
+   loose tags the card header used. */
+.cf-vtt-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+.cf-vtt-meta:not(:empty) {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+.cf-vtt-meta .tag {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--color-text);
+}
+.cf-vtt-meta > * + * {
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--color-divider);
+}
+
+.cf-vtt-banners {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 24vh;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-divider);
+  background: var(--color-bg);
+}
+/* Collapsed, not removed: `display: none` would drop the element out of the grid
+   entirely and slide the body up into the `auto` row meant for banners, leaving the
+   `1fr` row empty and the map 55px tall. */
+.cf-vtt-banners:empty {
+  padding: 0;
+  border: 0;
+}
+
+.cf-vtt-body {
+  position: relative;
+  display: flex;
+  min-height: 0;
+}
+
+.cf-vtt-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: radial-gradient(
+    120% 90% at 50% 0%,
+    color-mix(in srgb, var(--color-surface) 55%, #101120) 0%,
+    #101120 70%
+  );
+}
+
+/* --- side panel ---------------------------------------------------------- */
+.cf-vtt-panel {
+  flex: none;
+  width: var(--cf-vtt-panel-width);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  border-left: 1px solid var(--color-divider);
+  background: var(--cf-vtt-chrome);
+}
+.cf-vtt-panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: var(--space-2) var(--space-2) 0;
+  border-bottom: 1px solid var(--color-divider);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.cf-vtt-tab {
+  flex: none;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.cf-vtt-tab:hover { color: var(--color-text); }
+.cf-vtt-tab:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+.cf-vtt-tab[aria-selected='true'] {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-text);
+  font-weight: 700;
+}
+.cf-vtt-tab-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  color: var(--color-accent-300);
+  font-size: 10px;
+  font-weight: 700;
+}
+.cf-vtt-panel-close,
+.cf-vtt-panel-reopen {
+  border: 1px solid var(--color-divider);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+.cf-vtt-panel-close {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-md);
+}
+.cf-vtt-panel-close:hover,
+.cf-vtt-panel-reopen:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+.cf-vtt-panel-reopen {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 96px;
+  border-right: 0;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  background: var(--cf-vtt-scrim);
+  backdrop-filter: blur(6px);
+  color: var(--color-accent);
+  font-size: 13px;
+  z-index: 12;
+}
+.cf-vtt-panel-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+/* Each tab is its own always-mounted panel; the unselected ones are hidden, never
+   unmounted, so no component loses in-flight state to a tab click. */
+.cf-vtt-panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.cf-vtt-panel-section[hidden],
+.cf-vtt-tray[hidden],
+.cf-vtt-panel[hidden] {
+  display: none;
+}
+/* Panel content is the run page's existing cards; inside a 356px rail they read
+   better edge-to-edge than as nested rounded boxes with their own shadow. */
+.cf-vtt-panel-body .card {
+  box-shadow: none;
+}
+
+/* --- map furniture ------------------------------------------------------- */
+/* Initiative strip — floats over the canvas on the template's bottom scrim.
+   The wrapper is click-through so the map keeps the space; the strip itself is
+   not. */
+.cf-vtt-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9;
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  padding-left: calc(var(--cf-vtt-rail-width) + var(--space-3));
+  background: linear-gradient(180deg, rgba(16, 17, 32, 0) 0%, rgba(16, 17, 32, 0.86) 45%);
+  pointer-events: none;
+}
+.cf-vtt-strip > * { pointer-events: auto; }
+.cf-vtt-strip-toggle {
+  position: absolute;
+  left: calc(var(--cf-vtt-rail-width) + var(--space-3));
+  top: -10px;
+  z-index: 2;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--color-divider);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cf-vtt-chrome) 90%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.cf-vtt-strip-toggle:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+/* Roll button + tray */
+.cf-vtt-fab {
+  position: absolute;
+  right: var(--space-4);
+  /* 132px clears the initiative strip — but the canvas clips overflow, so on anything
+     shorter than 132 + this button's own 46px the Roll control was pushed off the top
+     edge and could not be clicked at all, stranding the dice tray behind it. Ride down
+     with the canvas instead of insisting on the clearance. */
+  bottom: min(132px, max(8px, calc(100% - 54px)));
+  /* Above the tray it opens, not level with it. The tray follows this button in the DOM
+     (so the keyboard reaches it after the toggle), which at equal z-index means the tray
+     paints over the button — and on a canvas short enough for the two to overlap, that
+     left the tray covering its own toggle with no other way to dismiss it. */
+  z-index: 14;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 46px;
+  padding: 0 18px;
+  border: 1px solid var(--color-accent);
+  border-radius: 999px;
+  background: linear-gradient(
+    180deg,
+    var(--color-accent) 0%,
+    color-mix(in srgb, var(--color-accent) 84%, #000) 100%
+  );
+  color: #14121f;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+.cf-vtt-fab:hover {
+  background: color-mix(in srgb, var(--color-accent) 82%, #fff);
+}
+.cf-vtt-tray {
+  position: absolute;
+  right: var(--space-4);
+  /* 190px clears the FAB and the initiative strip below it — but only when there IS 190px
+     of canvas. On a short canvas that offset puts the tray's own bottom edge above the
+     canvas top, so the Roll button opened a tray clipped entirely out of existence. Drop
+     the tray toward the floor as the canvas shrinks instead. */
+  bottom: min(190px, max(8px, calc(100% - 120px)));
+  z-index: 13;
+  width: min(320px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-4)));
+  /* Bounded by the CANVAS, not the viewport: the tray is absolutely positioned inside a
+     canvas that clips overflow, so a `60vh` tray in a shorter canvas had its top — and
+     its primary dice controls — cut off with no way to scroll them back. Floored for the
+     same reason as the map asides: `100% - 200px` collapses to nothing on a short canvas,
+     and an empty tray is worse than a scrolling one. */
+  max-height: min(calc(100% - 16px), max(96px, min(520px, calc(100% - 200px))));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--cf-vtt-chrome) 96%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.6);
+}
+
+/* Empty canvas (no map attached, or a player before one is shared). */
+.cf-vtt-canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  overflow-y: auto;
+}
+
+/* --- BattleMap in cockpit layout ----------------------------------------- */
+.cf-vtt-map {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* `!important`: BattleMap's Card sets `padding: 0` inline, and without outranking it
+     the reserved gutter silently does nothing — the tool rail then sits ON TOP of the
+     map chrome instead of beside it, which is how a phone-width viewport toolbar ended
+     up unclickable underneath the rail. */
+  padding: 0 0 0 var(--cf-vtt-rail-width) !important;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+/* No map yet: the upload/generate flow is long-form, so let it scroll. */
+.cf-vtt-map--empty { overflow-y: auto; }
+
+/* Setup, not a board: stack the turn bar under the canvas instead of floating it over
+   the upload and generate controls, which it otherwise swallows clicks for. Same
+   arrangement the narrow-viewport rules use, for the same reason. */
+.cf-vtt--stacked-map .cf-vtt-main {
+  display: flex;
+  flex-direction: column;
+  /* Setup is a form, not a board: nothing here is absolutely positioned, so let the whole
+     column scroll instead of clipping. On a short phone the canvas is ~140px and the
+     stack (upload panel, turn bar, dice tray, Roll button) is taller than that — clipped,
+     the Roll button ended up unreachable and an opened tray could not be closed. */
+  overflow-y: auto;
+}
+/* The map column keeps its OWN scroller. Letting it overflow instead made the setup
+   panel paint past its box and under the turn bar, which is painted later — the exact
+   click interception the stacked layout exists to avoid. */
+.cf-vtt--stacked-map .cf-vtt-map {
+  overflow-y: auto;
+}
+.cf-vtt--stacked-map .cf-vtt-map {
+  position: relative;
+  inset: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.cf-vtt--stacked-map .cf-vtt-strip {
+  position: static;
+  flex: none;
+  padding-left: var(--space-3);
+  background: none;
+}
+.cf-vtt--stacked-map .cf-vtt-strip-toggle {
+  position: static;
+  align-self: flex-start;
+  margin-bottom: var(--space-1);
+}
+/* The roll control and its tray stack too — a floating button over a setup form eats
+   clicks on whatever sits beneath it (it was swallowing the generator's Cancel). */
+.cf-vtt--stacked-map .cf-vtt-fab {
+  position: static;
+  align-self: flex-end;
+  flex: none;
+  margin: 0 var(--space-4) var(--space-3);
+}
+.cf-vtt--stacked-map .cf-vtt-tray {
+  position: static;
+  flex: none;
+  width: auto;
+  /* Bounded by the CANVAS it sits in, not by a fixed height: a 320px tray in a 139px
+     phone canvas pushed the Roll toggle past the clipped edge, so the tray could not be
+     closed again. The percentage resolves against `.cf-vtt-main`, and the tray's own
+     `overflow-y: auto` takes the rest. */
+  max-height: min(320px, 55%);
+  margin: 0 var(--space-4) var(--space-2);
+}
+
+.cf-vtt-map .cf-vtt-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--cf-vtt-rail-width);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0;
+  border-right: 1px solid var(--color-divider);
+  background: var(--cf-vtt-chrome);
+  overflow-y: auto;
+  scrollbar-width: none;
+  z-index: 10;
+}
+.cf-vtt-rail .cf-map-tool {
+  flex-direction: column;
+  gap: 3px;
+  width: 44px;
+  min-width: 44px;
+  padding: 6px 0;
+  font-size: 8px;
+  line-height: 1.1;
+  border-color: transparent;
+  text-align: center;
+}
+.cf-vtt-rail .cf-map-tool:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-surface) 80%, transparent);
+  color: var(--color-text);
+}
+.cf-vtt-rail .cf-map-tool[aria-pressed='true'] {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+.cf-vtt-rail-glyph {
+  font-size: 17px;
+  line-height: 1;
+}
+.cf-vtt-rail-label {
+  opacity: 0.8;
+  max-width: 42px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-vtt-rail-sep {
+  width: 26px;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--color-divider);
+  flex: none;
+}
+
+/* Secondary map chrome (grid & fog panel, token editor, attach guidance, load
+   status) floats over the canvas instead of pushing it down. Those blocks carry
+   inline `padding`/`margin` from the card layout they were written for, so the
+   override has to win over the style attribute. */
+.cf-vtt-map .cf-vtt-map-aside,
+.cf-vtt-map .cf-vtt-map-tray {
+  position: absolute;
+  /* The 56px clearance over the map's own toolbar row, given away as the canvas runs out
+     — otherwise the overlay starts below the space it has. Held in a variable because the
+     height cap below has to subtract exactly this, and CSS cannot read `top` back. */
+  --cf-vtt-overlay-top: min(56px, max(4px, calc(100% - 88px)));
+  top: var(--cf-vtt-overlay-top);
+  /* Half the free canvas at most, so the left-anchored aside and the right-anchored
+     tray can never meet. The old `100% - rail - 2*gap` let each take the FULL usable
+     width: between roughly 900px and 1240px they overlapped by up to ~120px, and since
+     the tray comes later in the DOM at the same z-index it swallowed pointer input over
+     the aside's Grid & fog panel. Below 900px they stop floating altogether. */
+  width: min(340px, calc((100% - var(--cf-vtt-rail-width) - 4 * var(--space-3)) / 2));
+  /* Never zero, and never taller than the room BELOW its own top edge. `100% - 190px`
+     alone goes negative — and so clamps to nothing — whenever the canvas is short (the
+     body is only guaranteed 96px), which made Grid & fog open onto an empty box despite
+     scrolling fine; a floor that ignores the top offset then overhangs the canvas's
+     clipped edge instead, and a scroller sized to a box hanging past that edge cannot
+     bring its last controls into view. Floor it, then cap it at what actually fits. */
+  max-height: min(calc(100% - var(--cf-vtt-overlay-top) - 8px), max(80px, calc(100% - 190px)));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  z-index: 8;
+  /* The box floats OVER the playable board, so its empty space must not steal input:
+     the gaps between rows, and the whole column when it holds one short control, would
+     otherwise swallow drags on tokens underneath. Only the controls themselves take
+     pointer input; the board keeps the rest. */
+  pointer-events: none;
+}
+.cf-vtt-map .cf-vtt-map-aside { left: calc(var(--cf-vtt-rail-width) + var(--space-3)); }
+.cf-vtt-map .cf-vtt-map-tray { right: var(--space-3); }
+.cf-vtt-map .cf-vtt-map-aside > *,
+.cf-vtt-map .cf-vtt-map-tray > * {
+  pointer-events: auto;
+  margin: 0 !important;
+  padding: var(--space-2) var(--space-3) !important;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--cf-vtt-chrome) 96%, transparent);
+  backdrop-filter: blur(6px);
+}
+/* The sr-only keyboard-help node must stay visually hidden, not become a card. */
+.cf-vtt-map .cf-vtt-map-tray > .sr-only {
+  border: 0;
+  background: none;
+  backdrop-filter: none;
+  padding: 0 !important;
+}
+
+.cf-vtt-map [data-testid='map-viewport-toolbar'] {
+  position: absolute;
+  right: var(--space-3);
+  top: var(--space-3);
+  z-index: 9;
+  margin: 0 !important;
+  padding: 4px !important;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: var(--cf-vtt-scrim);
+  backdrop-filter: blur(6px);
+}
+.cf-vtt-map [data-testid='battle-map-surface'] {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  aspect-ratio: auto;
+}
+
+/* --- narrow viewports ----------------------------------------------------- */
+/* Below the cockpit's two-column width the panel stacks under the canvas instead
+   of covering it — a full-bleed overlay would hide the map with no way to keep
+   both in view, which is the one thing this screen exists to do. */
+@media (max-width: 900px) {
+  .cf-vtt { --cf-vtt-rail-width: 50px; }
+  /* The header carries the whole DM control set and wraps hard at phone width — left
+     alone it grew past the viewport and pushed the side panel off the bottom of the
+     screen entirely. Cap it and let it scroll. */
+  /* The header stays at 40vh on a phone. Tightening it to 22vh starved the map instead —
+     the pan drill at 375px stopped registering — so the guarantee that the body is never
+     squeezed to nothing comes from its `minmax(96px, 1fr)` floor and from both of these
+     rows scrolling, not from making the header small enough to be sure. */
+  .cf-vtt-header {
+    max-height: 40vh;
+  }
+  .cf-vtt-banners {
+    max-height: 20vh;
+  }
+
+  .cf-vtt-body { flex-direction: column; }
+  /* Nothing overlays the board at phone width: the canvas and the turn bar stack, so a
+     drag that starts at the middle of the map reaches the map and not the strip.
+     `min-height: 0` on BOTH halves, so they always split whatever the row gives them
+     rather than one of them growing to its content and evicting the other — each scrolls
+     internally instead. */
+  .cf-vtt-main {
+    flex: 1 1 45%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .cf-vtt-map {
+    position: relative;
+    inset: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .cf-vtt-strip {
+    position: static;
+    flex: none;
+    padding-left: var(--space-3);
+    background: none;
+  }
+  .cf-vtt-strip-toggle {
+    position: static;
+    align-self: flex-start;
+    margin-bottom: var(--space-1);
+  }
+  .cf-vtt-panel {
+    width: auto;
+    flex: 1 1 55%;
+    min-height: 0;
+    border-left: 0;
+    border-top: 1px solid var(--color-divider);
+  }
+  .cf-vtt-panel-reopen {
+    top: auto;
+    bottom: 0;
+    right: var(--space-3);
+    transform: none;
+    width: 96px;
+    height: 26px;
+    border-right: 1px solid var(--color-divider);
+    border-bottom: 0;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
+  /* Same canvas-aware clamp as the wide layout, at this layout's smaller clearance. The
+     scrolling map column below is only a descendant of `.cf-vtt-main`, which still clips
+     — so a short landscape canvas put the whole 46px button above its top edge, with the
+     page scroll-locked and the dice tray behind it unreachable. */
+  .cf-vtt-fab { bottom: min(96px, max(8px, calc(100% - 54px))); }
+  /* Phone canvases are far too short for a fixed-height popover: pin the tray to both
+     edges of the canvas instead, so its height is whatever fits and its own scroller
+     handles the rest. */
+  .cf-vtt-tray {
+    top: var(--space-2);
+    /* Pinned to both edges, so the 150px reserve below is also the tray's HEIGHT budget:
+       on a canvas shorter than top + 150 the scroll viewport collapsed to a sliver and the
+       now-reachable Roll button opened something with no usable dice controls. Give the
+       reserve up as the canvas runs out, same as the wide variants. */
+    bottom: min(150px, max(8px, calc(100% - 96px)));
+    max-height: none;
+    width: min(320px, calc(100% - var(--cf-vtt-rail-width) - 2 * var(--space-3)));
+  }
+  /* Phone-width canvases are too small to float chrome over: a 340px aside on a
+     ~325px canvas blankets the map, so the surface is not even hoverable. Below this
+     width the map column goes back to scrolling, with the secondary chrome in flow
+     under the board rather than on top of it. */
+  .cf-vtt-map { overflow-y: auto; }
+  .cf-vtt-map .cf-vtt-map-aside,
+  .cf-vtt-map .cf-vtt-map-tray,
+  .cf-vtt-map [data-testid='map-viewport-toolbar'] {
+    position: static;
+    width: auto;
+    max-height: none;
+    overflow: visible;
+    backdrop-filter: none;
+  }
+  .cf-vtt-map [data-testid='map-viewport-toolbar'] {
+    margin: var(--space-2) var(--space-2) 0 !important;
+  }
+  .cf-vtt-map .cf-vtt-map-aside,
+  .cf-vtt-map .cf-vtt-map-tray {
+    padding: 0 var(--space-2) var(--space-2);
+  }
+  /* The board keeps a usable minimum instead of being squeezed by the chrome below it.
+     `!important` because BattleMap sets `flex`/`min-height` inline for the fill layout
+     the wide cockpit wants, and a stylesheet rule cannot outrank a style attribute. */
+  .cf-vtt-map [data-testid='battle-map-surface'] {
+    flex: 0 0 auto !important;
+    min-height: 220px !important;
+  }
+}
+
+/* --- print ---------------------------------------------------------------- */
+@media print {
+  html.cf-vtt-locked,
+  html.cf-vtt-locked body { overflow: visible; }
+  .cf-vtt {
+    position: static;
+    display: block;
+    height: auto;
+    overflow: visible;
+    z-index: auto;
+  }
+  .cf-vtt-header,
+  .cf-vtt-banners,
+  .cf-vtt-body,
+  .cf-vtt-main,
+  .cf-vtt-panel,
+  .cf-vtt-strip,
+  .cf-vtt-fab,
+  .cf-vtt-tray { display: none !important; }
 }

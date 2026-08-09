@@ -201,7 +201,10 @@ test.describe('turn-change beat (issue #1906)', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/features/encounters/RunSessionPage.tsx'), 'utf8');
     expect(source).toMatch(/const triggerOwnedTurnFeedback = useCallback\(\(beatKey: number\) => \{\s*if \(ownedTurnFeedbackRef\.current === beatKey\) return;/);
     expect(source).toMatch(/if \(!prefersReducedMotion\(\)\) \{\s*setTurnPulse\(true\);/);
-    expect(source).toMatch(/querySelector<HTMLElement>\('\[data-testid="turn-workspace"\]'\)\?\.scrollIntoView\(\{/);
+    // The cockpit keeps every panel mounted, so the workspace can be under a hidden tab
+    // (or a collapsed panel) when the beat arrives — the scroll now happens INSIDE a
+    // reveal, because scrolling a hidden node moves nothing.
+    expect(source).toMatch(/revealCockpitPanel\('turn-workspace', \(\) => \{\s*document\.getElementById\('turn-workspace'\)\?\.scrollIntoView\(\{/);
     expect(source).toMatch(/if \(kind === 'your-turn' && combatant\) \{\s*triggerOwnedTurnFeedback\(beatKey\);/);
     expect(source).toMatch(/turnBeat\.kind === 'your-turn'\s*\) return;\s*const nextBeatKey = \+\+turnBeatSequence\.current;\s*triggerOwnedTurnFeedback\(nextBeatKey\);/);
     expect(source).not.toMatch(/setTurnBeat\(\(previous\) =>[\s\S]*key: \+\+turnBeatSequence\.current/);

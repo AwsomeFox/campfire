@@ -73,6 +73,17 @@ async function seedEncounterAnnouncement(page: Page) {
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
   await expect(politeRegion(page)).toHaveText(/Round 1/);
   await expect(assertiveRegion(page)).toHaveText(/Encounter secret leak/);
+
+  // Leave the encounter before handing back, through the cockpit's own Back control
+  // rather than a fresh `goto`. The run page is a full-screen cockpit that scroll-locks
+  // the document, so the sidebar's Sign out sits below the fold with the cockpit over it;
+  // and a full page load would wipe the Announcer state this test is about. Re-asserting
+  // after the client-side navigation keeps the test honest: the announcements have to
+  // survive it, or the logout assertions below would pass against an already-empty DOM.
+  await page.getByRole('link', { name: /Back to encounters/i }).first().click();
+  await expect(page).toHaveURL(/\/encounters$/);
+  await expect(politeRegion(page)).toHaveText(/Round 1/);
+  await expect(assertiveRegion(page)).toHaveText(/Encounter secret leak/);
   return { campaignId };
 }
 

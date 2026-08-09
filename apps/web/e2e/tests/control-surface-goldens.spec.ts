@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import type { Campaign } from '@campfire/schema';
 import { measureBox } from '../lib/computedStyle';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 const MODIFIER = process.platform === 'darwin' ? 'Meta' : 'Control';
 
@@ -83,6 +84,7 @@ test.describe('control surface goldens (#1694)', () => {
     await restoreSeedEncounter();
     const { campaignId, encounterId } = seed();
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'turn');
 
     const workspace = page.getByTestId('turn-workspace');
     await expect(workspace).toBeVisible();

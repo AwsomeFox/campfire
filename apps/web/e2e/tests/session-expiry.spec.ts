@@ -32,7 +32,16 @@ async function mockAuthStatus(page: Page) {
 }
 
 /** After first paint: every protected API/SSE response becomes a proven 401. */
-async function expireProtectedApi(page: Page) {
+/**
+ * Expire the session for everything except auth.
+ *
+ * `mutationsOnly` keeps GETs alive. The run page polls its encounter every five seconds,
+ * so expiring reads too means the very next poll can redirect to the expired screen before
+ * the test has clicked anything — the button then detaches mid-click and the test times out
+ * having proved nothing. Tests that mean to assert "a MUTATION 401 sends you to the
+ * expired screen" pass `mutationsOnly` so the click is genuinely the trigger.
+ */
+async function expireProtectedApi(page: Page, { mutationsOnly = false }: { mutationsOnly?: boolean } = {}) {
   await page.route('**/api/v1/**', async (route) => {
     const url = route.request().url();
     if (url.includes('/api/v1/auth/login') || url.includes('/api/v1/auth/status')) {
@@ -41,6 +50,7 @@ async function expireProtectedApi(page: Page) {
     if (url.includes('/api/v1/auth/logout')) {
       return route.fulfill({ status: 204, body: '' });
     }
+    if (mutationsOnly && route.request().method() === 'GET') return route.fallback();
     return fulfillJson(route, 401, { message: 'Unauthorized' });
   });
 }
@@ -71,9 +81,14 @@ test.describe('issue #885 - session expiry reauth', () => {
     await page.goto(deepLink);
     await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
 
-    const actionBtn = page.getByRole('button', { name: /Next turn|Roll initiative|Start|Reopen|End/i }).first();
+    // Same header-scoped, enabled, write-only locator as above — see its note.
+    const actionBtn = page
+      .getByTestId('encounter-vtt-header')
+      .locator('button:not([disabled])')
+      .filter({ hasText: /^(Next turn|Start|Reopen|End)/i })
+      .first();
     await expect(actionBtn).toBeVisible();
-    await expireProtectedApi(page);
+    await expireProtectedApi(page, { mutationsOnly: true });
     await actionBtn.click({ force: true });
 
     await expect(page).toHaveURL(/\/login$/);
@@ -178,14 +193,14 @@ test.describe('issue #885 - session expiry reauth', () => {
     const { campaignId, encounterId } = seed();
     const deepLink = `/c/${campaignId}/encounters/${encounterId}`;
 
+    // Count the opens, then let the real stream through. Fulfilling this with a bare
+    // keepalive body never delivers a sync event, so the encounter's write gate marks
+    // every header action `cf-gated-disabled` — the click below then issues no request at
+    // all and there is no 401 to redirect on.
     let streamOpens = 0;
     await page.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
       streamOpens += 1;
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/event-stream',
-        body: ': keepalive\n\n',
-      });
+      await route.continue();
     });
 
     await mockAuthStatus(page);
@@ -193,9 +208,20 @@ test.describe('issue #885 - session expiry reauth', () => {
     await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
     await expect.poll(() => streamOpens).toBeGreaterThan(0);
 
-    const actionBtn = page.getByRole('button', { name: /Next turn|Roll initiative|Start|Reopen|End/i }).first();
+    // Scoped to the cockpit header, anchored, enabled, and only actions that actually
+    // WRITE. Three traps here: the run page is now a full-screen cockpit whose panels
+    // also hold buttons; a bare /End/i matched the roster's "What does Compendium mean?"
+    // help button, which `.first()` then picked; and "Roll initiative" is a no-op that
+    // issues no request when every combatant already has one, though it stays enabled.
+    // Clicking any of those means the redirect below comes from the background poll
+    // rather than from the mutation this test is named for.
+    const actionBtn = page
+      .getByTestId('encounter-vtt-header')
+      .locator('button:not([disabled])')
+      .filter({ hasText: /^(Next turn|Start|Reopen|End)/i })
+      .first();
     await expect(actionBtn).toBeVisible();
-    await expireProtectedApi(page);
+    await expireProtectedApi(page, { mutationsOnly: true });
     await actionBtn.click({ force: true });
 
     await expect(page).toHaveURL(/\/login$/);
