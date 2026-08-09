@@ -189,6 +189,10 @@ export function NotesQuickRail({
           }}
           aria-keyshortcuts={quickCaptureHint.ariaKeyshortcuts}
           title={`Quick note${quickCaptureHint.titleSuffix}`}
+          // The `title` is the shortcut hint, and a placeholder disappears the moment you type,
+          // so neither is this field's NAME — axe `label-title-only`. The accessible name says
+          // where the note goes, which is the one thing about this box that changes.
+          aria-label={dest === 'inbox' ? 'Note for the DM inbox' : 'Quick note, private to you'}
         />
         {/* compact, not xs (issue #1692 review — Codex): the quick-note form's only
             submit control, not a dense inline row action. */}
