@@ -522,6 +522,59 @@ test.describe('encounter cockpit across navigations', () => {
       await page.request.delete(`/api/v1/comments/${commentId}`).catch(() => undefined);
     }
   });
+
+  test('panel scroll does not carry from one encounter into the next', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, {
+      data: { name: 'Second encounter drill', hidden: false },
+    });
+    expect(created.ok()).toBe(true);
+    const secondId = ((await created.json()) as { id: number }).id;
+
+    try {
+      const navigate = async (id: number) => {
+        await page.evaluate(
+          ([c, e]) => {
+            window.history.pushState({}, '', `/c/${c}/encounters/${e}`);
+            window.dispatchEvent(new PopStateEvent('popstate'));
+          },
+          [campaignId, id] as const,
+        );
+        await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible({ timeout: 15_000 });
+      };
+
+      // Visit the second encounter FIRST so its read is cached. That is what makes the
+      // shell survive the later navigation: on a cold encounter the query goes pending,
+      // the page unmounts the cockpit, and fresh refs hide the bug entirely.
+      await page.goto(`/c/${campaignId}/encounters/${secondId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await navigate(encounterId);
+
+      // Party deliberately: both encounters default to it, so the tab does NOT change
+      // across the navigation and a restore keyed on the tab alone never runs at all.
+      await openCockpitTab(page, 'party');
+
+      const body = page.locator('.cf-vtt-panel-body');
+      await body.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      const deep = await body.evaluate((el) => el.scrollTop);
+      test.skip(deep < 40, 'panel body is not scrollable at this viewport');
+
+      // The shell survives this navigation without unmounting, so the offset — and the
+      // live `scrollTop` itself — leaked straight into the next encounter's roster.
+      await navigate(secondId);
+      await expect(page).toHaveURL(new RegExp(`/encounters/${secondId}$`));
+      await expect(page.getByTestId('encounter-vtt-tab-party')).toHaveAttribute('aria-selected', 'true');
+
+      await expect(async () => {
+        expect(await body.evaluate((el) => el.scrollTop)).toBe(0);
+      }).toPass({ timeout: 5_000 });
+    } finally {
+      await page.request.delete(`/api/v1/encounters/${secondId}`).catch(() => undefined);
+      await restoreSeedEncounter(page);
+    }
+  });
 });
 
 test.describe('encounter cockpit tablist keyboard', () => {

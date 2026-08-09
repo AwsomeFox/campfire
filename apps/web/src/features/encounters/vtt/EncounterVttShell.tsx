@@ -201,6 +201,7 @@ export function EncounterVttShell({
 }: Props) {
   const { t } = useTranslation();
   const panelLabel = t('encounters.vtt.panelLabel');
+  const { pathname } = useLocation();
 
   // Collapsing the panel hides the control that was just activated, so without this the
   // keyboard user's focus falls to the document and getting back to the reopen tab means
@@ -242,6 +243,25 @@ export function EncounterVttShell({
   const renderedTabRef = useRef(activeTabId);
   renderedTabRef.current = activeTabId;
   const restoredTabRef = useRef<string | null>(null);
+
+  // Those offsets belong to ONE encounter. This shell is reused across encounter
+  // navigations without an unmount, so without this, leaving one fight scrolled deep in
+  // Party and opening another that also lands on Party changed no tab at all — the effect
+  // below never ran and the new roster inherited the old offset. Keyed on the pathname,
+  // which is exactly "which encounter is on screen"; declared before the restore so a
+  // navigation clears first and the restore then finds nothing, i.e. the top.
+  const panelPathRef = useRef(pathname);
+  useLayoutEffect(() => {
+    if (panelPathRef.current === pathname) return;
+    panelPathRef.current = pathname;
+    panelScrollRef.current.clear();
+    restoredTabRef.current = null;
+    // The live offset has to go too, not only the remembered ones: when both encounters
+    // open on the same tab `activeTabId` never changes, so the restore below does not run
+    // and the scroller simply kept the previous fight's position.
+    if (panelBodyRef.current) panelBodyRef.current.scrollTop = 0;
+  }, [pathname]);
+
   useLayoutEffect(() => {
     const body = panelBodyRef.current;
     if (!body) return;
