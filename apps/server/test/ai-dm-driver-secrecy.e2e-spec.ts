@@ -227,6 +227,33 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
       .send({ action: 'grant', tool: 'list_creature_checks', entityId: combatantId });
     expect(grant.status).toBe(201);
 
+    // The same combatant-scoped grant permits exactly one catalog discovery, so the model learns
+    // a valid check id before its one allowed private roll.
+    h.script(
+      {
+        text: 'Looking up the approved catalog…',
+        toolCalls: [{ id: 'list-with-grant', name: 'list_creature_checks', arguments: { encounterId, combatantId } }],
+      },
+      { text: 'The catalog has a stealth check.' },
+    );
+    const listed = await h.sendMessage(campaignId, { input: 'show the approved creature checks' });
+    expect(listed.status).toBe(201);
+    expect(listed.body.toolCalls).toEqual([{ name: 'list_creature_checks', isError: false, proposed: false, encounterId }]);
+    expect(toolResultFor(h, 'list-with-grant')).toContain('"modifier":6');
+    expect(toolResultFor(h, 'list-with-grant')).toContain('DM-ONLY');
+    expect((await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approvals`).set(dm)).body).toHaveLength(1);
+
+    // The retained capability cannot disclose the catalog again; it is reserved solely for the
+    // pending roll against this combatant.
+    h.script({
+      text: 'Listing again…',
+      toolCalls: [{ id: 'repeat-list', name: 'list_creature_checks', arguments: { encounterId, combatantId } }],
+    });
+    const repeatedList = await h.sendMessage(campaignId, { input: 'show those creature checks again' });
+    expect(repeatedList.status).toBe(201);
+    expect(repeatedList.body.toolCalls).toEqual([{ name: 'list_creature_checks', isError: true, proposed: false, encounterId }]);
+    expect(toolResultFor(h, 'repeat-list')).not.toContain('"modifier":6');
+
     h.script(
       {
         text: 'Rolling with DM approval…',
