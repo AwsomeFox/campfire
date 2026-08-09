@@ -10,7 +10,6 @@ import {
 import { and, asc, count, desc, eq, inArray, isNull, lt, lte, ne, or, sql, type SQL } from 'drizzle-orm';
 import type {
   AuditActorRole,
-  AuditEntry,
   EntityType,
   ModerationActionRequest,
   ModerationEvidence,
@@ -47,7 +46,7 @@ import { buildCursorListPage } from '../../common/cursor-pagination';
 import { assertAnchorVisible } from '../../common/anchor-visibility';
 import { canSee } from '../../common/note-visibility';
 import { auditActor, type RequestUser } from '../../common/user.types';
-import { AuditService, DEFAULT_AUDIT_RETENTION_DAYS } from '../audit/audit.service';
+import { AuditService, DEFAULT_AUDIT_RETENTION_DAYS, toAuditEntry } from '../audit/audit.service';
 import { clampModerationListLimit, decodeModerationCursor } from './moderation-pagination';
 import {
   MODERATION_REDACTED_CONTENT,
@@ -1403,7 +1402,7 @@ export class ModerationService implements OnApplicationBootstrap {
       report: this.toReportDomain(report, evidence.integrity),
       evidence,
       additionalEvidence,
-      timeline: timelineRows as unknown as AuditEntry[],
+      timeline: timelineRows.map((row) => toAuditEntry(row)),
       exportedAt: nowIso(),
       exportedBy: actor.actor,
     };

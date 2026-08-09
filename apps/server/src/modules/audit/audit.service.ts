@@ -3,8 +3,10 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { BadRequestException, ConflictException, Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, count, desc, eq, gt, inArray, isNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { AuditPayload } from '@campfire/schema';
 import type {
   AuditActorRole,
+  AuditEntry,
   AuditLegalHold,
   AuditListPage,
   AuditPruneJob,
@@ -153,6 +155,11 @@ export type AuditLogParams = {
   campaignId?: number | null;
   detail?: string;
   /**
+   * Raw, typed forensic data. `detail` remains the compact human summary so
+   * legacy readers and markdown exports stay useful without parsing JSON.
+   */
+  payload?: AuditPayload;
+  /**
    * Overrides the ambient correlation id (#684). Pass `null` to write a row with NO
    * requestId — the deliberate de-correlation path for issue #599's anonymous safety
    * holds. `requestId` is a DM-queryable filter on the audit list, so an intentionally
@@ -162,6 +169,44 @@ export type AuditLogParams = {
    */
   requestId?: string | null;
 };
+
+/**
+ * Decode the stored payload defensively. A malformed value must never make an
+ * audit reader unavailable; it is treated as absent rather than guessed at.
+ */
+function parsePayload(raw: string | null): AuditPayload | null {
+  if (!raw) return null;
+  try {
+    const parsed = AuditPayload.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Defensive public projection for any consumer of persisted audit rows.
+ * Campaign-scoped consumers may receive the payload and detail only when their
+ * authorization boundary has already established that disclosure is allowed.
+ */
+export function toAuditEntry(
+  row: typeof auditLog.$inferSelect,
+  { includePayload = true, includeDetail = true }: { includePayload?: boolean; includeDetail?: boolean } = {},
+): AuditEntry {
+  return {
+    id: row.id,
+    campaignId: row.campaignId,
+    actor: row.actor,
+    actorRole: row.actorRole as AuditActorRole,
+    action: row.action,
+    entityType: row.entityType,
+    entityId: row.entityId,
+    detail: includeDetail ? row.detail : '',
+    payload: includePayload ? parsePayload(row.payloadJson) : null,
+    requestId: row.requestId,
+    createdAt: row.createdAt,
+  };
+}
 
 @Injectable()
 export class AuditService implements OnApplicationBootstrap {
@@ -282,6 +327,7 @@ export class AuditService implements OnApplicationBootstrap {
       entityType: params.entityType ?? null,
       entityId: params.entityId ?? null,
       detail: params.detail ?? '',
+      payloadJson: params.payload ? JSON.stringify(params.payload) : null,
       requestId: params.requestId !== undefined ? params.requestId : (getRequestId() ?? null),
       createdAt: nowIso(),
     };
@@ -369,7 +415,7 @@ export class AuditService implements OnApplicationBootstrap {
    * are excluded from `entries` and counted in `meta.truncated` (with any snapshot
    * rows missed because of retention pruning during the walk).
    */
-  async listForCampaignExport(campaignId: number): Promise<{
+  async listForCampaignExport(campaignId: number, includePayload = true, includeDetail = true): Promise<{
     entries: Awaited<ReturnType<AuditService['listForCampaign']>>;
     meta: CampaignAuditExportMeta;
   }> {
@@ -398,7 +444,7 @@ export class AuditService implements OnApplicationBootstrap {
           .orderBy(desc(auditLog.id))
           .limit(EXPORT_AUDIT_PAGE_SIZE);
         if (!page.length) break;
-        entries.push(...page);
+        entries.push(...page.map((row) => toAuditEntry(row, { includePayload, includeDetail })));
         if (page.length < EXPORT_AUDIT_PAGE_SIZE) break;
         cursorBelow = page[page.length - 1]!.id;
       }
@@ -457,13 +503,14 @@ export class AuditService implements OnApplicationBootstrap {
     } = {},
   ) {
     const conditions = this.campaignAuditConditions(campaignId, filters);
-    return this.db
+    const rows = await this.db
       .select()
       .from(auditLog)
       .where(and(...conditions))
       .orderBy(desc(auditLog.id))
       .limit(limit)
       .offset(offset);
+    return rows.map((row) => toAuditEntry(row));
   }
 
   /**
@@ -505,7 +552,7 @@ export class AuditService implements OnApplicationBootstrap {
     ]);
 
     const total = countRows[0]?.value ?? 0;
-    return buildCursorListPage(fetched, limit, total, (last) => ({ v: 1, m: 'id', i: last.id })) as AuditListPage;
+    return buildCursorListPage(fetched.map((row) => toAuditEntry(row)), limit, total, (last) => ({ v: 1, m: 'id', i: last.id })) as AuditListPage;
   }
 
   private campaignAuditConditions(
@@ -542,24 +589,32 @@ export class AuditService implements OnApplicationBootstrap {
     if (requestId) {
       return this.searchByRequestId(requestId, limit, offset);
     }
-    return this.db
+    const rows = await this.db
       .select()
       .from(auditLog)
       .where(isNull(auditLog.campaignId))
       .orderBy(desc(auditLog.id))
       .limit(limit)
       .offset(offset);
+    return rows.map((row) => toAuditEntry(row));
   }
 
   /** Server-admin correlation search across every audit row (issue #684). */
   async searchByRequestId(requestId: string, limit = 100, offset = 0) {
-    return this.db
+    const rows = await this.db
       .select()
       .from(auditLog)
       .where(eq(auditLog.requestId, requestId))
       .orderBy(desc(auditLog.id))
       .limit(limit)
       .offset(offset);
+    // Server-admin authority is not campaign membership. The request-id search
+    // intentionally crosses campaign boundaries for operational correlation, so
+    // it must not disclose a campaign row's structured (possibly DM-secret)
+    // payload to an operator who has no campaign role.
+    return rows.map((row) =>
+      toAuditEntry(row, { includePayload: row.campaignId == null, includeDetail: row.campaignId == null }),
+    );
   }
 
   /**

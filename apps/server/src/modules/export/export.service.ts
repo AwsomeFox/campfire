@@ -966,7 +966,7 @@ export class ExportService {
       this.comments.listForCampaign(campaignId, role),
       this.proposals.listForCampaign(campaignId, undefined, role, { proposerUserId: user.id }),
       this.supportPreferences.getOwn(campaignId, user.id),
-      this.audit.listForCampaignExport(campaignId),
+      this.audit.listForCampaignExport(campaignId, role === 'dm', role === 'dm'),
       // Issue #1904 review finding: this export's whole contract (see the class docstring
       // above) is "never show a caller more than the live API already would" — every OTHER
       // composed read here threads `role` through for exactly that reason. This one didn't,

@@ -3793,6 +3793,20 @@ function migrateAuditLogForRequestId(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #810 — keep the authoritative raw, versioned audit payload beside the
+ * existing human-readable detail. Nullable is essential: historical detail is
+ * evidence in its own right and cannot be reconstructed into a truthful diff.
+ */
+function migrateAuditLogForPayloadJson810(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'payload_json')) {
+    sqlite.exec('ALTER TABLE audit_log ADD COLUMN payload_json TEXT');
+  }
+}
+
+/**
  * Issue #549 — per-user, per-campaign catch-up cursor for the dashboard
  * "since you were last here" panel. Fresh DBs get the table from BOOTSTRAP_SQL;
  * upgraded installs create it here.
@@ -5504,6 +5518,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // #1319 claimed 0178 on main before #1941 shipped, so controller delegation uses 0179.
   { name: '0179_combatants_controller_user_id_1941', run: migrateCombatantsTableForControllerUserId },
   { name: '0180_hidden_status_notification_authorization_2112', run: migrateHiddenStatusNotificationAuthorization2112 },
+  // #2112 claimed 0180 on main before #810 shipped, so the audit payload uses 0181.
+  { name: '0181_audit_payload_json_810', run: migrateAuditLogForPayloadJson810 },
 ];
 
 /**

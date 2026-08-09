@@ -49,6 +49,7 @@ describe('ExportService unit coverage tests', () => {
   // as unredacted DM access, the exact gap that let a player's own member export carry the
   // full unredacted dice log.
   let rollsListForCampaignMock: jest.Mock;
+  let auditListForCampaignExportMock: jest.SpyInstance;
 
   beforeEach(async () => {
     previousDataDir = process.env.DATA_DIR;
@@ -57,6 +58,7 @@ describe('ExportService unit coverage tests', () => {
     holder = new DbHolder();
     db = holder.proxy as DrizzleDb;
     const audit = new AuditService(db);
+    auditListForCampaignExportMock = jest.spyOn(audit, 'listForCampaignExport');
     const quests = { listForCampaignWithObjectives: jest.fn().mockResolvedValue([]) } as unknown as QuestsService;
     const npcs = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as NpcsService;
     const locations = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as LocationsService;
@@ -187,5 +189,10 @@ describe('ExportService unit coverage tests', () => {
     rollsListForCampaignMock.mockClear();
     await exportService.buildExport(campaignId, adminActor);
     expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'dm');
+  });
+
+  it('omits raw audit payloads from a non-DM member export', async () => {
+    await exportService.buildMemberExport(campaignId, adminActor, 'player');
+    expect(auditListForCampaignExportMock).toHaveBeenCalledWith(campaignId, false, false);
   });
 });

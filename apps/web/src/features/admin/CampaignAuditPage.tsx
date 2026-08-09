@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import type { AuditEntry, AuditListPage, CampaignMember } from '@campfire/schema';
+import type { AuditEntry, AuditListPage, CampaignMember, TrashedEntity } from '@campfire/schema';
 import { AUDIT_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, getWithHeaders, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -115,6 +115,7 @@ export default function CampaignAuditPage() {
   const [draftFilters, setDraftFilters] = useState<AuditFilters>(() => filtersFromSearchParams(searchParams));
   const [members, setMembers] = useState<CampaignMember[]>([]);
   const [items, setItems] = useState<AuditEntry[]>([]);
+  const [trashedTimelineEventIds, setTrashedTimelineEventIds] = useState<ReadonlySet<number> | null>(null);
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -124,6 +125,7 @@ export default function CampaignAuditPage() {
   const [error, setError] = useState<string | null>(null);
   const [retention, setRetention] = useState<{ days: number | null; autoPrune: boolean } | null>(null);
   const fetchGeneration = useRef(0);
+  const trashRefreshGeneration = useRef(0);
   const highlightId = Number(searchParams.get('entry'));
 
   useEffect(() => {
@@ -136,6 +138,33 @@ export default function CampaignAuditPage() {
     if (!Number.isFinite(cid) || !isDm) return;
     void api.get<CampaignMember[]>(`${API}/campaigns/${cid}/members`).then(setMembers).catch(() => setMembers([]));
   }, [cid, isDm]);
+
+  const refreshTrashedTimelineEventIds = useCallback(async () => {
+    const generation = ++trashRefreshGeneration.current;
+    setTrashedTimelineEventIds(null);
+    try {
+      const items = await api.get<TrashedEntity[]>(`${API}/campaigns/${cid}/trash`);
+      if (generation === trashRefreshGeneration.current) {
+        setTrashedTimelineEventIds(new Set(items.filter((item) => item.type === 'timeline_event').map((item) => item.id)));
+      }
+    } catch {
+      if (generation === trashRefreshGeneration.current) setTrashedTimelineEventIds(null);
+    }
+  }, [cid]);
+
+  useEffect(() => {
+    if (!Number.isFinite(cid) || !isDm) {
+      trashRefreshGeneration.current += 1;
+      setTrashedTimelineEventIds(null);
+      return;
+    }
+    const onFocus = () => void refreshTrashedTimelineEventIds();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      trashRefreshGeneration.current += 1;
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [cid, isDm, refreshTrashedTimelineEventIds]);
 
   const loadPage = useCallback(
     async (activeFilters: AuditFilters, cursor?: string | null, append = false) => {
@@ -153,6 +182,7 @@ export default function CampaignAuditPage() {
           days: days === 'unlimited' ? null : days != null && Number.isFinite(Number(days)) ? Number(days) : null,
           autoPrune: headers.get('X-Audit-Auto-Prune') === '1',
         });
+        void refreshTrashedTimelineEventIds();
         setItems((prev) => (append ? [...prev, ...page.items] : page.items));
         setTotal(page.total);
         setHasMore(page.hasMore);
@@ -168,7 +198,7 @@ export default function CampaignAuditPage() {
         }
       }
     },
-    [cid, t],
+    [cid, refreshTrashedTimelineEventIds, t],
   );
 
   useEffect(() => {
@@ -385,6 +415,7 @@ export default function CampaignAuditPage() {
                   entry={entry}
                   members={members}
                   highlighted={entry.id === highlightId}
+                  trashedTimelineEventIds={trashedTimelineEventIds}
                 />
               )}
             </VirtualList>

@@ -41,6 +41,59 @@ describe('audit log (e2e)', () => {
     await closeTestApp(ctx);
   });
 
+  describe('#810 — structured timeline-event audit details', () => {
+    it('keeps raw before/after values in the DM audit/export while the reader boundary rejects non-DMs', async () => {
+      const server = ctx.app.getHttpServer();
+      const secret = 'audit-only secret 810';
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/timeline`)
+        .set(dm)
+        .set('x-request-id', 'audit-810-rest')
+        .send({ title: 'First omen', body: 'The sky darkens.', dmSecret: secret });
+      expect(created.status).toBe(201);
+
+      const updated = await request(server)
+        .patch(`/api/v1/timeline/${created.body.id}`)
+        .set(dm)
+        .set('x-request-id', 'audit-810-rest')
+        .send({ title: 'Second omen', dmSecret: `${secret} revised` });
+      expect(updated.status).toBe(200);
+
+      const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+      expect(audit.status).toBe(200);
+      const entry = (audit.body as Array<Record<string, unknown>>).find((row) => row.action === 'timeline.event.update');
+      expect(entry).toMatchObject({
+        detail: 'Timeline event “Second omen” updated: title, DM secret',
+        requestId: 'audit-810-rest',
+        payload: {
+          version: 1,
+          kind: 'timeline_event',
+          source: { transport: 'rest', requestId: 'audit-810-rest' },
+          entity: { id: created.body.id, label: 'Second omen', navigation: { route: 'timeline', query: 'event' } },
+        },
+      });
+      expect(JSON.stringify(entry)).toContain(`${secret} revised`);
+      expect(String(entry?.detail)).not.toContain(secret);
+
+      const exportRes = await request(server).get(`/api/v1/campaigns/${campaignId}/export`).set(dm);
+      expect(exportRes.status).toBe(200);
+      const exported = (exportRes.body.audit as Array<Record<string, unknown>>).find((row) => row.action === 'timeline.event.update');
+      expect(exported?.payload).toMatchObject({ version: 1, kind: 'timeline_event' });
+
+      const correlated = await ctx.app.get(AuditService).searchByRequestId('audit-810-rest');
+      const correlationEntry = correlated.find((row) => row.action === 'timeline.event.update');
+      expect(correlationEntry).toMatchObject({ detail: '', payload: null });
+      expect(JSON.stringify(correlationEntry)).not.toContain('Second omen');
+      expect(JSON.stringify(correlationEntry)).not.toContain(secret);
+
+      const denied = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/audit`)
+        .set({ 'x-dev-role': 'player', 'x-dev-user': 'audit-reader-810' });
+      expect(denied.status).toBe(403);
+      expect(denied.text).not.toContain(secret);
+    });
+  });
+
   // -------- #74: HP-tick coarsening --------
 
   describe('#74 — HP ticks are not audited', () => {

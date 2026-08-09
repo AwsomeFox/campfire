@@ -2,7 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, asc, count, eq, gt, or } from 'drizzle-orm';
 import type { z } from 'zod';
 import { TimelineEventCreate, TimelineEventUpdate, TimelineCalendarUpdate } from '@campfire/schema';
-import type { TimelineEvent, TimelineCalendar, Role, TimelineListPage } from '@campfire/schema';
+import type { TimelineEvent, TimelineCalendar, Role, TimelineEventAuditPayload, TimelineListPage } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { timelineEvents, timelineCalendars } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -10,6 +10,7 @@ import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHi
 import { notDeleted } from '../../common/soft-delete';
 import { buildCursorListPage } from '../../common/cursor-pagination';
 import { AuditService } from '../audit/audit.service';
+import { getRequestContext } from '../../common/request-context';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { MISSING_REVISION, nextUpdatedAt, staleWrite } from '../../common/stale-write';
@@ -46,11 +47,96 @@ function toCalendarDomain(row: typeof timelineCalendars.$inferSelect): TimelineC
   };
 }
 
+type TimelineAuditAction = TimelineEventAuditPayload['action'];
+type TimelineAuditRow = typeof timelineEvents.$inferSelect;
+type TimelineAuditField = 'title' | 'inWorldDate' | 'body' | 'era' | 'sortIndex' | 'dmSecret' | 'hidden';
+
+const TIMELINE_AUDIT_FIELDS: TimelineAuditField[] = [
+  'title',
+  'inWorldDate',
+  'body',
+  'era',
+  'sortIndex',
+  'dmSecret',
+  'hidden',
+];
+
+function timelineAuditSnapshot(row: TimelineAuditRow) {
+  return {
+    title: row.title,
+    inWorldDate: row.inWorldDate,
+    body: row.body,
+    era: row.era,
+    sortIndex: row.sortIndex,
+    dmSecret: row.dmSecret,
+    hidden: row.hidden,
+  };
+}
+
+function timelineAuditChanges(before: TimelineAuditRow | null, after: TimelineAuditRow | null): TimelineEventAuditPayload['changes'] {
+  const changes: TimelineEventAuditPayload['changes'] = TIMELINE_AUDIT_FIELDS
+    .filter((field) => before?.[field] !== after?.[field])
+    .map((field) => ({
+      field,
+      before: before?.[field] ?? null,
+      after: after?.[field] ?? null,
+      visibility: field === 'dmSecret' ? ('dm' as const) : ('member' as const),
+    }));
+  // Existing PATCH semantics allow an empty/no-op body. It still advances the
+  // optimistic-concurrency token, so preserve that committed fact rather than
+  // emitting an invalid empty versioned payload.
+  if (changes.length === 0 && before && after) {
+    changes.push({ field: 'updatedAt', before: before.updatedAt, after: after.updatedAt, visibility: 'member' });
+  }
+  return changes;
+}
+
+function timelineAuditDetail(action: TimelineAuditAction, row: TimelineAuditRow, changes: TimelineEventAuditPayload['changes']): string {
+  const label = `Timeline event “${row.title}”`;
+  if (action === 'timeline.event.create') return `${label} created`;
+  if (action === 'timeline.event.delete') return `${label} moved to trash`;
+  if (action === 'timeline.event.restore') return `${label} restored from trash`;
+  const changed = changes.map((change) => (change.field === 'dmSecret' ? 'DM secret' : change.field)).join(', ');
+  return `${label} updated${changed ? `: ${changed}` : ''}`;
+}
+
+function timelineAuditPayload(
+  action: TimelineAuditAction,
+  actor: string,
+  role: Role,
+  before: TimelineAuditRow | null,
+  after: TimelineAuditRow,
+): TimelineEventAuditPayload {
+  const context = getRequestContext();
+  const changes =
+    action === 'timeline.event.delete'
+      ? [{ field: 'trashed', before: false, after: true, visibility: 'member' as const }]
+      : action === 'timeline.event.restore'
+        ? [{ field: 'trashed', before: true, after: false, visibility: 'member' as const }]
+        : timelineAuditChanges(before, after);
+  return {
+    version: 1,
+    kind: 'timeline_event',
+    action,
+    actor: { id: actor, role },
+    source: { transport: context?.transport ?? 'system', requestId: context?.requestId ?? null },
+    entity: {
+      type: 'timeline_event',
+      id: after.id,
+      label: after.title,
+      navigation: { route: 'timeline', query: 'event' },
+    },
+    changes,
+    snapshot: action === 'timeline.event.delete' || action === 'timeline.event.restore' ? timelineAuditSnapshot(before ?? after) : null,
+    reason: null,
+  };
+}
+
 @Injectable()
 export class TimelineService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
-    private readonly audit: AuditService,
+    @Inject(AuditService) private readonly audit: Pick<AuditService, 'log' | 'logInTx'>,
     private readonly revisions: RevisionsService,
   ) {}
 
@@ -131,28 +217,36 @@ export class TimelineService {
 
   async createEvent(campaignId: number, input: EventCreateInput, user: RequestUser, role: Role): Promise<TimelineEvent> {
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(timelineEvents)
-      .values({
+    const actor = auditActor(user);
+    const row = this.db.transaction((tx) => {
+      const row = tx
+        .insert(timelineEvents)
+        .values({
+          campaignId,
+          title: input.title,
+          inWorldDate: input.inWorldDate ?? '',
+          body: input.body ?? '',
+          era: input.era ?? '',
+          sortIndex: input.sortIndex ?? 0,
+          dmSecret: input.dmSecret ?? '',
+          hidden: resolveCreateHidden(input.hidden),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .get();
+      const payload = timelineAuditPayload('timeline.event.create', actor, role, null, row);
+      this.audit.logInTx(tx, {
+        actor,
+        actorRole: role,
+        action: 'timeline.event.create',
+        entityType: 'timeline_event',
+        entityId: row.id,
         campaignId,
-        title: input.title,
-        inWorldDate: input.inWorldDate ?? '',
-        body: input.body ?? '',
-        era: input.era ?? '',
-        sortIndex: input.sortIndex ?? 0,
-        dmSecret: input.dmSecret ?? '',
-        hidden: resolveCreateHidden(input.hidden),
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'timeline.event.create',
-      entityType: 'timeline_event',
-      entityId: row.id,
-      campaignId,
+        detail: timelineAuditDetail('timeline.event.create', row, payload.changes),
+        payload,
+      });
+      return row;
     });
     return redactSecret(toEventDomain(row), role);
   }
@@ -164,39 +258,51 @@ export class TimelineService {
     role: Role,
     opts?: { expectedUpdatedAt?: string },
   ): Promise<TimelineEvent> {
-    const existing = await this.getEventRowOrThrow(id);
-    const updated = await this.db
-      .update(timelineEvents)
-      .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
-      .where(
-        opts?.expectedUpdatedAt
-          ? and(eq(timelineEvents.id, id), eq(timelineEvents.updatedAt, opts.expectedUpdatedAt))
-          : eq(timelineEvents.id, id),
-      )
-      .returning();
-    if (!updated[0]) {
-      const current = await this.getEventRowOrThrow(id);
-      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
-    }
-    const row = updated[0];
-    if (input.body !== undefined && input.body !== existing.body) {
-      await this.revisions.commitProseVersion({
+    const actor = auditActor(user);
+    const row = this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(timelineEvents)
+        .where(and(eq(timelineEvents.id, id), notDeleted(timelineEvents.deletedAt)))
+        .get();
+      if (!existing) throw new NotFoundException(`Timeline event ${id} not found`);
+      const row = tx
+        .update(timelineEvents)
+        .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(timelineEvents.id, id), eq(timelineEvents.updatedAt, opts.expectedUpdatedAt))
+            : eq(timelineEvents.id, id),
+        )
+        .returning()
+        .get();
+      if (!row) {
+        const current = tx.select({ updatedAt: timelineEvents.updatedAt }).from(timelineEvents).where(eq(timelineEvents.id, id)).get();
+        throw staleWrite(opts?.expectedUpdatedAt, current?.updatedAt ?? existing.updatedAt);
+      }
+      if (input.body !== undefined && input.body !== existing.body) {
+        this.revisions.commitProseVersionInTx(tx, {
+          entityType: 'timeline_event',
+          entityId: id,
+          campaignId: existing.campaignId,
+          priorProse: existing.body,
+          nextProse: input.body,
+          user,
+        });
+      }
+      const payload = timelineAuditPayload('timeline.event.update', actor, role, existing, row);
+      this.audit.logInTx(tx, {
+        actor,
+        actorRole: role,
+        action: 'timeline.event.update',
         entityType: 'timeline_event',
         entityId: id,
         campaignId: existing.campaignId,
-        priorProse: existing.body,
-        nextProse: input.body,
-        user,
+        detail: timelineAuditDetail('timeline.event.update', row, payload.changes),
+        payload,
       });
-    }
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'timeline.event.update',
-      entityType: 'timeline_event',
-      entityId: id,
-      campaignId: existing.campaignId,
-    });
+      return row;
+    }, { behavior: 'immediate' });
     return redactSecret(toEventDomain(row), role);
   }
 
@@ -205,40 +311,63 @@ export class TimelineService {
    * `deleted_at`; the event vanishes from normal reads but survives for restore().
    */
   async removeEvent(id: number, user: RequestUser, role: Role): Promise<void> {
-    const existing = await this.getEventRowOrThrow(id);
     const ts = nowIso();
-    await this.db
-      .update(timelineEvents)
-      .set({ deletedAt: ts, updatedAt: ts })
-      .where(eq(timelineEvents.id, id));
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'timeline.event.delete',
-      entityType: 'timeline_event',
-      entityId: id,
-      campaignId: existing.campaignId,
-      detail: 'soft-delete (trashed)',
-    });
+    const actor = auditActor(user);
+    this.db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(timelineEvents)
+        .where(and(eq(timelineEvents.id, id), notDeleted(timelineEvents.deletedAt)))
+        .get();
+      if (!existing) throw new NotFoundException(`Timeline event ${id} not found`);
+      const row = tx
+        .update(timelineEvents)
+        .set({ deletedAt: ts, updatedAt: ts })
+        .where(and(eq(timelineEvents.id, id), notDeleted(timelineEvents.deletedAt)))
+        .returning()
+        .get();
+      if (!row) throw new NotFoundException(`Timeline event ${id} not found`);
+      const payload = timelineAuditPayload('timeline.event.delete', actor, role, existing, row);
+      this.audit.logInTx(tx, {
+        actor,
+        actorRole: role,
+        action: 'timeline.event.delete',
+        entityType: 'timeline_event',
+        entityId: id,
+        campaignId: existing.campaignId,
+        detail: timelineAuditDetail('timeline.event.delete', row, payload.changes),
+        payload,
+      });
+    }, { behavior: 'immediate' });
   }
 
   /** Restore a trashed timeline event (issue #693) — clears `deleted_at`. */
   async restoreEvent(id: number, user: RequestUser, role: Role): Promise<TimelineEvent> {
-    const existing = await this.getEventRowOrThrow(id, true);
-    if (existing.deletedAt == null) throw new NotFoundException(`Timeline event ${id} is not in the trash`);
-    const [row] = await this.db
-      .update(timelineEvents)
-      .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(eq(timelineEvents.id, id))
-      .returning();
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'timeline.event.restore',
-      entityType: 'timeline_event',
-      entityId: id,
-      campaignId: existing.campaignId,
-    });
+    const actor = auditActor(user);
+    const ts = nowIso();
+    const row = this.db.transaction((tx) => {
+      const existing = tx.select().from(timelineEvents).where(eq(timelineEvents.id, id)).get();
+      if (!existing || existing.deletedAt == null) throw new NotFoundException(`Timeline event ${id} is not in the trash`);
+      const row = tx
+        .update(timelineEvents)
+        .set({ deletedAt: null, updatedAt: ts })
+        .where(and(eq(timelineEvents.id, id), eq(timelineEvents.deletedAt, existing.deletedAt)))
+        .returning()
+        .get();
+      if (!row) throw new NotFoundException(`Timeline event ${id} is not in the trash`);
+      const payload = timelineAuditPayload('timeline.event.restore', actor, role, existing, row);
+      this.audit.logInTx(tx, {
+        actor,
+        actorRole: role,
+        action: 'timeline.event.restore',
+        entityType: 'timeline_event',
+        entityId: id,
+        campaignId: existing.campaignId,
+        detail: timelineAuditDetail('timeline.event.restore', row, payload.changes),
+        payload,
+      });
+      return row;
+    }, { behavior: 'immediate' });
     return redactSecret(toEventDomain(row), role);
   }
 
