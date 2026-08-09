@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, rebuildEditedActionSpec, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
+import { canonicalJson, CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, rebuildEditedActionSpec, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
 import type { HomebrewMechanicsProfile, RuleSystemAdapter, Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { fromJsonText } from '../../common/json';
@@ -253,16 +253,22 @@ export class InventoryService {
    * for an item whose pack was removed.
    */
   /** The campaign's rule adapter, `customMechanicsProfile` included. */
-  private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
+  private async adapterForCampaign(campaignId: number): Promise<{ adapter: RuleSystemAdapter; mechanics: string }> {
     const campaign = await this.db
       .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .get();
-    return ruleSystemAdapter(
-      campaign?.ruleSystem ?? '',
-      fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
-    );
+    return {
+      adapter: ruleSystemAdapter(
+        campaign?.ruleSystem ?? '',
+        fromJsonText<HomebrewMechanicsProfile | null>(campaign?.customMechanicsProfile, null),
+      ),
+      // A canonical fingerprint of the mechanics this adapter was built from, so a write can
+      // check they still hold when it commits — see `update()`. Key-sorted, because the stored
+      // profile's key order is whatever serialized it.
+      mechanics: canonicalJson([campaign?.ruleSystem ?? '', safeJson(campaign?.customMechanicsProfile ?? '')]),
+    };
   }
 
   /** Fail-closed redaction of `equippedAction` for a single, already-resolved owner. */
@@ -338,7 +344,7 @@ export class InventoryService {
 
     const campaignIds = [...new Set(derivable.map((item) => item.campaignId))];
     const adapterByCampaign = new Map<number, RuleSystemAdapter>();
-    for (const campaignId of campaignIds) adapterByCampaign.set(campaignId, await this.adapterForCampaign(campaignId));
+    for (const campaignId of campaignIds) adapterByCampaign.set(campaignId, (await this.adapterForCampaign(campaignId)).adapter);
 
     const resolved = items.map((item) => {
       if (item.equippedAction != null || !item.equipped || item.ownerType !== 'character' || item.characterId == null) return item;
@@ -589,6 +595,12 @@ export class InventoryService {
       // A derived action is computed from whatever snapshot the row holds at READ time (see
       // `resolveEquippedActions`), so accepting a revision is now only this snapshot write —
       // there is nothing cached to regenerate or authorize a second time.
+      // Fence the write on the owner this request was AUTHORIZED against (issue #2097 review:
+      // chatgpt-codex-connector P1). `assertCanWriteOwner` ran before this transaction; if a DM
+      // hands the item to another player's character in between, an update keyed on the id
+      // alone lets the former owner replace the accepted snapshot — which now immediately
+      // changes what the NEW owner's weapon does. The authorization has to hold at the moment
+      // of the write, not merely at the moment it was checked.
       const [row] = tx
         .update(inventoryItems)
         .set({
@@ -597,9 +609,16 @@ export class InventoryService {
           compendiumState: 'linked',
           updatedAt: nowIso(),
         })
-        .where(eq(inventoryItems.id, id))
+        .where(
+          and(
+            eq(inventoryItems.id, id),
+            eq(inventoryItems.ownerType, existing.ownerType),
+            existing.characterId == null ? isNull(inventoryItems.characterId) : eq(inventoryItems.characterId, existing.characterId),
+          ),
+        )
         .returning()
         .all();
+      if (!row) throw new ConflictException('This item changed owner while the refresh was in flight; refetch and try again');
       return row;
     });
 
@@ -757,9 +776,9 @@ export class InventoryService {
     // Issue #2097: an AUTHORED action is validated and spec-rebuilt against the campaign's
     // own rule system, so the adapter is resolved HERE — the write below is a synchronous
     // better-sqlite3 transaction that cannot await, exactly like the owner ids above.
-    const editAdapter = input.equippedAction ? await this.adapterForCampaign(existing.campaignId) : null;
-    const campaignRuleSystem = editAdapter?.id ?? '';
-    const campaignDamageTypes = editAdapter?.damageTypes;
+    const editMechanics = input.equippedAction ? await this.adapterForCampaign(existing.campaignId) : null;
+    const campaignRuleSystem = editMechanics?.adapter.id ?? '';
+    const campaignDamageTypes = editMechanics?.adapter.damageTypes;
 
     // Auth checks above may await; the write itself must be one synchronous
     // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
@@ -906,6 +925,24 @@ export class InventoryService {
           // `rebuildEditedActionSpec`), which is why nothing is read here to compare against:
           // any such baseline can be overwritten by a concurrent edit between the caller's
           // read and this write, and then a genuinely stale spec looks deliberate.
+          // Fence on the mechanics the adapter above was built from (issue #2097 review:
+          // chatgpt-codex-connector P2). `adapterForCampaign` awaits, and a campaign PATCH can
+          // switch the rule system during that await — the edit would then be validated
+          // against the old system's damage vocabulary and expanded by its attack math, and
+          // stored as `manual`, which nothing ever regenerates. A derived action would simply
+          // recompute under the new system on the next read; an authored one is permanent, so
+          // this is the one write on this path that a mechanics change can still spoil.
+          const nowMechanics = (() => {
+            const campaign = tx
+              .select({ ruleSystem: campaigns.ruleSystem, customMechanicsProfile: campaigns.customMechanicsProfile })
+              .from(campaigns)
+              .where(eq(campaigns.id, existing.campaignId))
+              .get();
+            return canonicalJson([campaign?.ruleSystem ?? '', safeJson(campaign?.customMechanicsProfile ?? '')]);
+          })();
+          if (nowMechanics !== editMechanics!.mechanics) {
+            throw new ConflictException("The campaign's rule system changed while this action was being saved; refetch and try again");
+          }
           const authored = rebuildEditedActionSpec(input.equippedAction!, campaignRuleSystem, campaignDamageTypes);
           update.equippedAction = JSON.stringify(authored);
         } else if (actionWrite === 'clear') {

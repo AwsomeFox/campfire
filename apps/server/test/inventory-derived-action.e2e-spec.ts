@@ -3,8 +3,9 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { eq } from 'drizzle-orm';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { inventoryItems, ruleEntries } from '../src/db/schema';
+import { campaigns, inventoryItems, ruleEntries } from '../src/db/schema';
 import { CampaignEventsService } from '../src/modules/events/campaign-events.service';
+import { InventoryService } from '../src/modules/inventory/inventory.service';
 
 const dm = { 'x-dev-user': 'dm', 'x-dev-role': 'dm' };
 const player = { 'x-dev-user': 'player', 'x-dev-role': 'player' };
@@ -715,6 +716,122 @@ describe('derived equipped-item actions (issue #2097)', () => {
     // against and the action stays resolvable.
     expect(authored.body.equippedAction.spec).toBeDefined();
     expect(authored.body.equippedAction.damage).toBe('1d8 ichor');
+  });
+
+  it('a refresh whose item changed owner mid-flight is rejected, not applied', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'owner-fence-slot' });
+
+    const recipient = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Fence Recipient', level: 1, stats: { STR: 10 } });
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const before = db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s;
+
+    // Review (chatgpt-codex-connector P1): `assertCanWriteOwner` runs BEFORE the transaction,
+    // so the window this fence closes is "authorization passed, then a DM handed the item to
+    // another player's character". Hooking that call is what makes the window deterministic —
+    // moving the row beforehand would simply authorize against the new owner and prove
+    // nothing. Without the fence the write lands on the id alone and the former owner silently
+    // replaces the accepted snapshot, changing what the NEW owner's weapon does.
+    const service = ctx.app.get(InventoryService) as unknown as {
+      assertCanWriteOwner: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = service.assertCanWriteOwner.bind(service);
+    const spy = jest.spyOn(service, 'assertCanWriteOwner').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args);
+      db.update(inventoryItems).set({ characterId: recipient.body.id }).where(eq(inventoryItems.id, itemId)).run();
+      return result;
+    });
+
+    setLongswordEntryData({ itemKind: 'weapon', damageDice: '2d6', damageType: 'Slashing', properties: [] });
+    try {
+      const refreshed = await request(server).post(`/api/v1/inventory/${itemId}/compendium/refresh`).set(dm);
+      expect(refreshed.status).toBe(409);
+      const after = db.select({ s: inventoryItems.compendiumSnapshot }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get()!.s;
+      expect(after).toBe(before);
+    } finally {
+      spy.mockRestore();
+      restoreLongswordEntry();
+    }
+  });
+
+  it("an authored edit is rejected when the campaign's mechanics change under it", async () => {
+    const server = ctx.app.getHttpServer();
+    // Review (chatgpt-codex-connector P2): the adapter that validates an authored action is
+    // resolved before the transaction, and a campaign PATCH can switch the rule system during
+    // that await. A DERIVED action would simply recompute under the new system on the next
+    // read; an authored one is stored as `manual` and nothing ever regenerates it, so an edit
+    // validated against the old system's damage vocabulary and expanded by its attack math
+    // would be permanent. Hooking the adapter resolution is what makes that window
+    // deterministic — switching beforehand would just resolve the NEW system and prove nothing.
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Mechanics Fence' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Fence Wielder', level: 5, stats: { STR: 16 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory`)
+      .set(dm)
+      .send({ name: 'Fence Blade', ownerType: 'character', characterId: char.body.id });
+    await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'mech-fence-slot' });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const profile = {
+      slug: 'e2e-fence-hack',
+      label: 'E2E Fence Hack',
+      mechanicsSummary: 'A homebrew system swapped in mid-write, for e2e coverage.',
+      abilityTable: 'sw-banded',
+      abilityCap: 2,
+      saves: ['Grit'],
+      acMode: 'ascending',
+      acAnchor: 10,
+      initiativeMode: 'group',
+      initiativeDie: 6,
+      initiativeUsesDexMod: false,
+      tiebreak: 'order-only',
+      conditions: ['Soaked'],
+    };
+    const service = ctx.app.get(InventoryService) as unknown as {
+      adapterForCampaign: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = service.adapterForCampaign.bind(service);
+    const spy = jest.spyOn(service, 'adapterForCampaign').mockImplementation(async (...args: unknown[]) => {
+      const result = await original(...args);
+      db.update(campaigns)
+        .set({ ruleSystem: profile.slug, customMechanicsProfile: JSON.stringify(profile) })
+        .where(eq(campaigns.id, camp.body.id))
+        .run();
+      return result;
+    });
+
+    try {
+      const edited = await request(server)
+        .patch(`/api/v1/inventory/${item.body.id}`)
+        .set(dm)
+        .send({ equippedAction: { name: 'Under Old Rules', kind: 'melee', toHit: '+6', damage: '1d8+3 slashing', targetAc: '', notes: '' } });
+      expect(edited.status).toBe(409);
+      // Nothing stored under the wrong system, and not a 500 either.
+      const stored = db.select({ a: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, item.body.id)).get();
+      expect(stored?.a).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('an authored edit under UNCHANGED mechanics is stored, so the fence is not blanket', async () => {
+    const server = ctx.app.getHttpServer();
+    const itemId = await acquireLongsword();
+    await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'mech-ok-slot' });
+    const edited = await request(server)
+      .patch(`/api/v1/inventory/${itemId}`)
+      .set(dm)
+      .send({ equippedAction: { name: 'Same Rules', kind: 'melee', toHit: '+7', damage: '1d8+4 slashing', targetAc: '', notes: '' } });
+    expect(edited.status).toBe(200);
+    expect(edited.body.equippedActionSource).toBe('manual');
+    expect(edited.body.equippedAction.spec.attack.bonus).toBe('+7');
   });
 
   // ---- ownership and secrecy ----

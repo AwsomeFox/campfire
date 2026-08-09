@@ -427,26 +427,37 @@ function specAgreesWithFields(edited: CharacterAction): boolean {
 
   const specBonus = bonusOf(spec.attack?.bonus ?? '');
   const fieldBonus = bonusOf(edited.toHit);
-  // Only comparable when BOTH state an explicit number. An ability-derived spec bonus (empty
-  // `bonus`, non-empty `ability`) is deliberately not a fixed number, and a non-numeric
-  // `toHit` is display prose the resolver never reads.
-  if (specBonus !== null && fieldBonus !== null && specBonus !== fieldBonus) return false;
+  // A spec stating a FIXED bonus is making a claim the display field has to repeat. Review
+  // (chatgpt-codex-connector P1): requiring both sides to be numeric let a client clear
+  // `toHit`, or replace it with prose, while round-tripping the spec — and a cleared field is
+  // not "unknown", it is a different claim, so the card showed no attack bonus while combat
+  // went on rolling the old one. An ABILITY-derived spec bonus (empty `bonus`, non-empty
+  // `ability`) is deliberately not a fixed number and stays uncomparable.
+  if (specBonus !== null && specBonus !== fieldBonus) return false;
 
   const specParts = spec.outcomes?.hit?.damage ?? [];
   const fieldPart = damageLineToPart(edited.damage);
   // One part is what a round trip carries and what one display line can describe; more than
   // that is authored structure the line was never able to express, so there is nothing to
   // contradict.
-  if (specParts.length === 1 && fieldPart) {
+  if (specParts.length === 1) {
     const part = specParts[0];
-    if (part.formula.toLowerCase() !== fieldPart.formula.toLowerCase()) return false;
-    if (part.flat !== fieldPart.flat) return false;
-    if (part.type.toLowerCase() !== fieldPart.type) return false;
+    if (fieldPart) {
+      if (part.formula.toLowerCase() !== fieldPart.formula.toLowerCase()) return false;
+      if (part.flat !== fieldPart.flat) return false;
+      if (part.type.toLowerCase() !== fieldPart.type) return false;
+    } else if (specBonus !== null) {
+      // A fixed attack bonus makes this the weapon shape: its one damage part IS what the
+      // `damage` line describes, so a line that cannot be read as that part — cleared, or
+      // prose — contradicts it. Rebuilding yields a text-only action, honest about being
+      // unfinished, rather than rolling numbers the line disowns.
+      //
+      // Not applied to a spec with NO fixed bonus: a save-based action ("DC 15 DEX, 2d6
+      // fire") legitimately carries one damage part beside a line no attack parser can read,
+      // and rebuilding would throw its structure away.
+      return false;
+    }
   }
-  // A single-part attack spec beside a damage line nobody can roll is the round trip again,
-  // with the edit landing on text the parser cannot represent. Rebuilding yields a text-only
-  // action — honest about being unfinished — rather than rolling numbers the line disowns.
-  if (specParts.length === 1 && !fieldPart && edited.damage.trim() !== '') return false;
 
   return true;
 }

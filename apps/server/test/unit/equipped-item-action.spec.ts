@@ -453,6 +453,40 @@ describe('rebuildEditedActionSpec (#2097 review)', () => {
     expect(rebuildEditedActionSpec(authored, 'dnd5e', DND5E_DAMAGE_TYPES)).toEqual(authored);
   });
 
+  it('rebuilds when a fixed spec bonus is left beside a CLEARED to-hit field', () => {
+    // Review (chatgpt-codex-connector P1): requiring both sides to be numeric before comparing
+    // let a client clear `toHit` (or replace it with prose) while round-tripping the spec —
+    // and the saved action then displayed no attack bonus while combat went on rolling the
+    // old fixed one. A cleared field is not "unknown", it is a different claim.
+    for (const toHit of ['', '   ', 'see notes']) {
+      const out = rebuildEditedActionSpec(CharacterAction.parse({ ...derived, toHit }), 'dnd5e', DND5E_DAMAGE_TYPES);
+      expect(out.spec).toBeUndefined();
+      expect(out.toHit).toBe(toHit);
+    }
+  });
+
+  it('rebuilds when a fixed-bonus spec is left beside a CLEARED damage field', () => {
+    const out = rebuildEditedActionSpec(CharacterAction.parse({ ...derived, damage: '' }), 'dnd5e', DND5E_DAMAGE_TYPES);
+    expect(out.spec).toBeUndefined();
+  });
+
+  it('still trusts a single-part spec with no fixed bonus beside an unreadable line', () => {
+    // A save-based action legitimately carries one damage part beside a line no attack parser
+    // can read; rebuilding would throw its structure away. Only the WEAPON shape — a spec
+    // stating a fixed attack bonus — has to match its display line.
+    const saveAction = CharacterAction.parse({
+      ...derived,
+      toHit: '',
+      damage: 'DC 15 DEX, 2d6 fire',
+      spec: {
+        ...derived.spec,
+        attack: { bonus: '', ability: 'DEX', proficient: true, vs: 'ac' },
+        outcomes: { hit: { damage: [{ formula: '2d6', flat: 0, type: 'fire' }] } },
+      },
+    });
+    expect(rebuildEditedActionSpec(saveAction, 'dnd5e', DND5E_DAMAGE_TYPES)).toEqual(saveAction);
+  });
+
   it('trusts a spec the display line could never describe — the MCP path for a richer action', () => {
     // A save-based action carries no attack bonus and two damage parts. There is nothing in
     // `toHit`/`damage` that could contradict it, and rebuilding would throw the structure away.
