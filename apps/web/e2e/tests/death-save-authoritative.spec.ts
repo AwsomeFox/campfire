@@ -1,6 +1,7 @@
 import { test, expect, request, type APIRequestContext, type Page } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #1462 — a player reaches both death-save controls through the same
@@ -119,13 +120,17 @@ test.describe('authoritative player death saves (#1462)', () => {
         const stub = await stubAuthoritativeResult(page, drill, testCase.outcome);
 
         await page.goto(`/c/${campaignId}/encounters/${drill.encounterId}`);
+        await openCockpitTab(page, 'party');
         await expect(page.getByText('Running', { exact: true })).toBeVisible();
         const row = page.getByTestId(`combatant-row-${drill.combatantId}`);
         await expect(row).toContainText(drill.name);
 
         for (const [index, control] of testCase.controls.entries()) {
           if (control === 'workspace') {
+            // The workspace control is the Turn tab's; the roster row below is Party.
+            await openCockpitTab(page, 'turn');
             await page.getByTestId('turn-roll-death-save').click();
+            await openCockpitTab(page, 'party');
           } else {
             await row.getByRole('button', { name: 'Roll a death save' }).click();
           }

@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
+import { eq } from 'drizzle-orm';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { RulesService } from '../../src/modules/rules/rules.service';
@@ -87,6 +88,72 @@ describe('RulesService unit coverage tests', () => {
     expect(bySlug?.id).toBe(pack.id);
 
     await rulesService.uninstall(pack.id, adminActor);
+  });
+
+  it('blocks reclassifying a referenced base pack and ignores optional supplement compatibility on uninstall', async () => {
+    const [base] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'core-rules',
+        name: 'Core Rules',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'base',
+        installedAt: nowIso(),
+        entryCount: 0,
+      })
+      .returning();
+    await db.update(campaigns).set({ ruleSystem: base.slug }).where(eq(campaigns.id, campaignId));
+
+    const reclassification = {
+      source: 'upload' as const,
+      pack: {
+        slug: base.slug,
+        name: base.name,
+        license: 'CC0',
+        kind: 'supplement' as const,
+      },
+      entries: [{ slug: 'entry', name: 'Entry', type: 'other' as const }],
+    };
+    await expect(rulesService.enqueueUploadInstall(reclassification, adminActor)).rejects.toThrow(ConflictException);
+
+    await db.update(campaigns).set({ ruleSystem: '' }).where(eq(campaigns.id, campaignId));
+    const [extension] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'core-extension',
+        name: 'Core Extension',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'extension',
+        extendsPackSlug: base.slug,
+        installedAt: nowIso(),
+        entryCount: 0,
+      })
+      .returning();
+    await expect(rulesService.enqueueUploadInstall(reclassification, adminActor)).rejects.toThrow(ConflictException);
+
+    await db.delete(rulePacks).where(eq(rulePacks.id, extension.id));
+    const [supplement] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'compatible-supplement',
+        name: 'Compatible Supplement',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'supplement',
+        extendsPackSlug: base.slug,
+        installedAt: nowIso(),
+        entryCount: 0,
+      })
+      .returning();
+
+    await rulesService.uninstall(base.id, adminActor);
+    expect(await rulesService.getPackBySlug(base.slug)).toBeUndefined();
+    expect((await rulesService.getPackOrThrow(supplement.id)).extendsPackSlug).toBe(base.slug);
   });
 
   it('creates, updates, duplicates, and archives campaign homebrew entries', async () => {
@@ -273,6 +340,15 @@ describe('RulesService unit coverage tests', () => {
     const packScopedNames = packScopedSearch.items.map((i) => i.name);
     expect(packScopedNames).toContain('Goblin');
     expect(packScopedNames).toContain('Shadow Goblin');
+
+    // An explicit homebrew-only search never depends on a fabricated global pack slug:
+    // even with matching global content installed, only this campaign's live rows qualify.
+    const homebrewOnlySearch = await rulesService.search(
+      { q: 'Goblin', campaignId, homebrewOnly: true },
+      10,
+      adminActor,
+    );
+    expect(homebrewOnlySearch.items.map((item) => item.name)).toEqual(['Shadow Goblin']);
 
     // 8. Archived homebrew is excluded from scoped search
     await rulesService.archiveCampaignHomebrew(campaignId, homebrewEntry.id, adminActor);

@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import type { EncounterEvent, EncounterEventType } from '@campfire/schema';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 function mockEvent(id: number, type: EncounterEventType, patch: Partial<EncounterEvent> = {}): EncounterEvent {
   return {
@@ -82,6 +83,8 @@ async function restoreSeedFight(page: Page): Promise<void> {
 async function openEncounter(page: Page, campaignId: number, encounterId: number, heading: string) {
   await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
   await expect(page.getByRole('heading', { name: heading })).toBeVisible();
+  // The cockpit keeps the combat log in the side panel's Log tab.
+  await openCockpitTab(page, 'log');
   await expect(page.getByRole('log', { name: 'Combat log' })).toBeVisible();
 }
 
@@ -325,9 +328,14 @@ test.describe('combat log accessibility — remote clients', () => {
       await log.focus();
       await expect(log).toBeFocused();
       await viewerPage.keyboard.press('End');
+      // "End reached the bottom", within a pixel: `scrollTop` is fractional in a container
+      // whose own box is fractional (the panel's width and the spacing scale both are), so
+      // an exact equality here asserts pixel rounding rather than the behaviour.
       await expect
-        .poll(() => log.evaluate((node) => ({ top: node.scrollTop, max: node.scrollHeight - node.clientHeight })))
-        .toEqual(await log.evaluate((node) => ({ top: node.scrollHeight - node.clientHeight, max: node.scrollHeight - node.clientHeight })));
+        .poll(() =>
+          log.evaluate((node) => Math.abs(node.scrollTop - (node.scrollHeight - node.clientHeight)) <= 1),
+        )
+        .toBe(true);
       // End proves the focused history is keyboard-scrollable. Use a stable mid-history
       // position for the append assertion after the key scroll has fully settled.
       await log.evaluate((node) => {
@@ -439,6 +447,7 @@ test('mobile encounter view announces AI loot/treasury tool activity and keeps t
     .poll(async () => ((await polite.textContent()) ?? '').toLowerCase().includes('the ai dm adjust treasury'))
     .toBe(true);
 
+  await openCockpitTab(page, 'log');
   const combatLog = page.getByRole('log', { name: 'Combat log' });
   await expect(combatLog.getByText(/Granted treasury \(\+25 gp\)/i)).toBeVisible();
 });

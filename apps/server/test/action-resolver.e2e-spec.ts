@@ -537,3 +537,94 @@ describe('action resolver honesty (issue #1928): a registered non-5e rule system
     expect(res.body.mathProfile).toBeNull();
   });
 });
+
+/**
+ * Issue #2115 review — `rollMode: 'crit'` is named by the CLIENT, so a system with no critical
+ * hits must be defended in the resolver rather than by each UI hiding its control.
+ *
+ * OSR's `resolveAttack` returns only `hit` or `miss` (base B/X, OSRIC, Labyrinth Lord and OSE
+ * have no critical-hit multiplier; a natural 20 always hits but does not double damage). A
+ * forced crit used to be honoured unconditionally, minting an outcome the adapter itself can
+ * never return and committing its doubled damage through both REST and MCP.
+ */
+describe('action resolver (#2115): a forced crit is refused where the system has none', () => {
+  let ctx: TestAppContext;
+  let encounterId: number;
+  let actorId: number;
+  let targetId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'OSR Resolver Campaign' });
+    const campaignId: number = campRes.body.id;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ ruleSystem: 'osr' }).where(eq(campaigns.id, campaignId));
+
+    // AC reaches the resolver from a linked sheet or a rule-entry statblock, never a combatant
+    // column, so the target is a PC — created BEFORE the encounter, which auto-adds the party.
+    // AC 9 against the +10 below lands on effectively any roll: the outcome under test is
+    // crit-vs-hit, not hit-vs-miss.
+    const charRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Defender', stats: { DEX: 10 }, ac: 9, hpCurrent: 40, hpMax: 40, ownerUserId: 'dev:p-1' });
+    expect(charRes.status).toBe(201);
+
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'OSR Fight', hidden: false });
+    encounterId = encRes.body.id;
+    targetId = encRes.body.combatants.find((c: { characterId: number | null }) => c.characterId === charRes.body.id).id;
+    actorId = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Attacker', hpMax: 20 })).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  const attackSpec = {
+    mode: 'attack',
+    attack: { bonus: '+10', ability: '' },
+    cost: { slot: 'action', count: 1 },
+    targets: { count: 1, allow: 'any' },
+    outcomes: { hit: { damage: [{ formula: '1d6', flat: 0, type: 'slashing' }] } },
+  };
+
+  it('never reports a critical outcome, however many times a crit is asked for', async () => {
+    const server = ctx.app.getHttpServer();
+    // Repeated because the attack roll is random: one pass could coincidentally read as a hit
+    // even if the forced crit were still honoured.
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const res = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+        .set(dm)
+        .send({ actorCombatantId: actorId, spec: attackSpec, targetIds: [targetId], rollMode: 'crit' });
+      expect(res.status).toBe(200);
+      for (const target of res.body.resolution.targets) {
+        expect(target.outcome).not.toBe('crit');
+        expect(['hit', 'miss']).toContain(target.outcome);
+      }
+    }
+  });
+
+  it('still honours a crit for a system that has one', async () => {
+    const server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: '5e Resolver Campaign' });
+    const charRes = await request(server)
+      .post(`/api/v1/campaigns/${campRes.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Defender', stats: { DEX: 10 }, ac: 5, hpCurrent: 40, hpMax: 40, ownerUserId: 'dev:p-1' });
+    expect(charRes.status).toBe(201);
+    const encRes = await request(server).post(`/api/v1/campaigns/${campRes.body.id}/encounters`).set(dm).send({ name: '5e Fight', hidden: false });
+    const fiveEncounter = encRes.body.id;
+    const fiveTarget = encRes.body.combatants.find((c: { characterId: number | null }) => c.characterId === charRes.body.id).id;
+    const fiveActor = (await request(server).post(`/api/v1/encounters/${fiveEncounter}/combatants`).set(dm).send({ kind: 'monster', name: 'Attacker', hpMax: 20 })).body.id;
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${fiveEncounter}/actions/resolve`)
+      .set(dm)
+      .send({ actorCombatantId: fiveActor, spec: attackSpec, targetIds: [fiveTarget], rollMode: 'crit' });
+    expect(res.status).toBe(200);
+    expect(res.body.resolution.targets[0].outcome).toBe('crit');
+  });
+});

@@ -1,6 +1,7 @@
 import { test, expect, request } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
+import { cockpitPanel, openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #414 — multi-client structured action resolver (real DB + encounter UI).
@@ -92,10 +93,15 @@ test.describe('structured action resolver — multi-client', () => {
       expect((await startRes.json()).currentCombatantId).toBe(actorId);
 
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
-      await expect(page.getByText('Resolver PC', { exact: false }).first()).toBeVisible();
-      await expect(page.getByTestId('action-notes')).toHaveText('Three rays of fire.');
+      // The action's descriptive notes are on the roster's character card (Party); the
+      // suggested-action list that starts the Use flow is the actor's turn workspace
+      // (Turn). Both panels stay mounted, so each locator says which one it means.
+      await openCockpitTab(page, 'party');
+      await expect(cockpitPanel(page, 'party').getByText('Resolver PC', { exact: false }).first()).toBeVisible();
+      await expect(cockpitPanel(page, 'party').getByTestId('action-notes')).toHaveText('Three rays of fire.');
 
-      await page.getByTestId('suggested-action-use').click();
+      await openCockpitTab(page, 'turn');
+      await cockpitPanel(page, 'turn').getByTestId('suggested-action-use').click();
       await expect(page.getByTestId('action-use-panel')).toBeVisible();
       await expect(page.getByTestId('action-use-targets').getByRole('button', { name: 'Target Dummy' })).toBeVisible();
       await page.getByTestId('action-use-targets').getByRole('button', { name: 'Target Dummy' }).click();
@@ -122,7 +128,8 @@ test.describe('structured action resolver — multi-client', () => {
         data: { actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: true },
       });
       await page.reload();
-      await expect(page.getByText('Resolver PC', { exact: false }).first()).toBeVisible();
+      await openCockpitTab(page, 'party');
+      await expect(cockpitPanel(page, 'party').getByText('Resolver PC', { exact: false }).first()).toBeVisible();
       const afterReload = await dm.get(`/api/v1/encounters/${encounterId}`);
       expect(
         (await afterReload.json()).combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent,

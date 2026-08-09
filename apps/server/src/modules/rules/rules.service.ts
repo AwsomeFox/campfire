@@ -1219,6 +1219,29 @@ export class RulesService implements OnModuleInit {
     if (kind === 'base' && extendsPackSlug) {
       throw new BadRequestException('Base packs cannot declare extendsPackSlug');
     }
+
+    const [existing] = await this.db
+      .select({ id: rulePacks.id, kind: rulePacks.kind })
+      .from(rulePacks)
+      .where(eq(rulePacks.slug, slug))
+      .limit(1);
+    if (existing?.kind === 'base' && kind !== 'base') {
+      const [primaryCampaign] = await this.db
+        .select({ id: campaigns.id })
+        .from(campaigns)
+        .where(eq(campaigns.ruleSystem, slug))
+        .limit(1);
+      const [dependentExtension] = await this.db
+        .select({ name: rulePacks.name })
+        .from(rulePacks)
+        .where(and(eq(rulePacks.extendsPackSlug, slug), eq(rulePacks.kind, 'extension')))
+        .limit(1);
+      if (primaryCampaign || dependentExtension) {
+        throw new ConflictException(
+          `Rule pack "${slug}" cannot be changed from base to ${kind} while campaigns or installed extensions depend on it as a base`,
+        );
+      }
+    }
     if (!extendsPackSlug) return;
     const [base] = await this.db
       .select({ kind: rulePacks.kind })
@@ -2348,6 +2371,29 @@ export class RulesService implements OnModuleInit {
         const nextExtendsPackSlug = options.rewritePackProvenance
           ? (meta.extendsPackSlug ?? null)
           : before.extendsPackSlug;
+        // Repeat the enqueue-time relationship guard inside the write transaction. A
+        // campaign or extension can start referencing this base while an upload job is
+        // queued; re-read those inbound references at the exact point reclassification
+        // would otherwise commit so that race cannot leave invalid stored state.
+        if (before.kind === 'base' && nextKind !== 'base') {
+          const primaryCampaign = tx
+            .select({ id: campaigns.id })
+            .from(campaigns)
+            .where(eq(campaigns.ruleSystem, before.slug))
+            .limit(1)
+            .all()[0];
+          const dependentExtension = tx
+            .select({ name: rulePacks.name })
+            .from(rulePacks)
+            .where(and(eq(rulePacks.extendsPackSlug, before.slug), eq(rulePacks.kind, 'extension')))
+            .limit(1)
+            .all()[0];
+          if (primaryCampaign || dependentExtension) {
+            throw new ConflictException(
+              `Rule pack "${before.slug}" cannot be changed from base to ${nextKind} while campaigns or installed extensions depend on it as a base`,
+            );
+          }
+        }
 
         const existingRows = tx.select().from(ruleEntries).where(eq(ruleEntries.packId, packRow.id)).all();
         const existingByKey = new Map(existingRows.map((r) => [`${r.type}::${r.slug}`, r]));
@@ -2566,7 +2612,7 @@ export class RulesService implements OnModuleInit {
       const dependents = tx
         .select({ name: rulePacks.name })
         .from(rulePacks)
-        .where(eq(rulePacks.extendsPackSlug, pack.slug))
+        .where(and(eq(rulePacks.extendsPackSlug, pack.slug), eq(rulePacks.kind, 'extension')))
         .all();
       if (dependents.length > 0) {
         throw new ConflictException(
@@ -2642,7 +2688,7 @@ export class RulesService implements OnModuleInit {
   }
 
   async search(
-    params: { q: string; type?: RuleEntryType; pack?: string; packs?: string[]; cursor?: string; limit?: number; campaignId?: number },
+    params: { q: string; type?: RuleEntryType; pack?: string; packs?: string[]; homebrewOnly?: boolean; cursor?: string; limit?: number; campaignId?: number },
     limitArg?: number,
     user?: RequestUser,
   ): Promise<RuleSearchPage> {
@@ -2654,10 +2700,16 @@ export class RulesService implements OnModuleInit {
       await this.homebrewRole(params.campaignId, user);
     }
 
-    let requestedSlugs = params.packs?.length ? [...new Set(params.packs)] : params.pack ? [params.pack] : [];
+    let requestedSlugs = params.homebrewOnly
+      ? []
+      : params.packs?.length
+        ? [...new Set(params.packs)]
+        : params.pack
+          ? [params.pack]
+          : [];
     // Campaign-aware callers that omit an explicit pack filter get the authoritative
     // primary + enabled content set. This is the path used by MCP/AI lookups.
-    if (params.campaignId !== undefined && requestedSlugs.length === 0) {
+    if (!params.homebrewOnly && params.campaignId !== undefined && requestedSlugs.length === 0) {
       const [campaign] = await this.db
         .select({ ruleSystem: campaigns.ruleSystem, enabledPackSlugs: campaigns.enabledPackSlugs })
         .from(campaigns)
@@ -2668,10 +2720,11 @@ export class RulesService implements OnModuleInit {
         ...fromJsonText<string[]>(campaign?.enabledPackSlugs, []),
       ].filter(Boolean))];
     }
-    const packFilter = requestedSlugs.length
+    const packFilter = !params.homebrewOnly && requestedSlugs.length
       ? await this.db.select().from(rulePacks).where(inArray(rulePacks.slug, requestedSlugs))
       : undefined;
-    const packRequestedButMissing = requestedSlugs.length > 0 && (!packFilter || packFilter.length === 0);
+    const packRequestedButMissing = params.homebrewOnly ||
+      (requestedSlugs.length > 0 && (!packFilter || packFilter.length === 0));
     // Issue #1898 review: `campaign.ruleSystem` is free-text (never validated against
     // installed packs), and the picker always forwards it as `pack` alongside
     // `campaignId`. Short-circuiting to fully empty here — as the no-campaignId path

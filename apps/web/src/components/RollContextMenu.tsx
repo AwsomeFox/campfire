@@ -5,10 +5,38 @@ export type RollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
 
 interface RollContextMenuProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   children: React.ReactNode;
+  /**
+   * Called with the mode this interaction asked for.
+   *
+   * The `event` argument is only passed on the PLAIN-CLICK path, never from the context /
+   * long-press menu, and callers rely on that to tell the two apart: both emit `'normal'`,
+   * but a plain click means "no preference" (defer to a chooser, if the caller has one)
+   * while the menu's Normal item is an explicit request for a flat roll. See
+   * `rollModeForClick` in features/characters/rollMode.ts. Keep the asymmetry.
+   */
   onRoll: (mode: RollMode, event?: React.MouseEvent) => void;
+  /**
+   * Whether the menu offers "Critical Hit". Default true.
+   *
+   * `crit` only means something for a DAMAGE roll, where the caller doubles the dice. A
+   * catalog CHECK has no critical variant — `checkRollExpr` and the server's `rollCheck`
+   * both treat the mode as an ordinary single die — so offering it on a save, skill, ability
+   * or initiative control let the user pick a command that silently produced a plain roll.
+   * Those call sites pass false.
+   */
+  allowCrit?: boolean;
+  /**
+   * Whether the menu offers Advantage / Disadvantage. Default true.
+   *
+   * A catalog check carries `supportsAdvantage`, and a system that is not roll-two-keep
+   * (PF2e) sets it false — callers then collapse either mode to `normal`, so offering the
+   * commands meant an explicit selection silently produced a flat roll. Those call sites
+   * pass the definition's own capability.
+   */
+  allowAdvantage?: boolean;
 }
 
-export function RollContextMenu({ children, onRoll, className, disabled, onClick, onContextMenu, onPointerDown, onPointerUp, onPointerCancel, ...rest }: RollContextMenuProps) {
+export function RollContextMenu({ children, onRoll, allowCrit = true, allowAdvantage = true, className, disabled, onClick, onContextMenu, onPointerDown, onPointerUp, onPointerCancel, ...rest }: RollContextMenuProps) {
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const pressTimer = useRef<NodeJS.Timeout | null>(null);
 
@@ -34,15 +62,18 @@ export function RollContextMenu({ children, onRoll, className, disabled, onClick
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     if (disabled) return;
-    // Let keyboard modifiers override
-    if (e.shiftKey) {
+    // Keyboard modifiers are the desktop shortcut for the same two menu items, so they honour
+    // the same opt-out: hiding the items while still emitting the mode on shift/alt-click
+    // left a path that rolled unchanged and labelled the result with a mode the caller does
+    // not support.
+    if (allowAdvantage && e.shiftKey) {
       onRoll('advantage', e);
-    } else if (e.altKey || e.metaKey || e.ctrlKey) {
+    } else if (allowAdvantage && (e.altKey || e.metaKey || e.ctrlKey)) {
       onRoll('disadvantage', e);
     } else {
       onRoll('normal', e);
     }
-  }, [disabled, onRoll]);
+  }, [allowAdvantage, disabled, onRoll]);
 
   const closeMenu = useCallback(() => setMenuPos(null), []);
 
@@ -113,15 +144,21 @@ export function RollContextMenu({ children, onRoll, className, disabled, onClick
           <button type="button" role="menuitem" className="cf-menu-item" onClick={() => { onRoll('normal'); closeMenu(); }}>
             🎲 Normal
           </button>
-          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-success, #10b981)' }} onClick={() => { onRoll('advantage'); closeMenu(); }}>
-            ✅ Advantage
-          </button>
-          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => { onRoll('disadvantage'); closeMenu(); }}>
-            ❌ Disadvantage
-          </button>
-          <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--cf-crit, #fbbf24)' }} onClick={() => { onRoll('crit'); closeMenu(); }}>
-            💥 Critical Hit
-          </button>
+          {allowAdvantage && (
+            <>
+              <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-success, #10b981)' }} onClick={() => { onRoll('advantage'); closeMenu(); }}>
+                ✅ Advantage
+              </button>
+              <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => { onRoll('disadvantage'); closeMenu(); }}>
+                ❌ Disadvantage
+              </button>
+            </>
+          )}
+          {allowCrit && (
+            <button type="button" role="menuitem" className="cf-menu-item" style={{ color: 'var(--cf-crit, #fbbf24)' }} onClick={() => { onRoll('crit'); closeMenu(); }}>
+              💥 Critical Hit
+            </button>
+          )}
         </div>,
         document.body
       )}

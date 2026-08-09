@@ -46,6 +46,9 @@ import { campaigns } from '../../db/schema';
  *  - `latest_session_number` — a denormalized session-position statistic.
  *    `session_count` is the operational summary; the highest live session number is not
  *    needed to locate or administer a campaign in the catalog.
+ *  - `enabled_pack_slugs` — campaign content choices. The primary `rule_system` is useful
+ *    operational metadata; the full supplemental-content selection is not needed to
+ *    administer a campaign and is deliberately kept out of this non-member view.
  */
 export const CATALOG_CAMPAIGN_COLUMNS = {
   id: campaigns.id,

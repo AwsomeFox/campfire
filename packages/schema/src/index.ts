@@ -38,6 +38,7 @@ import {
   PendingConcentrationCheck,
   RESOLVER_MATH_D20_5E,
   type CriticalDamageRule,
+  type ResolverDegree,
   type ResolverMathProfile,
   type AttackRollInput,
   type AttackRollResult,
@@ -4324,6 +4325,37 @@ export function initiativeModelForAdapter(adapter: Pick<RuleSystemAdapter, 'init
   return adapter.initiativeModel ?? DEFAULT_INITIATIVE_MODEL;
 }
 
+/**
+ * Whether a system rolls initiative at all — see {@link RuleSystemAdapter.hasInitiativeRoll}.
+ * Omission means yes, so every existing adapter keeps its current behaviour and only a system
+ * that explicitly has no initiative roll opts out.
+ */
+export function hasInitiativeRollForAdapter(adapter?: Pick<RuleSystemAdapter, 'hasInitiativeRoll'> | null): boolean {
+  return adapter?.hasInitiativeRoll !== false;
+}
+
+/**
+ * Whether the neutral `d20 + modifier` catalog describes this system's checks — see
+ * {@link RuleSystemAdapter.hasNeutralD20Checks}. Omission means yes, so an adapter must opt
+ * out deliberately and every existing system is unchanged.
+ */
+export function hasNeutralD20ChecksForAdapter(adapter?: Pick<RuleSystemAdapter, 'hasNeutralD20Checks'> | null): boolean {
+  return adapter?.hasNeutralD20Checks !== false;
+}
+
+/**
+ * Whether this system owns its attack roll — see {@link RuleSystemAdapter.resolveAttack}.
+ *
+ * A UI that builds a `1d20 + bonus` expression from an action's printed to-hit is only
+ * correct while the resolver would do the same. Once an adapter declares `resolveAttack`
+ * (Open Legend rolls an exploding attribute pool), the same action used through the
+ * authoritative resolver produces materially different numbers, so a hand-built d20 chip
+ * would disagree with the encounter for the very same attack.
+ */
+export function hasAdapterOwnedAttackRoll(adapter?: Pick<RuleSystemAdapter, 'resolveAttack'> | null): boolean {
+  return typeof adapter?.resolveAttack === 'function';
+}
+
 // ---------- adapter-defined grid distance rules (issue #467) ----------
 // Square grids default to Euclidean straight-line ruler distance; hex grids use
 // cube/axial hex steps. 5e optionally counts every other diagonal as 2 squares.
@@ -4567,6 +4599,21 @@ export interface RuleSystemAdapter {
    */
   readonly criticalDamage?: CriticalDamageRule;
   /**
+   * OPTIONAL — declare `false` if this system has no critical hit at all (issue #1598 review).
+   * Read through {@link hasCriticalHitsForAdapter}; see its note on why {@link criticalDamage}
+   * is the wrong field to gate a crit-offering control on.
+   */
+  readonly hasCriticalHits?: boolean;
+  /**
+   * OPTIONAL — this system's DEGREE-of-success classification (PF2e/SF2e's four degrees).
+   *
+   * Declared on the base adapter, not only on {@link Pf2eRuleSystemAdapter}, so a generic
+   * caller holding a `RuleSystemAdapter` can ASK whether degrees exist rather than testing the
+   * adapter's id. Read through {@link hasDegreesOfSuccessForAdapter}; `classifySaveOutcome`
+   * makes the same test, and a system without it only ever resolves a save to success/failure.
+   */
+  degreeOfSuccess?(total: number, dc: number, naturalRoll?: number): ResolverDegree;
+  /**
    * OPTIONAL, OPT-IN — declare this only if the structured action resolver's OWN maths is this
    * system's maths (issue #1053 review): a single d20 plus a flat modifier, compared against
    * ascending armour class, with 5e's level-based proficiency bonus. See
@@ -4617,6 +4664,53 @@ export interface RuleSystemAdapter {
    * 5e sets this to true; systems without 5e death saves set it to false or omit it.
    */
   readonly hasDeathSaves?: boolean;
+  /**
+   * OPTIONAL — whether the NEUTRAL check catalog honestly describes this system's checks.
+   * Default true.
+   *
+   * {@link neutralCheckCatalog} emits ability/save/skill entries as `d20 + modifier` with a
+   * flat +2 proficiency term. That is a reasonable generic shape for a d20 system without
+   * its own `buildCheckCatalog`, and a LIE for a system that does not roll d20 checks at
+   * all: Ironsworn: Starforged resolves moves on a d6 action die against challenge dice,
+   * and Open Legend rolls an exploding attribute dice pool (score 5 is 1d20 + 2d6, see
+   * `attributeDicePool`). Neither can be expressed as a flat d20 modifier, so offering one
+   * does not merely look wrong — the server resolves that same definition and PERSISTS the
+   * wrong number to the shared dice log.
+   *
+   * Systems in that position set this false until they have an adapter-owned
+   * `buildCheckCatalog`, and the catalog returns nothing rather than something incorrect.
+   * Read through {@link hasNeutralD20ChecksForAdapter}.
+   */
+  readonly hasNeutralD20Checks?: boolean;
+  /**
+   * OPTIONAL — the ability/attribute this system's initiative derives from ('DEX', 'AGILITY'),
+   * for adapters that use the neutral roll catalog.
+   *
+   * `initiativeModifier` computes the number but does not say what it read, so the neutral
+   * catalog had to publish `ability: null` — and a caller that gates on "is the source score
+   * actually set" (the character sheet does, so a draft sheet cannot roll a fabricated +0)
+   * had nothing to gate on. Declaring it also gives the breakdown an honest label instead of
+   * the generic "initiative".
+   *
+   * Omit it for a system whose initiative reads no ability at all (Starforged's flat 0);
+   * `null`/absent then keeps today's ability-independent behaviour. Adapters with their own
+   * `buildCheckCatalog` (5e, PF2e) already publish the ability directly and ignore this.
+   */
+  readonly initiativeAbility?: string;
+  /**
+   * OPTIONAL — whether this system rolls initiative AT ALL. Default true.
+   *
+   * Distinct from {@link initiativeModel}, which answers "individual or group" for a system
+   * that HAS one. `initiativeDie` cannot answer this: the generic roller seam requires a die
+   * from every adapter, so a system with no initiative roll (Ironsworn: Starforged, a PbtA
+   * game with no turn-order roll) still reports one — its d6 action die — purely to satisfy
+   * that seam. Reading the die, or treating "not group" as "individual", therefore offers a
+   * personal initiative roll on a table that has none. Set this false to say so explicitly.
+   *
+   * Read through {@link hasInitiativeRollForAdapter} so an adapter that omits it keeps the
+   * true default, exactly as {@link hasDeathSaves} works.
+   */
+  readonly hasInitiativeRoll?: boolean;
   /**
    * OPTIONAL — whether this system endorses "half or more of the party succeeds" as a group-check
    * convention (issue #1943). The group-check board's X/N tally is universal, but the advisory
@@ -5208,6 +5302,20 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
     const hp = d.hp ?? d.hitPoints ?? d.hit_points;
     return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
   },
+  // Open Legend rolls an EXPLODING attribute dice pool (see `attributeDicePool`), not a flat
+  // d20 + modifier, so the neutral catalog cannot describe its checks — and the server
+  // resolves that same definition, so an offered check would persist a wrong result.
+  hasNeutralD20Checks: false,
+  // Turn order is Agility-monotonic (see `initiativeModifier` below), so the catalog can
+  // name the score it reads rather than publishing an ability-less initiative.
+  initiativeAbility: 'AGILITY',
+  /**
+   * No critical hits: `resolveAttack` below returns only `hit` or `miss`, because the exploding
+   * dice pool IS this system's escalation mechanic and has no separate crit tier. Declared for
+   * the same reason as the OSR variants — a control gating on the crit-damage FORMULA (which
+   * every adapter has) would offer a doubled total this system's resolver cannot produce.
+   */
+  hasCriticalHits: false,
   attributeDicePool(score: number): AttributeDicePool {
     return openLegendAttributeDicePool(score);
   },
@@ -5226,7 +5334,8 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
    * No separate crit tier: the pool's OWN exploding dice already are Open Legend's escalation
    * mechanic (a max face re-rolls and adds), so layering a 5e-style "natural 20 crits" on top
    * would double-count an already-escalating result. `naturalRoll` is null — there is no single
-   * die whose face is "the" roll to show as d20-style crit/fumble evidence.
+   * die whose face is "the" roll to show as d20-style crit/fumble evidence. `hasCriticalHits`
+   * above is the machine-readable half of that same paragraph — see its note.
    */
   resolveAttack(input: AttackRollInput): AttackRollResult {
     const score = Number.isFinite(input.modifier) ? Math.trunc(input.modifier) : 0;
@@ -5447,6 +5556,17 @@ export const DND5E_SKILLS: ReadonlyArray<{ readonly name: string; readonly abili
 /** 5e proficiency bonus by level: +2 at 1–4 up to +6 at 17–20 (single source of truth, issue #415). */
 export function dnd5eProficiencyBonus(level: number): number {
   return 2 + Math.floor((Math.max(1, level) - 1) / 4);
+}
+
+/**
+ * Read an ability score tolerantly, or null when the character has not set it — the same
+ * lookup as {@link readAbilityScore} without its default. Catalog builders use this to tell
+ * "absent" from "present and low", which the defaulting reader cannot.
+ */
+function readAbilityScoreOrNull(stats: Record<string, number>, ability: string): number | null {
+  const up = ability.toUpperCase();
+  const raw = stats[up] ?? stats[ability] ?? stats[ability.toLowerCase()];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
 }
 
 /** Read an ability score from a stats record tolerantly (uppercase-folded; default 10). */
@@ -5684,15 +5804,29 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
   const FLAT_PROFICIENCY = 2;
   const out: RollCheckDefinition[] = [];
 
-  const initBase = adapter.initiativeModifier(stats, 'score', character.level);
+  // The ADAPTER'S OWN key expectations, not the catalog's normalised ones. `normalizeStats`
+  // uppercases every key for this module's ability lookups, which silently hid PF1e's native
+  // `initiative` / `init` bonus (its reader matches those lowercase keys) and made a valid
+  // initiative resolve to 0 — reported as "Initiative —" on a sheet whose DEX was unset.
+  // Adapters already accept either canonical or raw ability maps, so handing them the stored
+  // record is strictly more permissive; verified identical for a canonical DEX map across
+  // every registered adapter.
+  const initBase = adapter.initiativeModifier(character.stats ?? stats, 'score', character.level);
   const initLevel = adapter.levelInitiativeBonus?.(character.level) ?? 0;
   const initMod = initBase + initLevel;
-  const initiativeLabel = adapter.id === ARCHMAGE_ADAPTER_ID ? 'DEX' : 'initiative';
-  out.push({
+  // The adapter's own declaration, when it has one — this used to special-case a single
+  // adapter id for the label and publish no ability at all (see `initiativeAbility`).
+  const initiativeAbility = adapter.initiativeAbility ?? null;
+  const initiativeLabel = initiativeAbility ?? 'initiative';
+
+  // A system with no initiative roll gets no initiative check — its `initiativeDie` exists
+  // only to satisfy the generic roller seam (see `hasInitiativeRoll`), so emitting an entry
+  // would let REST and MCP discover and persist a turn-order roll the game does not have.
+  if (hasInitiativeRollForAdapter(adapter)) out.push({
     id: 'initiative',
     label: 'Initiative',
     category: 'initiative',
-    ability: null,
+    ability: initiativeAbility,
     proficiency: null,
     favorite: true,
     modifier: initMod,
@@ -5707,6 +5841,10 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
     supportsAdvantage: true,
     supportsDegrees: false,
   });
+
+  // Everything below is `d20 + modifier`. For a system that does not roll d20 checks, the
+  // honest catalog is an empty one — see `hasNeutralD20Checks`.
+  if (!hasNeutralD20ChecksForAdapter(adapter)) return out;
 
   for (const ability of abilityKeys) {
     const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
@@ -5772,8 +5910,55 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
  * configurable {@link neutralCheckCatalog}. This is the single entry point the server, the MCP
  * tools, the character sheet, and the encounter card all call — so the math is identical.
  */
+/**
+ * Flag an initiative check that was computed from a score the character does not have.
+ *
+ * Applied to EVERY catalog — the adapter-owned ones (5e, PF2e) as much as the neutral one —
+ * because a renderer gating on `incomplete` must get the same answer whichever built it; a
+ * rule that only covered the neutral path silently let a 5e draft sheet roll a fabricated
+ * +0 initiative.
+ *
+ * The question is whether initiative has a SOURCE, which is not the same as whether it has a
+ * value. A 13th Age level-3 character with no DEX totals +3 from `levelInitiativeBonus` alone,
+ * so a total-based test would call that complete; a PF1e character with a native `initiative`
+ * bonus and no DEX has a real source, so an ability-presence test alone would call it
+ * incomplete. Provenance is therefore ASKED, never inferred: an adapter that tracks it exposes
+ * `initiativeModifierOrNull` and gets the final word (PF1e's `initiative: 0` is a declared
+ * +0, not a missing score — a nonzero-contribution test read it as the latter, #2115 review),
+ * and everyone else falls back to whether the declared `initiativeAbility` score is set.
+ */
+function withInitiativeCompleteness(
+  adapter: RuleSystemAdapter,
+  catalog: RollCheckDefinition[],
+  character: CheckCatalogCharacter,
+): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  return catalog.map((def) => {
+    if (def.category !== 'initiative' || def.incomplete) return def;
+    // An adapter that tracks provenance answers directly — no inference. Raw stats, not the
+    // uppercased map, because the native keys this reads (`initiative`, `init`) are lowercase.
+    if (adapter.initiativeModifierOrNull) {
+      const resolved = adapter.initiativeModifierOrNull(character.stats ?? stats, 'score', character.level);
+      return resolved === null ? { ...def, incomplete: true } : def;
+    }
+    const ability = def.ability;
+    if (!ability) return def;
+    return readAbilityScoreOrNull(stats, ability) === null ? { ...def, incomplete: true } : def;
+  });
+}
+
 export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
-  return adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character);
+  const catalog = withInitiativeCompleteness(
+    adapter,
+    adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character),
+    character,
+  );
+  // Enforced HERE, not at each render site: this is the one seam the sheet, the encounter
+  // card, REST `/checks` + `/checks/roll`, and the MCP `list_checks`/`roll_check` tools all
+  // read, so filtering anywhere else would leave the others able to roll what the adapter
+  // says does not exist.
+  if (hasInitiativeRollForAdapter(adapter)) return catalog;
+  return catalog.filter((c) => c.category !== 'initiative');
 }
 
 /** Find a single check by its stable id within a character's catalog, or null. */

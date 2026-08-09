@@ -1960,7 +1960,11 @@ function RuleSystemCard({
                   <span>
                     <strong>{pack.name}</strong>{' '}
                     <span className="tag tag-neutral" style={{ fontSize: 9 }}>{pack.kind}</span>
-                    {pack.extendsPackSlug ? <span className="text-muted"> · requires {pack.extendsPackSlug}</span> : null}
+                    {pack.extendsPackSlug ? (
+                      <span className="text-muted">
+                        {' · '}{pack.kind === 'extension' ? 'requires' : 'compatible with'} {pack.extendsPackSlug}
+                      </span>
+                    ) : null}
                     <span className="text-muted" style={{ display: 'block' }}>
                       {pack.license || 'License not specified'}{pack.sourceUrl ? ' · attribution/source link available in entries' : ''}
                     </span>

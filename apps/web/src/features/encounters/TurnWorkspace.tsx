@@ -332,7 +332,7 @@ export function TurnWorkspace({
   const actionDisabled = controlsDisabled || actionSpent;
 
   return (
-    <Card className="space-y-3" data-testid="turn-workspace">
+    <Card className="space-y-3" id="turn-workspace" data-testid="turn-workspace">
       {/* Prominent actor / round / next actor + Spellbook toggle. */}
       <div className="flex items-center justify-between gap-2.5 flex-wrap">
         <div className="flex items-center gap-2.5 flex-wrap">

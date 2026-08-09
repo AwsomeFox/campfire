@@ -238,7 +238,7 @@
         },
         "surfaceAriaLabel": "Ping the map center for everyone. {{hint}} Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.",
         "toolHelp": "Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone. {{hint}}",
-"log": {
+        "log": {
           "unknownSender": "Someone",
           "labeled": "{{name}} pings: {{label}}",
           "plain": "{{name}} pinged the map"
@@ -507,6 +507,20 @@
       "spentToast": "{{name}} spent",
       "available": "{{available}} of {{max}} {{name}} available",
       "receivedAnnounce": "You received {{name}}!"
+    },
+    "vtt": {
+      "panelLabel": "Encounter panel",
+      "showPanel": "Show encounter panel",
+      "hidePanel": "Hide encounter panel",
+      "tabTurn": "Turn",
+      "tabParty": "Party",
+      "tabLog": "Log",
+      "tabTable": "Table",
+      "turnBar": "Turn bar",
+      "turnBarToggle": "Collapse or expand the turn bar",
+      "roll": "Roll any dice — the result lands on every screen at the table",
+      "noMapTitle": "No battle map yet",
+      "noMapHint": "The DM has not shared a map for this encounter. The turn order and your character are in the panel."
     }
   }
 }

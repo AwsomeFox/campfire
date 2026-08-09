@@ -2,6 +2,7 @@ import { expect, request, test } from '@playwright/test';
 import { seed, stateFor } from './seed';
 import { CREDS } from '../global-setup';
 import { CONNECTING_GRACE_MS } from '../../src/features/encounters/encounterSyncState';
+import { openCockpitTab } from '../lib/encounterCockpit';
 
 /**
  * Issue #1446 — the stale-sync gate had no override: an environment where SSE never
@@ -58,6 +59,7 @@ test('DM can roll initiative, start, and advance turns after confirming the over
     });
 
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'party');
 
     const syncChip = page.getByTestId('encounter-sync-chip');
     await expect(syncChip).toHaveText('Connecting');
@@ -155,6 +157,7 @@ test('an overridden turn advance against a server whose turn already moved surfa
     });
 
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'party');
 
     const syncChip = page.getByTestId('encounter-sync-chip');
     await expect(syncChip).toHaveText('Offline', { timeout: GRACE_WAIT_TIMEOUT });
@@ -220,6 +223,7 @@ test('the stale banner remains visible for the duration of an active override', 
     });
 
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'party');
 
     const banner = page.getByTestId('encounter-sync-banner');
     const syncChip = page.getByTestId('encounter-sync-chip');
@@ -313,6 +317,7 @@ test('a player never sees or can grant the override, and their owned combatant s
     });
 
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'party');
 
     const syncChip = page.getByTestId('encounter-sync-chip');
     await expect(syncChip).toHaveText('Offline', { timeout: CONNECTING_GRACE_MS + 8_000 });
@@ -392,6 +397,7 @@ test('switching between two encounters in one campaign does not degrade a connec
       response.url().endsWith(`/api/v1/campaigns/${campaignId}/events`),
     );
     await page.goto(`/c/${campaignId}/encounters/${encounterAId}`);
+    await openCockpitTab(page, 'party');
     await initialStream;
 
     const syncChip = page.getByTestId('encounter-sync-chip');
@@ -470,6 +476,7 @@ test('switching encounters while the stream never connects still offers the over
     });
 
     await page.goto(`/c/${campaignId}/encounters/${encounterAId}`);
+    await openCockpitTab(page, 'party');
 
     const syncChip = page.getByTestId('encounter-sync-chip');
     // Grace elapses on encounter A: the override becomes offered.
@@ -592,6 +599,7 @@ test('an active override is revoked the instant DM authority is lost', async ({ 
     });
 
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'party');
 
     const syncChip = page.getByTestId('encounter-sync-chip');
     await expect(syncChip).toHaveText('Offline', { timeout: CONNECTING_GRACE_MS + 8_000 });
@@ -698,6 +706,7 @@ test('an override confirmed in one campaign does not carry over to a different c
     });
 
     await page.goto(`/c/${campaignAId}/encounters/${encounterAId}`);
+    await openCockpitTab(page, 'party');
 
     const syncChip = page.getByTestId('encounter-sync-chip');
     await expect(syncChip).toHaveText('Offline', { timeout: CONNECTING_GRACE_MS + 8_000 });
@@ -770,6 +779,7 @@ test('the override is never offered while AuthProvider is showing a stale (cache
     // First, a NORMAL load: a real, live `/me` succeeds and AuthProvider persists a
     // snapshot (issue #579) — this is the genuine mechanism, not a seeded/mocked one.
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'party');
     const syncChip = page.getByTestId('encounter-sync-chip');
     await expect(syncChip).toHaveText('Live');
 

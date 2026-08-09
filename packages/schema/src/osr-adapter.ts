@@ -437,6 +437,9 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
       mode: profile.initiativeMode,
       usesDexModifier: profile.initiativeUsesDexMod,
     },
+    // Only the variants that actually add the DEX modifier name it; the rest roll a bare d6
+    // and stay ability-independent, so the catalog publishes no source score for them.
+    ...(profile.initiativeUsesDexMod ? { initiativeAbility: 'DEX' } : {}),
     initiativeModifier(
       abilities: Record<string, unknown> | null | undefined,
       representation: AbilityRepresentation = 'score',
@@ -450,6 +453,14 @@ export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSyste
     // A homebrew profile's OWN vocabulary (issue #1502) when it declares one; every built-in
     // OSR profile omits `conditions` and keeps the shared OSR_CONDITIONS list unchanged.
     conditions: profile.conditions ?? OSR_CONDITIONS,
+    /**
+     * No critical hits in these rules — the machine-readable half of the `resolveAttack` note
+     * below, which was until now only prose. `resolveAttack` returns `hit` or `miss` and never
+     * `crit`, so any UI offering a "critical hit" damage roll for an OSR campaign produces a
+     * total the authoritative resolver cannot reach; `hasCriticalHitsForAdapter` is what those
+     * controls gate on.
+     */
+    hasCriticalHits: false,
     /**
      * This variant's OWN attack roll (issue #1598), via {@link osrAttackHits} — the function
      * this file already provided but nothing called. `osrAttackHits` reads the ATTACKER'S

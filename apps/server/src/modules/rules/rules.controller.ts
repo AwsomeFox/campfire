@@ -186,6 +186,7 @@ export class RulesController {
   @ApiQuery({ name: 'type', required: false, enum: ['spell', 'monster', 'hazard', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other'], description: 'Filter to one entry type.' })
   @ApiQuery({ name: 'pack', required: false, description: 'Filter to one pack by slug.' })
   @ApiQuery({ name: 'packs', required: false, description: 'Comma-separated pack slugs to search as a union. `pack` remains supported for backward compatibility.' })
+  @ApiQuery({ name: 'homebrewOnly', required: false, type: Boolean, description: 'With campaignId, exclude global packs and search only that campaign\'s homebrew.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size (default 50, max 100).' })
   @ApiQuery({ name: 'cursor', required: false, description: 'Opaque cursor from a previous page\'s nextCursor.' })
   @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Campaign ID to include campaign homebrew for members.' })
@@ -195,6 +196,7 @@ export class RulesController {
     @Query('type') type: string | undefined,
     @Query('pack') pack: string | undefined,
     @Query('packs') packs: string | undefined,
+    @Query('homebrewOnly') homebrewOnlyStr: string | undefined,
     @Query('limit') limit: string | undefined,
     @Query('cursor') cursor: string | undefined,
     @Query('campaignId') campaignIdStr: string | undefined,
@@ -228,11 +230,22 @@ export class RulesController {
     if (parsedPacks?.some((slug) => slug.length > 80)) {
       throw new BadRequestException('Each `packs` slug must be at most 80 characters');
     }
+    if (homebrewOnlyStr !== undefined && homebrewOnlyStr !== 'true' && homebrewOnlyStr !== 'false') {
+      throw new BadRequestException('`homebrewOnly` must be true or false');
+    }
+    const homebrewOnly = homebrewOnlyStr === 'true';
+    if (homebrewOnly && campaignId === undefined) {
+      throw new BadRequestException('`homebrewOnly=true` requires `campaignId`');
+    }
+    if (homebrewOnly && (pack?.trim() || parsedPacks !== undefined)) {
+      throw new BadRequestException('`homebrewOnly=true` cannot be combined with `pack` or `packs`');
+    }
     return this.rules.search({
       q: q ?? '',
       type: type as RuleEntryType | undefined,
       pack,
       packs: parsedPacks,
+      ...(homebrewOnly ? { homebrewOnly: true } : {}),
       cursor,
       limit: parsedLimit,
       campaignId,

@@ -14,6 +14,47 @@
  * notion would simply not render the chooser (the action surface gates on
  * `RollMode.isApplicable`).
  */
+import {
+  criticalDamageRuleForAdapter,
+  hasCriticalHitsForAdapter,
+  hasInitiativeRollForAdapter,
+  initiativeModelForAdapter,
+  type RuleSystemAdapter,
+} from '@campfire/schema';
+
+/**
+ * Whether the character sheet shows an initiative tile for this system.
+ *
+ * Two different questions, and `checkCatalogForAdapter` only answers the first. Whether the
+ * roll may HAPPEN is enforced there, so a system with no initiative (Starforged) contributes
+ * no catalog entry and REST/MCP cannot roll one. But an absent entry renders as
+ * "Initiative —", which reads as a real stat nobody filled in — so whether the TILE appears
+ * has to ask `hasInitiativeRoll` directly. A group-initiative system is the mirror case: its
+ * entry is legitimate (the encounter rolls once per side) and only the per-character tile
+ * would contradict it.
+ *
+ * Extracted so the rule is unit-testable against real adapters; it regressed once when the
+ * capability moved into the catalog and this half was assumed to have moved with it.
+ */
+export function showsInitiativeTile(adapter: RuleSystemAdapter): boolean {
+  return hasInitiativeRollForAdapter(adapter) && initiativeModelForAdapter(adapter).mode !== 'group';
+}
+
+/**
+ * Whether a damage chip on the sheet may offer a "Critical Hit" roll for this system.
+ *
+ * Two independent conditions, and the sheet used to check only the second:
+ *  - the system HAS critical hits — OSR resolves an attack to hit or miss and nothing else,
+ *    so a doubled total here is one `resolve_action` could never produce for the same item;
+ *  - and its crit rule is one this control can actually express. `critDamageExpr` doubles
+ *    dice, so a `double-total` system (PF2e/SF2e) is offered no chip rather than a wrong one.
+ *
+ * Extracted for the same reason as {@link showsInitiativeTile}: it is a rule about real
+ * adapters, so it should be testable against real adapters.
+ */
+export function allowsCriticalDamageRoll(adapter: RuleSystemAdapter): boolean {
+  return hasCriticalHitsForAdapter(adapter) && criticalDamageRuleForAdapter(adapter) === 'double-dice';
+}
 
 /** The three roll modes a d20 check/attack can be taken with. */
 export type RollMode = 'normal' | 'advantage' | 'disadvantage' | 'crit';
@@ -66,6 +107,30 @@ export function resolveRollMode(chosen: RollMode, modifiers: { shiftKey: boolean
   if (modifiers.shiftKey) return 'advantage';
   if (modifiers.altKey || modifiers.ctrlKey || modifiers.metaKey) return 'disadvantage';
   return chosen;
+}
+
+/**
+ * Resolve the mode for ONE interaction with a `RollContextMenu`-backed control that also
+ * has a visible chooser beside it.
+ *
+ * `RollContextMenu` folds shift/alt-click and its long-press menu into the single `clicked`
+ * mode it emits. A non-`normal` value is always an explicit override and wins. `'normal'`
+ * is ambiguous — it is emitted both by a plain click (no preference expressed, so the
+ * chooser's standing selection should apply) and by picking "Normal" from the menu (an
+ * explicit request for a flat roll, which must NOT be overridden by the chooser).
+ *
+ * `event` disambiguates them: `RollContextMenu` passes the MouseEvent on the plain-click
+ * path and nothing on the menu path. That contract is load-bearing here — see the note on
+ * `onRoll` in RollContextMenu.tsx.
+ *
+ * Call sites previously passed `clicked` into {@link resolveRollMode} with modifiers
+ * derived from `clicked` itself, making that call a no-op and the chooser decorative: a
+ * touch user who selected Advantage and tapped an attack still submitted a flat d20 — the
+ * exact gap issue #713 added the chooser to close.
+ */
+export function rollModeForClick(clicked: RollMode, chosen: RollMode, event?: unknown): RollMode {
+  if (clicked !== 'normal') return clicked;
+  return event === undefined ? 'normal' : chosen;
 }
 
 export function toCheckRollMode(mode: RollMode): 'normal' | 'advantage' | 'disadvantage' | 'crit' {

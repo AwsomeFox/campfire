@@ -74,6 +74,10 @@ describe('#587 catalog projection', () => {
       'icsTokenExpiresAt',
       'activeEncounterId',
       'latestSessionNumber', // denormalized session-position stat; not needed in the catalog
+      // Additional content selection is campaign configuration, not operational metadata.
+      // The catalog exposes the primary ruleSystem only; listing every enabled supplement
+      // would disclose campaign content choices to an admin who is not a member.
+      'enabledPackSlugs',
       // Homebrew mechanics profile (issue #1502): a 13-field combat-math blob the catalog has
       // no use for. `ruleSystem` — the slug it pairs with — is already projected, which is the
       // only part a catalog browser needs to know; the profile itself is read by the adapter

@@ -74,7 +74,7 @@ export function buildSearchUrlParams(query: string, ruleSystem?: string | null, 
   const params = new URLSearchParams();
   const trimmed = query.trim();
   if (trimmed) params.set('q', trimmed);
-  const packSlugs = [...new Set([ruleSystem ?? '', ...enabledPackSlugs].filter(Boolean))];
+  const packSlugs = [...new Set([ruleSystem ?? '', ...enabledPackSlugs].filter(Boolean))].sort();
   if (packSlugs.length === 1) params.set('pack', packSlugs[0]!);
   else if (packSlugs.length > 1) params.set('packs', packSlugs.join(','));
   params.set('limit', String(limit));
@@ -156,7 +156,7 @@ export function RulesLookupPanel({ campaignId, ruleSystem, enabledPackSlugs = []
   }, [installedPacks]);
 
   const effectivePack = ruleSystem || '';
-  const effectivePacksKey = [...new Set([effectivePack, ...enabledPackSlugs].filter(Boolean))].join(',');
+  const effectivePacksKey = [...new Set([effectivePack, ...enabledPackSlugs].filter(Boolean))].sort().join(',');
   const searchParams = buildSearchUrlParams(debouncedQuery, effectivePack, 8, enabledPackSlugs);
   const isQueryActive = Boolean(debouncedQuery.trim());
 
