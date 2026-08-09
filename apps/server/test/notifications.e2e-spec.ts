@@ -1155,8 +1155,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       }
       throw new Error(`Timed out waiting for ${deferred ? 'deferred' : 'immediate'} hidden-status row: ${body}`);
     };
-    const createHiddenCombatant = async (name: string, hidden = true) => {
-      const character = await player
+    const createHiddenCombatant = async (name: string, hidden = true, owner = player) => {
+      const character = await owner
         .post(`/api/v1/campaigns/${guardedCampaignId}/characters`)
         .send({ name, hpCurrent: 10, hpMax: 10 });
       expect(character.status).toBe(201);
@@ -1199,6 +1199,30 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
       .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
       .run();
 
+    // A recipient who is both the permanent DM and affected-character owner
+    // loses the full DM projection on demotion, but keeps the owner-safe row.
+    const dualRole = await createHiddenCombatant('Dual Role Read Hero', true, coDm);
+    expect((await dm
+      .patch(`/api/v1/encounters/${dualRole.encounter.body.id}/combatants/${dualRole.combatant.id}`)
+      .send({ hpSet: 0 })).status).toBe(200);
+    await waitForStoredRow(coDmId, 'Dual Role Read Hero was downed');
+    db.update(campaignMembers)
+      .set({ role: 'player' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+    const dualRoleAfterDemotion = (await listFor(coDm)).find((row) => row.body.includes('Dual Role Read Hero was downed'));
+    expect(dualRoleAfterDemotion).toMatchObject({ entityType: null, entityId: null });
+    const dualRoleRow = db.select().from(notificationRows).where(and(
+      eq(notificationRows.userId, coDmId),
+      eq(notificationRows.campaignId, guardedCampaignId),
+      sql`${notificationRows.body} like ${'%Dual Role Read Hero was downed%'}`,
+    )).get();
+    expect(dualRoleRow).toMatchObject({ entityType: null, entityId: null, data: null });
+    db.update(campaignMembers)
+      .set({ role: 'dm' })
+      .where(and(eq(campaignMembers.campaignId, guardedCampaignId), eq(campaignMembers.userId, coDmId)))
+      .run();
+
     const server = ctx.app.getHttpServer();
     const viewerToken = await coDm.post('/api/v1/tokens').send({
       name: 'hidden-status-viewer-read',
@@ -1218,7 +1242,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(viewerRead.status).toBe(200);
     expect((viewerRead.body.items ?? viewerRead.body).some((row: Notification) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(false);
     expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
-      .some((row) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(false);
+      .some((row) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(true);
+    expect((await listFor(coDm)).some((row) => row.body.includes('Viewer PAT Read Hero was downed'))).toBe(true);
 
     const boundToken = await coDm.post('/api/v1/tokens').send({
       name: 'hidden-status-bound-read',
@@ -1238,7 +1263,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(boundRead.status).toBe(200);
     expect((boundRead.body.items ?? boundRead.body).some((row: Notification) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(false);
     expect(db.select().from(notificationRows).where(and(eq(notificationRows.userId, coDmId), eq(notificationRows.campaignId, guardedCampaignId))).all()
-      .some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(false);
+      .some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(true);
+    expect((await listFor(coDm)).some((row) => row.body.includes('Bound PAT Read Hero was downed'))).toBe(true);
 
     expect((await coDm.put(`/api/v1/notifications/preferences/${guardedCampaignId}`).send({ categories: { live_play: 'digest' } })).status).toBe(200);
     const visibleThenHidden = await createHiddenCombatant('Visible Then Hidden Hero', false);
