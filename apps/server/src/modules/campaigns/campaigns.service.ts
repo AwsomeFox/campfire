@@ -1919,6 +1919,31 @@ export class CampaignsService {
       // Issue #851: the authoritative, race-free governance check — first statement
       // inside the transaction, atomic with the insert below.
       this.governance.enforceTx(tx, govCtx);
+      // The source may have changed its pack selection while the clone performed its
+      // bulk pre-transaction reads. Copy and validate the selection current after this
+      // transaction reserves the writer slot so a removed/reclassified pack cannot be
+      // persisted into the clone from the stale source snapshot.
+      const currentSourcePacks = tx
+        .select({
+          ruleSystem: campaigns.ruleSystem,
+          enabledPackSlugs: campaigns.enabledPackSlugs,
+          customMechanicsProfile: campaigns.customMechanicsProfile,
+        })
+        .from(campaigns)
+        .where(and(eq(campaigns.id, id), notDeleted(campaigns.deletedAt)))
+        .limit(1)
+        .get();
+      if (!currentSourcePacks) throw new NotFoundException(`Campaign ${id} not found`);
+      const clonedEnabledPackSlugs = this.normalizeEnabledPackSlugs(
+        fromJsonText<string[]>(currentSourcePacks.enabledPackSlugs, []),
+        currentSourcePacks.ruleSystem,
+      );
+      this.validateRuleSystemTx(
+        tx,
+        currentSourcePacks.ruleSystem,
+        currentSourcePacks.customMechanicsProfile != null,
+      );
+      this.validateEnabledPackSlugsTx(tx, clonedEnabledPackSlugs, currentSourcePacks.ruleSystem);
       const [campaignRow] = tx
         .insert(campaigns)
         .values({
@@ -1936,12 +1961,12 @@ export class CampaignsService {
           aiExternalContentPolicy: source.aiExternalContentPolicy ?? 'member_consent',
           sessionCount: template ? 0 : source.sessionCount,
           latestSessionNumber: template ? 0 : source.latestSessionNumber,
-          ruleSystem: source.ruleSystem,
-          enabledPackSlugs: JSON.stringify(source.enabledPackSlugs ?? []),
+          ruleSystem: currentSourcePacks.ruleSystem,
+          enabledPackSlugs: JSON.stringify(clonedEnabledPackSlugs),
           // Issue #1502: carry the paired homebrew mechanics profile with its ruleSystem slug —
           // otherwise a clone of a homebrew campaign would silently resolve to the 5e adapter
           // fallback (no ADAPTERS entry for the slug, no profile to pair it with).
-          customMechanicsProfile: source.customMechanicsProfile ? JSON.stringify(source.customMechanicsProfile) : null,
+          customMechanicsProfile: currentSourcePacks.customMechanicsProfile,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
           // Issue #851: the operator's default quota, inherited atomically with the
           // row — deliberately NOT the source campaign's own storageQuotaBytes.

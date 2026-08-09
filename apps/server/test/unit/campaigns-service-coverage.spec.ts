@@ -458,6 +458,61 @@ describe('CampaignsService unit coverage tests', () => {
     expect(clonedTmpl.name).toBe('Cloned Template Campaign');
   });
 
+  it('re-reads and validates the source pack selection inside the clone transaction', async () => {
+    const creatorActor: RequestUser = {
+      id: String(creatorUserId),
+      name: 'Creator',
+      serverRole: 'user',
+    };
+    const ts = new Date().toISOString();
+    const [supplement] = await db
+      .insert(rulePacks)
+      .values({
+        slug: 'clone-race-supplement',
+        name: 'Clone Race Supplement',
+        version: '1',
+        license: 'CC0',
+        sourceUrl: '',
+        kind: 'supplement',
+        installedAt: ts,
+        entryCount: 0,
+      })
+      .returning();
+    const source = await campaignsService.create(
+      { name: 'Clone Race Source', enabledPackSlugs: [supplement.slug] },
+      creatorActor,
+    );
+
+    const orm = (holder as unknown as { orm: DrizzleDb }).orm;
+    const original = Object.getOwnPropertyDescriptor(orm, 'transaction');
+    const realTransaction = orm.transaction.bind(orm);
+    let selectionDropped = false;
+    (orm as unknown as { transaction: unknown }).transaction = (fn: never) => {
+      if (!selectionDropped) {
+        selectionDropped = true;
+        // Simulate the source dropping its last reference and an admin uninstalling
+        // the pack after clone() reads the source but before its write transaction.
+        db.update(campaignsTable)
+          .set({ enabledPackSlugs: '[]' })
+          .where(eq(campaignsTable.id, source.id))
+          .run();
+        db.delete(rulePacks).where(eq(rulePacks.id, supplement.id)).run();
+      }
+      return realTransaction(fn);
+    };
+    try {
+      const cloned = await campaignsService.clone(
+        source.id,
+        { name: 'Clone Race Result', mode: 'full' },
+        creatorActor,
+      );
+      expect(cloned.enabledPackSlugs).toEqual([]);
+    } finally {
+      if (original) Object.defineProperty(orm, 'transaction', original);
+      else delete (orm as unknown as { transaction?: unknown }).transaction;
+    }
+  });
+
   // Issue #851 — CampaignsService's WIRING to CampaignGovernanceService: the
   // authoritative policy/limit logic itself is covered exhaustively in
   // campaign-governance.spec.ts against a real CampaignGovernanceService; here we
