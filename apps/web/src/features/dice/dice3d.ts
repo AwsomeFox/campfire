@@ -62,6 +62,59 @@ const WALL_Z = 1.5;
 
 const DROPPED_OPACITY = 0.3;
 
+/** Resting radius of each solid before the roll's scale is applied. */
+const DIE_RADIUS = 0.96;
+const D6_RADIUS = 0.86;
+/** How far apart two resting dice must sit, as a multiple of their radii. */
+const SEPARATION = 1.15;
+/**
+ * Relaxation passes. Generous because it runs ONCE per roll, off the animation
+ * frame, before anything is drawn: at the 60-die ceiling that is ~1770 pairs a
+ * pass, still well under a millisecond, and dice wedged against a wall need room
+ * to shuffle along it.
+ */
+const RELAX_PASSES = 400;
+/**
+ * Relax to a hair BEYOND the required gap. Correcting to exactly the gap only
+ * reaches it in the limit — each pass halves what is left — so a pair would sit
+ * a few ten-thousandths short of clear however many passes it ran.
+ */
+const SEPARATION_EPS = 0.002;
+
+/**
+ * How big the dice are drawn, given how many are in flight.
+ *
+ * The first three steps are the design's own sizes. Past that, the tray floor
+ * physically runs out: a fixed 0.66 fits maybe five dice, and the server accepts
+ * up to 20 per term with no cap on terms, so `20d6+20d6+20d6` is a legal 60-die
+ * roll. Asking `separateRestingPlaces` to open out more dice than the floor can
+ * hold has no answer — it can only pick the least-bad pile. So the dice shrink
+ * until the floor CAN hold them, and separation becomes solvable again.
+ *
+ * Capacity is counted as a GRID of rows and columns, not as bare area. The tray
+ * is much shallower than it is wide, so once dice are large enough that two will
+ * not sit side by side in z, area over-states what fits by a wide margin — it
+ * would shrink a three-die roll that comfortably lines up in a single row.
+ * Counts of three and under keep the design's sizes untouched.
+ */
+export function dieScaleFor(count: number, radius: number = DIE_RADIUS): number {
+  let scale = count > 3 ? 0.66 : count > 1 ? 0.82 : 1.05;
+  if (count <= 3) return scale;
+  for (let i = 0; i < 60; i++) {
+    const r = radius * scale;
+    const d = 2 * r * SEPARATION;
+    const cols = Math.floor(Math.max(0, 2 * WALL_X - 2 * r) / d) + 1;
+    const rows = Math.floor(Math.max(0, 2 * WALL_Z - 2 * r) / d) + 1;
+    // Generous headroom over a perfect grid. The dice relax from wherever the
+    // physics dropped them, which is nothing like a grid, and the last few
+    // percent of packing is exactly where relaxation stalls — the tray is cheap
+    // to give away, a die still overlapping is not.
+    if (cols * rows >= count * 1.6) break;
+    scale *= 0.95;
+  }
+  return scale;
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
 }
@@ -504,32 +557,121 @@ export interface RestingThrow {
   rest: number;
 }
 
+/** Centre distance two resting dice need before they stop intersecting. */
+export function separationGap(restA: number, restB: number): number {
+  return (restA + restB) * SEPARATION;
+}
+
 /**
- * Shift `traj` sideways so its resting place does not overlap one already taken.
+ * Slide resting dice apart so none settle intersecting.
  *
- * The nudge is clamped back inside the tray walls: an unclamped push (what a
- * template mockup rolling one or two dice never hits) walks a crowded 8d6 damage
- * roll straight off the edge of the canvas.
+ * Relaxes ALL of them together rather than fitting each new die around the ones
+ * already down. Placing them one at a time cannot work in general: an early die
+ * takes a spot, nothing can later reopen it, and a crowded roll dead-ends with
+ * dice inside each other however hard the newcomer is pushed. Here every die
+ * gives ground, so the pile opens out as a whole.
  *
- * Clamped TWICE, because the offset shifts every recorded frame, not just the
- * resting one. The resting frame is held to `WALL - rest` so the settled die sits
- * fully inside the tray; each earlier frame is then held to the wall the
- * integrator itself bounces off, so a throw that already grazed a wall mid-flight
- * cannot be shifted through it.
+ * Each pass moves an overlapping pair half the overlap apart each, then clamps
+ * both inside the tray — `WALL - rest`, so a settled die sits fully within the
+ * walls rather than merely having its centre in bounds. Passes stop as soon as
+ * nothing overlaps. `dieScaleFor` sizes the dice so the floor can hold them, so
+ * this has room to converge; were a roll ever denser than that, it still ends far
+ * more open than it started.
+ *
+ * The whole recorded trajectory shifts with the resting place, so the throw still
+ * arrives where it lands. Every frame is clamped to the wall the integrator
+ * bounces off, so a throw that grazed a wall in flight cannot be shifted through
+ * it.
  */
-export function nudgeApart(traj: Frame[], placed: readonly RestingThrow[], rest: number): void {
-  for (const other of placed) {
-    const ol = other.traj[other.traj.length - 1].p;
-    const ml = traj[traj.length - 1].p;
-    const gap = (other.rest + rest) * 1.15;
-    const dx = ml.x - ol.x;
-    const dz = ml.z - ol.z;
-    const dist = Math.hypot(dx, dz) || 0.001;
-    if (dist >= gap) continue;
-    const push = (gap - dist) / dist;
-    const offX = clamp(ml.x + dx * push, rest - WALL_X, WALL_X - rest) - ml.x;
-    const offZ = clamp(ml.z + dz * push, rest - WALL_Z, WALL_Z - rest) - ml.z;
-    for (const fr of traj) {
+export function separateRestingPlaces(throws: readonly RestingThrow[]): void {
+  const n = throws.length;
+  if (n < 2) return;
+
+  const startX = throws.map((t) => t.traj[t.traj.length - 1].p.x);
+  const startZ = throws.map((t) => t.traj[t.traj.length - 1].p.z);
+  const x = [...startX];
+  const z = [...startZ];
+  const limitX = throws.map((t) => Math.max(0, WALL_X - t.rest));
+  const limitZ = throws.map((t) => Math.max(0, WALL_Z - t.rest));
+
+  /** True while any pair is still closer than the gap they need. */
+  function stillOverlapping(): boolean {
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const gap = separationGap(throws[i].rest, throws[j].rest);
+        if (Math.hypot(x[i] - x[j], z[i] - z[j]) < gap) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * One separation sweep. Corrections are applied to both dice AS WE GO rather
+   * than accumulated and applied at the end: resolving each pair against
+   * already-moved neighbours converges, while collecting every correction first
+   * and applying them together leaves a crowded tray a hair short of clear no
+   * matter how long it runs.
+   */
+  function relaxPass(pass: number): void {
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const gap = separationGap(throws[i].rest, throws[j].rest);
+        let dx = x[i] - x[j];
+        let dz = z[i] - z[j];
+        let dist = Math.hypot(dx, dz);
+        if (dist >= gap + SEPARATION_EPS) continue;
+        if (dist < 1e-6) {
+          // Exactly stacked: any direction will do, but it must vary by pair and
+          // pass, or two coincident dice would shove each other nowhere.
+          const a = i * 2.399 + j * 0.777 + pass;
+          dx = Math.cos(a);
+          dz = Math.sin(a);
+          dist = 1;
+        }
+        const k = (gap + SEPARATION_EPS - dist) / dist / 2;
+        x[i] = clamp(x[i] + dx * k, -limitX[i], limitX[i]);
+        z[i] = clamp(z[i] + dz * k, -limitZ[i], limitZ[i]);
+        x[j] = clamp(x[j] - dx * k, -limitX[j], limitX[j]);
+        z[j] = clamp(z[j] - dz * k, -limitZ[j], limitZ[j]);
+      }
+    }
+  }
+
+  for (let pass = 0; pass < RELAX_PASSES && stillOverlapping(); pass++) relaxPass(pass);
+
+  if (stillOverlapping()) {
+    // Relaxation can wedge: a knot of dice in a corner reaches a fixed point that
+    // is still overlapping, and no number of further passes moves it, because
+    // every pair's correction is cancelled by another's. Laying the dice out on a
+    // grid is a placement that cannot fail — `dieScaleFor` has already guaranteed
+    // the floor has slots for them — and relaxing from there rounds off the
+    // regularity. Dice keep their left-to-right order, so the pile still broadly
+    // reflects where the throw put them.
+    const maxRest = Math.max(...throws.map((t) => t.rest));
+    const gap = separationGap(maxRest, maxRest) + SEPARATION_EPS;
+    const spanX = 2 * Math.max(0, WALL_X - maxRest);
+    const spanZ = 2 * Math.max(0, WALL_Z - maxRest);
+    const cols = Math.max(1, Math.floor(spanX / gap) + 1);
+    const rows = Math.max(1, Math.ceil(n / cols));
+    const stepX = cols > 1 ? spanX / (cols - 1) : 0;
+    const stepZ = rows > 1 ? Math.min(spanZ / (rows - 1), gap * 1.5) : 0;
+
+    const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => x[a] - x[b]);
+    for (const [slot, i] of order.entries()) {
+      const col = slot % cols;
+      const row = Math.floor(slot / cols);
+      x[i] = clamp(-spanX / 2 + col * stepX, -limitX[i], limitX[i]);
+      z[i] = clamp(-((rows - 1) * stepZ) / 2 + row * stepZ, -limitZ[i], limitZ[i]);
+    }
+
+    for (let pass = 0; pass < RELAX_PASSES && stillOverlapping(); pass++) relaxPass(pass);
+  }
+
+  for (let i = 0; i < n; i++) {
+    const offX = x[i] - startX[i];
+    const offZ = z[i] - startZ[i];
+    if (offX === 0 && offZ === 0) continue;
+    for (const fr of throws[i].traj) {
       fr.p.x = clamp(fr.p.x + offX, -WALL_X, WALL_X);
       fr.p.z = clamp(fr.p.z + offZ, -WALL_Z, WALL_Z);
     }
@@ -600,16 +742,19 @@ export function startDiceRoll(
   const group = new THREE.Group();
   const n = sides.length;
   const spread = n > 1 ? Math.min(2.5, 5.4 / n) : 0;
-  const scale = n > 3 ? 0.66 : n > 1 ? 0.82 : 1.05;
+  // Sized against the widest solid in the roll, so a mixed 1d20+8d6 is judged by
+  // the d20 it has to make room for rather than by the d6 average.
+  const scale = dieScaleFor(n, sides.some((s) => s !== 6) ? DIE_RADIUS : D6_RADIUS);
   const shadowTex = tex.shadow();
   const shadowGeos: THREE.BufferGeometry[] = [];
   const shadowMats: THREE.Material[] = [];
   const dice: DieState[] = [];
 
-  for (let i = 0; i < n; i++) {
-    const dieSides = sides[i];
-    const geoRadius = dieSides === 6 ? 0.86 : 0.96;
-    const rest = geoRadius * scale;
+  // Every throw is recorded first, then the whole set is slid apart, and only then
+  // are the dice built. Separation has to see all the resting places at once — it
+  // cannot be done while they arrive one at a time (see separateRestingPlaces).
+  const thrown = sides.map((dieSides, i) => {
+    const rest = (dieSides === 6 ? D6_RADIUS : DIE_RADIUS) * scale;
     const init: ThrowInit = {
       pos: new THREE.Vector3(
         (i - (n - 1) / 2) * spread + (Math.random() - 0.5) * 0.3,
@@ -630,9 +775,12 @@ export function startDiceRoll(
         (Math.random() - 0.5) * 22,
       ),
     };
-    const traj = simulate(init, rest);
-    // Keep resting places apart so two dice never come to rest inside each other.
-    nudgeApart(traj, dice, rest);
+    return { sides: dieSides, init, rest, traj: simulate(init, rest) };
+  });
+  separateRestingPlaces(thrown);
+
+  for (let i = 0; i < n; i++) {
+    const { sides: dieSides, init, rest, traj } = thrown[i];
 
     // Which face lands up is fixed by the recorded throw, so the rig can be built
     // with its numbering already keyed to that face.
@@ -640,7 +788,7 @@ export function startDiceRoll(
 
     const rig = buildDie(dieSides, theme, upIdx, tex);
     rig.group.scale.setScalar(scale);
-    rig.group.position.copy(init.pos);
+    rig.group.position.copy(traj[0].p);
     rig.group.quaternion.copy(init.quat);
     group.add(rig.group);
 

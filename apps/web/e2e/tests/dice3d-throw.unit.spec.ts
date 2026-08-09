@@ -1,7 +1,14 @@
 import { expect, test } from '@playwright/test';
 import * as THREE from 'three';
 import { DICE_ROLL_MAX_SETTLE_MS } from '../../src/components/DiceRollOverlay';
-import { dieFaceNormals, nudgeApart, simulate, upFaceIndex } from '../../src/features/dice/dice3d';
+import {
+  dieFaceNormals,
+  dieScaleFor,
+  separateRestingPlaces,
+  separationGap,
+  simulate,
+  upFaceIndex,
+} from '../../src/features/dice/dice3d';
 import { faceValues } from '../../src/features/dice/dice3dFaces';
 import {
   dieDelayMs,
@@ -133,10 +140,16 @@ test.describe('timing budget', () => {
   });
 });
 
-test.describe('separation nudge', () => {
-  /** A throw whose recorded frames already graze both walls. */
-  function grazingThrow() {
-    return {
+test.describe('resting-place separation', () => {
+  const at = (x: number, z: number) => ({
+    traj: [{ p: new THREE.Vector3(x, REST, z), q: new THREE.Quaternion() }],
+    rest: REST,
+  });
+
+  test('keeps every frame inside the walls, not just the resting one', () => {
+    // A throw whose recorded frames already graze both walls, resting on top of
+    // another die so the correction is at full strength.
+    const subject = {
       traj: [
         { p: new THREE.Vector3(WALL_X, 2.4, WALL_Z), q: new THREE.Quaternion() },
         { p: new THREE.Vector3(-WALL_X, 1.6, -WALL_Z), q: new THREE.Quaternion() },
@@ -144,16 +157,7 @@ test.describe('separation nudge', () => {
       ],
       rest: REST,
     };
-  }
-
-  test('keeps every frame inside the walls, not just the resting one', () => {
-    const subject = grazingThrow();
-    // A die resting almost on top of the subject's, so the push is at full strength.
-    const placed = [
-      { traj: [{ p: new THREE.Vector3(3.05, REST, 1.25), q: new THREE.Quaternion() }], rest: REST },
-    ];
-
-    nudgeApart(subject.traj, placed, REST);
+    separateRestingPlaces([subject, at(3.05, 1.25)]);
 
     for (const [i, fr] of subject.traj.entries()) {
       expect(Math.abs(fr.p.x), `frame ${i} shifted past the side wall`).toBeLessThanOrEqual(WALL_X);
@@ -165,29 +169,87 @@ test.describe('separation nudge', () => {
     expect(Math.abs(landed.z)).toBeLessThanOrEqual(WALL_Z - REST + 1e-9);
   });
 
-  test('leaves a throw alone when nothing is resting near it', () => {
-    const subject = grazingThrow();
-    const before = subject.traj.map((f) => f.p.clone());
-    nudgeApart(subject.traj, [
-      { traj: [{ p: new THREE.Vector3(-3.0, REST, -1.2), q: new THREE.Quaternion() }], rest: REST },
-    ], REST);
-    subject.traj.forEach((f, i) => {
-      expect(f.p.x).toBeCloseTo(before[i].x, 10);
-      expect(f.p.z).toBeCloseTo(before[i].z, 10);
+  test('leaves dice that already rest clear exactly where they landed', () => {
+    const a = at(3.0, 1.2);
+    const b = at(-3.0, -1.2);
+    const before = [a, b].map((t) => t.traj[0].p.clone());
+    separateRestingPlaces([a, b]);
+    [a, b].forEach((t, i) => {
+      expect(t.traj[0].p.x).toBeCloseTo(before[i].x, 10);
+      expect(t.traj[0].p.z).toBeCloseTo(before[i].z, 10);
     });
   });
 
   test('separates dice that would otherwise rest inside each other', () => {
-    const a = {
-      traj: [{ p: new THREE.Vector3(0, REST, 0), q: new THREE.Quaternion() }],
-      rest: REST,
-    };
-    const b = {
-      traj: [{ p: new THREE.Vector3(0.2, REST, 0), q: new THREE.Quaternion() }],
-      rest: REST,
-    };
-    nudgeApart(b.traj, [a], REST);
-    const gap = Math.hypot(b.traj[0].p.x - a.traj[0].p.x, b.traj[0].p.z - a.traj[0].p.z);
-    expect(gap).toBeGreaterThan(0.2);
+    const a = at(0, 0);
+    const b = at(0.2, 0);
+    separateRestingPlaces([a, b]);
+    const dist = Math.hypot(a.traj[0].p.x - b.traj[0].p.x, a.traj[0].p.z - b.traj[0].p.z);
+    expect(dist).toBeGreaterThanOrEqual(separationGap(REST, REST) - 1e-6);
+  });
+
+  test('unstacks dice dropped at exactly the same spot', () => {
+    const a = at(0, 0);
+    const b = at(0, 0);
+    const c = at(0, 0);
+    separateRestingPlaces([a, b, c]);
+    const gap = separationGap(REST, REST);
+    for (const [p, q] of [[a, b], [a, c], [b, c]]) {
+      const dist = Math.hypot(p.traj[0].p.x - q.traj[0].p.x, p.traj[0].p.z - q.traj[0].p.z);
+      expect(dist).toBeGreaterThanOrEqual(gap - 1e-6);
+    }
+  });
+
+  test('no two dice settle intersecting, for any roll size the server accepts', () => {
+    // The end-to-end placement invariant through the real pipeline: scale,
+    // simulate, separate. Fitting each die around the ones already down could not
+    // hold this — an early die takes a spot and nothing can later reopen it, so a
+    // crowded roll dead-ended with dice inside each other.
+    // 60 is the ceiling the grammar allows (20 per term, terms uncapped).
+    // Every count the grammar can produce, not a sample: the wedges this has to
+    // survive are specific to how many dice land where, and a sampled count sails
+    // past the one that knots up.
+    for (let count = 2; count <= 60; count++) {
+      const radius = 0.96;
+      const rest = radius * dieScaleFor(count, radius);
+      const thrown = Array.from({ length: count }, (_, i) => ({
+        traj: simulate(throwN(i * 7 + count), rest),
+        rest,
+      }));
+      separateRestingPlaces(thrown);
+
+      const gap = separationGap(rest, rest);
+      const resting = thrown.map((t) => t.traj[t.traj.length - 1].p);
+      // Reduced to one assertion per count rather than one per pair: at 60 dice
+      // that is 1770 pairs, and asserting each turns a millisecond of arithmetic
+      // into seconds of matcher overhead. The worst offender carries the message.
+      let worst = { gap: Infinity, at: '' };
+      let strayed = { over: 0, at: '' };
+      for (let i = 0; i < count; i++) {
+        const over = Math.max(Math.abs(resting[i].x) - WALL_X, Math.abs(resting[i].z) - WALL_Z);
+        if (over > strayed.over) strayed = { over, at: `die ${i}` };
+        for (let j = i + 1; j < count; j++) {
+          const dist = Math.hypot(resting[i].x - resting[j].x, resting[i].z - resting[j].z);
+          if (dist < worst.gap) worst = { gap: dist, at: `${i} and ${j}` };
+        }
+      }
+      expect(strayed.over, `${count} dice: ${strayed.at} past a wall`).toBeLessThanOrEqual(1e-9);
+      expect(worst.gap, `${count} dice: ${worst.at} intersect`).toBeGreaterThanOrEqual(gap - 1e-6);
+    }
+  });
+
+  test('dice shrink only as far as the tray actually demands', () => {
+    // The design's own sizes for small rolls must survive untouched.
+    expect(dieScaleFor(1)).toBe(1.05);
+    expect(dieScaleFor(2)).toBe(0.82);
+    expect(dieScaleFor(3)).toBe(0.82);
+    // Monotonic: a bigger handful never draws bigger dice.
+    let prev = Infinity;
+    for (let n = 1; n <= 60; n++) {
+      const s = dieScaleFor(n);
+      expect(s, `${n} dice grew`).toBeLessThanOrEqual(prev);
+      expect(s, `${n} dice vanished`).toBeGreaterThan(0.05);
+      prev = s;
+    }
   });
 });
