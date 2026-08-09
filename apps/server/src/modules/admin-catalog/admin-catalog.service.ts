@@ -38,6 +38,7 @@ import {
   settings,
   users,
 } from '../../db/schema';
+import { clearDerivedEquippedActionsIn } from '../inventory/derived-action-cleanup';
 import { AuditService, type AuditLogParams } from '../audit/audit.service';
 import { auditBestEffort } from '../audit/audit-best-effort';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -1907,6 +1908,12 @@ function planChange(
         apply: (tx) => {
           {
             tx.update(campaigns).set({ ruleSystem: next, updatedAt: ts }).where(eq(campaigns.id, id)).run();
+            // Issue #2097 review (chatgpt-codex-connector P1): a derived equipped action
+            // encodes the rule system it was computed under, and the resolver rolls whatever
+            // is stored against the campaign's CURRENT adapter — so every writer of
+            // `campaigns.ruleSystem` has to invalidate them, not just CampaignsService. Same
+            // transaction as the write, so the two can never disagree.
+            clearDerivedEquippedActionsIn(tx, id, ts);
           }
         },
       };

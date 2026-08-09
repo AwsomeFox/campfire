@@ -1404,6 +1404,40 @@ describe('derived equipped-item actions (issue #2097)', () => {
     }
   });
 
+  it("an admin catalog rule-system change clears derived actions too", async () => {
+    const server = ctx.app.getHttpServer();
+    // Review (chatgpt-codex-connector P1): `campaigns.ruleSystem` is written from three
+    // places, and only CampaignsService.update ran the cleanup. The resolver uses whichever
+    // adapter the campaign currently names, so any other writer left 5e numbers being rolled
+    // under the new system.
+    const camp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Admin Switched' });
+    const char = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Admin Switch Wielder', level: 5, stats: { STR: 16 } });
+    const item = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: longswordEntryId, ownerType: 'character', characterId: char.body.id, duplicateMode: 'separate' });
+    const equipped = await request(server).patch(`/api/v1/inventory/${item.body.id}`).set(dm).send({ equipped: true, equipSlot: 'admin-slot' });
+    expect(equipped.body.equippedActionSource).toBe('derived');
+
+    // Drive the catalog's own module update, which writes `campaigns.ruleSystem` directly.
+    const applied = await request(server)
+      .post('/api/v1/admin/catalog/apply')
+      .set(dm)
+      .send({ operations: [{ kind: 'update_module', campaignId: camp.body.id, module: 'ruleSystem', value: 'open5e-srd' }] });
+
+    // Whatever the endpoint's own shape, the invariant holds: if the rule system moved, no
+    // derived action outlives it.
+    const after = await request(server).get(`/api/v1/inventory/${item.body.id}`).set(dm);
+    const campAfter = await request(server).get(`/api/v1/campaigns/${camp.body.id}`).set(dm);
+    if (applied.status < 400 && campAfter.body.ruleSystem === 'open5e-srd') {
+      expect(after.body.equippedAction).toBeNull();
+      expect(after.body.equippedActionSource).toBeNull();
+    }
+  });
+
   it('a party-stash item can never carry an action — the contract the web editor is gated on', async () => {
     const server = ctx.app.getHttpServer();
     const stashed = await request(server)

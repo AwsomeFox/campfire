@@ -28,10 +28,10 @@ import {
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignStatus, CampaignStatusTransition, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { fromJsonText } from '../../common/json';
+import { clearDerivedEquippedActionsIn } from '../inventory/derived-action-cleanup';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
-  campaignLibraryBulkOperations,
   notes,
   quests,
   questObjectives,
@@ -446,40 +446,6 @@ function safeJson(text: string): unknown {
   } catch {
     return null;
   }
-}
-
-/**
- * Null out every `derived` equipped action recorded in a bulk-operation journal, returning the
- * rewritten JSON — or null when nothing needed changing, so the caller can skip the write.
- *
- * Structure-agnostic on purpose: the journal is a heterogeneous record of whatever the
- * operation touched, and this only cares about the `equippedAction`/`equippedActionSource`
- * pair wherever it appears. A `manual` action (or one with no provenance, which predates
- * migration 0177 and was therefore hand-authored) is left exactly as recorded.
- */
-function scrubDerivedActionsFromJournal(beforeJson: string | null): string | null {
-  if (!beforeJson) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(beforeJson);
-  } catch {
-    return null;
-  }
-  let changed = false;
-  const walk = (node: unknown): unknown => {
-    if (Array.isArray(node)) return node.map(walk);
-    if (!node || typeof node !== 'object') return node;
-    const record = { ...(node as Record<string, unknown>) };
-    if (record.equippedActionSource === 'derived') {
-      record.equippedAction = null;
-      record.equippedActionSource = null;
-      changed = true;
-    }
-    for (const key of Object.keys(record)) record[key] = walk(record[key]);
-    return record;
-  };
-  const next = walk(parsed);
-  return changed ? JSON.stringify(next) : null;
 }
 
 function toDomain(row: typeof campaigns.$inferSelect): Campaign {
@@ -1221,7 +1187,7 @@ export class CampaignsService {
           .returning({ id: campaignInvites.id })
           .all();
         // In the SAME transaction as the mechanics write — see `clearDerivedEquippedActionsIn`.
-        const clearedCharacterIds = willChangeMechanics ? this.clearDerivedEquippedActionsIn(tx, id) : [];
+        const clearedCharacterIds = willChangeMechanics ? clearDerivedEquippedActionsIn(tx, id, nowIso()) : [];
         return {
           row,
           revoked: deleted.length,
@@ -1314,7 +1280,7 @@ export class CampaignsService {
         // Same transaction as the mechanics write here too — see
         // `clearDerivedEquippedActionsIn`. This branch also persists `campaignInput`, so a
         // map-reset PATCH that ALSO switches systems has to clear atomically as well.
-        const clearedCharacterIds = willChangeMechanics ? this.clearDerivedEquippedActionsIn(tx, id) : [];
+        const clearedCharacterIds = willChangeMechanics ? clearDerivedEquippedActionsIn(tx, id, nowIso()) : [];
         return { row, changes: (reset as unknown as { changes?: number }).changes ?? 0, clearedCharacterIds };
       });
       updatedRow = resetResult.row;
@@ -1351,7 +1317,7 @@ export class CampaignsService {
           .where(eq(campaigns.id, id))
           .returning()
           .get();
-        return { row, clearedCharacterIds: willChangeMechanics ? this.clearDerivedEquippedActionsIn(tx, id) : [] };
+        return { row, clearedCharacterIds: willChangeMechanics ? clearDerivedEquippedActionsIn(tx, id, nowIso()) : [] };
       });
       updatedRow = written.row;
       ordinaryClearedCharacterIds = written.clearedCharacterIds;
@@ -1394,88 +1360,6 @@ export class CampaignsService {
       return toDomain(fresh ?? updatedRow);
     }
     return toDomain(updatedRow);
-  }
-
-  /**
-   * Drop every server-DERIVED equipped action in a campaign, and tell the affected
-   * characters' live screens (issue #2097 review). Called when the campaign's mechanics
-   * change, because a derived action encodes the rule system it was derived under.
-   *
-   * Only `derived` rows are touched — a `manual` action is a human's, and clearing it would
-   * throw away work the system change does not necessarily invalidate. The equip state itself
-   * is left alone: the sword is still worn, it just grants nothing until re-equipped.
-   * Soft-deleted rows are included; see the comment on the query.
-   *
-   * Runs INSIDE the caller's transaction (chatgpt-codex-connector P2). Awaited separately
-   * after the campaign write, an equip could start once the new system was already visible,
-   * derive a perfectly valid action under it, commit, and then have this cleanup delete that
-   * brand-new action purely because its source is `derived`. Sharing the transaction means an
-   * equip either precedes the switch — and is cleaned up correctly — or follows it and is
-   * left alone. Returns the affected character ids so the caller can emit invalidations after
-   * the commit rather than inside a synchronous better-sqlite3 transaction.
-   */
-  private clearDerivedEquippedActionsIn(tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0], campaignId: number): number[] {
-    // TOMBSTONED rows are included deliberately. Review (chatgpt-codex-connector P2): a
-    // bulk-archived equipped item keeps its action and provenance on purpose, so that
-    // `CampaignLibraryService.undoBulk()` can restore the exact pre-archive equip state — and
-    // that restore writes the saved action back verbatim, with no regeneration. Skipping the
-    // trash here therefore left a loaded gun: undo the archive after a system switch and the
-    // previous mechanics' spec is live again immediately. Nothing else about the tombstone
-    // changes; only the action a restore would resurrect.
-    const affected = tx
-      .select({ characterId: inventoryItems.characterId })
-      .from(inventoryItems)
-      .where(and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived')))
-      .all();
-    // NOTE: no early return on an empty `affected`. The journals are scrubbed below whether
-    // or not any LIVE row still carries a derived action — and the case where none does is
-    // exactly the dangerous one: a bulk move clears the live action while its journal keeps
-    // the copy, so an early return here would skip the only cleanup that matters.
-    if (affected.length > 0) {
-      const derivedInCampaign = and(eq(inventoryItems.campaignId, campaignId), eq(inventoryItems.equippedActionSource, 'derived'));
-      // LIVE rows advance `updatedAt`: their granted action genuinely changed, and readers
-      // key cache freshness off it.
-      tx.update(inventoryItems)
-        .set({ equippedAction: null, equippedActionSource: null, updatedAt: nowIso() })
-        .where(and(derivedInCampaign, isNull(inventoryItems.deletedAt)))
-        .run();
-      // TOMBSTONES deliberately do NOT. Review (chatgpt-codex-connector P2):
-      // `CampaignLibraryService.undoBulk()` fences on the tombstone's `updatedAt` still
-      // matching the version its journal recorded, so bumping it here made undoing an archive
-      // fail with a conflict — even though this same transaction scrubs the journal's action
-      // and the restore would have been perfectly safe. Nothing user-visible reads a trashed
-      // row's `updatedAt`, so leaving it alone costs nothing and keeps undo working.
-      tx.update(inventoryItems)
-        .set({ equippedAction: null, equippedActionSource: null })
-        .where(and(derivedInCampaign, isNotNull(inventoryItems.deletedAt)))
-        .run();
-    }
-
-    // …and the UNDO JOURNALS, which hold their own copies (issue #2097 review). A bulk
-    // operation's `beforeJson` keeps the pre-operation action indefinitely, and undo restores
-    // it verbatim — so a journal written before a system switch would put the old mechanics
-    // back the moment anyone undid an unrelated bulk operation.
-    //
-    // Scrubbed HERE, at the one moment those copies actually become invalid, rather than by
-    // having undo refuse to restore derived actions at all: that refusal (this feature's
-    // previous answer) also broke every ORDINARY undo, returning items equipped but granting
-    // nothing when no mechanics had changed. Same transaction as the live rows, so the two
-    // copies can never disagree.
-    for (const journal of tx
-      .select({ id: campaignLibraryBulkOperations.id, beforeJson: campaignLibraryBulkOperations.beforeJson })
-      .from(campaignLibraryBulkOperations)
-      .where(eq(campaignLibraryBulkOperations.campaignId, campaignId))
-      .all()) {
-      const scrubbed = scrubDerivedActionsFromJournal(journal.beforeJson);
-      if (scrubbed !== null) {
-        tx.update(campaignLibraryBulkOperations)
-          .set({ beforeJson: scrubbed, inverseJson: scrubbed })
-          .where(eq(campaignLibraryBulkOperations.id, journal.id))
-          .run();
-      }
-    }
-
-    return [...new Set(affected.map((row) => row.characterId).filter((cid): cid is number => cid != null))];
   }
 
   /** Emit the invalidations for a completed cleanup, after its transaction has committed. */
