@@ -6172,10 +6172,9 @@ export class EncountersService {
       }
       return { outcome, broadDelivered: false };
     };
-    for (const [memberId, memberRole] of roles) {
+    const deliverRecipient = async (memberId: number, memberRole: string, isOwner: boolean): Promise<boolean> => {
       const isDm = memberRole === 'dm';
-      const isOwner = String(memberId) === character?.ownerUserId;
-      if (!isDm && !isOwner) continue;
+      if ((!isDm && !isOwner) || narrowlyDelivered.has(memberId)) return false;
       // The player may learn their character's state, but a hidden encounter
       // remains a DM-only entity and must not become a notification deep-link.
       const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
@@ -6187,7 +6186,7 @@ export class EncountersService {
         isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
         encounterRow.id,
       ));
-      if (primary.broadDelivered) return;
+      if (primary.broadDelivered) return true;
       if (primary.outcome === 'delivered') narrowlyDelivered.add(memberId);
       // A recipient can legitimately hold both authorities. If their DM
       // membership changed after discovery, retry only their personal-status
@@ -6201,9 +6200,28 @@ export class EncountersService {
           { kind: 'character_owner', characterId },
           encounterRow.id,
         ));
-        if (owner.broadDelivered) return;
+        if (owner.broadDelivered) return true;
         if (owner.outcome === 'delivered') narrowlyDelivered.add(memberId);
       }
+      return false;
+    };
+    for (const [memberId, memberRole] of roles) {
+      if (await deliverRecipient(memberId, memberRole, String(memberId) === character?.ownerUserId)) return;
+    }
+
+    // Membership and ownership can both change between the initial recipient
+    // discovery and an awaited guarded write. Re-resolve them once after the
+    // first pass so a newly appointed permanent DM or current character owner
+    // gets the same transaction-bound delivery attempt. `narrowlyDelivered`
+    // prevents duplicate rows, and this bounded second pass never recurses.
+    const [currentCharacter] = await this.db
+      .select({ ownerUserId: characters.ownerUserId })
+      .from(characters)
+      .where(and(eq(characters.id, characterId), eq(characters.campaignId, encounterRow.campaignId)))
+      .limit(1);
+    const currentRoles = await this.notifications.memberRoles(encounterRow.campaignId);
+    for (const [memberId, memberRole] of currentRoles) {
+      if (await deliverRecipient(memberId, memberRole, String(memberId) === currentCharacter?.ownerUserId)) return;
     }
   }
 

@@ -1084,6 +1084,49 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(dualRoleOwnerDowned[0].entityId).toBe(dualRoleEncounter.body.id);
     expect((await statusNotifications(spectator, 'Character downed!', 1, dualRoleEncounter.body.id))[0].entityId).toBe(dualRoleEncounter.body.id);
 
+    // #2112: ownership may move after the initial recipient snapshot but
+    // before the stale owner's guarded write. The former owner is skipped;
+    // one bounded refreshed pass must notify the current owner safely.
+    const transferredOwnerCharacter = await player
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/characters`)
+      .send({ name: 'Transferred Owner Hero', hpCurrent: 10, hpMax: 10 });
+    expect(transferredOwnerCharacter.status).toBe(201);
+    const transferredOwnerEncounter = await dm
+      .post(`/api/v1/campaigns/${hiddenCampaignId}/encounters`)
+      .send({ name: 'Transferred Owner Ambush', hidden: true });
+    expect(transferredOwnerEncounter.status).toBe(201);
+    const transferredOwnerRoster = await dm.get(`/api/v1/encounters/${transferredOwnerEncounter.body.id}`);
+    const transferredOwnerCombatant = transferredOwnerRoster.body.combatants.find(
+      (combatant: { characterId: number | null }) => combatant.characterId === transferredOwnerCharacter.body.id,
+    );
+    expect(transferredOwnerCombatant).toBeDefined();
+    const transferOwnerAtWrite = jest.spyOn(notifications, 'notifyUserIfHiddenEncounterRecipient').mockImplementation(async (...args) => {
+      if (args[0] === playerId && args[4].kind === 'character_owner' && args[5] === transferredOwnerEncounter.body.id) {
+        db.update(characters)
+          .set({ ownerUserId: String(spectatorId) })
+          .where(eq(characters.id, transferredOwnerCharacter.body.id))
+          .run();
+      }
+      return guardedNotify(...args);
+    });
+    try {
+      expect((await dm
+        .patch(`/api/v1/encounters/${transferredOwnerEncounter.body.id}/combatants/${transferredOwnerCombatant.id}`)
+        .send({ hpSet: 0 })).status).toBe(200);
+    } finally {
+      transferOwnerAtWrite.mockRestore();
+    }
+    expect((await listFor(player)).find(
+      (row) => row.body.includes('Transferred Owner Hero was downed'),
+    )).toBeUndefined();
+    const transferredOwnerNotice = (await statusNotifications(
+      spectator,
+      'Character downed!',
+      1,
+      transferredOwnerEncounter.body.id,
+    ))[0];
+    expect(transferredOwnerNotice).toMatchObject({ entityType: null, entityId: null });
+
     db.update(campaignMembers)
       .set({ role: 'dm' })
       .where(and(eq(campaignMembers.campaignId, hiddenCampaignId), eq(campaignMembers.userId, coDmId)))
