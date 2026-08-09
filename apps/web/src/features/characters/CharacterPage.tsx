@@ -1911,9 +1911,13 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
   const saves = useMemo(() => catalog.filter((c) => c.category === 'save'), [catalog]);
-  // A system whose saves are not roll-two-keep (PF2e) gets no chooser: offering one would
-  // promise an advantage the server correctly refuses to roll.
-  const supportsAdvantage = useMemo(() => saves.some((c) => c.supportsAdvantage), [saves]);
+  // The chooser needs BOTH a system that can honour it and a viewer who can roll: PF2e's
+  // saves are not roll-two-keep, and a reader (archived campaign, non-owner) gets static
+  // tiles — either way an enabled chooser would only move a status label, driving nothing.
+  const supportsAdvantage = useMemo(
+    () => canEdit && saves.some((c) => c.supportsAdvantage),
+    [canEdit, saves],
+  );
 
   async function toggle(k: Ability) {
     if (!canEdit || busy) return;

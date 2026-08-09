@@ -5759,28 +5759,20 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
   const FLAT_PROFICIENCY = 2;
   const out: RollCheckDefinition[] = [];
 
-  const initBase = adapter.initiativeModifier(stats, 'score', character.level);
+  // The ADAPTER'S OWN key expectations, not the catalog's normalised ones. `normalizeStats`
+  // uppercases every key for this module's ability lookups, which silently hid PF1e's native
+  // `initiative` / `init` bonus (its reader matches those lowercase keys) and made a valid
+  // initiative resolve to 0 — reported as "Initiative —" on a sheet whose DEX was unset.
+  // Adapters already accept either canonical or raw ability maps, so handing them the stored
+  // record is strictly more permissive; verified identical for a canonical DEX map across
+  // every registered adapter.
+  const initBase = adapter.initiativeModifier(character.stats ?? stats, 'score', character.level);
   const initLevel = adapter.levelInitiativeBonus?.(character.level) ?? 0;
   const initMod = initBase + initLevel;
   // The adapter's own declaration, when it has one — this used to special-case a single
   // adapter id for the label and publish no ability at all (see `initiativeAbility`).
   const initiativeAbility = adapter.initiativeAbility ?? null;
   const initiativeLabel = initiativeAbility ?? 'initiative';
-  /**
-   * Whether this initiative was computed from data the character does not have.
-   *
-   * The ABILITY-derived component is `initBase` — `initiativeModifier` reads the declared
-   * `initiativeAbility` when the score is there, and some systems fall back to a native
-   * bonus stored under another key (PF1e's `initiative`/`init`). Testing that component,
-   * rather than the final total, is what separates the two cases a consumer must not
-   * confuse: a 13th Age level-3 character with no DEX totals +3 purely from
-   * `levelInitiativeBonus`, so a total-based test would call that complete; a PF1e character
-   * with a native +5 and no DEX has a real source, so an ability-presence test alone would
-   * call it incomplete. Both are answered here, in the catalog, instead of each renderer
-   * re-deriving it.
-   */
-  const initiativeIncomplete =
-    initiativeAbility != null && readAbilityScoreOrNull(stats, initiativeAbility) === null && initBase === 0;
 
   // A system with no initiative roll gets no initiative check — its `initiativeDie` exists
   // only to satisfy the generic roller seam (see `hasInitiativeRoll`), so emitting an entry
@@ -5803,7 +5795,6 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
     die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
     supportsAdvantage: true,
     supportsDegrees: false,
-    ...(initiativeIncomplete ? { incomplete: true } : {}),
   });
 
   // Everything below is `d20 + modifier`. For a system that does not roll d20 checks, the
@@ -5874,8 +5865,41 @@ export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: Check
  * configurable {@link neutralCheckCatalog}. This is the single entry point the server, the MCP
  * tools, the character sheet, and the encounter card all call — so the math is identical.
  */
+/**
+ * Flag an initiative check that was computed from a score the character does not have.
+ *
+ * Applied to EVERY catalog — the adapter-owned ones (5e, PF2e) as much as the neutral one —
+ * because a renderer gating on `incomplete` must get the same answer whichever built it; a
+ * rule that only covered the neutral path silently let a 5e draft sheet roll a fabricated
+ * +0 initiative.
+ *
+ * The test is the ABILITY-DERIVED COMPONENT of the breakdown, not the final total and not
+ * mere ability presence, because each of those gets one of the two cases wrong: a 13th Age
+ * level-3 character with no DEX totals +3 from `levelInitiativeBonus` alone (a total-based
+ * test calls that complete), while a PF1e character with a native `initiative` bonus and no
+ * DEX has a real source (an ability-presence test calls that incomplete).
+ */
+function withInitiativeCompleteness(
+  catalog: RollCheckDefinition[],
+  character: CheckCatalogCharacter,
+): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  return catalog.map((def) => {
+    const ability = def.ability;
+    if (def.category !== 'initiative' || def.incomplete || !ability) return def;
+    if (readAbilityScoreOrNull(stats, ability) !== null) return def;
+    const fromAbility = def.breakdown
+      .filter((c) => c.label.toLowerCase() === ability.toLowerCase())
+      .reduce((sum, c) => sum + c.value, 0);
+    return fromAbility === 0 ? { ...def, incomplete: true } : def;
+  });
+}
+
 export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
-  const catalog = adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character);
+  const catalog = withInitiativeCompleteness(
+    adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character),
+    character,
+  );
   // Enforced HERE, not at each render site: this is the one seam the sheet, the encounter
   // card, REST `/checks` + `/checks/roll`, and the MCP `list_checks`/`roll_check` tools all
   // read, so filtering anywhere else would leave the others able to roll what the adapter

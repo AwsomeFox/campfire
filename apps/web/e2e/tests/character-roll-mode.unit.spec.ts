@@ -5,6 +5,7 @@ import {
   Dnd5eAdapter,
   OSR_VARIANT_ADAPTERS,
   OpenLegendAdapter,
+  Pathfinder1eAdapter,
   StarforgedAdapter,
   listRuleSystemAdapters,
   checkCatalogForAdapter,
@@ -266,6 +267,24 @@ test.describe('neutral initiative declares the score it reads', () => {
    * to 0 through this path and IS incomplete. See the PR thread — that case-sensitivity is a
    * separate latent bug, not something to fix from a character-sheet change.
    */
+  /**
+   * The catalog hands adapters the STORED stats, not its own uppercased copy: PF1e reads a
+   * native `initiative`/`init` bonus under those exact lowercase keys, and normalising first
+   * silently resolved a valid initiative to 0 and reported "Initiative —".
+   */
+  test("PF1e's native initiative survives the catalog's key normalisation", () => {
+    const initiativeOfPf1e = (stats: Record<string, number>) =>
+      checkCatalogForAdapter(Pathfinder1eAdapter, { level: 3, stats, saveProficiencies: [], skills: {} })
+        .find((c) => c.category === 'initiative');
+
+    expect(initiativeOfPf1e({ initiative: 5 })).toMatchObject({ modifier: 5 });
+    expect(initiativeOfPf1e({ initiative: 5 })?.incomplete).toBeFalsy();
+    expect(initiativeOfPf1e({ init: 3 })).toMatchObject({ modifier: 3 });
+    // DEX still works, and a sheet with neither is still honestly incomplete.
+    expect(initiativeOfPf1e({ DEX: 16 })).toMatchObject({ modifier: 3 });
+    expect(initiativeOfPf1e({ STR: 10 })?.incomplete).toBe(true);
+  });
+
   test('a non-ability source keeps the entry complete', () => {
     const nativeSourced = {
       ...Archmage13aAdapter,

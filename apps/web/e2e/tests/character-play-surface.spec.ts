@@ -218,6 +218,7 @@ test.describe('character sheet play surface', () => {
       await expect(page.getByRole('button', { name: /^Roll initiative/ })).toBeVisible();
       await expect(page.getByRole('button', { name: /to hit \+9/ })).toBeVisible();
       await expect(page.getByRole('radiogroup', { name: 'Attack roll mode' })).toBeVisible();
+      await expect(page.getByRole('radiogroup', { name: 'Saving throw roll mode' })).toBeVisible();
 
       // Neither a check NOR a to-hit has a critical variant: the check path treats `crit` as
       // an ordinary die, and the attack chip's handler maps only advantage/disadvantage and
@@ -257,6 +258,8 @@ test.describe('character sheet play surface', () => {
       // ...and the roll-mode chooser goes with them: with no rollable chip on screen it
       // would announce mode changes that drive nothing.
       await expect(page.getByRole('radiogroup', { name: 'Attack roll mode' })).toHaveCount(0);
+      // Same for the saving-throw chooser: its tiles are static here too.
+      await expect(page.getByRole('radiogroup', { name: 'Saving throw roll mode' })).toHaveCount(0);
     } finally {
       // Trashing notifies members ("A campaign you were in was deleted") and the bell only
       // fetches the newest 30, so a leftover notice here pushes an older seeded one out of
