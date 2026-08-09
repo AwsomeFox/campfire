@@ -50,3 +50,62 @@ export function afterCombatantIdForDrop(
 export function reorderMenuTargets<T extends { id: number }>(orderedCombatants: readonly T[], combatantId: number): T[] {
   return orderedCombatants.filter((c) => c.id !== combatantId);
 }
+
+/**
+ * Issue #2116. `handleReorderDrop`'s in-flight gate refuses while `reorderCombatant.isPending`
+ * — but that flips false the instant the reorder POST resolves, before the follow-up refetch
+ * it triggers has actually landed. A drag issued in that window would be authored against
+ * whatever roster is STILL in the query cache — the pre-reorder topology — and the server's
+ * `expectedTurnVersion` CAS would still accept it (a reorder never bumps `turnVersion`, only a
+ * turn advance does), so the request would silently apply relative to an order the DM can no
+ * longer see: a wrong-result path, not the recoverable-409 the CAS otherwise guards.
+ *
+ * What this function's `true` result actually MEANS: "since the reorder that armed this gate
+ * settled, no real `GET /encounters/:id` has completed yet" — the precondition that must hold
+ * before a further drag is authored, because only a completed GET can have observed the
+ * server's post-reorder roster. `armedAt`/`readRevision` must therefore both be values of
+ * `encounterReadRevisionRef` (see RunSessionPage.tsx) — a counter `encounterQuery`'s `queryFn`
+ * increments ONLY after a fetch it started actually resolves (guarded by
+ * `signal.throwIfAborted()` so a superseded in-flight request cannot count). It is
+ * DELIBERATELY NOT `encounterQuery.dataUpdatedAt`: that TanStack-managed timestamp advances on
+ * ANY `setQueryData` call for this query key, including the several local OPTIMISTIC writes
+ * elsewhere on this page (HP deltas, map/fog patch reconciliation, ...) that touch fields other
+ * than `combatants`/`turnVersion` and never round-trip to the server at all — gating on it
+ * would let one of those land inside the window and clear the gate while the roster was still
+ * stale, reopening exactly the silent-wrong-order hazard this function exists to prevent. (This
+ * codebase already discovered and documented that exact hazard for a sibling problem — see
+ * `encounterReadRevisionRef`'s own doc comment.)
+ *
+ * Returns `true` — "still waiting, keep the gate closed" — until `readRevision` is STRICTLY
+ * greater than `armedAt` (`false` when `armedAt` is `null`: no reorder has settled since the
+ * last resync, or since this last cleared). Deliberately independent of
+ * `encounterQuery.isFetching`, which the issue rules out as the gating signal: `isFetching`
+ * is true for ANY refetch (SSE invalidations, an unrelated write's own `onSettled`), so
+ * gating on it would silently swallow a completed drag whenever one happened to overlap.
+ */
+export function isAwaitingReorderResync(armedAt: number | null, readRevision: number): boolean {
+  return armedAt !== null && readRevision <= armedAt;
+}
+
+/**
+ * Issue #2116 review round 7. `RunSessionPage` is reused across encounters — its route carries
+ * no `key={encounterId}`, so navigating the DM from encounter A to encounter B re-renders the
+ * SAME component instance instead of remounting it. `useMutation` (`@tanstack/react-query`)
+ * calls `observer.setOptions(options)` in an effect on every render, and
+ * `MutationObserver.setOptions` (`@tanstack/query-core`) splices those newest options straight
+ * into an in-flight `Mutation` instance whenever its status is still `'pending'`. So if a drag
+ * starts on encounter A and the DM navigates to encounter B before A's POST resolves, the
+ * `onSettled` callback that actually executes is the one captured on B's most recent render —
+ * closing over B, even though the completed write and its variables still belong to A.
+ *
+ * `writeEncounterId` must therefore come from the mutation's own variables (fixed once, as the
+ * argument to its one `execute()` call, never subject to that options swap); `activeEncounterId`
+ * must come from a ref updated fresh on every render (e.g. `activeEncounterIdRef.current`), read
+ * at the moment `onSettled` actually runs. Only when the two still agree does a just-settled
+ * write belong to the encounter currently on screen — arming the resync latch for anything else
+ * would spuriously disable the DISPLAYED encounter's reorder affordances for a drag that was
+ * never made against it.
+ */
+export function shouldArmReorderResyncLatch(writeEncounterId: number, activeEncounterId: number): boolean {
+  return writeEncounterId === activeEncounterId;
+}
