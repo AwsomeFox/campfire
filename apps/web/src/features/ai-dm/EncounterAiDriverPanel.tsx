@@ -27,7 +27,7 @@ import {
   shouldScrollTranscriptToTailOnMount,
   unreadAfterFeedGrowth,
 } from './feedScrollFollow';
-import { NARRATION_LOG_LIVE_REGION, NARRATION_STATUS_LIVE_REGION, NARRATION_VISUAL_TRANSCRIPT, nextComposerStatusAnnouncement, resolveComposerA11ySnapshot, type ComposerA11ySnapshot } from './narrationAccessibility';
+import { NARRATION_LOG_LIVE_REGION, NARRATION_STATUS_LIVE_REGION, NARRATION_VISUAL_TRANSCRIPT, formatNarrationLogAddition, nextComposerStatusAnnouncement, resolveComposerA11ySnapshot, type ComposerA11ySnapshot } from './narrationAccessibility';
 import { useDisclosure } from '../../components/useDisclosure';
 import { Btn, Card, Chip, EmptyState } from '../../components/ui';
 import { Field } from '../../components/Field';
@@ -90,7 +90,7 @@ export function EncounterAiDriverPanel({
     }
     const additions = finished.filter((entry) => !announcedIdsRef.current.has(entry.id));
     additions.forEach((entry) => announcedIdsRef.current.add(entry.id));
-    if (additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...additions.map((entry) => entry.kind === 'dm' ? entry.committed.join('\n\n') : entry.kind === 'player' ? entry.text : entry.kind === 'tool' ? entry.name : entry.text ?? '')]);
+    if (additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...additions.map((entry) => formatNarrationLogAddition(entry.kind === 'dm' ? { id: entry.id, kind: 'dm', text: entry.committed.join('\n\n') } : entry.kind === 'player' ? { id: entry.id, kind: 'player', memberName: entry.memberName, characterName: entry.characterName, text: entry.text } : entry.kind === 'tool' ? { id: entry.id, kind: 'tool', text: entry.name } : { id: entry.id, kind: 'system', variant: entry.variant, text: entry.text, data: entry.data }))]);
   }, [transcript.entries]);
 
   const charactersQuery = useQuery({
@@ -103,6 +103,7 @@ export function EncounterAiDriverPanel({
   const myCharacter = charactersQuery.data?.find((c) => c.id === myMembership?.characterId);
   const memberName = me?.user.displayName || me?.user.username || t('table.you');
   const characterName = myCharacter?.name;
+  const playerAttributionPending = !isDm && myMembership?.characterId !== undefined && !charactersQuery.isFetched;
 
   const currentCombatantName = useMemo(() => {
     if (!encounter.currentCombatantId) return undefined;
@@ -168,7 +169,7 @@ export function EncounterAiDriverPanel({
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || locked || submitting) return;
+    if (!text || locked || submitting || playerAttributionPending) return;
     setSubmitting(true);
     setSubmitError(null);
     const clientRef = newClientRef();
