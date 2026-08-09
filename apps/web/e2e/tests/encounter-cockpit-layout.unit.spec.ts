@@ -73,7 +73,9 @@ test.describe('encounter cockpit layout', () => {
     const block = styles.slice(styles.indexOf('.cf-vtt {'), styles.indexOf('.cf-vtt-header {'));
     expect(block).toMatch(/position: fixed;/);
     expect(block).toMatch(/inset: 0;/);
-    expect(block).toMatch(/grid-template-rows: auto auto minmax\(0, 1fr\);/);
+    // Header and banners are `auto`; the body keeps a floor so a tall wrapped header plus
+    // stacked banners can never squeeze the map and panel to nothing.
+    expect(block).toMatch(/grid-template-rows: auto auto minmax\(96px, 1fr\);/);
     expect(block).toMatch(/overflow: hidden;/);
     // Above the mobile tab bar it replaces, below dialogs.
     expect(styles).toMatch(/--cf-layer-immersive: 41;/);

@@ -44,6 +44,7 @@ import {
   isValidElement,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type FocusEvent,
@@ -51,6 +52,7 @@ import {
   type PointerEvent,
   type ReactElement,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { sanitizeFieldPrefix } from './Field';
 import {
   applyGatedHintEvent,
@@ -150,6 +152,18 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
 
   const [hint, setHint] = useState<GatedHintState>(GATED_HINT_STATE_IDLE);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapperRef = useRef<HTMLSpanElement>(null);
+  /**
+   * Where to paint the bubble when the wrapper sits inside something that clips.
+   *
+   * The hint is normally absolutely positioned against this wrapper, which is right until
+   * an ancestor scrolls: the encounter cockpit's 58px tool rail has `overflow-y: auto`,
+   * and that establishes a clip box in BOTH axes, so a 220px bubble is sliced to the rail
+   * width in every viewport. Rather than change how the hint is positioned everywhere,
+   * detect a clipping ancestor and, only then, portal the same element to `<body>` with
+   * viewport coordinates measured from the trigger.
+   */
+  const [escapeAt, setEscapeAt] = useState<{ left: number; bottom: number } | null>(null);
 
   const clearTapTimer = () => {
     if (tapTimerRef.current != null) {
@@ -160,6 +174,30 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
 
   // Unmount-time cleanup only — the gated-clearing effect below handles every other case.
   useEffect(() => clearTapTimer, []);
+
+  const tooltipVisible = gatedTooltipVisible(hint);
+
+  useLayoutEffect(() => {
+    if (!tooltipVisible) {
+      setEscapeAt(null);
+      return;
+    }
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+    let clipping: HTMLElement | null = wrapper.parentElement;
+    while (clipping) {
+      const overflow = getComputedStyle(clipping);
+      if (overflow.overflowX !== 'visible' || overflow.overflowY !== 'visible') break;
+      clipping = clipping.parentElement;
+    }
+    // `document.body`/`html` clip nothing that matters here — only a real inner scroller does.
+    if (!clipping || clipping === document.body || clipping === document.documentElement) {
+      setEscapeAt(null);
+      return;
+    }
+    const rect = wrapper.getBoundingClientRect();
+    setEscapeAt({ left: Math.round(rect.left), bottom: Math.round(window.innerHeight - rect.top) });
+  }, [tooltipVisible, reason]);
 
   // The moment the reason clears (e.g. sync recovers), drop any lingering hover/focus/tap
   // hint state so a stale bubble never survives past the control actually becoming enabled.
@@ -233,19 +271,31 @@ export function GatedControl({ reason, className, children }: GatedControlProps)
     },
   } as Partial<GatableProps>);
 
-  const tooltipVisible = gatedTooltipVisible(hint);
+
+
+  const hintNode = tooltipVisible ? (
+    <span
+      className="cf-gated-hint"
+      role="presentation"
+      aria-hidden="true"
+      data-testid="gated-control-hint"
+      style={
+        escapeAt
+          ? { position: 'fixed', left: escapeAt.left, bottom: escapeAt.bottom, marginBottom: 6 }
+          : undefined
+      }
+    >
+      {reason}
+    </span>
+  ) : null;
 
   return (
-    <span className={wrapperClass} data-gated="true">
+    <span className={wrapperClass} data-gated="true" ref={wrapperRef}>
       {child}
       <span id={reasonId} className="sr-only">
         {reason}
       </span>
-      {tooltipVisible && (
-        <span className="cf-gated-hint" role="presentation" aria-hidden="true" data-testid="gated-control-hint">
-          {reason}
-        </span>
-      )}
+      {escapeAt && hintNode ? createPortal(hintNode, document.body) : hintNode}
     </span>
   );
 }
