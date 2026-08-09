@@ -52,6 +52,7 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/clearTranscript\(viewerId, campaignId, 'activity'\)/);
     expect(hook).toMatch(/transcriptRequestGenerationRef/);
     expect(hook).toMatch(/transcriptOwnerRef\.current === key \? transcript : emptyTranscript/);
+    expect(hook).toMatch(/\},\s*effectiveRole,/);
   });
 
   test('the empty encounter list retains a Driver session entry', () => {

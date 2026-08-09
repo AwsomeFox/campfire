@@ -369,6 +369,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
         }
       },
     },
+    effectiveRole,
   );
 
   // The owner-changing hydrate runs after render. Never hand a new role, campaign, or
