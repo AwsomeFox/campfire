@@ -82,7 +82,7 @@ export class AiPortraitController {
     @CurrentUser() user: RequestUser,
   ) {
     await this.access.requireRole(user, campaignId, 'player');
-    return this.aiPortrait.getJob(jobId, campaignId);
+    return this.aiPortrait.getJob(jobId, campaignId, user);
   }
 
   /** Cancel a job (issue #1321). Aborts any in-flight render; leaves no orphan files. */

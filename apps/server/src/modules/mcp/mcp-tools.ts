@@ -4819,7 +4819,7 @@ export class McpToolsService {
       },
       async ({ campaignId, jobId }) => {
         await this.access.requireRole(user, campaignId as number, 'player');
-        return this.aiPortrait.getJob(jobId as string, campaignId as number);
+        return this.aiPortrait.getJob(jobId as string, campaignId as number, user);
       },
     );
 

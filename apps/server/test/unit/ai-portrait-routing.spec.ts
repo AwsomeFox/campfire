@@ -12,6 +12,7 @@ import type { AttachmentsService } from '../../src/modules/attachments/attachmen
 import type { CharactersService } from '../../src/modules/characters/characters.service';
 import type { NpcsService } from '../../src/modules/npcs/npcs.service';
 import type { AuditService } from '../../src/modules/audit/audit.service';
+import type { AiProviderConfigService } from '../../src/modules/ai-provider-config/ai-provider-config.service';
 
 /**
  * AI portrait generation routing (issue #1321). Exercises the whole service offline with fake
@@ -88,7 +89,13 @@ function makeService(config: AiProviderConfig | null) {
     },
   };
   const audit: Pick<AuditService, 'log'> = { log: async () => undefined };
-  const providerConfig = { resolveEffectiveConfig: async () => config };
+  // Typed against Pick<AiProviderConfigService, ...> (AGENTS.md L96-L98) so a missing/renamed
+  // dependency method fails to compile. Production now calls both resolveEffectiveConfig and
+  // getServerAllowedModels (model allowlist revalidation), so the double supplies both.
+  const providerConfig: Pick<AiProviderConfigService, 'resolveEffectiveConfig' | 'getServerAllowedModels'> = {
+    resolveEffectiveConfig: async () => config,
+    getServerAllowedModels: async () => [],
+  };
   const service = new AiPortraitService(
     providerConfig as never,
     attachments as unknown as AttachmentsService,
@@ -188,6 +195,83 @@ describe('AiPortraitService routing (#1321)', () => {
     expect(b.id).toBe(a.id);
     expect(b.previews).toHaveLength(1);
   });
+
+  it('binds every job operation to its creator — a different caller cannot read/cancel/attach', async () => {
+    // Review feedback: a job id copied to another campaign member must not let them read the private
+    // prompt, cancel, refine, or attach another caller's job.
+    const { service } = makeService(openAiImageConfig(imageFetch()));
+    const campaignId = nextCampaign();
+    const OTHER: RequestUser = { id: 'u2-other', name: 'thief', serverRole: 'user', devRole: 'dm' } as RequestUser;
+    const job = await service.createJob(campaignId, { prompt: 'private brief', count: 1 } as never, USER, 'dm');
+    // The creator can fetch it.
+    expect(service.getJob(job.id, campaignId, USER).status).toBe('succeeded');
+    // A different caller is forbidden from reading, cancelling, refining, or attaching it.
+    expect(() => service.getJob(job.id, campaignId, OTHER)).toThrow(/different caller/i);
+    await expect(service.cancelJob(job.id, campaignId, OTHER, 'dm')).rejects.toThrow(/different caller/i);
+    await expect(
+      service.refine(campaignId, job.id, { prompt: 'x' } as never, OTHER, 'dm'),
+    ).rejects.toThrow(/different caller/i);
+    await expect(
+      service.attach(campaignId, job.id, { previewId: job.previews[0].id, entityType: 'character', entityId: 55 } as never, OTHER, 'dm'),
+    ).rejects.toThrow(/different caller/i);
+  });
+
+  it('revalidates the configured model against the admin allowlist even without an imageModel override', async () => {
+    // Review feedback: when the normal UI omits imageModel, the provider is called with config.model.
+    // An admin who tightens allowedModels after configuration must block that path too.
+    const config = openAiImageConfig(imageFetch()); // config.model = 'gpt-image-1'
+    const created: Array<{ kind: string }> = [];
+    const attachments: Pick<AttachmentsService, 'createGenerated' | 'versionToken' | 'remove' | 'setHidden'> = {
+      createGenerated: async (_c: number, kind: string) => { created.push({ kind }); return { id: 1, kind, hidden: false, updatedAt: '' } as never; },
+      versionToken: () => 'v',
+      remove: async () => ({} as never),
+      setHidden: async () => ({} as never),
+    };
+    const characters: Pick<CharactersService, 'getRowOrThrow' | 'assertCanWrite' | 'update'> = {
+      getRowOrThrow: async () => ({} as never),
+      assertCanWrite: () => undefined,
+      update: async () => ({} as never),
+    };
+    const npcs: Pick<NpcsService, 'getRowOrThrow' | 'update'> = {
+      getRowOrThrow: async () => ({} as never),
+      update: async () => ({} as never),
+    };
+    const audit: Pick<AuditService, 'log'> = { log: async () => undefined };
+    // Allowlist does NOT include config.model ('gpt-image-1') — so generation must be rejected.
+    const providerConfig: Pick<AiProviderConfigService, 'resolveEffectiveConfig' | 'getServerAllowedModels'> = {
+      resolveEffectiveConfig: async () => config,
+      getServerAllowedModels: async () => ['dall-e-3', 'some-other-model'],
+    };
+    const service = new AiPortraitService(
+      providerConfig as never,
+      attachments as unknown as AttachmentsService,
+      characters as unknown as CharactersService,
+      npcs as unknown as NpcsService,
+      audit as unknown as AuditService,
+    );
+    // No imageModel override — config.model is used and must be rejected by the allowlist.
+    await expect(
+      service.createJob(nextCampaign(), { prompt: 'a knight', count: 1 } as never, USER, 'dm'),
+    ).rejects.toThrow(/not in the server admin's allowlist/i);
+    // Nothing was generated.
+    expect(created).toHaveLength(0);
+  });
+
+  it('reserves generation admission synchronously before the first await', async () => {
+    // Review feedback: concurrent requests must not all pass the admission check before any job is
+    // registered. The placeholder job is registered synchronously, so a concurrent create for the
+    // same campaign hits MAX_CONCURRENT_PER_CAMPAIGN (2) on the third in-flight request.
+    const { service } = makeService(openAiImageConfig(imageFetch()));
+    const campaignId = nextCampaign();
+    // Kick off 3 concurrent generations without awaiting. The first 2 are admitted (concurrency cap
+    // is 2); the third must be rejected because the placeholders count toward the in-flight limit.
+    const promises = Array.from({ length: 3 }, () =>
+      service.createJob(campaignId, { prompt: 'a hero', count: 1 } as never, USER, 'dm').catch((e: Error) => e.message),
+    );
+    const results = await Promise.all(promises);
+    // At least one must have been rejected for too many concurrent generations.
+    expect(results.some((r) => /too many ai portrait generations/i.test(String(r)))).toBe(true);
+  });
 });
 
 describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity link)', () => {
@@ -258,7 +342,10 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
       update: async () => ({} as never),
     };
     const audit: Pick<AuditService, 'log'> = { log: async () => undefined };
-    const providerConfig = { resolveEffectiveConfig: async () => openAiImageConfig(imageFetch()) };
+    const providerConfig: Pick<AiProviderConfigService, 'resolveEffectiveConfig' | 'getServerAllowedModels'> = {
+      resolveEffectiveConfig: async () => openAiImageConfig(imageFetch()),
+      getServerAllowedModels: async () => [],
+    };
     const service = new AiPortraitService(
       providerConfig as never,
       attachments as unknown as AttachmentsService,
@@ -323,17 +410,28 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
       remove: async (id: number) => { removed.push(id); return {} as never; },
       setHidden: async () => ({} as never),
     };
+    // characters.getRowOrThrow returns a PRIOR portraitUrl so we can assert the rollback restores it
+    // (review feedback: linkage commit + post-audit throw must not leave the entity pointing at a
+    // deleted attachment file). characters.update records the URL written so we can inspect both calls.
+    const characterUpdates: Array<{ portraitUrl?: string }> = [];
     const characters: Pick<CharactersService, 'getRowOrThrow' | 'assertCanWrite' | 'update'> = {
-      getRowOrThrow: async (id: number) => ({ id, campaignId: 1, ownerUserId: 'u1' }) as never,
+      getRowOrThrow: async (id: number) =>
+        ({ id, campaignId: 1, ownerUserId: 'u1', portraitUrl: '/prior/portrait.png' }) as never,
       assertCanWrite: () => undefined,
-      update: async () => { throw new Error('concurrent edit race'); },
+      update: async (_id: number, input: { portraitUrl?: string }) => {
+        characterUpdates.push(input);
+        throw new Error('concurrent edit race');
+      },
     };
     const npcs: Pick<NpcsService, 'getRowOrThrow' | 'update'> = {
       getRowOrThrow: async () => ({} as never),
       update: async () => ({} as never),
     };
     const audit: Pick<AuditService, 'log'> = { log: async () => undefined };
-    const providerConfig = { resolveEffectiveConfig: async () => openAiImageConfig(imageFetch()) };
+    const providerConfig: Pick<AiProviderConfigService, 'resolveEffectiveConfig' | 'getServerAllowedModels'> = {
+      resolveEffectiveConfig: async () => openAiImageConfig(imageFetch()),
+      getServerAllowedModels: async () => [],
+    };
     const service = new AiPortraitService(
       providerConfig as never,
       attachments as unknown as AttachmentsService,
@@ -348,6 +446,12 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
     // The attachment was persisted then rolled back (review feedback: no quota-charged orphan).
     expect(created).toHaveLength(1);
     expect(removed).toEqual([7171]);
+    // The rollback attempted to RESTORE the prior portrait URL (review feedback): the entity must
+    // not keep pointing at the now-deleted attachment. The first update tried the new URL; the
+    // catch block re-set the prior URL. Both calls hit characters.update.
+    expect(characterUpdates.length).toBeGreaterThanOrEqual(1);
+    const restoreCall = characterUpdates[characterUpdates.length - 1];
+    expect(restoreCall.portraitUrl).toBe('/prior/portrait.png');
   });
 
   it('rejects attach for a non-succeeded job', async () => {

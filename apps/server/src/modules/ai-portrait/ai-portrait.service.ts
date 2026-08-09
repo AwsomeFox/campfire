@@ -84,6 +84,13 @@ interface JobRecord {
   job: AiPortraitGenerationJob;
   request: AiPortraitGenerationRequest;
   caller: AiPortraitCaller;
+  /**
+   * Immutable caller identity (review feedback): `pat:<tokenId>` for PATs or the session user id.
+   * Stored so every status/cancel/refine/attach request can be bound to the original creator — a
+   * job id copied to another campaign member must not let them read the private prompt, cancel,
+   * refine, or attach another caller's job.
+   */
+  creatorId: string;
   /** Decoded preview bytes keyed by preview id (never persisted until attach). */
   bytes: Map<string, { buf: Buffer; mime: string }>;
   abort: AbortController;
@@ -182,6 +189,12 @@ export class AiPortraitService {
       if (existing && existing.job.campaignId === campaignId) return existing.job;
     }
 
+    // SYNCHRONOUS admission (review feedback): enforceRateAndConcurrency and the idempotency
+    // reservation MUST happen before the first await (`safeResolveConfig`). Otherwise concurrent
+    // requests all pass the admission check (no job is registered yet, lastStart unset), exceeding
+    // MAX_CONCURRENT_PER_CAMPAIGN and the start-rate limit, and requests sharing an idempotency
+    // key each invoke the paid provider before the ledger is populated. We reserve both here and
+    // release the reservation below if setup fails before generation starts.
     this.enforceRateAndConcurrency(campaignId);
 
     const prompt = composePortraitPrompt(request);
@@ -189,61 +202,105 @@ export class AiPortraitService {
 
     const id = `aiportrait-${crypto.randomBytes(9).toString('hex')}`;
     const ts = nowIso();
-    const config = await this.safeResolveConfig(campaignId);
-    const method = this.chooseMethod(config);
-
-    // Enforce the server admin's model allowlist on a per-request imageModel override (review
-    // feedback): without this a player-scoped caller could select a disallowed or more expensive
-    // model using the server's configured credentials. The check runs BEFORE any provider call.
-    if (request.imageModel && method === 'image-provider') {
-      await this.assertModelAllowed(request.imageModel);
-    }
-
-    const base: AiPortraitGenerationJob = AiPortraitGenerationJob.parse({
+    // Register a placeholder job SYNCHRONOUSLY so the admission and idempotency slots are held
+    // before any await. The job is marked 'queued' until the config resolves and generation starts;
+    // concurrent requests now see it counted toward MAX_CONCURRENT_PER_CAMPAIGN and the idempotency
+    // map is populated so a concurrent retry returns this same job rather than starting a second.
+    const placeholder: AiPortraitGenerationJob = AiPortraitGenerationJob.parse({
       id,
       campaignId,
-      status: moderation.flagged ? 'failed' : 'running',
-      progress: moderation.flagged ? 100 : 5,
-      method,
+      status: 'queued',
+      progress: 0,
+      method: 'external-instructions',
       prompt,
-      provider: config?.providerType ?? null,
-      model: config?.model ?? null,
-      dimensions: method === 'image-provider' ? this.dimensionsFor(request) : null,
+      provider: null,
+      model: null,
+      dimensions: null,
       moderation,
-      cost: this.estimateCost(method, request),
+      cost: this.estimateCost('external-instructions', request),
       previews: [],
       externalInstructions: [],
       warnings: [],
-      error: moderation.flagged ? 'Prompt was blocked by the content-moderation gate.' : null,
+      error: null,
       createdBy: auditActor(user),
       createdAt: ts,
       updatedAt: ts,
     });
-
-    const record: JobRecord = { job: base, request, caller, bytes: new Map(), abort: new AbortController() };
+    const record: JobRecord = {
+      job: placeholder,
+      request,
+      caller,
+      creatorId: callerId,
+      bytes: new Map(),
+      abort: new AbortController(),
+    };
     this.registerJob(record);
     if (idemKey) this.idempotency.set(idemKey, id);
 
-    if (moderation.flagged) {
-      await this.audit.log({
-        actor: auditActor(user),
-        actorRole: role,
-        action: 'ai-portrait.blocked',
-        entityType: 'campaign',
-        entityId: campaignId,
+    // From here, any setup failure must release the reserved admission/idempotency slots.
+    try {
+      const config = await this.safeResolveConfig(campaignId);
+      const method = this.chooseMethod(config);
+
+      // Enforce the server admin's model allowlist on the EFFECTIVE model (review feedback): the
+      // prior fix validated only `request.imageModel`, but when the normal UI omits that field the
+      // provider is called with `config.model` — an admin can tighten `allowedModels` after a
+      // campaign/provider was configured, so this path could keep spending credentials on a now-
+      // forbidden model. Validate the resolved model (override ?? configured) before any provider
+      // call, mirroring AiProviderConfigService.resolveExecutionModel's execution-time recheck.
+      if (method === 'image-provider') {
+        await this.assertModelAllowed(request.imageModel ?? config?.model ?? '');
+      }
+
+      const base: AiPortraitGenerationJob = AiPortraitGenerationJob.parse({
+        id,
         campaignId,
-        detail: `ai portrait prompt blocked (${moderation.categories.join(',') || 'policy'}) by ${caller}`,
+        status: moderation.flagged ? 'failed' : 'running',
+        progress: moderation.flagged ? 100 : 5,
+        method,
+        prompt,
+        provider: config?.providerType ?? null,
+        model: config?.model ?? null,
+        dimensions: method === 'image-provider' ? this.dimensionsFor(request) : null,
+        moderation,
+        cost: this.estimateCost(method, request),
+        previews: [],
+        externalInstructions: [],
+        warnings: [],
+        error: moderation.flagged ? 'Prompt was blocked by the content-moderation gate.' : null,
+        createdBy: auditActor(user),
+        createdAt: ts,
+        updatedAt: ts,
       });
+      record.job = base;
+
+      if (moderation.flagged) {
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: role,
+          action: 'ai-portrait.blocked',
+          entityType: 'campaign',
+          entityId: campaignId,
+          campaignId,
+          detail: `ai portrait prompt blocked (${moderation.categories.join(',') || 'policy'}) by ${caller}`,
+        });
+        return record.job;
+      }
+
+      // Charge the rate-limit slot only once a generation actually STARTS — a blocked prompt
+      // runs no renderer and costs nothing, so it must not lock the campaign out (issue #1321,
+      // mirroring the ai-map fix at ai-map.service.ts:237-242).
+      this.lastStart.set(campaignId, Date.now());
+
+      await this.runGeneration(record, config, user, role, caller);
       return record.job;
+    } catch (err) {
+      // Setup failed before generation committed — release the reserved slots so the caller is
+      // not locked out by a half-registered placeholder (review feedback).
+      this.jobs.delete(id);
+      if (idemKey) this.idempotency.delete(idemKey);
+      throw err;
     }
-
-    // Charge the rate-limit slot only once a generation actually STARTS — a blocked prompt
-    // runs no renderer and costs nothing, so it must not lock the campaign out (issue #1321,
-    // mirroring the ai-map fix at ai-map.service.ts:237-242).
-    this.lastStart.set(campaignId, Date.now());
-
-    await this.runGeneration(record, config, user, role, caller);
-    return record.job;
   }
 
   /** Refine an existing job: merge prompt/count deltas and generate a fresh job (issue #1321). */
@@ -255,7 +312,7 @@ export class AiPortraitService {
     role: Role,
     opts: CreateJobOptions = {},
   ): Promise<AiPortraitGenerationJob> {
-    const prior = this.requireJob(jobId, campaignId);
+    const prior = this.requireOwnedJob(jobId, campaignId, user);
     const fromPreview = refine.fromPreviewId
       ? prior.job.previews.find((p) => p.id === refine.fromPreviewId)
       : undefined;
@@ -275,8 +332,8 @@ export class AiPortraitService {
   // ── status / cancel ─────────────────────────────────────────────────────────
 
   /** Fetch a job's status view (issue #1321). */
-  getJob(jobId: string, campaignId: number): AiPortraitGenerationJob {
-    return this.requireJob(jobId, campaignId).job;
+  getJob(jobId: string, campaignId: number, user: RequestUser): AiPortraitGenerationJob {
+    return this.requireOwnedJob(jobId, campaignId, user).job;
   }
 
   /**
@@ -285,7 +342,7 @@ export class AiPortraitService {
    * Idempotent: cancelling a finished job is a no-op that returns its final state.
    */
   async cancelJob(jobId: string, campaignId: number, user: RequestUser, role: Role): Promise<AiPortraitGenerationJob> {
-    const record = this.requireJob(jobId, campaignId);
+    const record = this.requireOwnedJob(jobId, campaignId, user);
     if (record.job.status === 'running' || record.job.status === 'queued') {
       record.abort.abort();
       record.job.status = 'cancelled';
@@ -329,7 +386,7 @@ export class AiPortraitService {
     user: RequestUser,
     role: Role,
   ): Promise<{ attachment: Attachment; entity: { type: 'character' | 'npc'; id: number }; provenance: AiPortraitProvenance }> {
-    const record = this.requireJob(jobId, campaignId);
+    const record = this.requireOwnedJob(jobId, campaignId, user);
     if (record.job.status !== 'succeeded') {
       throw new ConflictException(`Job ${jobId} is ${record.job.status}; only a succeeded job can be attached.`);
     }
@@ -410,6 +467,33 @@ export class AiPortraitService {
       // Defensive: the pre-validation should have caught authority issues, but a race, a concurrent
       // edit, or an audit-write failure could still throw after the attachment was committed. Roll
       // back the just-created attachment so the campaign is not charged quota for an unlinked portrait.
+      // If the entity linkage committed (the update may commit portraitUrl and THEN throw on its
+      // post-write audit), first restore the PRIOR portrait URL so the entity does not keep pointing
+      // at the about-to-be-deleted attachment file (review feedback). We always attempt the restore:
+      // if linkage never committed, re-setting the same prior URL is a harmless no-op write.
+      try {
+        if (body.entityType === 'character') {
+          await this.characters.update(
+            body.entityId,
+            { portraitUrl: targetVisibility.priorPortraitUrl },
+            user,
+            role,
+          );
+        } else {
+          await this.npcs.update(
+            body.entityId,
+            { portraitUrl: targetVisibility.priorPortraitUrl },
+            user,
+            role,
+          );
+        }
+      } catch (restoreErr) {
+        this.logger.error(
+          `AI portrait attach could not restore prior portrait for ${body.entityType}:${body.entityId}: ${
+            restoreErr instanceof Error ? restoreErr.message : String(restoreErr)
+          }`,
+        );
+      }
       try {
         await this.attachments.remove(attachment.id, user, role);
       } catch (cleanupErr) {
@@ -432,7 +516,8 @@ export class AiPortraitService {
    * ordering issue (issue #1321 review feedback). Character authority is dm-or-owner (delegated to
    * `CharactersService.assertCanWrite`); NPC authority is DM-only. Returns the target's `hidden`
    * flag so the caller can match the attachment's visibility to the target's secrecy (a portrait
-   * for a hidden NPC must stay hidden).
+   * for a hidden NPC must stay hidden), and the target's PRIOR `portraitUrl` so a failed linkage
+   * can be restored to exactly what it was before the update (review feedback).
    */
   private async validateTarget(
     campaignId: number,
@@ -440,7 +525,7 @@ export class AiPortraitService {
     entityId: number,
     user: RequestUser,
     role: Role,
-  ): Promise<{ hidden: boolean }> {
+  ): Promise<{ hidden: boolean; priorPortraitUrl: string | null }> {
     if (entityType === 'character') {
       const row = await this.characters.getRowOrThrow(entityId);
       if (row.campaignId !== campaignId) {
@@ -450,7 +535,7 @@ export class AiPortraitService {
       // here, before any attachment bytes are written.
       this.characters.assertCanWrite(row, user, role);
       // Characters are always player-visible (no hidden flag), so the portrait is visible.
-      return { hidden: false };
+      return { hidden: false, priorPortraitUrl: row.portraitUrl ?? null };
     }
     if (role !== 'dm') {
       throw new ForbiddenException('Only a DM may attach a portrait to an NPC.');
@@ -462,7 +547,7 @@ export class AiPortraitService {
     // Preserve the NPC's secrecy: if the NPC is hidden, the generated portrait must be hidden too,
     // or a non-DM member could enumerate it through the attachment list and fetch the bytes even
     // though the NPC itself returns 404 (issue #1321 review feedback).
-    return { hidden: Boolean(row.hidden) };
+    return { hidden: Boolean(row.hidden), priorPortraitUrl: row.portraitUrl ?? null };
   }
 
   // ── generation core ───────────────────────────────────────────────────────────
@@ -649,6 +734,21 @@ export class AiPortraitService {
     const record = this.jobs.get(jobId);
     if (!record || record.job.campaignId !== campaignId) {
       throw new NotFoundException(`AI portrait job ${jobId} not found for this campaign.`);
+    }
+    return record;
+  }
+
+  /**
+   * Look up a job and verify the caller is its CREATOR (review feedback). Jobs expose the private
+   * prompt and generated bytes, and allow cancel/refine/attach — so a job id copied to another
+   * campaign member must not let them read, cancel, refine, or attach someone else's job. The
+   * creator identity (`pat:<tokenId>` or session user id) is immutable and stored on JobRecord.
+   */
+  private requireOwnedJob(jobId: string, campaignId: number, user: RequestUser): JobRecord {
+    const record = this.requireJob(jobId, campaignId);
+    const callerId = user.tokenContext ? `pat:${user.tokenContext.tokenId}` : user.id;
+    if (record.creatorId !== callerId) {
+      throw new ForbiddenException(`AI portrait job ${jobId} belongs to a different caller.`);
     }
     return record;
   }
