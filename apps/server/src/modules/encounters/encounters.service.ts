@@ -10173,7 +10173,7 @@ export class EncountersService {
       const [character] = await this.db
         .select({ id: characters.id, campaignId: characters.campaignId, ownerUserId: characters.ownerUserId })
         .from(characters)
-        .where(eq(characters.id, input.characterId))
+        .where(and(eq(characters.id, input.characterId), notDeleted(characters.deletedAt)))
         .limit(1);
       if (!character || character.campaignId !== campaignId) {
         throw new NotFoundException(`Character ${input.characterId} not found`);

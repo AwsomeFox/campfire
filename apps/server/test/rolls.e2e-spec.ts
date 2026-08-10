@@ -2,7 +2,7 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns, diceRolls } from '../src/db/schema';
+import { campaigns, characters, diceRolls } from '../src/db/schema';
 import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../src/modules/rolls/rolls.service';
 import { OPEN_LEGEND_PACK_SLUG } from '@campfire/schema';
 
@@ -196,6 +196,14 @@ describe('shared dice log (e2e)', () => {
       .send({ expr: '1d20', characterId: character.body.id });
     expect(dmRoll.status).toBe(201);
     expect(dmRoll.body.characterId).toBe(character.body.id);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(characters).set({ deletedAt: new Date().toISOString() }).where(eq(characters.id, character.body.id));
+    const trashedCharacter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .set(dm)
+      .send({ expr: '1d20', characterId: character.body.id });
+    expect(trashedCharacter.status).toBe(404);
   });
 
   it('viewer may roll too — any member, not gated by role', async () => {

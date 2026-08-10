@@ -204,8 +204,12 @@ export class RollsService implements OnApplicationBootstrap {
     // Audience is enforced in SQL before LIMIT so a private or DM-only newest row never
     // shortens another member's page. A dm_shared row stays readable by its author and by
     // any current DM; private remains author-only, even to DMs, matching NoteVisibility.
+    // Omitted role is intentionally DM-facing per this method's documented convention
+    // (for example, ScribeService's internal recap source); do not accidentally turn
+    // that established call shape into a player projection.
+    const isDmFacing = role === undefined || role === 'dm';
     const audience = [eq(diceRolls.visibility, 'party_shared')];
-    if (role === 'dm') audience.push(eq(diceRolls.visibility, 'dm_shared'));
+    if (isDmFacing) audience.push(eq(diceRolls.visibility, 'dm_shared'));
     if (viewerUserId !== undefined) audience.push(eq(diceRolls.rollerUserId, viewerUserId));
     const audienceCondition = or(...audience)!;
 
@@ -231,7 +235,7 @@ export class RollsService implements OnApplicationBootstrap {
       .select()
       .from(diceRolls)
       .where(
-        role === 'dm'
+        isDmFacing
           ? and(eq(diceRolls.campaignId, campaignId), audienceCondition)
           : and(
               eq(diceRolls.campaignId, campaignId),
@@ -246,7 +250,8 @@ export class RollsService implements OnApplicationBootstrap {
       )
       .orderBy(desc(diceRolls.id))
       .limit(limit);
-    return this.maskHiddenNpcLabels(rows.map(toDomain));
+    const rolls = rows.map(toDomain);
+    return isDmFacing ? rolls : this.maskHiddenNpcLabels(rolls);
   }
 
   /**
