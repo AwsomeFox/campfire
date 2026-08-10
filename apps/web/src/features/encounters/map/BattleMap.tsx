@@ -3100,8 +3100,16 @@ export const BattleMap = memo(function BattleMap({
                 {/* Persistent map icons/set pieces (issue #1308) — read-only; place/move/label/
                     delete happen through the "Set pieces" DM panel, not by dragging this layer.
                     `encounter.mapObjects` is already server-redacted (a dmOnly object is dropped
-                    wholesale for a non-DM before this component ever sees it). */}
-                <MapObjectsOverlay mapObjects={encounter.mapObjects} mapRect={mapRect} />
+                    wholesale for a non-DM before this component ever sees it).
+                    `?? []` matches every other read of a `.default([])`-backed encounter list in
+                    this file (see `encounter.aoe ?? []` at :1001/:2219/:2333/:2344) — a real
+                    server response always sends the array, but a hand-built encounter object
+                    (the Cast projection's `safeEncounterForCast`, or a test fixture) can predate
+                    a newly added field and arrive without the key at all (review: PR #2174,
+                    `player-display-cast-session.spec.ts` — a missing array threw inside this
+                    overlay and took the whole map scene down with it, since BattleMap has no
+                    error boundary of its own). */}
+                <MapObjectsOverlay mapObjects={encounter.mapObjects ?? []} mapRect={mapRect} />
 
                 {/* Calibration anchors (issue #417) — DM-only, only in the Calibrate tool.
                     Drag the origin anchor to a corner of the map's printed grid, then drag the

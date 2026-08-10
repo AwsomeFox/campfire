@@ -142,6 +142,10 @@ test.describe('Player Display cast sessions', () => {
       updatedAt: '2026-01-01T00:00:00.000Z',
       combatants: [],
       aoe: [],
+      // Issue #1308: a real cast/encounter response always carries this array (server-side
+      // default is `[]`, never absent) — kept honest here so this mock matches the real
+      // payload shape BattleMap actually receives.
+      mapObjects: [],
       fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 50, h: 100 }] },
     };
 
