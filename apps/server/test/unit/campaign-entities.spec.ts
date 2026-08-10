@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CharactersService } from '../../src/modules/characters/characters.service';
@@ -238,7 +238,7 @@ describe('Campaign Entities (Characters, Notes, Quests, Inventory) unit tests', 
       expect(afterRemove.length).toBe(0);
 
       await inventoryService.restore(item.id, dmActor, 'dm');
-      const auditRows = await db.select().from(auditLog).where(eq(auditLog.entityId, item.id));
+      const auditRows = await db.select().from(auditLog).where(eq(auditLog.entityId, item.id)).orderBy(asc(auditLog.id));
       const payloads = auditRows
         .filter((row) => ['item.create', 'item.update', 'item.delete', 'item.restore'].includes(row.action))
         .map((row) => JSON.parse(row.payloadJson ?? '{}'));

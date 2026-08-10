@@ -12957,7 +12957,7 @@ export const InventoryItemAuditPayload = z.object({
   source: z.object({ transport: z.enum(['rest', 'mcp', 'system']), requestId: z.string().max(128).nullable() }),
   entity: z.object({ type: z.literal('inventory_item'), id: Id, label: z.string().min(1).max(200), navigation: z.object({ route: z.literal('inventory'), query: z.literal('item') }) }),
   changes: z.array(AuditFieldChange).min(1).max(12),
-  snapshot: z.object({ name: z.string().max(200), qty: z.number().int(), notes: z.string().max(20_000), iconSlug: z.string().max(200), ownerType: z.enum(['party', 'character']), characterId: Id.nullable(), equipped: z.boolean(), equipSlot: z.string().max(100).nullable() }).nullable(),
+  snapshot: z.object({ name: z.string().max(200), qty: z.number().int().min(0), notes: z.string().max(5_000), iconSlug: z.string().max(80), ownerType: z.enum(['party', 'character']), characterId: Id.nullable(), equipped: z.boolean(), equipSlot: z.string().max(60).nullable() }).nullable(),
   reason: z.string().max(500).nullable(),
 });
 export type InventoryItemAuditPayload = z.infer<typeof InventoryItemAuditPayload>;

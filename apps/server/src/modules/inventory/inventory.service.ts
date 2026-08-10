@@ -24,8 +24,16 @@ type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
 
 function inventoryAuditPayload(action: InventoryItemAuditPayload['action'], actor: string, role: Role, before: typeof inventoryItems.$inferSelect | null, after: typeof inventoryItems.$inferSelect): InventoryItemAuditPayload {
   const context = getRequestContext();
-  const fields = ['name', 'qty', 'notes', 'iconSlug', 'ownerType', 'characterId', 'equipped', 'equipSlot'] as const;
-  const changes = (action === 'item.delete' ? [{ field: 'trashed', before: false, after: true, visibility: 'member' as const }] : action === 'item.restore' ? [{ field: 'trashed', before: true, after: false, visibility: 'member' as const }] : fields.filter((field) => before?.[field] !== after[field]).map((field) => ({ field, before: before?.[field] ?? null, after: after[field] ?? null, visibility: 'member' as const })));
+  const fields = ['name', 'qty', 'notes', 'iconSlug', 'ownerType', 'characterId', 'equipped', 'equipSlot', 'equippedAction'] as const;
+  const standardChanges: InventoryItemAuditPayload['changes'] = fields
+    .filter((field) => before?.[field] !== after[field])
+    .map((field) => ({ field, before: before?.[field] ?? null, after: after[field] ?? null, visibility: 'member' as const }));
+  let changes: InventoryItemAuditPayload['changes'] = standardChanges;
+  if (action === 'item.delete') {
+    changes = [{ field: 'trashed', before: false, after: true, visibility: 'member' as const }];
+  } else if (action === 'item.restore') {
+    changes = [{ field: 'trashed', before: true, after: false, visibility: 'member' as const }, ...standardChanges];
+  }
   return { version: 1, kind: 'inventory_item', action, actor: { id: actor, role }, source: { transport: context?.transport ?? 'system', requestId: context?.requestId ?? null }, entity: { type: 'inventory_item', id: after.id, label: after.name, navigation: { route: 'inventory', query: 'item' } }, changes: changes.length ? changes : [{ field: 'updatedAt', before: before?.updatedAt ?? null, after: after.updatedAt, visibility: 'member' }], snapshot: action === 'item.delete' || action === 'item.restore' ? { name: before?.name ?? after.name, qty: before?.qty ?? after.qty, notes: before?.notes ?? after.notes, iconSlug: before?.iconSlug ?? after.iconSlug, ownerType: (before?.ownerType ?? after.ownerType) as 'party' | 'character', characterId: before?.characterId ?? after.characterId, equipped: before?.equipped ?? after.equipped, equipSlot: before?.equipSlot ?? after.equipSlot } : null, reason: null };
 }
 
@@ -1255,28 +1263,49 @@ export class InventoryService {
 
     const ts = nowIso();
     const actor = auditActor(user);
-    const snapshot = {
-      name: existing.name,
-      qty: existing.qty,
-      notes: existing.notes,
-      iconSlug: existing.iconSlug,
-      ownerType: existing.ownerType,
-      characterId: existing.characterId,
-      equipped: existing.equipped,
-      equipSlot: existing.equipSlot,
-    };
-
     const row = this.db.transaction((tx) => {
-      const [deleted] = tx.update(inventoryItems)
-      // Issue #1326 review (coordinator): trashing an equipped item must clear
-      // equipped/equipSlot so a replacement can claim the slot, but equippedAction is
-      // inert while equipped is false and should round-trip with the tombstone. Nulled
-      // here, the granted action is unrecoverable because the audit snapshot (above)
-      // does not record it and restore() does not rewrite it.
-      .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts, equipped: false, equipSlot: null })
-      .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
-      .returning().all();
-      if (deleted) this.audit.logInTx(tx, { actor, actorRole: role, action: 'item.delete', entityType: 'inventory_item', entityId: id, campaignId: existing.campaignId, detail: JSON.stringify({ snapshot }), payload: inventoryAuditPayload('item.delete', actor, role, existing, deleted) });
+      const [liveRow] = tx
+        .select()
+        .from(inventoryItems)
+        .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
+        .limit(1)
+        .all();
+      if (!liveRow) return null;
+
+      const liveSnapshot = {
+        name: liveRow.name,
+        qty: liveRow.qty,
+        notes: liveRow.notes,
+        iconSlug: liveRow.iconSlug,
+        ownerType: liveRow.ownerType,
+        characterId: liveRow.characterId,
+        equipped: liveRow.equipped,
+        equipSlot: liveRow.equipSlot,
+      };
+
+      const [deleted] = tx
+        .update(inventoryItems)
+        // Issue #1326 review (coordinator): trashing an equipped item must clear
+        // equipped/equipSlot so a replacement can claim the slot, but equippedAction is
+        // inert while equipped is false and should round-trip with the tombstone. Nulled
+        // here, the granted action is unrecoverable because the audit snapshot (above)
+        // does not record it and restore() does not rewrite it.
+        .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts, equipped: false, equipSlot: null })
+        .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
+        .returning()
+        .all();
+      if (deleted) {
+        this.audit.logInTx(tx, {
+          actor,
+          actorRole: role,
+          action: 'item.delete',
+          entityType: 'inventory_item',
+          entityId: id,
+          campaignId: liveRow.campaignId,
+          detail: JSON.stringify({ snapshot: liveSnapshot }),
+          payload: inventoryAuditPayload('item.delete', actor, role, liveRow, deleted),
+        });
+      }
       return deleted;
     });
     if (!row) {
