@@ -2498,6 +2498,65 @@ export function catchUpChangeKind(
   return 'changed';
 }
 
+// ---------- personal navigation: bookmarks + recent history (issue #840) ----------
+// Per-user, private navigation metadata. A bookmark/recent target is a polymorphic
+// (campaignId, entityType, entityId) soft reference into a SUPPORTED set of canon
+// entities — the same set the @-mention/search surface links to. Visibility is
+// re-resolved from the owning entity services' role-filtered lists at READ time, so
+// a bookmark silently drops out of the list the moment its target becomes hidden,
+// deleted, or inaccessible (lost membership / cross-campaign). Nothing here is
+// shared canon: it never mutates campaign content and is private to the owning user.
+/** The canon entity types a user may bookmark / revisit. Subset of `EntityType`. */
+export const BookmarkEntityType = z.enum([
+  'quest',
+  'npc',
+  'faction',
+  'location',
+  'character',
+  'session',
+  'encounter',
+]);
+export type BookmarkEntityType = z.infer<typeof BookmarkEntityType>;
+
+/** Input identifying one supported campaign target for a bookmark or recent visit. */
+export const PersonalNavigationTarget = z.object({
+  campaignId: Id,
+  entityType: BookmarkEntityType,
+  entityId: Id,
+});
+export type PersonalNavigationTarget = z.infer<typeof PersonalNavigationTarget>;
+
+/** A resolved bookmark row, label re-resolved at read time. */
+export const Bookmark = z.object({
+  id: Id,
+  campaignId: Id,
+  entityType: BookmarkEntityType,
+  entityId: Id,
+  label: z.string(),
+  createdAt: IsoDate,
+});
+export type Bookmark = z.infer<typeof Bookmark>;
+
+export const BookmarksResponse = z.object({
+  items: z.array(Bookmark),
+});
+export type BookmarksResponse = z.infer<typeof BookmarksResponse>;
+
+/** A resolved recent-visit row, label re-resolved at read time. */
+export const RecentHistoryEntry = z.object({
+  campaignId: Id,
+  entityType: BookmarkEntityType,
+  entityId: Id,
+  label: z.string(),
+  visitedAt: IsoDate,
+});
+export type RecentHistoryEntry = z.infer<typeof RecentHistoryEntry>;
+
+export const RecentHistoryResponse = z.object({
+  items: z.array(RecentHistoryEntry),
+});
+export type RecentHistoryResponse = z.infer<typeof RecentHistoryResponse>;
+
 // ---------- session zero / table charter (safety tools & expectations) — issue #122 ----------
 // Session zero is where a table agrees on the content it will and won't play through
 // and the tools it will use to steer in the moment. Before this, none of that had a

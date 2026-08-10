@@ -1,0 +1,17 @@
+{
+  "personalNavigation": {
+    "bookmarksTitle": "Bookmarks",
+    "recentTitle": "Recently viewed",
+    "empty": "No bookmarks yet — save one from an entity's page for quick access.",
+    "recentEmpty": "No recently viewed entities yet.",
+    "remove": "Remove bookmark for {{label}}",
+    "removeButton": "Remove",
+    "clearHistory": "Clear",
+    "loadFailed": "Couldn't load bookmarks.",
+    "recentLoadFailed": "Couldn't load recent history.",
+    "removeFailed": "Couldn't remove bookmark.",
+    "clearFailed": "Couldn't clear history.",
+    "removed": "Bookmark removed.",
+    "cleared": "History cleared."
+  }
+}

@@ -74,6 +74,7 @@ import { SafetyCharterGuard } from './modules/session-zero/safety-charter.guard'
 import { RevisionsModule } from './modules/revisions/revisions.module';
 import { RequestContextActorGuard } from './common/guards/request-context-actor.guard';
 import { CastModule } from './modules/cast/cast.module';
+import { PersonalNavigationModule } from './modules/personal-navigation/personal-navigation.module';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -209,6 +210,7 @@ function serveStaticImports(): DynamicModule[] {
     SessionZeroModule,
     RevisionsModule,
     CastModule,
+    PersonalNavigationModule,
   ],
   providers: [
     Reflector,

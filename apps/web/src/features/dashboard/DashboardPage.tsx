@@ -31,6 +31,8 @@ import { CampaignOnboardingCard } from './CampaignOnboardingCard';
 import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
 import { CatchUpPanel } from './CatchUpPanel';
+import { BookmarksPanel } from './BookmarksPanel';
+import { RecentPanel } from './RecentPanel';
 import {
   dashboardCatchUpOptions,
   failureAfterCancel,
@@ -356,6 +358,8 @@ export default function DashboardPage() {
           />
           <PartyCard campaignId={id} characters={summary.party} accessibleCharacterIds={new Set(summary.characters.map((character) => character.id))} />
           <HandoutsCard campaignId={id} />
+          <BookmarksPanel campaignId={id} />
+          <RecentPanel campaignId={id} />
         </aside>
 
         {/* The world column. `auto-fit` rather than a fixed split: the map holds its shape at any
