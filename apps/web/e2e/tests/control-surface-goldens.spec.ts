@@ -345,35 +345,63 @@ test.describe('design-system spacing pins (issue #2167)', () => {
     ).toBe('5.6px');
   });
 
-  test('nocturne .hr and .table pin their own declared --space-* values (currently dead code, verified below)', async ({ page }) => {
-    // Both are direct `var(--space-N)` consumers named in this issue's "at minimum" list,
-    // but neither one is reachable through a live page today:
-    //  - `.hr`'s `margin: var(--space-4) 0` (nocturne.css) is overridden by an inline
-    //    `style={{ margin: ... }}` at all three of its call sites in the app
-    //    (AddCombatantPanel.tsx, LoginPage.tsx, QuestPage.tsx) — inline style always wins
-    //    over an external class rule, so the class's own margin value never actually paints
-    //    anywhere. Verified via `grep -rn 'className="hr"' apps/web/src`.
-    //  - `.table` (nocturne.css) has zero JSX consumers at all — every `<table>` in the app
-    //    uses Tailwind utility classes instead (e.g. `className="w-full text-sm"`). Verified
-    //    via `grep -rn '<table' apps/web/src`.
-    // Both rules stay live in the compiled stylesheet and will still shift silently under
-    // #2169's retokening, so they are pinned here via `renderCssFixture` — the documented
-    // fallback in computedStyle.ts for exactly this case ("no convenient live page renders
-    // the exact class combination you need") — against the real compiled CSS, not
-    // hand-duplicated values. Run `npm run build` in apps/web before running this test.
-    await renderCssFixture(
-      page,
-      '<div class="hr" data-testid="fixture-hr"></div>' +
-        '<table class="table"><tbody><tr><td data-testid="fixture-td">cell</td></tr></tbody></table>',
-    );
+  test('nocturne .hr: live in the desktop sidebar, pinned against the real page', async ({ page }) => {
+    // CORRECTED (PR #2189 review, Copilot): the original version of this test claimed
+    // `.hr` was dead code, overridden by an inline `style={{ margin: ... }}` at "all three"
+    // of its call sites. That count was wrong — there is a FOURTH call site,
+    // `apps/web/src/app/Layout.tsx:973`'s `<div className="hr my-1" />` (the sidebar's
+    // server-admin/group-account section divider, rendered on every desktop campaign or
+    // admin route), and it carries no inline style. Full, corrected inventory
+    // (`git grep -n 'className="hr' apps/web/src` at this SHA):
+    //   - `LoginPage.tsx:445`, `AddCombatantPanel.tsx:849`, `QuestPage.tsx:833` — each has
+    //     an inline `style={{ margin: ... }}`, which always wins over any external class
+    //     rule, so `.hr`'s own margin is genuinely inert at these three.
+    //   - `Layout.tsx:973` — `className="hr my-1"`, no inline style. Here `.hr`'s own
+    //     margin CONTESTS Tailwind's `my-1` utility instead, at equal selector specificity
+    //     — a case the original comment didn't check. This file's own `nocturne.css` import
+    //     comment (search "CASCADE TRAP" above) already documents the mechanism that
+    //     decides ties like this: nocturne.css is imported UNLAYERED while every Tailwind
+    //     utility lives in `@layer utilities`, and an unlayered rule beats a layered one
+    //     regardless of specificity — so `.hr`'s margin should win here, not `my-1`.
+    // Verified empirically, not just by reasoning about cascade order (measured against
+    // this exact live route before writing this pin): the sidebar's `.hr.my-1` computes
+    // `margin-top`/`margin-bottom` of 11.2px, i.e. `--space-4` — NOT `my-1`'s 4px
+    // (`0.25rem`). `.hr` is therefore LIVE at this site, contrary to the original claim,
+    // and is pinned here against the real rendered sidebar rather than a synthetic fixture
+    // (the "strong form" computedStyle.ts's own header comment prefers whenever a live page
+    // is available). 11.2px is --space-4 on the current 2.8px scale; #2169's retokening
+    // moves it to 16px.
+    const { campaignId } = seed();
+    await page.goto(`/c/${campaignId}`);
+    await expect(page.getByRole('link', { name: /switch campaign/i })).toBeVisible({ timeout: 15_000 });
 
-    const hr = page.getByTestId('fixture-hr');
+    const hr = page.locator('.hr.my-1');
+    await expect(hr).toHaveCount(1);
     const hrBox = await measureBox(hr);
-    // 11.2px is --space-4 on the current 2.8px scale; #2169's retokening moves it to 16px.
     expect(
       hrBox.marginTop,
-      '.hr margin-top must equal --space-4 (11.2px on the current 2.8px scale) today — see the comment above before changing this value',
+      '.hr margin-top must equal --space-4 (11.2px on the current 2.8px scale) today at Layout.tsx\'s sidebar divider — see the comment above before changing this value',
     ).toBe('11.2px');
+  });
+
+  test('nocturne .table: no JSX consumer, pinned against the compiled stylesheet', async ({ page }) => {
+    // `.table` (nocturne.css) is a direct `var(--space-N)` consumer named in this issue's
+    // "at minimum" list, but has no live page to measure it against: nothing in
+    // `apps/web/src` composes the class. Verified by searching for the class being
+    // COMPOSED, not merely for the `<table` element (a bare `<table className="w-full
+    // text-sm">` — the shape every real table in this app actually uses — would false-
+    // negative-free past a `<table` search without ever using this rule):
+    // `git grep -n 'className="[^"]*\btable\b[^"]*"' apps/web/src` and the template-literal
+    // form `git grep -n 'className={[^}]*\btable\b' apps/web/src` both return nothing.
+    // The rule stays live in the compiled stylesheet and will still shift silently under
+    // #2169's retokening, so it is pinned here via `renderCssFixture` — the documented
+    // fallback in computedStyle.ts for exactly this case ("no convenient live page renders
+    // the exact class combination you need") — against the real compiled CSS, not a
+    // hand-duplicated value. Run `npm run build` in apps/web before running this test.
+    await renderCssFixture(
+      page,
+      '<table class="table"><tbody><tr><td data-testid="fixture-td">cell</td></tr></tbody></table>',
+    );
 
     const td = page.getByTestId('fixture-td');
     const tdBox = await measureBox(td);
