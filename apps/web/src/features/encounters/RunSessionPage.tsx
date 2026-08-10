@@ -2717,12 +2717,21 @@ export default function RunSessionPage() {
       operations: new Map(),
     };
   }
-  const replayPendingOptimisticHpDeltas = useCallback(() => {
+  const replayPendingOptimisticHpDeltas = useCallback((rolledBackId?: number) => {
     const queue = optimisticHpQueueRef.current;
     if (queue.encounterId !== eid) return;
     const { base } = queue;
     if (!base) return;
-    const targetIds = [...queue.operations.values()].map(({ combatantId }) => combatantId);
+    // `rolledBackId`, when given, is a combatant whose OWN operation was just
+    // deleted from `queue.operations` (a failure) — it must still be merged so
+    // its stale optimistic HP is rolled back, even though it is no longer a
+    // live target. `replayOptimisticHpDeltas` above already recomputes it as a
+    // pass-through of `base`'s untouched entry (no operation targets it after
+    // the delete), which is the same value `ctx.previousCombatant` captured at
+    // that operation's own onMutate — the authoritative pre-operation state,
+    // not a re-derivation from a separately stale source.
+    const targetIds = new Set([...queue.operations.values()].map(({ combatantId }) => combatantId));
+    if (rolledBackId !== undefined) targetIds.add(rolledBackId);
     const recomputed = replayOptimisticHpDeltas(
       base.combatants,
       [...queue.operations.values()]
@@ -2833,7 +2842,7 @@ export default function RunSessionPage() {
       appendHpFeedbackEvents(events);
       if (observed) hpFeedbackSnapshotRef.current?.combatants.set(combatant.id, combatant);
     },
-    onError: (err, _vars, ctx) => {
+    onError: (err, vars, ctx) => {
       const queue = optimisticHpQueueRef.current;
       if (
         ctx?.encounterId === eid &&
@@ -2841,7 +2850,11 @@ export default function RunSessionPage() {
         ctx.optimisticOperationId &&
         queue.operations.delete(ctx.optimisticOperationId)
       ) {
-        replayPendingOptimisticHpDeltas();
+        // Pass the failed combatant's own id explicitly: it was just removed
+        // from `queue.operations`, so it is no longer a live target, but its
+        // now-invalid optimistic HP is still sitting in the cache and must be
+        // merged back to its pre-operation value — not silently left stale.
+        replayPendingOptimisticHpDeltas(vars.combatantId);
         seedHpFeedbackSnapshot(queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid)));
       }
       // An ambiguous failure must NOT be reported as a plain error: the optimistic HP was

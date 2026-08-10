@@ -138,6 +138,63 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(merged.combatants[1]).toBe(addedByAnotherClient);
   });
 
+  test('issue #2119 (third P2 follow-up) — a lone stepper failure rolls back the failed target instead of leaving it stale', () => {
+    // Mirrors onError exactly: queue.operations.delete(failedKey) runs BEFORE
+    // the replay, so the failed combatant is no longer a live target. Without
+    // explicitly re-including it, mergeOptimisticHpTargets's own empty-set
+    // guard means the merge is a total no-op and the stale optimistic HP
+    // (already written to the cache by onMutate) is never rolled back.
+    const base = { id: 8, combatants: [{ ...combatant, hpCurrent: 20 }] } as EncounterWithCombatants;
+    // `current` already carries the failed operation's optimistic write (as
+    // onMutate's own replay put it there before the request round-tripped).
+    const current = { ...base, combatants: [{ ...combatant, hpCurrent: 15 }] } as EncounterWithCombatants;
+
+    // The failed operation was just deleted, so no operations remain at all.
+    const remainingOps: { combatantId: number; delta: number }[] = [];
+    const recomputed = replayOptimisticHpDeltas(base.combatants, remainingOps);
+
+    // The bug this pins against: deriving targetIds from ONLY the remaining
+    // (post-delete) operations, exactly as `1a1a913dc` did.
+    const buggyTargetIds = new Set(remainingOps.map((op) => op.combatantId));
+    const buggyResult = mergeOptimisticHpTargets(current, recomputed, buggyTargetIds);
+    expect(buggyResult.combatants[0]?.hpCurrent).toBe(15); // stale — the bug, reproduced here for contrast
+
+    // The fix: explicitly union the failed operation's own combatant id back
+    // in, so its stale HP is merged back to base's (== ctx.previousCombatant's)
+    // authoritative pre-operation value.
+    const fixedTargetIds = new Set([...remainingOps.map((op) => op.combatantId), combatant.id]);
+    const fixedResult = mergeOptimisticHpTargets(current, recomputed, fixedTargetIds);
+    expect(fixedResult.combatants[0]?.hpCurrent).toBe(20); // rolled back correctly
+  });
+
+  test('issue #2119 (third P2 follow-up) — a cross-target failure rolls back only the failed combatant, other live targets keep their delta', () => {
+    const base = {
+      id: 8,
+      combatants: [{ ...combatant, hpCurrent: 20 }, { id: 2, hpCurrent: 12, hpMax: 20 } as Combatant],
+    } as EncounterWithCombatants;
+    // Both combatant #1 and #2 have optimistic deltas already applied in the
+    // cache (delta -5 and -3 respectively) from onMutate.
+    const current = {
+      ...base,
+      combatants: [{ ...combatant, hpCurrent: 15 }, { id: 2, hpCurrent: 9, hpMax: 20 } as Combatant],
+    } as EncounterWithCombatants;
+
+    // Combatant #1's operation just failed and was deleted; #2's operation is
+    // still pending.
+    const remainingOps = [{ combatantId: 2, delta: -3 }];
+    const recomputed = replayOptimisticHpDeltas(base.combatants, remainingOps);
+
+    const buggyTargetIds = new Set(remainingOps.map((op) => op.combatantId)); // {2} — #1 silently dropped
+    const buggyResult = mergeOptimisticHpTargets(current, recomputed, buggyTargetIds);
+    expect(buggyResult.combatants[0]?.hpCurrent).toBe(15); // stale — #1's failed delta never rolled back
+    expect(buggyResult.combatants[1]?.hpCurrent).toBe(9); // #2 unaffected either way
+
+    const fixedTargetIds = new Set([...remainingOps.map((op) => op.combatantId), combatant.id]); // {2, 1}
+    const fixedResult = mergeOptimisticHpTargets(current, recomputed, fixedTargetIds);
+    expect(fixedResult.combatants[0]?.hpCurrent).toBe(20); // #1 rolled back
+    expect(fixedResult.combatants[1]?.hpCurrent).toBe(9); // #2's still-live delta preserved
+  });
+
   test('the HP mutation replays pending deltas instead of restoring a snapshot', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
 
@@ -186,5 +243,28 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(bulkApplySite).not.toContain('withOptimisticHpCombatants');
 
     expect(source).toContain("import {\n  applyOptimisticHpDelta,\n  mergeOptimisticHpTargets,\n  replayOptimisticHpDeltas,\n  rollbackOptimisticHpTargets,\n  type OptimisticHpDelta,\n} from './optimisticHp';");
+  });
+
+  test('issue #2119 (third P2 follow-up) — the failed stepper wires its own combatant id into the replay', () => {
+    const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
+
+    expect(source).toContain('const replayPendingOptimisticHpDeltas = useCallback((rolledBackId?: number) => {');
+    expect(source).toContain('if (rolledBackId !== undefined) targetIds.add(rolledBackId);');
+    // onError must delete the failed operation BEFORE computing targetIds
+    // (already true — the replay call happens after the delete) AND pass the
+    // failed combatant's own id through, or its stale optimistic HP is never
+    // rolled back.
+    const onErrorStart = source.indexOf('onError: (err, vars, ctx) => {');
+    const onErrorSite = source.slice(
+      onErrorStart,
+      source.indexOf("if (isAmbiguousOutcome(err)) enterReconciling();\n      else reportError(err);", onErrorStart),
+    );
+    expect(onErrorSite).toContain('queue.operations.delete(ctx.optimisticOperationId)');
+    expect(onErrorSite).toContain('replayPendingOptimisticHpDeltas(vars.combatantId)');
+    // The delete must run BEFORE the replay call, not after — the replay's
+    // `targetIds` are derived from whatever remains in `queue.operations` at
+    // call time.
+    expect(onErrorSite.indexOf('queue.operations.delete(ctx.optimisticOperationId)'))
+      .toBeLessThan(onErrorSite.indexOf('replayPendingOptimisticHpDeltas(vars.combatantId)'));
   });
 });
