@@ -1690,8 +1690,15 @@ export const diceRolls = sqliteTable('dice_rolls', {
   // packages/schema for the full rationale) — null for the vast majority of rolls.
   encounterId: integer('encounter_id'),
   npcId: integer('npc_id'),
+  // #1511: additive shared-roll context. Legacy rows keep the table-wide default.
+  characterId: integer('character_id'),
+  combatantId: integer('combatant_id'),
+  visibility: text('visibility').notNull().default('party_shared'),
   createdAt: text('created_at').notNull(),
-});
+}, (table) => ({
+  campaignVisibility: index('idx_dice_rolls_campaign_visibility_id_desc').on(table.campaignId, table.visibility, table.id),
+  campaignRoller: index('idx_dice_rolls_campaign_roller_id_desc').on(table.campaignId, table.rollerUserId, table.id),
+}));
 
 // In-app notifications — one row per recipient per event (see modules/notifications).
 // Written by domain services (sessions/notes/membership) on the triggering event;

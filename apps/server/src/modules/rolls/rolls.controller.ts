@@ -66,6 +66,6 @@ export class CampaignRollsController {
 
     // Issue #1904: role drives read-time redaction of a roll whose encounter/NPC became
     // hidden AFTER it was recorded — see RollsService.listForCampaign.
-    return this.rolls.listForCampaign(campaignId, limit, role);
+    return this.rolls.listForCampaign(campaignId, limit, role, user.id);
   }
 }

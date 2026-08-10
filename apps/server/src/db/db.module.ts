@@ -1055,6 +1055,30 @@ function migrateDiceRollsTableForEncounterNpcRefs1904(sqlite: Database.Database)
 }
 
 /**
+ * #1511: durable roll audience and server-resolved character/combatant context.
+ * All columns are additive: old shared rows acquire party_shared, and no historical
+ * identity is guessed. The two read-path indexes keep private/DM audience checks bounded.
+ */
+function migrateDiceRollsContext1511(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('character_id')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN character_id INTEGER');
+  if (!has('combatant_id')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN combatant_id INTEGER');
+  if (!has('visibility')) sqlite.exec("ALTER TABLE dice_rolls ADD COLUMN visibility TEXT NOT NULL DEFAULT 'party_shared'");
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_visibility_id_desc
+      ON dice_rolls(campaign_id, visibility, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_roller_id_desc
+      ON dice_rolls(campaign_id, roller_user_id, id DESC);
+  `);
+}
+
+/**
  * Issue #1910: additive nullable `speed` column on `characters` and `combatants` —
  * movement speed in the rule system adapter's movement unit, replacing the hardcoded
  * 30 ft every PC previously got in the turn workspace. NULL on both tables preserves
@@ -5541,6 +5565,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // #2112 claimed 0180 on main before #810 shipped, so the audit payload uses 0181.
   { name: '0181_audit_payload_json_810', run: migrateAuditLogForPayloadJson810 },
   { name: '0182_push_subscriptions_1323', run: migratePushSubscriptions1323 },
+  { name: '0183_dice_rolls_context_1511', run: migrateDiceRollsContext1511 },
 ];
 
 /**

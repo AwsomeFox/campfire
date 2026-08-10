@@ -133,6 +133,25 @@ describe('RollsService unit coverage tests', () => {
     expect(received[0].rollId).toBe(roll.id);
   });
 
+  it('#1511 routes private and DM-shared dice.rolled ticks only to their durable audience', async () => {
+    const events = new CampaignEventsService();
+    const service = new RollsService(db, events);
+    const rollerEvents: any[] = [];
+    const dmEvents: any[] = [];
+    const otherEvents: any[] = [];
+    events.streamFor(campaignId, { userId: adminActor.id, role: 'player' }).subscribe((event) => rollerEvents.push(event));
+    events.streamFor(campaignId, { userId: 'dm-2', role: 'dm' }).subscribe((event) => dmEvents.push(event));
+    events.streamFor(campaignId, { userId: 'other', role: 'player' }).subscribe((event) => otherEvents.push(event));
+
+    await service.record(campaignId, { expr: '1d20', rolls: [8], total: 8, visibility: 'private' }, adminActor);
+    await service.record(campaignId, { expr: '1d20', rolls: [9], total: 9, visibility: 'dm_shared' }, adminActor);
+
+    expect(rollerEvents).toHaveLength(2);
+    expect(dmEvents).toHaveLength(1);
+    expect(otherEvents).toHaveLength(0);
+    expect(Object.keys(dmEvents[0]).sort()).toEqual(['at', 'campaignId', 'rollId', 'type']);
+  });
+
   // Issue #1904 review finding (performance regression from the prior fix): the first
   // attempt at "apply the limit after hidden rows are removed" widened the candidate
   // fetch to the full retention ceiling (up to 1000 rows) on EVERY non-DM list call —

@@ -1,8 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { Subject, type Observable } from 'rxjs';
-import { filter } from 'rxjs/operators';
-import type { CampaignEvent, CampaignEventInput } from '@campfire/schema';
+import { filter, map } from 'rxjs/operators';
+import type { CampaignEvent, CampaignEventInput, Role } from '@campfire/schema';
 import { nowIso } from '../../common/time';
+
+/** Internal-only routing context; it never becomes part of the wire event. */
+export type CampaignEventAudience = { userId: string; role: Role };
+type RoutedCampaignEvent = {
+  event: CampaignEvent;
+  audience?: (viewer: CampaignEventAudience) => boolean;
+};
 
 /**
  * In-process pub/sub for per-campaign real-time events (issue #4).
@@ -17,7 +24,7 @@ import { nowIso } from '../../common/time';
  */
 @Injectable()
 export class CampaignEventsService {
-  private readonly subject = new Subject<CampaignEvent>();
+  private readonly subject = new Subject<RoutedCampaignEvent>();
 
   /**
    * Accepts a single CampaignEvent variant minus its `at` timestamp (see
@@ -29,11 +36,23 @@ export class CampaignEventsService {
    * could silently bypass the compiler if the schema ever changes.
    */
   emit(event: CampaignEventInput): void {
-    const stamped = { ...event, at: nowIso() } satisfies CampaignEvent;
-    this.subject.next(stamped);
+    this.emitForAudience(event);
   }
 
-  streamFor(campaignId: number): Observable<CampaignEvent> {
-    return this.subject.asObservable().pipe(filter((event) => event.campaignId === campaignId));
+  /**
+   * Emit a thin event only to a durable row's current audience. The predicate stays
+   * in-process and is intentionally stripped before callers receive the event, so a
+   * private-roll audience can never leak through an SSE frame.
+   */
+  emitForAudience(event: CampaignEventInput, audience?: (viewer: CampaignEventAudience) => boolean): void {
+    const stamped = { ...event, at: nowIso() } satisfies CampaignEvent;
+    this.subject.next({ event: stamped, ...(audience ? { audience } : {}) });
+  }
+
+  streamFor(campaignId: number, viewer?: CampaignEventAudience): Observable<CampaignEvent> {
+    return this.subject.asObservable().pipe(
+      filter(({ event, audience }) => event.campaignId === campaignId && (!audience || (viewer !== undefined && audience(viewer)))),
+      map(({ event }) => event),
+    );
   }
 }

@@ -4956,6 +4956,8 @@ export class EncountersService {
             // covering the row when an encounter is hidden AFTER the roll was persisted,
             // which a write-time check cannot.
             result.encounterId = encounterId;
+            result.combatantId = fresh.id;
+            result.characterId = fresh.characterId!;
             roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
             // `updateCombatant` applies this server-only face after the hook returns.
             deathSavePatch.deathSaveRoll = result.total;
@@ -6978,7 +6980,15 @@ export class EncountersService {
       // (both modes) lets the same read path drop the whole row if the ENCOUNTER itself is
       // later hidden — mirroring the write-time rule right below that a hidden encounter's
       // roll must never reach the campaign-wide log in the first place.
-      const diceLogEntries: Array<{ label: string; expr: string; rolls: number[]; total: number; npcId?: number }> = [];
+      const diceLogEntries: Array<{
+        label: string;
+        expr: string;
+        rolls: number[];
+        total: number;
+        npcId?: number;
+        characterId?: number;
+        combatantId?: number;
+      }> = [];
 
       if (initModel.mode === 'group') {
         // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
@@ -7033,6 +7043,8 @@ export class EncountersService {
             expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
             rolls: [natural],
             total: initiative,
+            combatantId: row.id,
+            ...(row.characterId != null ? { characterId: row.characterId } : {}),
             ...(row.kind === 'npc' && diceLogNpcId !== null ? { npcId: diceLogNpcId } : {}),
           });
           return { id: row.id, initiative, breakdown, name: row.name };
@@ -7055,6 +7067,8 @@ export class EncountersService {
               label: entry.label,
               source: 'rolled',
               encounterId,
+              ...(entry.combatantId !== undefined ? { combatantId: entry.combatantId } : {}),
+              ...(entry.characterId !== undefined ? { characterId: entry.characterId } : {}),
               ...(entry.npcId !== undefined ? { npcId: entry.npcId } : {}),
             },
             user,
@@ -7445,6 +7459,8 @@ export class EncountersService {
               label,
               source: 'rolled',
               encounterId,
+              combatantId: freshCombatant.id,
+              ...(freshCombatant.characterId != null ? { characterId: freshCombatant.characterId } : {}),
               ...(freshCombatant.kind === 'npc' && npcIdentityId !== null ? { npcId: npcIdentityId } : {}),
             },
             user,
@@ -10149,6 +10165,25 @@ export class EncountersService {
    * clients keep working unchanged.
    */
   async rollDiceForCampaign(campaignId: number, input: RollRequestInput, user: RequestUser, role: Role): Promise<DiceRoll> {
+    let characterId: number | undefined;
+    if (input.characterId !== undefined) {
+      // The public request may identify a sheet, but identity is trusted only after
+      // re-resolving it in this campaign and applying the same dm-or-owner rule as a
+      // catalog check. Encounter/combatant context remains server-only.
+      const [character] = await this.db
+        .select({ id: characters.id, campaignId: characters.campaignId, ownerUserId: characters.ownerUserId })
+        .from(characters)
+        .where(eq(characters.id, input.characterId))
+        .limit(1);
+      if (!character || character.campaignId !== campaignId) {
+        throw new NotFoundException(`Character ${input.characterId} not found`);
+      }
+      if (role !== 'dm' && character.ownerUserId !== user.id) {
+        throw new ForbiddenException('Only dm or the owning player may roll for this character');
+      }
+      characterId = character.id;
+    }
+
     const result = rollDice(input.expr);
     // Optional check context (issue #130): echo the label and compute success server-side
     // so every member's feed shows the same pass/fail, not a client's interpretation.
@@ -10158,6 +10193,8 @@ export class EncountersService {
       result.dc = input.dc;
       result.success = result.total >= input.dc;
     }
+    if (characterId !== undefined) result.characterId = characterId;
+    result.visibility = input.visibility ?? 'party_shared';
     const persisted = await this.rolls.record(campaignId, result, user);
 
     await this.audit.log({
@@ -10316,6 +10353,8 @@ export class EncountersService {
         actor: diceActor,
         natural20: isNat20 ? 1 : 0,
         encounterId,
+        ...(combatantRow ? { combatantId: combatantRow.id } : {}),
+        ...(combatantRow?.characterId != null ? { characterId: combatantRow.characterId } : {}),
         ...(combatantRow?.kind === 'npc' && npcIdentityId !== null
           ? { npcId: npcIdentityId }
           : {}),

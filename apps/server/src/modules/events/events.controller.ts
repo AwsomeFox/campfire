@@ -101,7 +101,7 @@ export class CampaignEventsController {
     // are internal termination signals, not a "refetch this" tick. (The web client's
     // isCampaignEvent guard accepts the variants, but no client handler acts on them
     // as data. We filter them out server-side so the wire stays clean.)
-    const dataStream = this.events.streamFor(campaignId).pipe(
+    const dataStream = this.events.streamFor(campaignId, { userId: user.id, role }).pipe(
       filter((event) => event.type !== 'membership.revoked' && event.type !== 'campaign.trashed'),
       map((event) => {
         // Role redaction is enforced HERE, at the broadcast boundary (#572, #1552).

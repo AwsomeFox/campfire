@@ -59,13 +59,13 @@ describe('encounter quick-roll (real SQLite, service layer)', () => {
       .values({ encounterId: encounter.id, kind: 'character', characterId: char1.id, name: 'Valerie', initiative: 15, hpCurrent: 30, hpMax: 30 })
       .returning()
       .all();
-    return { campaignId: campaign.id, encounterId: encounter.id, combatantId: c1.id };
+    return { campaignId: campaign.id, characterId: char1.id, encounterId: encounter.id, combatantId: c1.id };
   }
 
   it('quick-rolls to-hit (+7) and records to BOTH campaign dice_rolls and encounter_events', async () => {
     dataDir = makeTempDataDir();
     const { orm, service, rolls } = build();
-    const { campaignId, encounterId, combatantId } = seed(orm);
+    const { campaignId, characterId, encounterId, combatantId } = seed(orm);
 
     const res = await service.quickRoll(
       encounterId,
@@ -90,6 +90,9 @@ describe('encounter quick-roll (real SQLite, service layer)', () => {
     expect(campaignRolls.length).toBeGreaterThanOrEqual(1);
     expect(campaignRolls[0].actor).toBe('Valerie');
     expect(campaignRolls[0].label).toContain('Valerie · Longsword (to-hit)');
+    expect(campaignRolls[0].encounterId).toBe(encounterId);
+    expect(campaignRolls[0].combatantId).toBe(combatantId);
+    expect(campaignRolls[0].characterId).toBe(characterId);
 
     // Check encounter_events table
     const events = orm

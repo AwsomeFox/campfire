@@ -535,7 +535,17 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       ).toContain('idx_timeline_events_campaign_sort');
       expect(
         (sqlite.pragma('index_list(dice_rolls)') as Array<{ name: string }>).map((index) => index.name),
-      ).toContain('idx_dice_rolls_campaign_id_desc');
+      ).toEqual(
+        expect.arrayContaining([
+          'idx_dice_rolls_campaign_id_desc',
+          'idx_dice_rolls_campaign_visibility_id_desc',
+          'idx_dice_rolls_campaign_roller_id_desc',
+        ]),
+      );
+      expect(MIGRATION_NAMES).toContain('0182_dice_rolls_context_1511');
+      expect(columnNames(sqlite, 'dice_rolls')).toEqual(
+        expect.arrayContaining(['character_id', 'combatant_id', 'visibility']),
+      );
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_purge_tombstones'").get(),
       ).toBeTruthy();

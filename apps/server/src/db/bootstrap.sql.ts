@@ -1404,6 +1404,11 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   -- encounter/NPC becomes hidden AFTER the roll was written — null for most rolls.
   encounter_id INTEGER,
   npc_id INTEGER,
+  -- #1511: server-resolved shared-roll context. Existing shared feed behavior is the
+  -- default; nullable identities preserve legacy rows.
+  character_id INTEGER,
+  combatant_id INTEGER,
+  visibility TEXT NOT NULL DEFAULT 'party_shared',
   created_at TEXT NOT NULL
 );
 
@@ -2234,6 +2239,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_npc ON combatants(enc
 CREATE INDEX IF NOT EXISTS idx_encounter_events_encounter ON encounter_events(encounter_id);
 -- #617: shared roll feed and retention prune are campaign-scoped, newest-first.
 CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_id_desc ON dice_rolls(campaign_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_visibility_id_desc ON dice_rolls(campaign_id, visibility, id DESC);
+CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_roller_id_desc ON dice_rolls(campaign_id, roller_user_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);
