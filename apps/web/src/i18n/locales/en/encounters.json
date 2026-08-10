@@ -265,6 +265,7 @@
         "labelPlaceholder": "Label (e.g. Trapped chest)",
         "xField": "X %",
         "yField": "Y %",
+        "sizeField": "Size %",
         "dmOnly": "DM only",
         "add": "Add",
         "placing": "Placing…",
@@ -272,7 +273,15 @@
         "placeError": "Couldn't place the object.",
         "updateError": "Couldn't update the object.",
         "removed": "Removed {{label}}",
-        "removeError": "Couldn't remove the object."
+        "removeError": "Couldn't remove the object.",
+        "placeOnMap": "Place on map",
+        "cancelPlace": "Cancel",
+        "armedHint": "Click on the map to place {{label}}. Esc to cancel.",
+        "dragHint": "drag to move, click to select",
+        "resizeHandle": "Resize",
+        "placedOnMap": "Placed {{label}} on the map",
+        "movedAnnounce": "{{label}} moved to {{x}}% across, {{y}}% down",
+        "placeCancelled": "Map object placement cancelled"
       },
       "setup": "Map setup",
       "fog": {

@@ -10820,6 +10820,9 @@ export const MapPing = z.object({
 });
 export type MapPing = z.infer<typeof MapPing>;
 
+/** Default rendered diameter (percent of map width) for a newly placed map object (issue #2175). */
+export const DEFAULT_MAP_OBJECT_SIZE = 5;
+
 /**
  * A persistent icon or set piece placed on a battle map (issue #1308) — a chest, trap,
  * door, hazard, or quest marker that is not tied to a combatant. Same percent-of-map
@@ -10833,11 +10836,12 @@ export type MapPing = z.infer<typeof MapPing>;
  * DM-only object must not reach a non-DM response at all, coordinates included; see that
  * function's own doc for why this is a wholesale drop, not a coordinate null-out.
  *
- * Deliberately no `sizePct`/resize field this pass: the issue's acceptance criteria list
- * place/move/label/delete, not resize, and a fixed render size keeps this slice's surface
- * area matched to what's actually required. Also deliberately no fog interaction — unlike
- * `AoeTemplate`, an object's visibility is the static `dmOnly` flag alone, not cross-checked
- * against revealed fog regions; folding fog in is a natural follow-up once this lands.
+ * `size` is the rendered icon diameter as a percent of the map's rendered WIDTH (issue #2175) —
+ * the same isotropic unit the grid/calibration math uses (`mapRenderedBounds`), so a DM resize
+ * drag and every viewport stay in lockstep. Bounded [1, 100]; default 5 reads as roughly one
+ * cell on a typical 5%-cell grid. Deliberately no fog interaction — unlike `AoeTemplate`, an
+ * object's visibility is the static `dmOnly` flag alone, not cross-checked against revealed
+ * fog regions; folding fog in is a natural follow-up once this lands.
  */
 export const MapObject = z.object({
   id: z.string().min(1).max(40),
@@ -10845,6 +10849,7 @@ export const MapObject = z.object({
   iconSlug: z.string().min(1).max(80),
   x: z.number().min(0).max(100),
   y: z.number().min(0).max(100),
+  size: z.number().min(1).max(100).default(DEFAULT_MAP_OBJECT_SIZE),
   dmOnly: z.boolean().default(false),
 });
 export type MapObject = z.infer<typeof MapObject>;
@@ -10859,6 +10864,7 @@ export const MapObjectUpdate = z.object({
   iconSlug: z.string().min(1).max(80).optional(),
   x: z.number().min(0).max(100).optional(),
   y: z.number().min(0).max(100).optional(),
+  size: z.number().min(1).max(100).optional(),
   dmOnly: z.boolean().optional(),
 }).strict();
 export type MapObjectUpdate = z.infer<typeof MapObjectUpdate>;
