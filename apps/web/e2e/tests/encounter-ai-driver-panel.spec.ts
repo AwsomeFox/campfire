@@ -96,8 +96,8 @@ test.describe('encounter panel tool confirmations (#1494)', () => {
     await mockAiDm(page, campaignId, resolved);
 
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
-    // The AI-DM driver dock is table-wide, so it lives in the cockpit's Table tab.
-    await openCockpitTab(page, 'table');
+    // Issue #2158: the AI-DM driver dock has its own Driver tab, distinct from Table.
+    await openCockpitTab(page, 'driver');
 
     // The dock starts collapsed; a DM supervising the AI opens it. The confirmation lives inside
     // the disclosure region, so it must be opened before the panel can render.
@@ -133,8 +133,8 @@ test.describe('encounter panel tool confirmations (#1494)', () => {
     const { campaignId, encounterId } = seed();
     await mockAiDm(page, campaignId, []);
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
-    // The AI-DM driver dock is table-wide, so it lives in the cockpit's Table tab.
-    await openCockpitTab(page, 'table');
+    // Issue #2158: the AI-DM driver dock has its own Driver tab, distinct from Table.
+    await openCockpitTab(page, 'driver');
     // The endpoint is DM-only and the query is disabled for anyone else, so even with the dock
     // open there is nothing to render and no 403 drip.
     const toggle = page.getByTestId('encounter-ai-driver-toggle');
@@ -247,7 +247,7 @@ test.describe('encounter Driver live session (#1318)', () => {
     });
 
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
-    await openCockpitTab(page, 'table');
+    await openCockpitTab(page, 'driver');
     await page.getByTestId('encounter-ai-driver-toggle').click();
     await expect(page.getByRole('button', { name: 'Start Session' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Wrap Up' })).toBeVisible();
@@ -330,7 +330,7 @@ test.describe('encounter Driver live session (#1318)', () => {
       });
 
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
-      await openCockpitTab(page, 'table');
+      await openCockpitTab(page, 'driver');
       await page.getByTestId('encounter-ai-driver-toggle').click();
 
       const composer = page.getByTestId('encounter-ai-driver-composer');
