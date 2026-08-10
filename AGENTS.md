@@ -92,10 +92,11 @@ the browser tier boots a Nest server plus Chromium on the fixed port 8123 with
 tests at once therefore exhaust host memory, and two concurrent browser runs
 silently share one seeded backend. The lock makes those runs queue instead; it
 waits up to an hour and is a no-op when `CI` is set. It is an `flock(2)` held by
-the test process itself, so the kernel releases it the moment that process and
-its workers exit — a crashed or killed run leaves nothing to clean up, and
-workers that outlive their parent keep holding it rather than letting the next
-run start on top of them. Invoke tests through the npm scripts, not by calling `jest`, `vitest`,
+the test process itself, so the kernel releases it the moment that process exits
+and a crashed or killed run leaves nothing to clean up. The one gap, documented
+at the top of the script, is that jest and Playwright workers do not inherit the
+descriptor, so a worker that outlives an abnormally killed runner no longer
+holds the lock. Invoke tests through the npm scripts, not by calling `jest`, `vitest`,
 or `playwright` directly — a direct call bypasses the lock. `test:watch` and
 `test:e2e:ui` stay unlocked deliberately, because a long-lived interactive
 session would hold the lock indefinitely and starve every other session; UI mode

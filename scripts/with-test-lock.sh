@@ -23,8 +23,19 @@
 # The lock is taken and then the command is exec'd *in place*, so the test
 # process itself holds the lock: signals from the terminal or a supervisor reach
 # it directly, its exit status is reported unchanged, and there is no wrapper
-# process left in the middle to forward either. Descendants inherit the open
-# file description, so the lock also covers workers that outlive their parent.
+# process left in the middle to forward either.
+#
+# Known limit: processes *forked* by the command inherit the open file
+# description and extend the lock, but Node's child_process closes descriptors
+# it was not told to pass, so jest and Playwright workers do not hold it. If the
+# top-level runner dies abnormally and a worker outlives it, the lock frees
+# while that worker is still running. Closing that would need a supervisor
+# waiting on the whole process tree: a supervisor waiting only on its immediate
+# child does not help (it releases at the same moment), and process-group
+# tracking is not portable — dash gives a background child no group of its own —
+# while reintroducing the signal-forwarding gap this exec exists to avoid. In
+# normal operation a runner does not exit before its workers, so this needs an
+# abnormal death plus a surviving orphan.
 #
 # Usage:  scripts/with-test-lock.sh <command> [args...]
 #
@@ -109,6 +120,13 @@ if command -v perl >/dev/null 2>&1; then
 fi
 
 if command -v flock >/dev/null 2>&1; then
+  # -F/--no-fork execs the command in place, matching the perl path above, so a
+  # signal aimed at the wrapper reaches the test rather than a parent flock that
+  # merely waits on it. The flag postdates util-linux 2.30, so fall back to the
+  # forking form where it is unavailable.
+  if flock --help 2>&1 | grep -q -- '--no-fork'; then
+    exec flock -E 75 -w "$WAIT" -F "$LOCK" "$@"
+  fi
   exec flock -E 75 -w "$WAIT" "$LOCK" "$@"
 fi
 
