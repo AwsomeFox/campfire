@@ -166,8 +166,12 @@ export function useCampaignEvents(
   // it. Clearing a page-local status variable (RunSessionPage's `eventStatus`) cannot fix
   // this; the underlying stream itself has to tear down and re-establish under the new
   // credentials, which only this hook's own effect can do.
-  const { me } = useAuth();
+  const { me, roleIn } = useAuth();
   const userId = me?.user.id ?? null;
+  // #1511: audience-routed dice events depend on the current effective campaign
+  // role. A membership refresh may retain the same account id while promoting or
+  // demoting it, so role must also restart the authenticated stream.
+  const viewerRole = campaignId === undefined ? null : roleIn(campaignId);
 
   useEffect(() => {
     if (campaignId === undefined || !Number.isFinite(campaignId)) return;
@@ -194,5 +198,5 @@ export function useCampaignEvents(
     });
 
     return () => loop.dispose();
-  }, [campaignId, resumeEpoch, userId, reconnectKey]);
+  }, [campaignId, resumeEpoch, userId, viewerRole, reconnectKey]);
 }

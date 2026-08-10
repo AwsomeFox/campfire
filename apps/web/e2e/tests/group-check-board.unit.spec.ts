@@ -31,6 +31,7 @@ function mkRoll(overrides: Partial<DiceRoll> & { id: number }): DiceRoll {
     campaignId: 1,
     rollerUserId: 'dev:player-1',
     rollerName: 'Player',
+    visibility: 'party_shared',
     createdAt: '2026-01-01T00:00:01.000Z',
     expr: '1d20+3',
     rolls: [15],

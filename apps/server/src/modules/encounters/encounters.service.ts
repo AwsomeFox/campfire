@@ -10204,9 +10204,13 @@ export class EncountersService {
       entityType: null,
       entityId: null,
       campaignId,
+      // #1511: a private roll remains attributable (actor/action/campaign), but its
+      // contents must not enter the DM-visible audit/export surface.
       detail:
-        `${result.label ? `${result.label}: ` : ''}${result.expr} = ${result.total}` +
-        (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'})` : ''),
+        result.visibility === 'private'
+          ? 'private roll'
+          : `${result.label ? `${result.label}: ` : ''}${result.expr} = ${result.total}` +
+            (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'})` : ''),
     });
 
     return persisted;

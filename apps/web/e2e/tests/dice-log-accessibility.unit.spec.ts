@@ -25,6 +25,7 @@ function roll(partial: Partial<DiceRoll> & Pick<DiceRoll, 'id' | 'expr' | 'total
     campaignId: 1,
     rollerUserId: 'user:2',
     rollerName: 'Mira',
+    visibility: 'party_shared',
     createdAt: '2026-07-23T12:00:00.000Z',
     kept: undefined,
     dc: undefined,

@@ -20,6 +20,7 @@ function roll(id: number): DiceRoll {
     success: undefined,
     rollerUserId: 'user:1',
     rollerName: 'DM',
+    visibility: 'party_shared',
     createdAt: '2026-07-23T00:00:00.000Z',
   };
 }

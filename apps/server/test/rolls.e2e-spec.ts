@@ -159,6 +159,14 @@ describe('shared dice log (e2e)', () => {
     expect(labels(dmFeed)).not.toContain('private roll sentinel');
     expect(labels(viewerFeed)).toContain('public roll sentinel');
     expect(labels(viewerFeed)).not.toEqual(expect.arrayContaining(['private roll sentinel', 'DM roll sentinel']));
+
+    const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+    expect(audit.status).toBe(200);
+    const privateAudit = (audit.body as Array<{ action: string; detail: string }>).find(
+      (entry) => entry.action === 'dice.roll' && entry.detail === 'private roll',
+    );
+    expect(privateAudit).toBeDefined();
+    expect(JSON.stringify(audit.body)).not.toContain('private roll sentinel');
   });
 
   it('#1511 accepts only server-validated character identity on a generic roll', async () => {
