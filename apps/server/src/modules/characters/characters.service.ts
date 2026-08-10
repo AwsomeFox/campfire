@@ -182,6 +182,10 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     saveProficiencies: fromJsonText<Character['saveProficiencies']>(row.saveProficiencies, []),
     skills: fromJsonText<Record<string, SkillRank>>(row.skills, {}),
     weaponProficiencies: fromJsonText<Record<string, SkillRank>>(row.weaponProficiencies, {}),
+    // Issue #2156: character-level damage-type defences (see Character.resistances' own doc).
+    resistances: fromJsonText<string[]>(row.resistances, []),
+    vulnerabilities: fromJsonText<string[]>(row.vulnerabilities, []),
+    immunities: fromJsonText<string[]>(row.immunities, []),
     actions: fromJsonText<CharacterAction[]>(row.actions, []),
     spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
     resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
@@ -1146,6 +1150,9 @@ export class CharactersService {
         saveProficiencies: toJsonText(input.saveProficiencies ?? []),
         skills: toJsonText(input.skills ?? {}),
         weaponProficiencies: toJsonText(input.weaponProficiencies ?? {}),
+        resistances: toJsonText(input.resistances ?? []),
+        vulnerabilities: toJsonText(input.vulnerabilities ?? []),
+        immunities: toJsonText(input.immunities ?? []),
         actions: toJsonText(input.actions ?? []),
         spellSlots: toJsonText(input.spellSlots ?? {}),
         portraitUrl: input.portraitUrl ?? null,
@@ -1363,6 +1370,11 @@ export class CharactersService {
     // Full-snapshot replace, like `skills` directly above: the sheet sends the whole record,
     // and a merge would make "untrain me with longswords" unexpressible.
     if (input.weaponProficiencies !== undefined) update.weaponProficiencies = toJsonText(input.weaponProficiencies);
+    // Issue #2156: same full-snapshot-replace contract as weaponProficiencies/saveProficiencies
+    // above — each PATCH sends the whole array, so "no longer resistant to X" is expressible.
+    if (input.resistances !== undefined) update.resistances = toJsonText(input.resistances);
+    if (input.vulnerabilities !== undefined) update.vulnerabilities = toJsonText(input.vulnerabilities);
+    if (input.immunities !== undefined) update.immunities = toJsonText(input.immunities);
     if (input.actions !== undefined) update.actions = toJsonText(input.actions);
     // Reject a level whose `used` is outside [0, max] rather than silently clamping it —
     // matches the resources branch above and the dedicated POST :id/spell-slots path

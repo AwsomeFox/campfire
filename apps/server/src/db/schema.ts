@@ -174,6 +174,12 @@ export const characters = sqliteTable('characters', {
   // Issue #2144: weapon-or-category -> proficiency rank. Absent key = untrained. The term an
   // equipped weapon's derived attack bonus needs and the sheet never recorded.
   weaponProficiencies: text('weapon_proficiencies').notNull().default('{}'),
+  // Issue #2156: character-level damage-type defences, matching action-resolver.ts's
+  // TargetDefenses shape (each a JSON string[]). Previously only a monster/NPC statblock
+  // could carry these; a PC's resistances/vulnerabilities/immunities never fed the resolver.
+  resistances: text('resistances').notNull().default('[]'),
+  vulnerabilities: text('vulnerabilities').notNull().default('[]'),
+  immunities: text('immunities').notNull().default('[]'),
   actions: text('actions').notNull().default('[]'),
   spellSlots: text('spell_slots').notNull().default('{}'),
   resources: text('resources').notNull().default('{}'),

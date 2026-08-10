@@ -272,6 +272,68 @@ describe('characters (e2e)', () => {
     });
   });
 
+  /**
+   * Issue #2156 — `TargetDefenses` (resistance/vulnerability/immunity) was already fully
+   * modeled and applied by the action resolver, but only ever derived from a monster/NPC
+   * statblock; a PC's sheet had no fields to author any of the three at all.
+   */
+  describe('resistances / vulnerabilities / immunities', () => {
+    it('default to empty, and each round-trips a full replace independently', async () => {
+      const server = ctx.app.getHttpServer();
+      const before = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+      expect(before.body.resistances).toEqual([]);
+      expect(before.body.vulnerabilities).toEqual([]);
+      expect(before.body.immunities).toEqual([]);
+
+      const res = await request(server)
+        .patch(`/api/v1/characters/${characterId}`)
+        .set(owner)
+        .send({ resistances: ['fire', 'cold'], vulnerabilities: ['thunder'], immunities: ['poison'] });
+      expect(res.status).toBe(200);
+      expect(res.body.resistances).toEqual(['fire', 'cold']);
+      expect(res.body.vulnerabilities).toEqual(['thunder']);
+      expect(res.body.immunities).toEqual(['poison']);
+    });
+
+    it('is a full-snapshot replace, so an entry can be removed', async () => {
+      const server = ctx.app.getHttpServer();
+      await request(server).patch(`/api/v1/characters/${characterId}`).set(owner).send({ resistances: ['fire', 'cold'] });
+      const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(owner).send({ resistances: ['fire'] });
+      expect(res.status).toBe(200);
+      expect(res.body.resistances).toEqual(['fire']);
+    });
+
+    it('rejects a defence-array entry over the 24-char cap', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/characters/${characterId}`)
+        .set(owner)
+        .send({ resistances: ['a'.repeat(25)] });
+      expect(res.status).toBe(400);
+    });
+
+    it('a non-owner, non-dm player cannot PATCH another player’s defences', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/characters/${characterId}`)
+        .set(nonOwner)
+        .send({ resistances: ['necrotic'] });
+      expect(res.status).toBe(403);
+    });
+
+    it('POST create accepts the three arrays too, not just PATCH', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Frost Warden', resistances: ['fire'], vulnerabilities: ['cold'], immunities: ['exhaustion'] });
+      expect(res.status).toBe(201);
+      expect(res.body.resistances).toEqual(['fire']);
+      expect(res.body.vulnerabilities).toEqual(['cold']);
+      expect(res.body.immunities).toEqual(['exhaustion']);
+    });
+  });
+
   it('PATCH skills round-trips proficient/expertise ranks', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)

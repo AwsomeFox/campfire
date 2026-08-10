@@ -592,6 +592,32 @@ function migrateCharactersTableForWeaponProficiencies(sqlite: Database.Database)
 }
 
 /**
+ * Migration for DBs created before character-level damage defences (issue #2156):
+ * `characters.resistances`/`vulnerabilities`/`immunities` didn't exist. Same shape and same
+ * reasoning as `migrateCharactersTableForWeaponProficiencies` immediately above (its own entry
+ * in MIGRATIONS, not folded into `migrateCharactersTableForSheetDepth`, because `runMigrations`
+ * skips a step whose NAME is already recorded and `0010_characters_sheet_depth` is recorded on
+ * every database that has ever booted) — three plain defaulted ADD COLUMNs, no table rebuild.
+ */
+function migrateCharactersTableForDefenses2156(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'resistances')) {
+    sqlite.exec("ALTER TABLE characters ADD COLUMN resistances TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!columns.some((c) => c.name === 'vulnerabilities')) {
+    sqlite.exec("ALTER TABLE characters ADD COLUMN vulnerabilities TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!columns.some((c) => c.name === 'immunities')) {
+    sqlite.exec("ALTER TABLE characters ADD COLUMN immunities TEXT NOT NULL DEFAULT '[]'");
+  }
+}
+
+/**
  * Migration for issue #1308: `encounters.map_objects` didn't exist on pre-#1308 DBs. Plain
  * nullable ADD COLUMN — same shape as `aoe` (`gridType`'s sibling column, added the same
  * way for the same table) — no table rebuild needed. NULL reads back as `[]` (see
@@ -5707,6 +5733,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // migration has never shipped on any real database either, so renumbering to 0187
   // is safe by the identical argument.
   { name: '0187_encounters_map_objects_1308', run: migrateEncountersTableForMapObjects1308 },
+  { name: '0188_characters_defenses_2156', run: migrateCharactersTableForDefenses2156 },
 ];
 
 /**

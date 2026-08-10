@@ -922,6 +922,195 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(hpAfter).toBe(60 - t.totalDamage);
   });
 
+  /**
+   * Issue #2156 — `TargetDefenses` was already fully modeled and applied by the resolver, but
+   * only ever derived from a monster/NPC statblock (`damageDefensesFromStatblock`); a
+   * character-kind combatant always got `EMPTY_DEFENSES` because `statblockData` only reads
+   * `ruleEntryId`, which a character-linked combatant never carried. These tests exercise the
+   * new `ActionResolverService.targetDefenses` branch directly (the same private-method-access
+   * pattern `resolvePinnedPf2eTarget` below already uses in this file) so the precedence rule
+   * is pinned deterministically rather than through dice-roll-dependent full resolution.
+   */
+  describe('issue #2156: character-level damage defences', () => {
+    function seedCharacterCombatant(characterOverrides: Record<string, unknown> = {}, combatantOverrides: Record<string, unknown> = {}) {
+      const { orm, service } = build();
+      const ts = new Date().toISOString();
+      const [campaign] = orm.insert(campaigns).values({ name: 'Defenses Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+      const [char] = orm
+        .insert(characters)
+        .values({
+          campaignId: campaign.id,
+          ownerUserId: alice.id,
+          name: 'Defender PC',
+          hpCurrent: 30,
+          hpMax: 30,
+          resistances: JSON.stringify(['cold']),
+          vulnerabilities: JSON.stringify(['fire']),
+          immunities: JSON.stringify(['poison']),
+          createdAt: ts,
+          updatedAt: ts,
+          ...characterOverrides,
+        })
+        .returning()
+        .all();
+      const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+      const [combat] = orm
+        .insert(combatants)
+        .values({
+          encounterId: encounter.id,
+          kind: 'character',
+          characterId: char.id,
+          name: 'Defender PC',
+          initiative: 10,
+          hpCurrent: 30,
+          hpMax: 30,
+          sortOrder: 0,
+          ...combatantOverrides,
+        })
+        .returning()
+        .all();
+      const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
+      return { orm, service, row };
+    }
+
+    it("a character-kind combatant applies its OWN authored resistances/vulnerabilities/immunities, not EMPTY_DEFENSES", () => {
+      const { service, row } = seedCharacterCombatant();
+      const defenses = (service as any).targetDefenses(row);
+      expect(defenses).toEqual({ resistances: ['cold'], vulnerabilities: ['fire'], immunities: ['poison'] });
+    });
+
+    it('a full save-based resolution against a character target actually applies its resistance end to end (not just the private accessor above)', () => {
+      const { orm, service } = build();
+      const ts = new Date().toISOString();
+      // Save-based, not attack-based (same reasoning as fireball(1)/fireball(21) above): a
+      // 5e ATTACK roll auto-misses on a natural 1 regardless of AC, so an attack-based test
+      // would carry a ~1-in-20 flake risk. A SAVE has no such quirk here (classifySaveOutcome
+      // is a plain total>=dc comparison for the default/5e adapter) — DC 21 against a
+      // DEX-10/no-proficiency defender (nat 20 + mod 0 = 20 < 21) always FAILS, guaranteeing
+      // full (pre-resistance) damage every run.
+      const iceLance = {
+        name: 'Ice Lance',
+        kind: 'spell',
+        toHit: '',
+        damage: '8d6 cold',
+        notes: '',
+        spec: {
+          mode: 'save',
+          save: { ability: 'DEX', dc: { kind: 'fixed', dc: 21 } },
+          cost: { slot: 'action', count: 1 },
+          uses: { spellLevel: 3 },
+          // 'any' (like fireball above), not 'enemy': both combatants here are character-kind,
+          // which assertTargetAllowed treats as allies, not enemies.
+          targets: { count: 1, allow: 'any' },
+          outcomes: { failure: { damage: [{ formula: '8d6', type: 'cold' }] }, success: { halfDamage: true } },
+        },
+      };
+      const [campaign] = orm.insert(campaigns).values({ name: 'Defenses E2E Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+      const [attackerChar] = orm
+        .insert(characters)
+        .values({
+          campaignId: campaign.id,
+          ownerUserId: alice.id,
+          name: 'Attacker PC',
+          level: 5,
+          stats: JSON.stringify({ STR: 18 }),
+          hpCurrent: 30,
+          hpMax: 30,
+          actions: JSON.stringify([iceLance]),
+          spellSlots: JSON.stringify({ '3': { max: 1, used: 0 } }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const [defenderChar] = orm
+        .insert(characters)
+        .values({
+          campaignId: campaign.id,
+          ownerUserId: bob.id,
+          name: 'Defender PC',
+          hpCurrent: 30,
+          hpMax: 30,
+          resistances: JSON.stringify(['cold']),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+      const [attackerCombat] = orm
+        .insert(combatants)
+        .values({ encounterId: encounter.id, kind: 'character', characterId: attackerChar.id, name: 'Attacker PC', initiative: 20, hpCurrent: 30, hpMax: 30, sortOrder: 0 })
+        .returning()
+        .all();
+      const [defenderCombat] = orm
+        .insert(combatants)
+        .values({ encounterId: encounter.id, kind: 'character', characterId: defenderChar.id, name: 'Defender PC', initiative: 10, hpCurrent: 30, hpMax: 30, sortOrder: 1 })
+        .returning()
+        .all();
+      orm.update(encounters).set({ currentCombatantId: attackerCombat.id }).where(eq(encounters.id, encounter.id)).run();
+
+      const res = service.resolve(
+        encounter.id,
+        ActionResolveRequest.parse({ actorCombatantId: attackerCombat.id, actionIndex: 0, targetIds: [defenderCombat.id], commit: true }),
+        alice,
+        'player',
+      );
+      const t = res.resolution.targets[0];
+      expect(t.outcome).toBe('failure');
+      expect(t.damage[0].applied).toBe('resistant');
+      expect(t.totalDamage).toBeGreaterThan(0);
+      const hpAfter = orm.select().from(combatants).where(eq(combatants.id, defenderCombat.id)).get()!.hpCurrent;
+      expect(hpAfter).toBe(30 - t.totalDamage);
+    });
+
+    it(
+      "precedence: a linked character's defences win outright over a statblock/ruleEntry also present on the same combatant row — " +
+        'the same rule targetDefenseValue already applies for AC, stated explicitly rather than left to evaluation order',
+      () => {
+        const { orm, service } = build();
+        const ts = new Date().toISOString();
+        const [campaign] = orm.insert(campaigns).values({ name: 'Precedence Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+        const [rulePack] = orm.insert(rulePacks).values({ slug: 'precedence-pack', name: 'Precedence Pack', installedAt: ts }).returning().all();
+        // A statblock that declares the OPPOSITE defence (immune, not resistant) for the same
+        // damage type, so a test that passed by accident (e.g. reading the statblock branch
+        // when it shouldn't) would fail loudly instead of silently agreeing with the character.
+        const [entry] = orm
+          .insert(ruleEntries)
+          .values({
+            packId: rulePack.id,
+            slug: 'conflicting-statblock',
+            name: 'Conflicting Statblock',
+            type: 'monster',
+            dataJson: JSON.stringify({ armor_class: 10, hit_points: 10, damage_immunities: ['cold'] }),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        const [char] = orm
+          .insert(characters)
+          .values({ campaignId: campaign.id, ownerUserId: alice.id, name: 'Defender PC', hpCurrent: 30, hpMax: 30, resistances: JSON.stringify(['cold']), createdAt: ts, updatedAt: ts })
+          .returning()
+          .all();
+        const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+        // The combatant row carries BOTH a characterId AND a ruleEntryId — a shape the schema
+        // permits even though ordinary application flow never produces it for a character-kind
+        // combatant. The precedence rule must hold regardless.
+        const [combat] = orm
+          .insert(combatants)
+          .values({ encounterId: encounter.id, kind: 'character', characterId: char.id, ruleEntryId: entry.id, name: 'Defender PC', initiative: 10, hpCurrent: 30, hpMax: 30, sortOrder: 0 })
+          .returning()
+          .all();
+        const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
+
+        const defenses = (service as any).targetDefenses(row);
+        expect(defenses.resistances).toContain('cold');
+        expect(defenses.immunities).not.toContain('cold');
+      },
+    );
+  });
+
   function resolvePinnedPf2eTarget(spec: ActionSpec, fixed: Record<string, number> = { '1d20': 1, '2d6': 7, '4d6': 14 }) {
     const { service, encounterId, actor, bob } = seed({ ruleSystem: 'pf2e' });
     const encounter = (service as any).encounterRowOrThrow(encounterId);

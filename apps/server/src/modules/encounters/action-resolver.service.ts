@@ -331,12 +331,30 @@ export class ActionResolverService {
     return null;
   }
 
-  /** Damage-type defences for a target from its statblock/sheet (best-effort; empty when none). */
+  /**
+   * Damage-type defences for a target (issue #2156). Precedence, explicit rather than an
+   * accident of evaluation order: a linked character's OWN authored defences win outright
+   * over any statblock-derived ones the same row might also carry — the identical rule
+   * `targetDefenseValue` above already applies for AC (character link wins, never merged
+   * with a `ruleEntryId`/inline statblock that happens to also be set). A character-kind
+   * combatant normally has no `ruleEntryId`, but the schema does not forbid one, so this is
+   * a stated rule, not a gap. A character is authored directly (no statblock prose to parse),
+   * so there is no vocabulary filtering to apply — the three arrays are the canonical list as
+   * entered, unlike `damageDefensesFromStatblock`'s best-effort parse.
+   */
   private targetDefenses(
     row: typeof combatants.$inferSelect,
     damageTypes?: readonly string[],
     categories?: Readonly<Record<string, readonly string[]>>,
   ): TargetDefenses {
+    const character = this.linkedCharacter(row);
+    if (character) {
+      return {
+        resistances: fromJsonText<string[]>(character.resistances, []),
+        vulnerabilities: fromJsonText<string[]>(character.vulnerabilities, []),
+        immunities: fromJsonText<string[]>(character.immunities, []),
+      };
+    }
     const data = this.statblockData(row);
     return damageDefensesFromStatblock(data, damageTypes?.length ? damageTypes : undefined, categories);
   }
