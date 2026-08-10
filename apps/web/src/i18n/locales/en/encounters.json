@@ -257,6 +257,23 @@
         "movedMessage": "Moved {{feet}} {{unit}}.",
         "undoneMessage": "Move undone."
       },
+      "objects": {
+        "title": "Set pieces",
+        "empty": "No set pieces placed yet.",
+        "chooseIcon": "Choose icon",
+        "labelField": "Label",
+        "labelPlaceholder": "Label (e.g. Trapped chest)",
+        "xField": "X %",
+        "yField": "Y %",
+        "dmOnly": "DM only",
+        "add": "Add",
+        "placing": "Placing…",
+        "placed": "Placed {{label}}",
+        "placeError": "Couldn't place the object.",
+        "updateError": "Couldn't update the object.",
+        "removed": "Removed {{label}}",
+        "removeError": "Couldn't remove the object."
+      },
       "setup": "Map setup",
       "fog": {
         "undo": "Undo",

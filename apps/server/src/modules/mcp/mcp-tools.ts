@@ -56,6 +56,8 @@ import {
   LocationCreate,
   LocationStatus,
   LocationUpdate,
+  MapObjectCreate,
+  MapObjectUpdate,
   MapPing,
   MemberCreate,
   MemberUpdate,
@@ -1510,6 +1512,58 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.removeAoeTemplate(encounterId as number, templateId as string, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'place_map_object',
+      'Place a persistent icon/set piece on an encounter\'s battle map (issue #1308) — a chest, trap, door, hazard, or ' +
+        'quest marker, not tied to a combatant. DM only. `id` is caller-chosen so a later update_map_object/remove_map_object ' +
+        'can reference it without a round trip. `dmOnly: true` keeps the object (coordinates and existence both) out of every ' +
+        'non-DM read — see get_encounter.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        ...MapObjectCreate.shape,
+      },
+      async ({ encounterId, ...object }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.placeMapObject(encounterId as number, object, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_map_object',
+      'Move, relabel, re-icon, or flip the dmOnly flag on an existing map object (issue #1308). DM only.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        objectId: MapObjectCreate.shape.id.describe('Map object id supplied when it was placed'),
+        ...MapObjectUpdate.shape,
+      },
+      async ({ encounterId, objectId, ...patch }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.updateMapObject(encounterId as number, objectId as string, patch, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'remove_map_object',
+      'Remove a placed map object (issue #1308). DM only.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters'),
+        objectId: MapObjectCreate.shape.id.describe('Map object id supplied when it was placed'),
+      },
+      async ({ encounterId, objectId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.removeMapObject(encounterId as number, objectId as string, user, role);
       },
     );
 

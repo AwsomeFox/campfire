@@ -592,6 +592,27 @@ function migrateCharactersTableForWeaponProficiencies(sqlite: Database.Database)
 }
 
 /**
+ * Migration for issue #1308: `encounters.map_objects` didn't exist on pre-#1308 DBs. Plain
+ * nullable ADD COLUMN — same shape as `aoe` (`gridType`'s sibling column, added the same
+ * way for the same table) — no table rebuild needed. NULL reads back as `[]` (see
+ * `parseMapObjects` in encounters.service.ts), matching `aoe`'s own null-means-empty
+ * convention, so an un-migrated row and a migrated-but-never-written row are
+ * indistinguishable to every reader. New DBs never hit this path — BOOTSTRAP_SQL already
+ * declares the column.
+ */
+function migrateEncountersTableForMapObjects1308(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'map_objects')) return;
+
+  sqlite.exec('ALTER TABLE encounters ADD COLUMN map_objects TEXT');
+}
+
+/**
  * Migration for DBs created before session scheduling (issue #13):
  * `campaigns.ics_token` didn't exist. Plain nullable ADD COLUMN — no table
  * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
@@ -5682,6 +5703,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // migration backfills every existing comment author as `watching` on their own thread
   // so the new fan-out model preserves pre-#829 "prior participants get notified" behavior.
   { name: '0186_comment_thread_state_829', run: migrateCommentThreadState829 },
+  // #829 claimed 0186 on main first (same reasoning as the comment above it): this
+  // migration has never shipped on any real database either, so renumbering to 0187
+  // is safe by the identical argument.
+  { name: '0187_encounters_map_objects_1308', run: migrateEncountersTableForMapObjects1308 },
 ];
 
 /**

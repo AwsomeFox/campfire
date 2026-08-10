@@ -67,6 +67,7 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
+import { MapObjectsPanel } from './MapObjectsPanel';
 import { shouldRevealInitiative } from './initiativeReveal';
 import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
 import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
@@ -5648,6 +5649,13 @@ export default function RunSessionPage() {
               <>
                 <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />
                 <EncounterQuickWhisperPanel campaignId={cid} myUserId={myUserId} onError={surfaceActionError} />
+                {/* Issue #1308: place/move/label/delete persistent map icons (chests, traps,
+                    doors, quest markers). DM-only mount gate; the objects themselves render
+                    on the map for every role via MapObjectsOverlay, already server-redacted.
+                    `?? []` matches BattleMap's own defensive read of this same field (review:
+                    PR #2174) — cheap insurance against any future caller of this panel with an
+                    encounter object that predates the field. */}
+                <MapObjectsPanel encounterId={eid} objects={encounter.mapObjects ?? []} canDmWrite={canDmWrite} onError={surfaceActionError} />
               </>
             )}
             {canDmWrite && <GroupCheckBoard campaignId={cid} />}

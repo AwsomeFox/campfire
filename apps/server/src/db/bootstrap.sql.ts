@@ -1430,6 +1430,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   grid_type TEXT NOT NULL DEFAULT 'square',
   hex_orientation TEXT NOT NULL DEFAULT 'pointy',
   aoe TEXT,
+  map_objects TEXT,
   grid_offset_x REAL NOT NULL DEFAULT 0,
   grid_offset_y REAL NOT NULL DEFAULT 0,
   grid_cell_height REAL,
