@@ -43,6 +43,10 @@ export interface ComputedBox {
   lineHeight: string;
   paddingTop: string;
   paddingBottom: string;
+  /** Issue #2167: margin-top/bottom, needed to pin heading/`<p>`/`.hr` --space-* margins
+   * (paddingTop/paddingBottom alone can't see a margin-driven consumer). */
+  marginTop: string;
+  marginBottom: string;
 }
 
 /** Round to 2dp — sub-pixel rendering noise otherwise makes assertions annoyingly exact. */
@@ -64,6 +68,8 @@ export async function measureBox(locator: Locator): Promise<ComputedBox> {
       lineHeight: cs.lineHeight,
       paddingTop: cs.paddingTop,
       paddingBottom: cs.paddingBottom,
+      marginTop: cs.marginTop,
+      marginBottom: cs.marginBottom,
     };
   }).then((box) => ({ ...box, height: round2(box.height), width: round2(box.width) }));
 }
