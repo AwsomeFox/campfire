@@ -69,6 +69,7 @@ import {
   hasDegreesOfSuccessForAdapter,
   hasAdapterOwnedAttackRoll,
   sortCheckCatalog,
+  filterCheckCatalog,
   DND5E_ABILITY_KEYS,
   formatCheckBreakdown,
   restOptionsForAdapter,
@@ -2118,6 +2119,12 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
   const skillChecks = useMemo(() => catalog.filter((c) => c.category === 'skill'), [catalog]);
 
+  // Issue #2154: a long skill list is searchable, mirroring the encounter card's
+  // `CharacterStatCard` skill search — same shared `filterCheckCatalog`, same
+  // `check-search` testid — so a player/DM can narrow a full catalog without scrolling.
+  const [skillQuery, setSkillQuery] = useState('');
+  const skills = useMemo(() => filterCheckCatalog(skillChecks, skillQuery), [skillChecks, skillQuery]);
+
   async function cycle(name: string) {
     if (!canEdit || busy) return;
     setBusy(true);
@@ -2147,8 +2154,18 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
           tap a skill to roll{canEdit ? <span className="cf-print-hide">; tap the ○/●/★ to cycle proficiency</span> : ''}
         </span>
       </div>
+      <input
+        type="search"
+        value={skillQuery}
+        onChange={(e) => setSkillQuery(e.target.value)}
+        placeholder="Search skills…"
+        aria-label={`Search ${character.name}'s skills`}
+        data-testid="check-search"
+        className="input cf-print-hide"
+        style={{ fontSize: 12, minHeight: 32, maxWidth: 220 }}
+      />
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-        {skillChecks.map((def) => {
+        {skills.map((def) => {
           const name = def.label;
           const ability = def.ability;
           const rank = character.skills[name] ?? (def.proficiency as SkillRank | null);
@@ -2217,6 +2234,11 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
             </div>
           );
         })}
+        {skills.length === 0 && skillQuery.trim() !== '' && (
+          <span className="text-[12px] text-secondary">
+            No skills match “{skillQuery}”.
+          </span>
+        )}
       </div>
     </Card>
   );
