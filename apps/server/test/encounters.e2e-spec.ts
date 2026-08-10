@@ -147,6 +147,8 @@ describe('encounters (e2e)', () => {
     expect(rolled.body.roll).toMatchObject({ actor: 'Test Goblin', encounterId: created.body.id, label: 'Test Goblin · Stealth' });
     expect(rolled.body.roll.expr).toBe('1d20+6');
     expect(rolled.body.roll.label).not.toContain('+6');
+    // Issue #2155: same catalog-check pipeline as a character's own roll — 'check' kind.
+    expect(rolled.body.roll.kind).toBe('check');
     const shared = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=10`).set(player);
     const publicRoll = shared.body.find((entry: { id: number }) => entry.id === rolled.body.roll.id);
     expect(publicRoll).toMatchObject({ expr: '1d20', total: publicRoll.rolls[0], label: 'Test Goblin · Stealth' });
@@ -4950,6 +4952,8 @@ describe('encounters — issue #1462: authoritative death-save rolls (e2e)', () 
         .send({ idempotencyKey: 'hidden-death-save-dm-succeeds' });
       expect(dmAttempt.status).toBe(201);
       expect(dmAttempt.body.roll.total).toBe(10);
+      // Issue #2155: a death save is a 'check' in the shared log's grouping.
+      expect(dmAttempt.body.roll.kind).toBe('check');
       // Committed, not merely accepted-and-discarded: the DM's own feed shows the new roll.
       expect(
         (await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm)).body.filter((roll: { label?: string }) => roll.label === 'Nyx · death save'),
@@ -6088,6 +6092,8 @@ describe('encounters — issue #1904: per-combatant initiative roll + bulk dice-
     expect(typeof res.body.combatant.initiative).toBe('number');
     expect(res.body.combatant.initiativeBreakdown).toMatchObject({ total: res.body.combatant.initiative });
     expect(res.body.roll).toMatchObject({ label: 'Aria · Initiative', total: res.body.combatant.initiative });
+    // Issue #2155: initiative is a 'check' in the shared log's grouping.
+    expect(res.body.roll.kind).toBe('check');
 
     const events = await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
     expect(events.body).toEqual(
@@ -6693,10 +6699,13 @@ describe('encounters — issue #1904: bulk dice-log rows use one entry per SIDE 
     expect(res.body.rolledCount).toBe(4); // 2 party + 2 monsters, each combatant gets a value
 
     const after = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(dm);
-    const initiativeRows = (after.body as Array<{ label?: string }>).filter((r) => (r.label ?? '').endsWith('· Initiative'));
+    const initiativeRows = (after.body as Array<{ label?: string; kind?: string }>).filter((r) => (r.label ?? '').endsWith('· Initiative'));
     // One row per SIDE (party, monsters), not one per combatant.
     expect(initiativeRows).toHaveLength(beforeCount + 2);
     expect(initiativeRows.map((r) => r.label).sort()).toEqual(['Monsters · Initiative', 'Party · Initiative']);
+    // Issue #2155: the bulk roll's dice-log entries are 'check' kind too, same as the
+    // per-combatant roll.
+    expect(initiativeRows.every((r) => r.kind === 'check')).toBe(true);
 
     // Every combatant on the same side shares the exact same rolled value.
     const encAfter = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
