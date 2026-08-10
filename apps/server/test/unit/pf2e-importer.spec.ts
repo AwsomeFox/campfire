@@ -1,4 +1,4 @@
-import { fetchPf2eSection, fetchSf2eSection, entryTypeForSection, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
+import { fetchPf2eSection, fetchSf2eSection, entryTypeForSection, resolveBaseItemWeaponStats, ALL_PF2E_SECTIONS, PF2E_DEFAULT_LICENSE } from '../../src/modules/rules/pf2e-importer';
 import {
   startFakePf2e,
   startFakePf2eDuplicates,
@@ -115,6 +115,50 @@ describe('pf2e-importer — section fetch + mapping', () => {
       armorCategory: 'Medium',
       armorGroup: 'Chain',
       usage: 'worn armor',
+    });
+  });
+
+  /**
+   * Issue #2144 — AoN states damage on the BASE weapon only, so a magic weapon arrives with
+   * `base_item: ["Longsword"]` and no numbers of its own. Live: 424 of the 651 PF2e rows
+   * shelved under Weapons that state no damage do name a base item that does, so without this
+   * the majority of the weapons a PF2e character acquires derive no attack when equipped.
+   */
+  describe('magic weapons inherit their base weapon\'s stats (#2144)', () => {
+    it("fills a magic weapon's damage from the base item it names", async () => {
+      const { entries } = await fetchPf2eSection(fake.baseUrl, 'equipment', silentLogger);
+      const smokingSword = JSON.parse(entries.find((e) => e.name === 'Smoking Sword')!.dataJson!);
+      expect(smokingSword).toMatchObject({
+        baseItem: 'Longsword',
+        damage: '1d8 S',
+        damageType: ['Slashing'],
+        weaponCategory: 'Martial',
+        weaponGroup: 'Sword',
+        weaponType: 'Melee',
+        // Provenance, not a claim that the magic item printed these itself.
+        damageFromBaseItem: 'Longsword',
+      });
+    });
+
+    it('leaves a weapon that states its own damage untouched', async () => {
+      const { entries } = await fetchPf2eSection(fake.baseUrl, 'equipment', silentLogger);
+      const longsword = JSON.parse(entries.find((e) => e.name === 'Longsword')!.dataJson!);
+      expect(longsword.damage).toBe('1d8 S');
+      expect(longsword).not.toHaveProperty('damageFromBaseItem');
+    });
+
+    it('fills nothing when the base item is not in the scan', () => {
+      // A truncated scan, or a name that matches no row. The entry keeps what it had and the
+      // equipped-action derivation falls back to its text-only "fill it in" attack.
+      const orphan = { slug: 'x', name: 'Orphan Blade', type: 'item' as const, summary: '', body: '', license: '', source: '', dataJson: JSON.stringify({ itemCategory: 'Weapons', baseItem: 'Nonexistent Sword' }) };
+      expect(resolveBaseItemWeaponStats([orphan])).toBe(0);
+      expect(JSON.parse(orphan.dataJson)).not.toHaveProperty('damage');
+    });
+
+    it('never lets a self-referential base_item add bogus provenance', () => {
+      const selfRef = { slug: 'x', name: 'Longsword', type: 'item' as const, summary: '', body: '', license: '', source: '', dataJson: JSON.stringify({ itemCategory: 'Weapons', baseItem: 'Longsword', damage: '1d8 S' }) };
+      expect(resolveBaseItemWeaponStats([selfRef])).toBe(0);
+      expect(JSON.parse(selfRef.dataJson)).not.toHaveProperty('damageFromBaseItem');
     });
   });
 

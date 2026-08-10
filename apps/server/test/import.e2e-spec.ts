@@ -108,6 +108,10 @@ describe('campaign import (e2e, real cookie sessions)', () => {
       level: 3,
       status: 'active',
       portraitUrl: 'https://images.example.test/rogue.png',
+      // Issue #2144: sheet mechanics that must survive the round trip. Weapon training is the
+      // term an equipped weapon's derived attack bonus is built from.
+      skills: { Stealth: 'expertise' },
+      weaponProficiencies: { martial: 'proficient', longsword: 'expert' },
     });
     characterId = charRes.body.id;
     const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Vault Guards' });
@@ -230,6 +234,12 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(chars.body[0].ownerUserId).toBeNull();
     // Safe remote portraits survive JSON import (issue #524 / CodeRabbit on #1229).
     expect(chars.body[0].portraitUrl).toBe('https://images.example.test/rogue.png');
+    // Issue #2144 review (chatgpt-codex-connector P2): both halves of the round trip. The
+    // export profile has to CARRY weapon training and the import has to WRITE it — omitting
+    // either silently resets the column to `{}`, so every equipped weapon on the imported
+    // sheet derives as untrained with nothing to show it happened.
+    expect(chars.body[0].skills).toEqual({ Stealth: 'expertise' });
+    expect(chars.body[0].weaponProficiencies).toEqual({ martial: 'proficient', longsword: 'expert' });
 
     // Encounters + combatants copied; the character combatant's characterId remapped.
     const encs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);

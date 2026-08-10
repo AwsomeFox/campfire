@@ -3372,6 +3372,11 @@ export class CampaignsService {
             ...characterConditionWriteSetForImport(c),
             saveProficiencies: jsonCol(c.saveProficiencies, '[]'),
             skills: jsonCol(c.skills, '{}'),
+            // Issue #2144 review (chatgpt-codex-connector P2): omitted, the column default
+            // silently replaced every imported character's weapon training with `{}` — so a
+            // round-tripped campaign came back with every equipped weapon derived as
+            // untrained, losing its proficiency bonus with nothing to show it had happened.
+            weaponProficiencies: jsonCol(c.weaponProficiencies, '{}'),
             actions: jsonCol(c.actions, '[]'),
             spellSlots: jsonCol(c.spellSlots, '{}'),
             // Remapped to the freshly imported portrait attachment when a ZIP import

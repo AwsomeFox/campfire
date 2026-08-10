@@ -247,7 +247,11 @@ export const PUBLISHABLE_FIELDS = {
     // PLAYED_STATE_FIELDS. Omitting it meant the `handoff`/`publish` profiles
     // silently stripped a non-default speed before import.
     'id', 'campaignId', 'name', 'species', 'className', 'level', 'background', 'stats', 'ac', 'eac', 'kac', 'speed',
-    'hpMax', 'spMax', 'rpMax', 'saveProficiencies', 'skills', 'actions', 'resources', 'portraitUrl', 'notes',
+    // `weaponProficiencies` sits beside `saveProficiencies`/`skills` for the same reason
+    // (issue #2144): it is baseline sheet mechanics, not played state. Omitted, the reduced
+    // profiles would strip a character's weapon training on the way OUT, so fixing only the
+    // import side would have left the round trip just as lossy.
+    'hpMax', 'spMax', 'rpMax', 'saveProficiencies', 'skills', 'weaponProficiencies', 'actions', 'resources', 'portraitUrl', 'notes',
   ],
   note: ['id', 'campaignId', 'visibility', 'entityType', 'entityId', 'entityName', 'body'],
   comment: ['id', 'campaignId', 'entityType', 'entityId', 'parentId', 'body', 'inCharacter', 'characterId', 'characterName'],

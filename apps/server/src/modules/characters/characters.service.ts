@@ -181,6 +181,7 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     conditionInstances: readConditionInstances(row.conditionInstances, row.conditions),
     saveProficiencies: fromJsonText<Character['saveProficiencies']>(row.saveProficiencies, []),
     skills: fromJsonText<Record<string, SkillRank>>(row.skills, {}),
+    weaponProficiencies: fromJsonText<Record<string, SkillRank>>(row.weaponProficiencies, {}),
     actions: fromJsonText<CharacterAction[]>(row.actions, []),
     spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
     resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
@@ -1144,6 +1145,7 @@ export class CharactersService {
         ...sheetConditionWriteSetFromNames(input.conditions ?? [], null),
         saveProficiencies: toJsonText(input.saveProficiencies ?? []),
         skills: toJsonText(input.skills ?? {}),
+        weaponProficiencies: toJsonText(input.weaponProficiencies ?? {}),
         actions: toJsonText(input.actions ?? []),
         spellSlots: toJsonText(input.spellSlots ?? {}),
         portraitUrl: input.portraitUrl ?? null,
@@ -1358,6 +1360,9 @@ export class CharactersService {
     }
     if (input.saveProficiencies !== undefined) update.saveProficiencies = toJsonText(input.saveProficiencies);
     if (input.skills !== undefined) update.skills = toJsonText(input.skills);
+    // Full-snapshot replace, like `skills` directly above: the sheet sends the whole record,
+    // and a merge would make "untrain me with longswords" unexpressible.
+    if (input.weaponProficiencies !== undefined) update.weaponProficiencies = toJsonText(input.weaponProficiencies);
     if (input.actions !== undefined) update.actions = toJsonText(input.actions);
     // Reject a level whose `used` is outside [0, max] rather than silently clamping it —
     // matches the resources branch above and the dedicated POST :id/spell-slots path

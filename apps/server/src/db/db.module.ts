@@ -568,6 +568,30 @@ function migrateCharactersTableForSheetDepth(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before weapon training (issue #2144):
+ * `characters.weapon_proficiencies` didn't exist. Plain defaulted ADD COLUMN — no table
+ * rebuild needed, same as migrateCharactersTableForSheetDepth above.
+ *
+ * Its OWN entry in MIGRATIONS rather than a line appended to that function, even though the
+ * column is the identical shape and sits on the same table: `runMigrations` skips any step
+ * whose NAME is already recorded in `__migrations`, and `0010_characters_sheet_depth` is
+ * recorded on every database that has ever booted. Piggy-backing would have shipped the column
+ * to fresh installs only, and left every existing one running a drizzle schema that selects a
+ * column its table does not have.
+ */
+function migrateCharactersTableForWeaponProficiencies(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'weapon_proficiencies')) return;
+
+  sqlite.exec("ALTER TABLE characters ADD COLUMN weapon_proficiencies TEXT NOT NULL DEFAULT '{}'");
+}
+
+/**
  * Migration for DBs created before session scheduling (issue #13):
  * `campaigns.ics_token` didn't exist. Plain nullable ADD COLUMN — no table
  * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
@@ -5583,6 +5607,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0182_push_subscriptions_1323', run: migratePushSubscriptions1323 },
   { name: '0183_dice_rolls_context_1511', run: migrateDiceRollsContext1511 },
   { name: '0184_campaigns_condition_definitions_1505', run: migrateCampaignsTableForConditionDefinitions1505 },
+  { name: '0185_characters_weapon_proficiencies_2144', run: migrateCharactersTableForWeaponProficiencies },
 ];
 
 /**

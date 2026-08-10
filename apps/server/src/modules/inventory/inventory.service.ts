@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { canonicalJson, CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, rebuildEditedActionSpec, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
+import { canonicalJson, CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, equippedActionHasContent, rebuildEditedActionSpec, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
 import type { HomebrewMechanicsProfile, RuleSystemAdapter, Treasury, Role, InventoryItemAuditPayload } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { fromJsonText } from '../../common/json';
@@ -149,6 +149,12 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   const ref = parsedRef.success ? parsedRef.data : null;
   const snapshot = row.compendiumSnapshot ? sanitizeCompendiumSnapshot(safeJson(row.compendiumSnapshot)) : null;
   const parsedAction = row.equippedAction ? CharacterAction.safeParse(safeJson(row.equippedAction)) : null;
+  // Issue #2144: a stored action that says nothing beyond its own name is read as NO action,
+  // so derivation runs for it. `update()` no longer writes one, but rows saved before that —
+  // the editor's blank draft, saved unchanged — are already out there, each one silently
+  // holding its item's derived attack down. Treating them as absent on the way out repairs
+  // them where it matters without a migration rewriting anyone's data.
+  const storedAction = parsedAction?.success && equippedActionHasContent(parsedAction.data) ? parsedAction.data : null;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -164,8 +170,8 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     compendiumState: InventoryItem.shape.compendiumState.safeParse(row.compendiumState).success ? InventoryItem.shape.compendiumState.parse(row.compendiumState) : null,
     equipped: row.equipped,
     equipSlot: row.equipSlot ?? null,
-    equippedAction: parsedAction?.success ? parsedAction.data : null,
-    equippedActionSource: parsedAction?.success ? EquippedActionSource.enum.manual : null,
+    equippedAction: storedAction,
+    equippedActionSource: storedAction ? EquippedActionSource.enum.manual : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? null,
@@ -338,7 +344,13 @@ export class InventoryService {
     const characterRows =
       characterIds.length > 0
         ? await this.db
-            .select({ id: characters.id, ownerUserId: characters.ownerUserId, stats: characters.stats, level: characters.level })
+            .select({
+              id: characters.id,
+              ownerUserId: characters.ownerUserId,
+              stats: characters.stats,
+              level: characters.level,
+              weaponProficiencies: characters.weaponProficiencies,
+            })
             .from(characters)
             .where(inArray(characters.id, characterIds))
         : [];
@@ -375,7 +387,13 @@ export class InventoryService {
       const action = deriveEquippedItemAction({
         itemName: item.name,
         data: safeJson(dataJson),
-        character: { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level },
+        character: {
+          stats: fromJsonText<Record<string, number>>(character.stats, {}),
+          level: character.level,
+          // Issue #2144: the wielder's actual weapon training, which is what replaced this
+          // derivation's assumed proficiency.
+          weaponProficiencies: fromJsonText<Record<string, string>>(character.weaponProficiencies, {}),
+        },
         adapter,
       });
       return action ? { ...item, equippedAction: action, equippedActionSource: EquippedActionSource.enum.derived } : item;
@@ -961,8 +979,14 @@ export class InventoryService {
         // nothing cached to keep current, so none of the fences, revisions, or conflict
         // paths this block used to carry are needed.
         nameBeforeWrite = fresh.name;
+        // A submitted action with no mechanics in it is a CLEAR, not an authored row (issue
+        // #2144). The web editor opens prefilled with the item's name and five empty fields,
+        // so "open it, look, save" produced a valid-but-inert action that displayed nothing
+        // and — since only an item with no authored action derives one — took away the attack
+        // the weapon had been granting. Storing nothing restores the derived row instead.
+        const submittedAction = equippedActionHasContent(input.equippedAction) ? input.equippedAction! : null;
         const actionWrite: 'authored' | 'clear' | 'leave' =
-          input.equippedAction !== undefined ? (input.equippedAction ? 'authored' : 'clear') : moved ? 'clear' : 'leave';
+          input.equippedAction !== undefined ? (submittedAction ? 'authored' : 'clear') : moved ? 'clear' : 'leave';
 
         if (actionWrite === 'authored') {
           // An authored action's structured `spec` is what the resolver ROLLS; `toHit` and
@@ -991,7 +1015,7 @@ export class InventoryService {
           if (nowMechanics !== editMechanics!.mechanics) {
             throw new ConflictException("The campaign's rule system changed while this action was being saved; refetch and try again");
           }
-          const authored = rebuildEditedActionSpec(input.equippedAction!, campaignRuleSystem, campaignDamageTypes);
+          const authored = rebuildEditedActionSpec(submittedAction!, campaignRuleSystem, campaignDamageTypes);
           update.equippedAction = JSON.stringify(authored);
         } else if (actionWrite === 'clear') {
           update.equippedAction = CLEARED_EQUIP_STATE.equippedAction;

@@ -37,7 +37,9 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const install = await request(server)
       .post('/api/v1/rules/packs/install')
       .set(dm)
-      .send({ source: 'open5e', url: fake.baseUrl, sections: ['weapons'] });
+      // `items` is Open5e's MAGIC items — the section a magic weapon arrives in, and the one
+      // #2144 is about. Installed alongside the mundane `weapons` because a campaign has both.
+      .send({ source: 'open5e', url: fake.baseUrl, sections: ['weapons', 'items'] });
     expect([200, 201, 202]).toContain(install.status);
     // Installs are enqueued; wait for the pack to land before acquiring from it.
     for (let i = 0; i < 60; i++) {
@@ -59,7 +61,10 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const char = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
-      .send({ name: 'Sword Fighter', level: 5, stats: { STR: 16, DEX: 12 } });
+      // Issue #2144: weapon training is READ from the sheet now, not assumed, so the wielder
+      // has to record it. `martial` covers the fixture Longsword (`isSimple: false`); the
+      // untrained case gets its own spec rather than being every spec's silent default.
+      .send({ name: 'Sword Fighter', level: 5, stats: { STR: 16, DEX: 12 }, weaponProficiencies: { martial: 'proficient' } });
     characterId = char.body.id;
   });
 
@@ -159,7 +164,7 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const wielder = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
-      .send({ name: 'Agreement Test', level: 9, stats: { STR: 18 } });
+      .send({ name: 'Agreement Test', level: 9, stats: { STR: 18 }, weaponProficiencies: { martial: 'proficient' } });
     const itemId = await acquireLongsword(wielder.body.id);
     await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'agree-slot' });
 
@@ -231,7 +236,7 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const recipient = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
-      .send({ name: 'Weak Squire', level: 1, stats: { STR: 8, DEX: 8 } });
+      .send({ name: 'Weak Squire', level: 1, stats: { STR: 8, DEX: 8 }, weaponProficiencies: { martial: 'proficient' } });
 
     const moved = await request(server)
       .patch(`/api/v1/inventory/${itemId}`)
@@ -257,7 +262,7 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const recipient = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
-      .send({ name: 'Inheritor', level: 1, stats: { STR: 10 } });
+      .send({ name: 'Inheritor', level: 1, stats: { STR: 10 }, weaponProficiencies: { martial: 'proficient' } });
     const moved = await request(server)
       .patch(`/api/v1/inventory/${itemId}`)
       .set(dm)
@@ -300,7 +305,7 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const grower = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
-      .send({ name: 'Growing Fighter', level: 1, stats: { STR: 12 } });
+      .send({ name: 'Growing Fighter', level: 1, stats: { STR: 12 }, weaponProficiencies: { martial: 'proficient' } });
     const itemId = await acquireLongsword(grower.body.id);
     const equipped = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'grow-slot' });
     // STR 12 (+1), level 1 (proficiency +2).
@@ -325,7 +330,7 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const fixed = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
-      .send({ name: 'Fixed Fighter', level: 1, stats: { STR: 12 } });
+      .send({ name: 'Fixed Fighter', level: 1, stats: { STR: 12 }, weaponProficiencies: { martial: 'proficient' } });
     const itemId = await acquireLongsword(fixed.body.id);
     await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'fixed-slot' });
     await request(server)
@@ -376,7 +381,7 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const char = await request(server)
       .post(`/api/v1/campaigns/${camp.body.id}/characters`)
       .set(dm)
-      .send({ name: 'Switcher', level: 5, stats: { STR: 16 } });
+      .send({ name: 'Switcher', level: 5, stats: { STR: 16 }, weaponProficiencies: { martial: 'proficient' } });
     const acquired = await request(server)
       .post(`/api/v1/campaigns/${camp.body.id}/inventory/from-compendium`)
       .set(dm)
@@ -1333,7 +1338,7 @@ describe('derived equipped-item actions (issue #2097)', () => {
     const owned = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
-      .send({ name: 'Player Blade', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player' });
+      .send({ name: 'Player Blade', level: 5, stats: { STR: 16 }, ownerUserId: 'dev:player', weaponProficiencies: { martial: 'proficient' } });
     const itemId = await acquireLongsword(owned.body.id);
     await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'owned-slot' });
 
@@ -1364,4 +1369,226 @@ describe('derived equipped-item actions (issue #2097)', () => {
     expect(after?.a).toContain('Written Down');
   });
 
+  /**
+   * Issue #2144 — the blank editor draft. Opening the action editor on an equipped weapon and
+   * saving it untouched submitted a name and five empty strings, which is a VALID
+   * `CharacterAction`. Storing it replaced the weapon's derived attack with a row that showed
+   * nothing and rolled nothing, and derivation never came back because derivation only runs
+   * where no authored action exists. The player's gear silently stopped working, and the only
+   * way out was a Remove button they had no reason to press.
+   */
+  describe('an action with nothing in it is not an authored action (#2144)', () => {
+    it('leaves the derived attack in place instead of storing a blank row', async () => {
+      const server = ctx.app.getHttpServer();
+      const itemId = await acquireLongsword();
+      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'blank-draft-slot' });
+
+      const saved = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(dm)
+        .send({ equippedAction: { name: 'Longsword', kind: '', toHit: '', damage: '', targetAc: '', notes: '' } });
+      expect(saved.status).toBe(200);
+      expect(saved.body.equippedActionSource).toBe('derived');
+      expect(saved.body.equippedAction.toHit).toBe('+6');
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const stored = db.select({ a: inventoryItems.equippedAction }).from(inventoryItems).where(eq(inventoryItems.id, itemId)).get();
+      expect(stored?.a).toBeNull();
+    });
+
+    it('derives over a blank row that was already stored', async () => {
+      // Rows like this exist in the wild — written before the guard above. The read path
+      // treats them as absent so the weapon starts working again on the next request,
+      // without a migration rewriting anyone's inventory.
+      const server = ctx.app.getHttpServer();
+      const itemId = await acquireLongsword();
+      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'legacy-blank-slot' });
+      const db = ctx.app.get<DrizzleDb>(DB);
+      db.update(inventoryItems)
+        .set({ equippedAction: JSON.stringify({ name: 'Longsword', kind: '', toHit: '', damage: '', targetAc: '', notes: '' }) })
+        .where(eq(inventoryItems.id, itemId))
+        .run();
+
+      const read = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+      expect(read.status).toBe(200);
+      expect(read.body.equippedActionSource).toBe('derived');
+      expect(read.body.equippedAction.toHit).toBe('+6');
+    });
+
+    it('the encounter card agrees with the sheet about a blank row', async () => {
+      const server = ctx.app.getHttpServer();
+      const itemId = await acquireLongsword();
+      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'blank-encounter-slot' });
+      const db = ctx.app.get<DrizzleDb>(DB);
+      db.update(inventoryItems)
+        .set({ equippedAction: JSON.stringify({ name: 'Longsword', kind: '', toHit: '', damage: '', targetAc: '', notes: '' }) })
+        .where(eq(inventoryItems.id, itemId))
+        .run();
+
+      const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Blank Draft Fight' });
+      const combatant = enc.body.combatants.find((c: { characterId: number | null }) => c.characterId === characterId);
+      const actions = await request(server).get(`/api/v1/encounters/${enc.body.id}/combatants/${combatant.id}/actions`).set(dm);
+      const longsword = actions.body.find((a: { name: string }) => a.name === 'Longsword');
+      expect(longsword).toBeDefined();
+      expect(longsword.toHit).toBe('+6');
+    });
+
+    it('still stores an action a human actually filled in', async () => {
+      // The guard must not swallow a real edit — a single filled field is authorship.
+      const server = ctx.app.getHttpServer();
+      const itemId = await acquireLongsword();
+      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'authored-note-slot' });
+      const saved = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(dm)
+        .send({ equippedAction: { name: 'Longsword', kind: '', toHit: '', damage: '', targetAc: '', notes: 'Ask the DM about the rust.' } });
+      expect(saved.status).toBe(200);
+      expect(saved.body.equippedActionSource).toBe('manual');
+      expect(saved.body.equippedAction.notes).toBe('Ask the DM about the rust.');
+    });
+  });
+
+  /**
+   * Issue #2144 — the derived to-hit is priced from the wielder's RECORDED training.
+   *
+   * Until now the derivation assumed the wielder was proficient and said so in the action's
+   * notes. That was defensible for 5e, where the term is one fixed number; it was not for
+   * PF2e, whose term is level plus a rank bonus running +2 to +8, which is why a Pathfinder
+   * weapon showed a damage line and a blank attack bonus at all.
+   */
+  describe('weapon training is read from the sheet, not assumed (#2144)', () => {
+    async function equipLongswordFor(weaponProficiencies: Record<string, string> | undefined, name: string) {
+      const server = ctx.app.getHttpServer();
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name, level: 5, stats: { STR: 16, DEX: 12 }, ...(weaponProficiencies ? { weaponProficiencies } : {}) });
+      const itemId = await acquireLongsword(char.body.id);
+      const equipped = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(dm)
+        .send({ equipped: true, equipSlot: 'training-slot' });
+      expect(equipped.status).toBe(200);
+      return equipped.body.equippedAction;
+    }
+
+    it('adds no proficiency for a wielder with nothing recorded, and says why', async () => {
+      const action = await equipLongswordFor(undefined, 'Untrained Wielder');
+      // STR +3 alone. The old assumption silently made this +6.
+      expect(action.toHit).toBe('+3');
+      expect(action.notes).toContain('untrained +0');
+      expect(action.notes.toLowerCase()).toContain('no training with this weapon is recorded');
+    });
+
+    it("adds it for a wielder trained in the weapon's category", async () => {
+      const action = await equipLongswordFor({ martial: 'proficient' }, 'Category Trained');
+      expect(action.toHit).toBe('+6');
+      expect(action.notes).toContain('trained +3');
+    });
+
+    it('adds it for a wielder trained in that weapon by name', async () => {
+      const action = await equipLongswordFor({ Longsword: 'expert' }, 'Named Trained');
+      expect(action.toHit).toBe('+6');
+    });
+
+    it('follows an edit to the sheet with no write to the item', async () => {
+      // Same read-time-derivation contract as every other input: change the training, and the
+      // next read of the item reflects it, because nothing about the action was ever stored.
+      const server = ctx.app.getHttpServer();
+      const char = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Late Learner', level: 5, stats: { STR: 16, DEX: 12 } });
+      const itemId = await acquireLongsword(char.body.id);
+      await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ equipped: true, equipSlot: 'late-slot' });
+
+      const before = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+      expect(before.body.equippedAction.toHit).toBe('+3');
+
+      await request(server).patch(`/api/v1/characters/${char.body.id}`).set(dm).send({ weaponProficiencies: { martial: 'trained' } });
+      const after = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+      expect(after.body.equippedAction.toHit).toBe('+6');
+    });
+  });
+
+  /**
+   * Issue #2144 — an equipped item the compendium CALLS a weapon always grants an attack row,
+   * even with no numbers to build one from. Deriving nothing looks exactly like the feature
+   * being broken, which is how a magic weapon with no base weapon, and every item acquired
+   * before its importer kept the stats, presented on a character sheet.
+   */
+  it('equipping a MAGIC weapon from the compendium derives its attack too (#2144)', async () => {
+    // The user-facing bug in full: a magic weapon is what a DM actually hands out, and
+    // Open5e publishes its stats only inside the base-weapon block the importer used to
+    // discard. Acquire → equip → attack, with nobody authoring anything.
+    const server = ctx.app.getHttpServer();
+    const search = await request(server).get('/api/v1/rules/search').query({ q: 'Longsword (+1)', type: 'item' }).set(dm);
+    const entry = (search.body.items ?? search.body).find((e: { name: string }) => e.name === 'Longsword (+1)');
+    expect(entry).toBeDefined();
+
+    const acquired = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/inventory/from-compendium`)
+      .set(dm)
+      .send({ ruleEntryId: entry.id, ownerType: 'character', characterId, duplicateMode: 'separate' });
+    expect(acquired.status).toBe(201);
+
+    const equipped = await request(server)
+      .patch(`/api/v1/inventory/${acquired.body.id}`)
+      .set(dm)
+      .send({ equipped: true, equipSlot: 'magic-main-hand' });
+    expect(equipped.status).toBe(200);
+    expect(equipped.body.equippedActionSource).toBe('derived');
+    expect(equipped.body.equippedAction.name).toBe('Longsword (+1)');
+    // The base Longsword's 1d8 slashing, plus this fighter's STR +3 and proficiency +3.
+    expect(equipped.body.equippedAction.toHit).toBe('+6');
+    expect(equipped.body.equippedAction.damage).toBe('1d8+3 slashing');
+    // The weapon's own +1 is NOT invented: nothing in the row states it as a number, and the
+    // action's notes point at the editor for exactly this.
+    expect(equipped.body.equippedAction.notes).toMatch(/magic bonus/i);
+  });
+
+  describe('a weapon with no usable stats still grants an attack (#2144)', () => {
+    it('grants a visibly unfinished attack rather than nothing at all', async () => {
+      const server = ctx.app.getHttpServer();
+      const itemId = await acquireLongsword();
+      // What a magic weapon carrying no base weapon looks like: the shelf, and nothing else.
+      setLongswordEntryData({ category: 'Weapon', rarity: 'Very Rare', requiresAttunement: true });
+      try {
+        const db = ctx.app.get<DrizzleDb>(DB);
+        // Derivation prefers the accepted snapshot; drop it so the edited live entry is read.
+        db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
+        const equipped = await request(server)
+          .patch(`/api/v1/inventory/${itemId}`)
+          .set(dm)
+          .send({ equipped: true, equipSlot: 'statless-weapon-slot' });
+        expect(equipped.status).toBe(200);
+        expect(equipped.body.equippedActionSource).toBe('derived');
+        expect(equipped.body.equippedAction.kind).toBe('attack');
+        expect(equipped.body.equippedAction.notes).toMatch(/fill it in/i);
+        // Unfinished, never plausibly wrong: no invented to-hit.
+        expect(equipped.body.equippedAction.toHit).toBe('');
+      } finally {
+        restoreLongswordEntry();
+      }
+    });
+
+    it('grants nothing for an item the compendium does not call a weapon', async () => {
+      const server = ctx.app.getHttpServer();
+      const itemId = await acquireLongsword();
+      setLongswordEntryData({ category: 'Wondrous Item', rarity: 'Uncommon' });
+      try {
+        const db = ctx.app.get<DrizzleDb>(DB);
+        db.update(inventoryItems).set({ compendiumSnapshot: null }).where(eq(inventoryItems.id, itemId)).run();
+        const equipped = await request(server)
+          .patch(`/api/v1/inventory/${itemId}`)
+          .set(dm)
+          .send({ equipped: true, equipSlot: 'wondrous-slot' });
+        expect(equipped.status).toBe(200);
+        expect(equipped.body.equippedAction).toBeNull();
+        expect(equipped.body.equippedActionSource).toBeNull();
+      } finally {
+        restoreLongswordEntry();
+      }
+    });
+  });
 });

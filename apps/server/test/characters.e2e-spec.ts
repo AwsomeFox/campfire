@@ -224,6 +224,54 @@ describe('characters (e2e)', () => {
     expect(res.status).toBe(400);
   });
 
+  /**
+   * Issue #2144 — the sheet learned to record weapon training, which is the term an equipped
+   * weapon's derived attack bonus needs and never had.
+   */
+  describe('weaponProficiencies', () => {
+    it('defaults to empty, and round-trips a full replace', async () => {
+      const server = ctx.app.getHttpServer();
+      const before = await request(server).get(`/api/v1/characters/${characterId}`).set(owner);
+      expect(before.body.weaponProficiencies).toEqual({});
+
+      const res = await request(server)
+        .patch(`/api/v1/characters/${characterId}`)
+        .set(owner)
+        .send({ weaponProficiencies: { martial: 'proficient', longsword: 'expert' } });
+      expect(res.status).toBe(200);
+      expect(res.body.weaponProficiencies).toEqual({ martial: 'proficient', longsword: 'expert' });
+    });
+
+    it('accepts the PF2e rungs 5e never had', async () => {
+      // The point of unifying the ladder: a PF2e character can be Master with a weapon, and
+      // before this the enum had nowhere to put that.
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/characters/${characterId}`)
+        .set(owner)
+        .send({ weaponProficiencies: { martial: 'master', simple: 'legendary' } });
+      expect(res.status).toBe(200);
+      expect(res.body.weaponProficiencies).toEqual({ martial: 'master', simple: 'legendary' });
+    });
+
+    it('is a full-snapshot replace, so an entry can be removed', async () => {
+      const server = ctx.app.getHttpServer();
+      await request(server).patch(`/api/v1/characters/${characterId}`).set(owner).send({ weaponProficiencies: { martial: 'trained' } });
+      const res = await request(server).patch(`/api/v1/characters/${characterId}`).set(owner).send({ weaponProficiencies: {} });
+      expect(res.status).toBe(200);
+      expect(res.body.weaponProficiencies).toEqual({});
+    });
+
+    it('rejects a rank that is not on the ladder', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/characters/${characterId}`)
+        .set(owner)
+        .send({ weaponProficiencies: { martial: 'very good' } });
+      expect(res.status).toBe(400);
+    });
+  });
+
   it('PATCH skills round-trips proficient/expertise ranks', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server)
@@ -239,8 +287,22 @@ describe('characters (e2e)', () => {
     const res = await request(server)
       .patch(`/api/v1/characters/${characterId}`)
       .set(owner)
-      .send({ skills: { Stealth: 'legendary' } });
+      .send({ skills: { Stealth: 'very good' } });
     expect(res.status).toBe(400);
+  });
+
+  it('PATCH skills now accepts the PF2e rungs above expertise (#2144)', async () => {
+    // A deliberate widening: this spec used to assert `legendary` was a 400. The two
+    // vocabularies were unified onto one ladder, so a PF2e sheet can finally record a Master
+    // or Legendary skill — which `pf2eCheckCatalog` previously had to cap at expert because
+    // the enum had nowhere to put it. The 5e spellings stay valid alongside.
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(owner)
+      .send({ skills: { Stealth: 'legendary', Athletics: 'proficient' } });
+    expect(res.status).toBe(200);
+    expect(res.body.skills).toEqual({ Stealth: 'legendary', Athletics: 'proficient' });
   });
 
   it('PATCH actions round-trips and fills field defaults', async () => {

@@ -46,6 +46,18 @@ describe('D&D Beyond character import — mapper (unit)', () => {
     expect(c.xp).toBe(6500);
     expect(c.ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
     expect(new Set(c.saveProficiencies)).toEqual(new Set(['STR', 'CON']));
+    // Issue #2144 — weapon training, so an imported character's equipped weapon derives its
+    // proficiency instead of arriving untrained. Categories only: DDB grants a named-weapon
+    // proficiency as a bare subType indistinguishable from `thieves-tools` or `light-armor`,
+    // both of which are in this fixture precisely to prove they are not swept up.
+    expect(c.weaponProficiencies).toEqual({
+      simple: 'proficient',
+      martial: 'proficient',
+      // Split grants keep their split (#2144 review, chatgpt-codex-connector P2): collapsing
+      // `martial-ranged-weapons` to a bare `martial` would hand the character proficiency with
+      // every martial MELEE weapon too. `categoryKeys` emits the matching composite key.
+      'martial ranged': 'proficient',
+    });
     expect(c.skills).toEqual({ Perception: 'proficient', Stealth: 'expertise' });
     expect(c.portraitUrl).toBe('https://www.dndbeyond.com/avatars/thornbeard.png');
     expect(c.notes).toContain('left the mountain halls');
