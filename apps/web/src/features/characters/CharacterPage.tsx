@@ -3704,13 +3704,18 @@ function DamageDefensesCard({
   onError: (msg: string | null) => void;
   adapter: RuleSystemAdapter;
 }) {
+  // Same "hide the whole card in print when empty" rule WeaponTrainingCard already applies
+  // (#2151) — an on-screen "No resistances." placeholder is useful while editing, but a
+  // printed sheet with nothing authored in any of the three categories should not grow a
+  // "Damage defenses" section at all.
+  const hasAny = character.resistances.length > 0 || character.vulnerabilities.length > 0 || character.immunities.length > 0;
   return (
     <section
       id="character-section-damage-defenses"
       aria-labelledby="character-section-damage-defenses-heading"
       className="cf-sheet-section"
     >
-      <Card className="space-y-2.5">
+      <Card className={`space-y-2.5${hasAny ? '' : ' cf-print-hide'}`} data-testid="character-damage-defenses">
         <h2 id="character-section-damage-defenses-heading" className="card-kicker mb-0">Damage defenses</h2>
         {DAMAGE_DEFENSE_CATEGORIES.map((category) => (
           <DamageDefenseRow
@@ -3761,15 +3766,22 @@ function DamageDefenseRow({
   // saveProficiencies/weaponProficiencies — see characters.service.ts), not a dedicated
   // add/remove endpoint like conditions has: these three fields are plain string arrays with
   // no chained-state (no leveled track, no live-tracker mirror) to coordinate.
-  async function patchDefenses(next: string[]) {
-    if (busy) return;
+  // Returns whether the write was actually attempted AND succeeded, so a caller can gate its
+  // announcement on that rather than merely on having clicked — a busy-skip (the `if (busy)
+  // return` below) and a failed request (caught below, surfaced via onError) both need to
+  // suppress the announcement the same way: an assistive-tech user told "removed"/"added"
+  // when nothing actually changed is actively misinformed, worse than no announcement at all.
+  async function patchDefenses(next: string[]): Promise<boolean> {
+    if (busy) return false;
     setBusy(true);
     onError(null);
     try {
       await api.patch(`${API}/characters/${character.id}`, { [category.field]: next });
       await onChange();
+      return true;
     } catch (err) {
       onError(err instanceof ApiError ? err.message : `Couldn't update ${category.label.toLowerCase()}.`);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -3783,19 +3795,22 @@ function DamageDefenseRow({
       setAdding(false);
       return;
     }
-    await patchDefenses([...current, v]);
+    const ok = await patchDefenses([...current, v]);
     setValue('');
     setAdding(false);
-    announce(`Added ${category.label.toLowerCase()} ${v}`);
+    if (ok) announce(`Added ${category.label.toLowerCase()} ${v}`);
   }
 
   async function removeValue(name: string) {
-    await patchDefenses(current.filter((c) => c !== name));
-    announce(`Removed ${category.label.toLowerCase()} ${name}`);
+    const ok = await patchDefenses(current.filter((c) => c !== name));
+    if (ok) announce(`Removed ${category.label.toLowerCase()} ${name}`);
   }
 
   return (
-    <div className="flex items-center gap-1.5 flex-wrap">
+    <div
+      className={`flex items-center gap-1.5 flex-wrap${current.length === 0 ? ' cf-print-hide' : ''}`}
+      data-testid={`character-damage-defense-${category.field}`}
+    >
       <span className="text-muted text-xs" style={{ minWidth: 92 }}>{category.label}</span>
       {current.map((v) => (
         <span key={v} className="tag tag-outline" style={{ gap: 6 }}>

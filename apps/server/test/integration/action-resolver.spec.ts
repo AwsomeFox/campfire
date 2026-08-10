@@ -1065,24 +1065,69 @@ describe('action resolver (real SQLite, service layer)', () => {
     });
 
     it(
-      "precedence: a linked character's defences win outright over a statblock/ruleEntry also present on the same combatant row — " +
-        'the same rule targetDefenseValue already applies for AC, stated explicitly rather than left to evaluation order',
+      "regression (issue #606): a character-kind combatant that has authored NO defences at all still " +
+        'receives its statblock mitigation — the precedence rule is per-category, not "character link wins ' +
+        'outright" (an earlier version of this method WAS outright-wins, and it broke exactly this case: ' +
+        "encounter-turn-workspace.spec.ts's \"queues only post-mitigation direct typed damage\" caught it via " +
+        'EncountersService.targetDamageDefenses, this pins the identical rule on ActionResolverService too)',
       () => {
         const { orm, service } = build();
         const ts = new Date().toISOString();
-        const [campaign] = orm.insert(campaigns).values({ name: 'Precedence Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
-        const [rulePack] = orm.insert(rulePacks).values({ slug: 'precedence-pack', name: 'Precedence Pack', installedAt: ts }).returning().all();
-        // A statblock that declares the OPPOSITE defence (immune, not resistant) for the same
-        // damage type, so a test that passed by accident (e.g. reading the statblock branch
-        // when it shouldn't) would fail loudly instead of silently agreeing with the character.
+        const [campaign] = orm.insert(campaigns).values({ name: 'Empty Defences Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+        const [rulePack] = orm.insert(rulePacks).values({ slug: 'empty-defences-pack', name: 'Empty Defences Pack', installedAt: ts }).returning().all();
         const [entry] = orm
           .insert(ruleEntries)
           .values({
             packId: rulePack.id,
-            slug: 'conflicting-statblock',
-            name: 'Conflicting Statblock',
+            slug: 'resistant-statblock',
+            name: 'Resistant Statblock',
             type: 'monster',
-            dataJson: JSON.stringify({ armor_class: 10, hit_points: 10, damage_immunities: ['cold'] }),
+            dataJson: JSON.stringify({ armor_class: 10, hit_points: 10, damage_resistances: ['fire'] }),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        // No resistances/vulnerabilities/immunities passed — every field defaults to `[]`,
+        // the exact "never authored anything" shape a pre-#2156 character has today.
+        const [char] = orm
+          .insert(characters)
+          .values({ campaignId: campaign.id, ownerUserId: alice.id, name: 'Defender PC', hpCurrent: 30, hpMax: 30, createdAt: ts, updatedAt: ts })
+          .returning()
+          .all();
+        const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+        const [combat] = orm
+          .insert(combatants)
+          .values({ encounterId: encounter.id, kind: 'character', characterId: char.id, ruleEntryId: entry.id, name: 'Defender PC', initiative: 10, hpCurrent: 30, hpMax: 30, sortOrder: 0 })
+          .returning()
+          .all();
+        const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
+
+        const defenses = (service as any).targetDefenses(row);
+        expect(defenses.resistances).toEqual(['fire']);
+      },
+    );
+
+    it(
+      'per-category precedence: a non-empty authored category overrides the SAME category on a same-row ' +
+        "statblock outright (not merged), while a DIFFERENT category the character left empty still falls " +
+        'through to the statblock — proving categories are resolved independently, not all-or-nothing',
+      () => {
+        const { orm, service } = build();
+        const ts = new Date().toISOString();
+        const [campaign] = orm.insert(campaigns).values({ name: 'Per-Category Precedence Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+        const [rulePack] = orm.insert(rulePacks).values({ slug: 'per-category-pack', name: 'Per-Category Pack', installedAt: ts }).returning().all();
+        // Same category as the character's own (resistances) but a DIFFERENT type ('fire'), so a
+        // test that passed by accident (e.g. merging character+statblock resistances together)
+        // fails loudly — and a separate category (immunities) the character never touched.
+        const [entry] = orm
+          .insert(ruleEntries)
+          .values({
+            packId: rulePack.id,
+            slug: 'mixed-statblock',
+            name: 'Mixed Statblock',
+            type: 'monster',
+            dataJson: JSON.stringify({ armor_class: 10, hit_points: 10, damage_resistances: ['fire'], damage_immunities: ['poison'] }),
             createdAt: ts,
             updatedAt: ts,
           })
@@ -1105,24 +1150,28 @@ describe('action resolver (real SQLite, service layer)', () => {
         const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
 
         const defenses = (service as any).targetDefenses(row);
-        expect(defenses.resistances).toContain('cold');
-        expect(defenses.immunities).not.toContain('cold');
+        // Character authored resistances ('cold') → wins outright for THAT category; the
+        // statblock's 'fire' resistance is entirely superseded, not unioned in alongside it.
+        expect(defenses.resistances).toEqual(['cold']);
+        // Character left immunities empty → falls through to the statblock's 'poison' immunity.
+        expect(defenses.immunities).toEqual(['poison']);
       },
     );
 
     it(
-      "precedence holds against a PF2e CATEGORY-expanded statblock too (#2177): a character vulnerable to " +
-        "'slashing' — a member of PF2e's 'physical' category — still reports only its own authored arrays " +
-        "when the same row's statblock is resistant to the whole 'physical' category, because the character " +
-        'branch returns before `damageDefensesFromStatblock` (and its category expansion) ever runs',
+      "per-category precedence holds against a PF2e CATEGORY-expanded statblock too (#2177): a character's " +
+        "OWN authored 'slashing' vulnerability is reported exactly as authored — never widened or narrowed " +
+        "by category membership — while a category the character left empty (resistances) still falls " +
+        "through to the statblock's category-expanded value, since that expansion happens only inside " +
+        '`damageDefensesFromStatblock`, on the fallback path',
       () => {
         const { orm, service } = build();
         const ts = new Date().toISOString();
         const [campaign] = orm.insert(campaigns).values({ name: 'Category Precedence Test', ruleSystem: 'pf2e', createdAt: ts, updatedAt: ts }).returning().all();
         const [rulePack] = orm.insert(rulePacks).values({ slug: 'category-precedence-pack', name: 'Category Precedence Pack', installedAt: ts }).returning().all();
         // Statblock resistant to the whole 'physical' CATEGORY, which #2177's expansion turns
-        // into member types including 'slashing' — the opposite polarity of the character's own
-        // 'slashing' vulnerability below, so an accidental read of the statblock branch fails loudly.
+        // into member types including 'slashing'. The character never authored anything in the
+        // resistances category, so this SHOULD fall through and be visible, category-expanded.
         const [entry] = orm
           .insert(ruleEntries)
           .values({
@@ -1150,11 +1199,12 @@ describe('action resolver (real SQLite, service layer)', () => {
         const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
 
         // Pass `categories` explicitly, exactly as the real call site (adapter.damageTypeCategories)
-        // would for a PF2e campaign — proving the character branch ignores it, not merely that the
-        // test never supplied it.
+        // would for a PF2e campaign.
         const defenses = (service as any).targetDefenses(row, undefined, PF2E_DAMAGE_TYPE_CATEGORIES);
+        // The character's own authored category: exactly as authored, untouched by expansion.
         expect(defenses.vulnerabilities).toEqual(['slashing']);
-        expect(defenses.resistances).toEqual([]);
+        // The category the character left empty: falls through to the category-expanded statblock.
+        expect(defenses.resistances).toEqual(['bludgeoning', 'piercing', 'slashing']);
       },
     );
   });

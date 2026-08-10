@@ -663,6 +663,55 @@ describe('encounters (e2e)', () => {
       expect(immune.body.hpCurrent).toBe(13); // immune: unchanged
     });
 
+    it(
+      'regression (issue #606): direct tracker damage against a character-kind combatant with NO authored ' +
+        "defences still applies its statblock's mitigation — the precedence rule is per-category, not " +
+        '"character link wins outright" (an earlier version of this method WAS outright-wins, and it broke ' +
+        'exactly this: encounter-turn-workspace.spec.ts caught it first)',
+      async () => {
+        const server = ctx.app.getHttpServer();
+        const db = ctx.app.get<DrizzleDb>(DB);
+        const ts = new Date().toISOString();
+        const source = await db.select({ packId: ruleEntries.packId }).from(ruleEntries).where(eq(ruleEntries.id, ruleEntryId)).get();
+        expect(source).toBeDefined();
+        const [entry] = await db
+          .insert(ruleEntries)
+          .values({
+            packId: source!.packId,
+            slug: `resistant-statblock-606-${Date.now()}`,
+            name: 'Resistant statblock (no character defences)',
+            type: 'monster',
+            summary: '',
+            body: '',
+            dataJson: JSON.stringify({ hitPoints: 100, damage_resistances: ['fire'] }),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning();
+        // No resistances/vulnerabilities/immunities passed — defaults to `[]`, the exact
+        // "never authored anything" shape a pre-#2156 character has today.
+        const character = await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Untouched Defences PC', hpCurrent: 30, hpMax: 30 });
+        expect(character.status).toBe(201);
+        const added = await request(server)
+          .post(`/api/v1/encounters/${encounterId}/combatants`)
+          .set(dm)
+          .send({ kind: 'character', characterId: character.body.id });
+        expect(added.status).toBe(201);
+        // The combatant row carries BOTH a characterId AND a ruleEntryId — a shape the schema
+        // permits even though ordinary application flow never produces it for a character-kind
+        // combatant. The precedence rule must hold regardless.
+        await db.update(combatantsTable).set({ ruleEntryId: entry.id }).where(eq(combatantsTable.id, added.body.id));
+
+        const resisted = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${added.body.id}`).set(dm)
+          .send({ hpDelta: -10, damageType: 'fire' });
+        expect(resisted.status).toBe(200);
+        expect(resisted.body.hpCurrent).toBe(25); // statblock resistance still applies: 10 halved to 5
+      },
+    );
+
     it('rejects direct-damage metadata for adapters that do not own 5e damage rules (issue #605)', async () => {
       const server = ctx.app.getHttpServer();
       const db = ctx.app.get<DrizzleDb>(DB);

@@ -821,8 +821,11 @@ export const Character = z.object({
    * `TargetDefenses` as a sub-object and every sibling array field on `Character` is flat.
    * A character is authored directly (no statblock prose to parse), so there is no vocabulary
    * filtering to apply on read — unlike `damageDefensesFromStatblock`, these are the canonical
-   * list as entered. See `ActionResolverService.targetDefenses` for the precedence rule when a
-   * combatant is both character-linked AND carries a statblock/rule-entry link.
+   * list as entered. See `ActionResolverService.targetDefenses` for the full precedence rule
+   * when a combatant is both character-linked AND carries a statblock/rule-entry link — in
+   * short, PER-CATEGORY, non-empty wins: an empty array here (the default, and what every
+   * pre-#2156 character has) falls through to that category's statblock value rather than
+   * suppressing it.
    */
   resistances: TargetDefenses.shape.resistances,
   vulnerabilities: TargetDefenses.shape.vulnerabilities,

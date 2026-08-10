@@ -20,32 +20,37 @@ test.describe('character sheet damage defenses (#2156)', () => {
     const { campaignId, navigation } = seed();
     await page.goto(`/c/${campaignId}/characters/${navigation.characterId}`);
 
-    await expect(page.getByRole('heading', { name: 'Damage defenses' })).toBeVisible();
-    await expect(page.getByText('No resistances.')).toBeVisible();
-    await expect(page.getByText('No vulnerabilities.')).toBeVisible();
-    await expect(page.getByText('No immunities.')).toBeVisible();
+    // Scoped to the card's own data-testid throughout: the sheet already has other "Add"
+    // buttons (character-vitals-rail, and #2151's character-weapon-training), so an unscoped
+    // getByRole('button', { name: 'Add' }) is ambiguous — and, worse, can silently click the
+    // WRONG control instead of failing outright.
+    const card = page.getByTestId('character-damage-defenses');
+    await expect(card.getByRole('heading', { name: 'Damage defenses' })).toBeVisible();
+    await expect(card.getByText('No resistances.')).toBeVisible();
+    await expect(card.getByText('No vulnerabilities.')).toBeVisible();
+    await expect(card.getByText('No immunities.')).toBeVisible();
 
-    await page.getByRole('button', { name: 'Add resistant to' }).click();
-    await page.getByLabel('Damage type').fill('Fire');
+    await card.getByRole('button', { name: 'Add resistant to' }).click();
+    await card.getByLabel('Damage type').fill('Fire');
 
     const addReq = page.waitForResponse(
       (res) => res.url().endsWith(`/api/v1/characters/${navigation.characterId}`) && res.request().method() === 'PATCH',
     );
-    await page.getByRole('button', { name: 'Add', exact: true }).click();
+    await card.getByRole('button', { name: 'Add', exact: true }).click();
     await addReq;
 
-    await expect(page.getByText('No resistances.')).toHaveCount(0);
-    await expect(page.getByText('Fire', { exact: true })).toBeVisible();
+    await expect(card.getByText('No resistances.')).toHaveCount(0);
+    await expect(card.getByText('Fire', { exact: true })).toBeVisible();
     // The other two categories are untouched by adding a resistance.
-    await expect(page.getByText('No vulnerabilities.')).toBeVisible();
-    await expect(page.getByText('No immunities.')).toBeVisible();
+    await expect(card.getByText('No vulnerabilities.')).toBeVisible();
+    await expect(card.getByText('No immunities.')).toBeVisible();
 
     const removeReq = page.waitForResponse(
       (res) => res.url().endsWith(`/api/v1/characters/${navigation.characterId}`) && res.request().method() === 'PATCH',
     );
-    await page.getByRole('button', { name: 'Remove resistant to Fire' }).click();
+    await card.getByRole('button', { name: 'Remove resistant to Fire' }).click();
     await removeReq;
-    await expect(page.getByText('Fire', { exact: true })).toHaveCount(0);
-    await expect(page.getByText('No resistances.')).toBeVisible();
+    await expect(card.getByText('Fire', { exact: true })).toHaveCount(0);
+    await expect(card.getByText('No resistances.')).toBeVisible();
   });
 });

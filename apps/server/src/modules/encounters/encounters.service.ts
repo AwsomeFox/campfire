@@ -1286,12 +1286,19 @@ export class EncountersService {
 
   /**
    * Damage-type defences for direct tracker damage (issue #605), extended in #2156 to also
-   * check a linked character. Same precedence rule as `ActionResolverService.targetDefenses`,
-   * stated once there and mirrored here rather than duplicated in prose: a linked character's
-   * own authored defences win outright over any statblock-derived ones the same row might also
-   * carry, whether or not the statblock side would have had PF2e category tokens (#2177)
-   * expanded into member damage types first — the character branch never reaches
-   * `damageDefensesFromStatblock` at all, so category expansion is simply not in play for it.
+   * check a linked character. Precedence is PER-CATEGORY, non-empty wins — the identical rule
+   * (and the identical bug fixed) as `ActionResolverService.targetDefenses`, stated once there
+   * and mirrored here rather than duplicated in prose: a linked character's authored
+   * `resistances`/`vulnerabilities`/`immunities` each override the same row's
+   * statblock-derived value for THAT category only when the character actually authored at
+   * least one entry there; an empty authored array falls through to the statblock. NOT
+   * "character link wins outright" — this method's first version was, and it silently dropped
+   * a `ruleEntryId` statblock's mitigation for any character-kind combatant that had never
+   * authored its own defences (`Character.resistances` etc. default to `[]`, indistinguishable
+   * from an explicit empty override), which is exactly what broke
+   * `encounter-turn-workspace.spec.ts`'s "queues only post-mitigation direct typed damage"
+   * (issue #606) regression test. See the fuller rationale on `ActionResolverService
+   * .targetDefenses`, including why per-category (not a union) is the right fix.
    */
   private targetDamageDefenses(
     row: typeof combatants.$inferSelect,
@@ -1299,32 +1306,36 @@ export class EncountersService {
     db: SyncDb = this.db,
     categories?: Readonly<Record<string, readonly string[]>>,
   ): TargetDefenses {
-    if (row.characterId !== null) {
-      const character = db.select().from(characters).where(eq(characters.id, row.characterId)).get();
-      if (character) {
-        return {
-          resistances: fromJsonText<string[]>(character.resistances, []),
-          vulnerabilities: fromJsonText<string[]>(character.vulnerabilities, []),
-          immunities: fromJsonText<string[]>(character.immunities, []),
-        };
-      }
-    }
-    if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
-    const encounter = db
-      .select({ campaignId: encounters.campaignId })
-      .from(encounters)
-      .where(eq(encounters.id, row.encounterId))
-      .get();
-    const campaignScope = encounter
-      ? or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounter.campaignId))
-      : isNull(ruleEntries.campaignId);
-    const entry = db
-      .select({ dataJson: ruleEntries.dataJson })
-      .from(ruleEntries)
-      .where(and(eq(ruleEntries.id, row.ruleEntryId), campaignScope))
-      .get();
-    const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
-    return damageDefensesFromStatblock(data, damageTypes, categories);
+    const statblock = (): TargetDefenses => {
+      if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
+      const encounter = db
+        .select({ campaignId: encounters.campaignId })
+        .from(encounters)
+        .where(eq(encounters.id, row.encounterId))
+        .get();
+      const campaignScope = encounter
+        ? or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, encounter.campaignId))
+        : isNull(ruleEntries.campaignId);
+      const entry = db
+        .select({ dataJson: ruleEntries.dataJson })
+        .from(ruleEntries)
+        .where(and(eq(ruleEntries.id, row.ruleEntryId), campaignScope))
+        .get();
+      const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
+      return damageDefensesFromStatblock(data, damageTypes, categories);
+    };
+    if (row.characterId === null) return statblock();
+    const character = db.select().from(characters).where(eq(characters.id, row.characterId)).get();
+    if (!character) return statblock();
+    const resistances = fromJsonText<string[]>(character.resistances, []);
+    const vulnerabilities = fromJsonText<string[]>(character.vulnerabilities, []);
+    const immunities = fromJsonText<string[]>(character.immunities, []);
+    const fallback = statblock();
+    return {
+      resistances: resistances.length ? resistances : fallback.resistances,
+      vulnerabilities: vulnerabilities.length ? vulnerabilities : fallback.vulnerabilities,
+      immunities: immunities.length ? immunities : fallback.immunities,
+    };
   }
 
   /** Batch-load compendium statblocks for boss-action detection (issue #618). */
