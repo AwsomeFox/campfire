@@ -92,6 +92,7 @@ export function EncounterAiDriverPanel({
   const [narrationStatus, setNarrationStatus] = useState('');
   const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
   const narrationOwnerRef = useRef('');
+  const composerOwnerRef = useRef('');
   const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
   const [narrationAnnouncements, setNarrationAnnouncements] = useState<NarrationLogAddition[]>([]);
   const displayNarrationAdditions = useCallback(
@@ -140,15 +141,24 @@ export function EncounterAiDriverPanel({
     setNarrationAnnouncements([]);
     setNarrationStatus('');
     composerA11yRef.current = null;
-    setInput('');
-    setSceneField('');
-    setSubmitting(false);
-    setSubmitError(null);
     // A successful message POST can settle after this dock unmounts. Clearing this
     // owner marker makes that old continuation discard its local echo instead of
     // dispatching it into the Layout provider for the next campaign/viewer.
     return () => { narrationOwnerRef.current = ''; };
   }, [campaignId, isDm, liveActivity.mode, liveActivity.transcriptGeneration, me?.user.id, myMembership?.role]);
+
+  useLayoutEffect(() => {
+    // Transcript generation changes clear only narration mirrors. The composer is owned by
+    // the campaign/viewer/role instead, so a same-owner transcript purge preserves a draft.
+    const owner = `${me?.user.id ?? ''}:${campaignId}:${liveActivity.mode ?? ''}:${isDm}:${myMembership?.role ?? ''}`;
+    if (composerOwnerRef.current === owner) return;
+    composerOwnerRef.current = owner;
+    setInput('');
+    setSceneField('');
+    setSubmitting(false);
+    setSubmitError(null);
+    return () => { composerOwnerRef.current = ''; };
+  }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role]);
 
   useEffect(() => {
     if (!liveActivity.transcriptFetched) {
@@ -233,7 +243,7 @@ export function EncounterAiDriverPanel({
     setSubmitting(true);
     setSubmitError(null);
     const clientRef = newClientRef();
-    const submissionOwner = narrationOwnerRef.current;
+    const submissionOwner = composerOwnerRef.current;
     const body: {
       input: string;
       scene?: string;
@@ -251,14 +261,16 @@ export function EncounterAiDriverPanel({
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
-      if (narrationOwnerRef.current !== submissionOwner) return;
+      if (composerOwnerRef.current !== submissionOwner) return;
       dispatchTranscript({ type: 'localPlayer', memberName, characterName, text, clientRef });
       setInput('');
       setSceneField('');
     } catch (err) {
-      setSubmitError(translateApiError(err, t));
+      if (composerOwnerRef.current === submissionOwner) {
+        setSubmitError(translateApiError(err, t));
+      }
     } finally {
-      setSubmitting(false);
+      if (composerOwnerRef.current === submissionOwner) setSubmitting(false);
     }
   }
 

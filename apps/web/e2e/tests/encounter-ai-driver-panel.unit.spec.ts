@@ -38,8 +38,14 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/role="alert"/);
     expect(panel).toMatch(/narrationOwnerRef/);
     expect(panel).toMatch(/return \(\) => \{ narrationOwnerRef\.current = ''; \}/);
-    expect(panel).toMatch(/const submissionOwner = narrationOwnerRef\.current/);
-    expect(panel).toMatch(/narrationOwnerRef\.current !== submissionOwner/);
+    expect(panel).toMatch(/composerOwnerRef/);
+    expect(panel).toMatch(/return \(\) => \{ composerOwnerRef\.current = ''; \}/);
+    expect(panel).toMatch(/const submissionOwner = composerOwnerRef\.current/);
+    expect(panel).toMatch(/composerOwnerRef\.current !== submissionOwner/);
+    expect(panel).toMatch(/composerOwnerRef\.current === submissionOwner/);
+    expect(panel).toMatch(/composerOwnerRef\.current = owner;[\s\S]{0,500}\}, \[campaignId, isDm, liveActivity\.mode, me\?\.user\.id, myMembership\?\.role\]\);/);
+    expect(panel).toMatch(/catch \(err\) \{\s*if \(composerOwnerRef\.current === submissionOwner\)/);
+    expect(panel).toMatch(/finally \{\s*if \(composerOwnerRef\.current === submissionOwner\) setSubmitting\(false\);/);
     expect(panel).toMatch(/setInput\(''\);[\s\S]{0,120}setSceneField\(''\);[\s\S]{0,120}setSubmitting\(false\);[\s\S]{0,120}setSubmitError\(null\);/);
     expect(panel).toMatch(/liveActivity\.transcriptFetched/);
     expect(panel).toMatch(/beginNarrationLogLive/);
