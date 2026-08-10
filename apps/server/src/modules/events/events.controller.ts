@@ -75,14 +75,6 @@ export class CampaignEventsController {
       ),
     );
 
-    // Issue #1511 / #437: when THIS user's role is updated/demoted, deliver the membership.updated
-    // frame over dataStream first, then complete the stream on the next tick so the client reconnects
-    // under its new server authorization without dropping the role-change notification.
-    const roleUpdatedClosed = this.events.streamFor(campaignId).pipe(
-      filter((event) => event.type === 'membership.updated' && event.userId === user.id),
-      delay(0, asyncScheduler),
-    );
-
     // Issue #2126: complete the stream the instant the HTTP client disconnects. Nest's
     // @Sse() framework registers its own `request.on('close')` to unsubscribe and end
     // the response, but there is a TOCTOU window between the underlying socket closing
@@ -119,6 +111,6 @@ export class CampaignEventsController {
     return merge(
       dataStream,
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
-    ).pipe(takeUntil(merge(closed, roleUpdatedClosed, clientDisconnected)));
+    ).pipe(takeUntil(merge(closed, clientDisconnected)));
   }
 }
