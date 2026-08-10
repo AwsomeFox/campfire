@@ -62,7 +62,7 @@ export function RecentPanel({ campaignId }: { campaignId: number }) {
           <button
             type="button"
             className="text-sm"
-            style={{ color: 'var(--color-text-muted)' }}
+            style={{ color: 'var(--color-text-secondary)' }}
             disabled={clearing}
             onClick={() => void clear()}
           >
@@ -84,7 +84,7 @@ export function RecentPanel({ campaignId }: { campaignId: number }) {
               >
                 {entry.label}
               </Link>
-              <span className="text-sm" style={{ marginLeft: 'auto', color: 'var(--color-text-muted)', flexShrink: 0 }}>
+              <span className="text-sm" style={{ marginLeft: 'auto', color: 'var(--color-text-secondary)', flexShrink: 0 }}>
                 {timeAgo(entry.visitedAt)}
               </span>
             </li>

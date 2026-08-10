@@ -75,7 +75,7 @@ export function BookmarksPanel({ campaignId }: { campaignId: number }) {
               <button
                 type="button"
                 className="text-sm"
-                style={{ marginLeft: 'auto', color: 'var(--color-text-muted)' }}
+                style={{ marginLeft: 'auto', color: 'var(--color-text-secondary)' }}
                 aria-label={t('personalNavigation.remove', { label: b.label })}
                 disabled={pending[b.id]}
                 onClick={() => void remove(b.id)}
