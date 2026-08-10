@@ -5733,7 +5733,14 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // migration has never shipped on any real database either, so renumbering to 0187
   // is safe by the identical argument.
   { name: '0187_encounters_map_objects_1308', run: migrateEncountersTableForMapObjects1308 },
-  { name: '0188_characters_defenses_2156', run: migrateCharactersTableForDefenses2156 },
+  // Originally written as 0188 (the merged-main ceiling at the time). Re-checked immediately
+  // before push against every PUBLISHED claim, not just merged main — 0188 was already taken by
+  // open PR #2179 (inventory item weight, #2157) and 0189 by open PR #2182 (dice roll kind,
+  // #2155), both opened before this one pushed. Renumbered to 0190 rather than asking either of
+  // them to move: they published their claims first. This migration has never shipped on any
+  // real database under 0188, so renumbering is safe by the same argument used above for
+  // 0174/0177/0186/0187.
+  { name: '0190_characters_defenses_2156', run: migrateCharactersTableForDefenses2156 },
 ];
 
 /**

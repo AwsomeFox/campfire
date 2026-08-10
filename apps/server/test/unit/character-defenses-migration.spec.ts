@@ -65,7 +65,7 @@ describe('character defenses migration (#2156)', () => {
     // …and forget only THIS step, leaving `0010_characters_sheet_depth` recorded. That
     // pairing is the whole point: an upgrading installation is in exactly this state, and it
     // is why the columns cannot ride along inside 0010.
-    raw.prepare('DELETE FROM __migrations WHERE name = ?').run('0188_characters_defenses_2156');
+    raw.prepare('DELETE FROM __migrations WHERE name = ?').run('0190_characters_defenses_2156');
     const applied = (raw.prepare('SELECT name FROM __migrations').all() as Array<{ name: string }>).map((r) => r.name);
     expect(applied).toContain('0010_characters_sheet_depth');
     raw.close();
