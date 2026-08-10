@@ -579,6 +579,43 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect((denied.content as TextContent[])[0].text).toContain('403');
   });
 
+  it('generate_ai_portrait (issue #1321): dm generates offline (external-instructions), fetches status; viewer denied', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    // No AI provider is configured, so generation routes HONESTLY to the external-instructions
+    // fallback — no previews (there is no first-party portrait renderer), but concrete steps.
+    const genRes = await dmClient.callTool({
+      name: 'generate_ai_portrait',
+      arguments: { campaignId, prompt: 'a weathered human ranger with a scarred cheek', count: 2 },
+    });
+    expect(genRes.isError).toBeFalsy();
+    const gen = parseResult(genRes) as {
+      id: string;
+      status: string;
+      method: string;
+      previews: unknown[];
+      externalInstructions: string[];
+    };
+    expect(gen.status).toBe('succeeded');
+    expect(gen.method).toBe('external-instructions');
+    expect(gen.previews).toHaveLength(0);
+    expect(gen.externalInstructions.length).toBeGreaterThan(0);
+
+    // get_portrait_generation returns the job status.
+    const statusRes = await dmClient.callTool({ name: 'get_portrait_generation', arguments: { campaignId, jobId: gen.id } });
+    expect(statusRes.isError).toBeFalsy();
+    expect((parseResult(statusRes) as { id: string }).id).toBe(gen.id);
+
+    // A viewer-scoped PAT cannot generate (member role required, not viewer).
+    const denied = await viewerClient.callTool({
+      name: 'generate_ai_portrait',
+      arguments: { campaignId, prompt: 'a hero', count: 1 },
+    });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('403');
+  });
+
   it('timeline (issue #257): dm creates an event with a secret/hidden; viewer reads are redacted', async () => {
     const dmClient = await mcpClient(dmToken);
     const viewerClient = await mcpClient(viewerToken);
