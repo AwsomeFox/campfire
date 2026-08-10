@@ -31,7 +31,7 @@ import {
   formatDiceRollAnnouncementBatch,
   type DiceRollAnnouncementCursor,
 } from './diceLogAccessibility';
-import { diceRollDisplayActor, diceRollSummaryLine, showRolledDice } from './diceRollDisplay';
+import { diceRollDisplayActor, diceRollKindLabelKey, diceRollKindTagClass, diceRollSummaryLine, showRolledDice } from './diceRollDisplay';
 import {
   EMPTY_PHYSICAL_ROLL_FORM,
   isManualDiceRoll,
@@ -507,6 +507,8 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
             const fresh = r.id === justRolledId && !manual;
             const totalClass = d20TotalClasses(flavor, fresh);
             const summary = diceRollSummaryLine(r, t('dice.physicalExpr'));
+            const kindTagClass = diceRollKindTagClass(r.kind);
+            const kindLabelKey = diceRollKindLabelKey(r.kind);
             return (
             <div
               key={r.id}
@@ -528,6 +530,13 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                   title={t('dice.physicalRollHint')}
                 >
                   {t('dice.physicalBadge')}
+                </span>
+              )}
+              {/* Issue #2155: kind badge — undefined for a manual/physical entry (never
+                  classified) and for any pre-#2155 row (unclassified, not guessed). */}
+              {kindTagClass && kindLabelKey && (
+                <span className={`tag ${kindTagClass}`} style={{ fontSize: 9.5, flex: 'none', padding: '2px 7px' }}>
+                  {t(kindLabelKey)}
                 </span>
               )}
               {showRolledDice(r) && <RolledDice rolls={r.rolls} kept={r.kept} />}

@@ -4867,6 +4867,19 @@ export interface RuleSystemAdapter {
   readonly conditions: readonly string[];
   /** Optional typed-damage vocabulary offered by this system's encounter controls (issue #605). */
   readonly damageTypes?: readonly string[];
+  /**
+   * OPTIONAL — a map from a CATEGORY token a statblock prints (e.g. PF2e "physical",
+   * "all damage", "energy") to the plain damage types it expands to (issue #2150). This is
+   * DISTINCT from {@link damageTypes}: the picker, the direct-damage type check, and the
+   * equipped-action derivation all want the PLAIN types (so a DM selects "slashing", not
+   * "physical"), while defence parsing must keep category-shaped entries that are real
+   * defences but are not themselves damage types. Defences are matched by EXACT lowercased
+   * type, so a category is expanded to its members (filtered to {@link damageTypes}) at parse
+   * time — a creature resistant to "physical" is stored as resistant to bludgeoning, piercing,
+   * AND slashing, and a slashing Strike then correctly hits the resistance. Omit it and
+   * {@link damageDefensesFromStatblock} keeps only entries that are literally in the vocabulary.
+   */
+  readonly damageTypeCategories?: Readonly<Record<string, readonly string[]>>;
   /** Whether this adapter owns 5e-style direct-damage semantics (save-half and dice-only crits). */
   readonly supportsDirectDamageRules?: boolean;
   /**
@@ -6659,6 +6672,58 @@ export const PF2E_CONDITIONS = [
 export type Pf2eConditionName = (typeof PF2E_CONDITIONS)[number];
 
 /**
+ * PF2e damage-type vocabulary (remaster / Player Core "Damage"). The PLAIN typed list a DM
+ * selects in the damage-type picker, a hand-typed spec is gated against, and the equipped-
+ * action derivation checks — distinct from the 5e list (no lightning/thunder/necrotic/
+ * radiant/psychic; PF2e has electricity/sonic/void/vitality/mental/spirit/precision/bleed).
+ * "Untyped" is deliberately NOT a member: it is the absence of a type, selected by sending an
+ * empty damage type, and a defence can never be "resistant to untyped".
+ *
+ * The 16 types, grouped the way Player Core groups them:
+ *   physical:   bludgeoning, piercing, slashing
+ *   energy:     acid, cold, electricity, fire, force, sonic, vitality, void
+ *   other:      mental, poison, bleed, precision, spirit
+ *
+ * Declaring this on {@link Pf2eAdapter} (issue #2150) does two things at once: it switches
+ * {@link damageDefensesFromStatblock} from best-effort parsing (keep every entry, so an AoN
+ * `immunity: ['fire','paralyzed','sleep']` registered the conditions paralyzed/sleep as
+ * damage immunities) to filtered-to-the-list, AND it gives the equipped-action derivation +
+ * `rebuildEditedActionSpec` the same defence-bypass guard 5e has (a resolvable spec carrying
+ * `"slashing damage"` is no longer left untouched by a target's slashing resistance). Category-
+ * shaped entries that are real defences but are not themselves damage types survive through
+ * {@link PF2E_DAMAGE_TYPE_CATEGORIES}.
+ */
+export const PF2E_DAMAGE_TYPES = [
+  // Physical
+  'bludgeoning', 'piercing', 'slashing',
+  // Energy
+  'acid', 'cold', 'electricity', 'fire', 'force', 'sonic', 'vitality', 'void',
+  // Other
+  'mental', 'poison', 'bleed', 'precision', 'spirit',
+] as const;
+
+/**
+ * PF2e category tokens a statblock prints where a plain damage type is expected, mapped to the
+ * plain {@link PF2E_DAMAGE_TYPES} members each expands to (issue #2150). AoN statblocks publish
+ * "resistance 5 physical", "immune to all damage", and (rarely) "energy" — these are REAL
+ * defences, but with the vocabulary declared a naive canonical parse would DROP them (none of
+ * the words is in the 16-type list). Because defences match by EXACT lowercased type, the
+ * category is expanded to its members at parse time: "physical" becomes bludgeoning, piercing,
+ * AND slashing, so a slashing Strike lands on the resistance. "all damage" fans out to every
+ * type. The members are intersected with the adapter's own {@link damageTypes} at parse time,
+ * so this map stays the source of truth for what a category MEANS regardless of the caller's
+ * vocabulary. Statblock TOKENS are matched case-insensitively — the parser lowercases the
+ * token before lookup — so this map's KEYS must be lowercase to match: a capitalized key like
+ * `Physical` would never be hit, because the lookup runs against the already-lowercased token.
+ */
+export const PF2E_DAMAGE_TYPE_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
+  physical: ['bludgeoning', 'piercing', 'slashing'],
+  energy: ['acid', 'cold', 'electricity', 'fire', 'force', 'sonic', 'vitality', 'void'],
+  'all damage': PF2E_DAMAGE_TYPES,
+  all: PF2E_DAMAGE_TYPES,
+};
+
+/**
  * PF2e adapter surface — the shared RuleSystemAdapter seam plus the PF2e-only pure math a
  * caller that knows it holds the PF2e adapter can use directly. The extra members live
  * here (not on the shared interface) so 5e stays clean; systems #296-300 follow the same
@@ -6828,18 +6893,19 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     if (traits.includes('propulsive')) return strMod > 0 ? Math.floor(strMod / 2) : 0;
     return 0;
   },
-  // NOT declaring `damageTypes`, deliberately (issue #2144). It would have given the
-  // equipped-action derivation the same defense-bypass guard 5e has — but `damageTypes` is
-  // read by three other callers, and for two of them (`damageDefensesFromStatblock` via
-  // `targetDamageDefenses`, and the direct-damage type check) declaring a closed vocabulary
-  // switches PF2e monster defenses from best-effort parsing to filtered-to-the-list. That
-  // would fix a real bug — an AoN dragon's `immunity: ['fire','paralyzed','sleep']` currently
-  // registers two CONDITIONS as damage immunities — and would also silently drop the
-  // category-shaped resistance entries PF2e prints ("resistance 5 physical", "all damage")
-  // that are not damage types but are real defenses. That is a change to encounter damage
-  // resolution, not to this issue's equipment loop, and it deserves its own change with its
-  // own coverage — tracked as its own issue (#2150). The derivation keeps the length bound it
-  // has always used here.
+  // #2150 — declaring the PF2e damage-type vocabulary does two things at once: it gives the
+  // equipped-action derivation + `rebuildEditedActionSpec` the same defence-bypass guard 5e
+  // has (a resolvable spec carrying "slashing damage" is no longer left untouched by a
+  // slashing resistance), AND it switches `damageDefensesFromStatblock` from best-effort
+  // parsing to filtered-to-the-list — so an AoN `immunity: ['fire','paralyzed','sleep']` no
+  // longer registers the CONDITIONS paralyzed/sleep as damage immunities. The two uses that
+  // want the PLAIN 16 (the damage-type picker + the direct-damage type check) read this same
+  // list; the category-shaped defence entries PF2e prints ("resistance 5 physical", "all
+  // damage") that are real defences but are not damage types survive through
+  // `damageTypeCategories`, which `damageDefensesFromStatblock` expands to its plain members
+  // at parse time. See PF2E_DAMAGE_TYPES / PF2E_DAMAGE_TYPE_CATEGORIES for the derivation.
+  damageTypes: PF2E_DAMAGE_TYPES,
+  damageTypeCategories: PF2E_DAMAGE_TYPE_CATEGORIES,
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,
@@ -12898,6 +12964,21 @@ export type ActionRollRequest = z.infer<typeof ActionRollRequest>;
 export const DiceRollSource = z.enum(['rolled', 'manual']);
 export type DiceRollSource = z.infer<typeof DiceRollSource>;
 
+/**
+ * What a dice-log entry IS, for grouping/colour-coding the shared log (issue #2155).
+ * Matches the reference VTT's own four buckets — an attack's to-hit roll, its damage
+ * roll, an ability/skill/save/initiative CHECK (one bucket: the reference does not
+ * split those further), and a free-form/quick roll that fits none of the above.
+ *
+ * Server-derived only, from whichever pipeline produced the `RollResult` — never a
+ * client-supplied classification (see the call sites in `EncountersService` and
+ * `CharactersService`, the only writers). `quickRoll`'s `QuickRollRequest.kind` is the
+ * one exception, and even that is trusted server input already branched on for its own
+ * to-hit/damage logic, not a fresh classification accepted at face value.
+ */
+export const DiceRollKind = z.enum(['to-hit', 'damage', 'check', 'roll']);
+export type DiceRollKind = z.infer<typeof DiceRollKind>;
+
 /** Sentinel `expr` stored for a paper-table / physical roll — not a dice expression. */
 export const PHYSICAL_ROLL_EXPR = 'physical';
 
@@ -12949,6 +13030,12 @@ export const RollResult = z.object({
   success: z.boolean().optional(),
   // Issue #673: manual/physical rolls carry honest provenance — no fabricated dice math.
   source: DiceRollSource.optional(),
+  // Issue #2155: what the roll IS, for the shared log's grouping/colour. Producer-side
+  // (server pipeline) context, same optionality convention as `visibility` below — a
+  // trusted roll builder that has no opinion (a quick free-form roll's raw expression, a
+  // manual/physical entry) simply omits it, and it reads as unclassified rather than a
+  // guessed kind.
+  kind: DiceRollKind.optional(),
   /** Who rolled at the table when `source` is `manual` (character/NPC name). */
   actor: z.string().max(120).optional(),
   /** Optional natural d20 face the DM recorded — informational only, not re-rolled. */

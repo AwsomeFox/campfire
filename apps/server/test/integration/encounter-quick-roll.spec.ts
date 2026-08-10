@@ -93,6 +93,9 @@ describe('encounter quick-roll (real SQLite, service layer)', () => {
     expect(campaignRolls[0].encounterId).toBe(encounterId);
     expect(campaignRolls[0].combatantId).toBe(combatantId);
     expect(campaignRolls[0].characterId).toBe(characterId);
+    // Issue #2155: the shared log's grouping/colour — this pipeline already knows its own
+    // kind (`isToHit`), so it's exactly `body.kind`, no separate classification.
+    expect(campaignRolls[0].kind).toBe('to-hit');
 
     // Check encounter_events table
     const events = orm
@@ -109,8 +112,8 @@ describe('encounter quick-roll (real SQLite, service layer)', () => {
 
   it('quick-rolls damage (1d8+4 slashing) and records damage type icon', async () => {
     dataDir = makeTempDataDir();
-    const { orm, service } = build();
-    const { encounterId, combatantId } = seed(orm);
+    const { orm, service, rolls } = build();
+    const { campaignId, encounterId, combatantId } = seed(orm);
 
     const res = await service.quickRoll(
       encounterId,
@@ -128,6 +131,10 @@ describe('encounter quick-roll (real SQLite, service layer)', () => {
 
     expect(res.total).toBeGreaterThanOrEqual(5);
     expect(res.total).toBeLessThanOrEqual(12);
+
+    // Issue #2155: same pipeline as the to-hit case above, the other half of `body.kind`.
+    const campaignRolls = await rolls.listForCampaign(campaignId);
+    expect(campaignRolls[0].kind).toBe('damage');
 
     const events = orm
       .select()

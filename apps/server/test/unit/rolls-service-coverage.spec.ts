@@ -277,4 +277,40 @@ describe('RollsService unit coverage tests', () => {
       expect(limitParam).toBeLessThanOrEqual(5);
     }
   });
+
+  it('#2155 round-trips a recorded kind through record() and listForCampaign()', async () => {
+    const roll = await rollsService.record(campaignId, { expr: '1d20+3', rolls: [11], total: 14, kind: 'to-hit' }, adminActor);
+    expect(roll.kind).toBe('to-hit');
+
+    const [listed] = await rollsService.listForCampaign(campaignId, 10);
+    expect(listed.kind).toBe('to-hit');
+  });
+
+  it('#2155 a roll recorded with no kind reads back as unclassified (undefined), not a guessed one', async () => {
+    const roll = await rollsService.record(campaignId, { expr: '1d20', rolls: [7], total: 7 }, adminActor);
+    expect(roll.kind).toBeUndefined();
+
+    const [listed] = await rollsService.listForCampaign(campaignId, 10);
+    expect(listed.kind).toBeUndefined();
+  });
+
+  it('#2155 a row with an unrecognized stored kind (future/rolled-back value) reads as unclassified, never as a wrong kind', async () => {
+    // Bypasses the service so this can write a value no current pipeline would ever
+    // produce — the same shape a downgrade-then-upgrade, or a future enum value this
+    // binary does not know about yet, would leave behind.
+    await db.insert(diceRolls).values({
+      campaignId,
+      rollerUserId: adminActor.id,
+      rollerName: adminActor.name,
+      expr: '1d20',
+      rolls: '[9]',
+      total: 9,
+      source: 'rolled',
+      kind: 'some-future-kind',
+      createdAt: nowIso(),
+    });
+
+    const [listed] = await rollsService.listForCampaign(campaignId, 10);
+    expect(listed.kind).toBeUndefined();
+  });
 });

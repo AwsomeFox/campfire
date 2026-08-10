@@ -1289,6 +1289,7 @@ export class EncountersService {
     row: typeof combatants.$inferSelect,
     damageTypes: readonly string[] | undefined,
     db: SyncDb = this.db,
+    categories?: Readonly<Record<string, readonly string[]>>,
   ): TargetDefenses {
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
     const encounter = db
@@ -1305,7 +1306,7 @@ export class EncountersService {
       .where(and(eq(ruleEntries.id, row.ruleEntryId), campaignScope))
       .get();
     const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
-    return damageDefensesFromStatblock(data, damageTypes);
+    return damageDefensesFromStatblock(data, damageTypes, categories);
   }
 
   /** Batch-load compendium statblocks for boss-action detection (issue #618). */
@@ -2164,6 +2165,9 @@ export class EncountersService {
       ...(result.actor ? { actor: result.actor } : {}),
       encounterId,
       ...(npcIdentityId != null ? { npcId: npcIdentityId } : {}),
+      // Issue #2155: same catalog-check pipeline as CharactersService.rollCheck, just for
+      // a creature — one 'check' bucket for every ability/skill/save it can roll.
+      kind: 'check',
     };
     const persistedRoll = await this.rolls.record(encounter.campaignId, sharedResult, user);
     const roll: DiceRoll = {
@@ -5142,6 +5146,8 @@ export class EncountersService {
             result.encounterId = encounterId;
             result.combatantId = fresh.id;
             result.characterId = fresh.characterId!;
+            // Issue #2155: a saving throw is a 'check' in the shared log's grouping.
+            result.kind = 'check';
             roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
             // `updateCombatant` applies this server-only face after the hook returns.
             deathSavePatch.deathSaveRoll = result.total;
@@ -5952,6 +5958,7 @@ export class EncountersService {
                     fresh,
                     adapter.damageTypes?.length ? adapter.damageTypes : undefined,
                     tx,
+                    adapter.damageTypeCategories,
                   )
                 : { resistances: [], vulnerabilities: [], immunities: [] },
               { half: patch.saveOutcome === 'half' },
@@ -7304,6 +7311,9 @@ export class EncountersService {
               ...(entry.combatantId !== undefined ? { combatantId: entry.combatantId } : {}),
               ...(entry.characterId !== undefined ? { characterId: entry.characterId } : {}),
               ...(entry.npcId !== undefined ? { npcId: entry.npcId } : {}),
+              // Issue #2155: initiative is a 'check' in the shared log's grouping — the
+              // reference VTT's own log has no separate initiative bucket.
+              kind: 'check',
             },
             user,
           );
@@ -7696,6 +7706,8 @@ export class EncountersService {
               combatantId: freshCombatant.id,
               ...(freshCombatant.characterId != null ? { characterId: freshCombatant.characterId } : {}),
               ...(freshCombatant.kind === 'npc' && npcIdentityId !== null ? { npcId: npcIdentityId } : {}),
+              // Issue #2155: same 'check' bucket as the bulk roll above.
+              kind: 'check',
             },
             user,
           );
@@ -10437,6 +10449,10 @@ export class EncountersService {
     }
     if (characterId !== undefined) result.characterId = characterId;
     result.visibility = input.visibility ?? 'party_shared';
+    // Issue #2155: a free-form expression this pipeline knows nothing about beyond the
+    // dice — the shared log's catch-all 'roll' bucket, matching the reference VTT's own
+    // "Roll" category for anything that isn't a to-hit/damage/check.
+    result.kind = 'roll';
     const persisted = await this.rolls.record(campaignId, result, user);
 
     await this.audit.log({
@@ -10604,6 +10620,10 @@ export class EncountersService {
         ...(combatantRow?.kind === 'npc' && npcIdentityId !== null
           ? { npcId: npcIdentityId }
           : {}),
+        // Issue #2155: `body.kind` is already exactly 'to-hit' | 'damage' — the same
+        // trusted-server-input field `isToHit` above branches display copy on — so this
+        // pipeline already knows its own kind without any new classification logic.
+        kind: body.kind,
       },
       user,
     );
@@ -10681,6 +10701,10 @@ export class EncountersService {
       result.dc = input.dc;
       result.success = result.total >= input.dc;
     }
+    // Issue #2155: Open Legend's native action-dice pool IS this system's check/resolution
+    // roll — the attribute-vs-DC mechanic every other adapter reaches via the check
+    // catalog — so it gets the same 'check' bucket.
+    result.kind = 'check';
 
     const persisted = await this.rolls.record(campaignId, result, user);
 
@@ -10713,6 +10737,10 @@ export class EncountersService {
   ): Promise<DiceRoll> {
     const label = input.label?.trim();
     const actor = input.actor?.trim();
+    // Issue #2155: deliberately no `kind` here. A physical roll is just the total a player
+    // reported — this pipeline has no idea whether it was an attack, a save, or anything
+    // else, and guessing from the free-text label would risk showing a WRONG kind, which
+    // the shared log must not do. It reads as unclassified, same as a pre-#2155 row.
     const result: RollResult = {
       expr: PHYSICAL_ROLL_EXPR,
       rolls: [],
