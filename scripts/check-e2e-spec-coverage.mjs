@@ -52,7 +52,15 @@ function main() {
     return match?.[1] ?? '';
   };
   const errors = [];
-  if (webPackage.scripts?.['test:unit'] !== `playwright test --config ${unitConfig}`) errors.push(`apps/web test:unit must invoke ${unitConfig}`);
+  // Exactly one wrapper prefix is allowed — scripts/with-test-lock.sh, which
+  // serializes local runs across agent sessions. Matching on "ends with the
+  // invocation" instead would also accept a prefix that never runs it
+  // (`echo playwright test …`, `true # playwright test …`), which is precisely
+  // the way this tier could be orphaned again while this check stays green.
+  const unitScript = webPackage.scripts?.['test:unit'] ?? '';
+  const unitInvocation = `playwright test --config ${unitConfig}`;
+  const allowedUnitScripts = [unitInvocation, `../../scripts/with-test-lock.sh ${unitInvocation}`];
+  if (!allowedUnitScripts.includes(unitScript)) errors.push(`apps/web test:unit must invoke ${unitConfig}, optionally via scripts/with-test-lock.sh`);
   if (!rootPackage.scripts?.['test:all']?.includes('test:unit:web')) errors.push('root test:all must invoke test:unit:web');
   const unitWeb = jobBlock('unit-web');
   const aggregateCi = jobBlock('ci');

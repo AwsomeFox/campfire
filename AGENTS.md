@@ -83,6 +83,28 @@ Run the smallest relevant checks while iterating. Run all checks affected by the
 final diff before handoff. GitHub's aggregate required check is named `ci`.
 Non-required browser jobs still matter when the branch caused their failure.
 
+Every test tier above is wrapped in `scripts/with-test-lock.sh`, which holds a
+machine-wide lock (`/tmp/campfire-test.lock`) for the duration of the run. Each
+tier sizes its worker pool against the whole machine — jest asks for 50% of the
+cores at a ~1GB-per-worker recycle threshold, vitest spawns its own pool, and
+the browser tier boots a Nest server plus Chromium on the fixed port 8123 with
+`reuseExistingServer`. Several agent sessions in separate worktrees running
+tests at once therefore exhaust host memory, and two concurrent browser runs
+silently share one seeded backend. The lock makes those runs queue instead; it
+waits up to an hour and is a no-op when `CI` is set. It is an `flock(2)` held by
+the test process itself, so the kernel releases it the moment that process exits
+and a crashed or killed run leaves nothing to clean up. The one gap, documented
+at the top of the script, is that jest and Playwright workers do not inherit the
+descriptor, so a worker that outlives an abnormally killed runner no longer
+holds the lock. Invoke tests through the npm scripts, not by calling `jest`, `vitest`,
+or `playwright` directly — a direct call bypasses the lock. `test:watch` and
+`test:e2e:ui` stay unlocked deliberately, because a long-lived interactive
+session would hold the lock indefinitely and starve every other session; UI mode
+therefore serves its own backend on port 8125 rather than sharing 8123 with a
+locked `test:e2e` run. `JEST_MAX_WORKERS`,
+`VITEST_MAX_WORKERS`, and `CAMPFIRE_TEST_HEAP_MB` override the per-run caps;
+`CAMPFIRE_TEST_LOCK_HELD=1` skips locking entirely.
+
 `npm run typecheck` covers `apps/server/test/**` and the `apps/web` Playwright
 tree, and the `lint` job runs it — a broken service constructor/method
 signature fails there in under two minutes, not ~20 minutes later in

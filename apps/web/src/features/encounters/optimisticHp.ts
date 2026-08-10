@@ -76,6 +76,26 @@ export type OptimisticHpDelta = {
   delta: number;
 };
 
+/**
+ * The complete set of fields an HP mechanism (the stepper replay, the bulk
+ * "Apply to all" write, and the rollback below) is entitled to touch on a
+ * combatant. Everything else on a `Combatant` — `turnState`, conditions,
+ * name, initiative, roster membership — is owned by some other writer and
+ * must survive an HP write untouched.
+ */
+function withHpOwnedFields(combatant: Combatant, source: Combatant): Combatant {
+  return {
+    ...combatant,
+    hpCurrent: source.hpCurrent,
+    hpTemp: source.hpTemp,
+    spCurrent: source.spCurrent,
+    rpCurrent: source.rpCurrent,
+    deathState: source.deathState,
+    deathSaveSuccesses: source.deathSaveSuccesses,
+    deathSaveFailures: source.deathSaveFailures,
+  };
+}
+
 /** Restores optimistic HP fields without rolling back newer turn-owned state. */
 export function rollbackOptimisticHpTargets(
   current: EncounterWithCombatants,
@@ -90,17 +110,41 @@ export function rollbackOptimisticHpTargets(
     combatants: current.combatants.map((combatant) => {
       if (!targets.has(combatant.id)) return combatant;
       const before = previousCombatants.get(combatant.id);
-      if (!before) return combatant;
-      return {
-        ...combatant,
-        hpCurrent: before.hpCurrent,
-        hpTemp: before.hpTemp,
-        spCurrent: before.spCurrent,
-        rpCurrent: before.rpCurrent,
-        deathState: before.deathState,
-        deathSaveSuccesses: before.deathSaveSuccesses,
-        deathSaveFailures: before.deathSaveFailures,
-      };
+      return before ? withHpOwnedFields(combatant, before) : combatant;
+    }),
+  };
+}
+
+/**
+ * Merges HP-owned fields (see `withHpOwnedFields`) for `targetIds` from a
+ * recomputed combatants array onto the freshest cached encounter, leaving
+ * every other field of every combatant — encounter-level fields AND every
+ * non-HP per-combatant field alike (`turnState`, conditions, ...) — exactly
+ * as `current` already has them. `recomputed` is expected to have been built
+ * from a captured, possibly-stale base (see `replayOptimisticHpDeltas`), so
+ * only its HP-owned fields for the touched ids are trustworthy; everything
+ * else about it is discarded in favor of `current`.
+ *
+ * Two roster edges: a target id present in the stale base but absent from
+ * `current` (removed by another client meanwhile) is never resurrected —
+ * this only ever maps over `current.combatants`. A combatant present in
+ * `current` but outside `targetIds` (added by another client, or simply not
+ * part of this HP operation) is returned completely untouched.
+ */
+export function mergeOptimisticHpTargets(
+  current: EncounterWithCombatants,
+  recomputed: Combatant[],
+  targetIds: Iterable<number>,
+): EncounterWithCombatants {
+  const targets = new Set(targetIds);
+  if (targets.size === 0) return current;
+  const recomputedById = new Map(recomputed.map((combatant) => [combatant.id, combatant]));
+  return {
+    ...current,
+    combatants: current.combatants.map((combatant) => {
+      if (!targets.has(combatant.id)) return combatant;
+      const source = recomputedById.get(combatant.id);
+      return source ? withHpOwnedFields(combatant, source) : combatant;
     }),
   };
 }

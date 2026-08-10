@@ -36,6 +36,7 @@ import { endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import {
   applyOptimisticHpDelta,
+  mergeOptimisticHpTargets,
   replayOptimisticHpDeltas,
   rollbackOptimisticHpTargets,
   type OptimisticHpDelta,
@@ -2567,26 +2568,31 @@ export default function RunSessionPage() {
    * get a fresh value every render instead of silently swallowing an action on a control that
    * still LOOKED enabled.
    *
-   * The clearing effect's dependency is `encounterQuery.dataUpdatedAt` — NOT
-   * `encounterReadRevision` (review round 5) and NOT `encounter` itself (review round 6). Both
-   * of those were tried and both failed, for opposite reasons; `dataUpdatedAt` is the one
-   * TanStack-native signal that avoids both failure modes at once:
+   * The clearing effect's dependency is `encounterDataUpdateCount` (defined below) — NOT
+   * `encounterReadRevision` (round 5), NOT `encounter` itself (round 6), and NOT
+   * `encounterQuery.dataUpdatedAt` (round 7, reopened as issue #2140). All three were tried and
+   * all three failed:
    *
    * - Round 5's failure: `encounterReadRevisionRef`/`encounterReadRevision` are bumped by OUR
    *   OWN code, synchronously inside `queryFn`, BEFORE that function returns — strictly before
    *   TanStack's separate cache-update-and-notify step publishes the `encounter` a component
    *   renders. A render could see the bumped revision but the still-stale `encounter`.
-   *   `dataUpdatedAt` has no such gap: it is one field on the SAME `QueryObserverResult` TanStack
-   *   computes and publishes to `useQuery` callers in one shot, atomically with `data` — there is
-   *   no TanStack-internal path that updates `dataUpdatedAt` in an earlier render than `data`.
    * - Round 6's failure: gating on `encounter`'s object REFERENCE changing gets stuck armed
    *   forever when a reorder fails without changing server state (the concrete case: the server
    *   rejects a move of the current combatant) — the follow-up GET returns a payload identical to
    *   what's cached, and `@tanstack/query-core`'s `replaceEqualDeep` (verified against its actual
    *   source: on a full deep-equal match it returns the OLD reference `a`, not the new one)
    *   preserves the OLD `encounter` reference, so an effect keyed on `encounter` never re-fires.
-   *   `dataUpdatedAt` has no such gap either: TanStack advances it on every completed fetch,
-   *   independent of whether the resulting reference changed.
+   * - Round 7's failure (issue #2140): `dataUpdatedAt` looked like it dodged both of the above —
+   *   it advances on every completed fetch, independent of reference identity. But
+   *   `@tanstack/query-core`'s `successState()` (verified against `query.js`) computes it as
+   *   `dataUpdatedAt ?? Date.now()` — millisecond-resolution wall-clock time with NO uniqueness
+   *   guarantee. Two accepted results landing in the same millisecond (this reorder's own
+   *   `onSettled` invalidate-refetch racing an unrelated `encounter.updated` SSE refetch, for
+   *   example) stamp an IDENTICAL value. React compares effect dependencies with `Object.is`; an
+   *   unchanged dependency does not re-run the effect, so the gate stayed armed until some later,
+   *   UNRELATED cache write happened to land in a different millisecond. Browsers that coarsen
+   *   clock precision (Spectre mitigations) widen that collision window well past 1ms.
    *
    * (`replaceEqualDeep` also rules out comparing `encounter`'s reference against
    * `latestEncounterReadRef.current.encounter`, the raw pre-structural-sharing value `queryFn`
@@ -2594,30 +2600,52 @@ export default function RunSessionPage() {
    * new value, but a freshly reconstructed wrapper object, so that comparison would almost never
    * match even right after an authentic update.)
    *
-   * `dataUpdatedAt` ALSO advances on a local optimistic write (verified against
-   * `@tanstack/query-core`'s actual source: `QueryClient.setQueryData` → `Query.setData` →
-   * `successState(data, dataUpdatedAt)`, where a caller that (like every optimistic write on
-   * this page) omits `updatedAt` gets `dataUpdatedAt ?? Date.now()` — the SAME field round 3
-   * found unsuitable) — so on its own this dependency does not distinguish a real GET from an
-   * optimistic write. It doesn't need to: it is consulted here purely as a "something in the
-   * query settled — go re-examine" WAKE-UP, never as the gating comparison itself. The actual
-   * decision is still `encounterReadRevisionRef.current` (bumped ONLY by a real, non-aborted GET
-   * inside `queryFn`, never by `setQueryData`) versus `reorderResyncArmedAt`, exactly as before
-   * round 5. An optimistic write firing this effect still finds `encounterReadRevisionRef`
-   * unchanged and leaves the gate armed — it just wakes the check, it does not answer it. This is
-   * the opposite failure mode from round 3, which used `dataUpdatedAt` (there,
-   * `encounterQuery.dataUpdatedAt` directly) AS the comparison value, so an optimistic write's
-   * bump satisfied the check by itself.
+   * `encounterDataUpdateCount` reads `queryClient.getQueryState(queryKeys.encounter(eid))
+   * ?.dataUpdateCount` — `@tanstack/query-core`'s own per-query counter. Verified against
+   * `query.js`'s `#dispatch` reducer: `dataUpdateCount: state.dataUpdateCount + 1` is applied
+   * UNCONDITIONALLY inside the same `"success"` branch that publishes `data`/`dataUpdatedAt`, for
+   * BOTH a real completed fetch (`Query#fetch`'s own `this.setData(data)`) and a local optimistic
+   * `queryClient.setQueryData` write (`manual: true`, which skips only the `fetchStatus: "idle"`
+   * reset a few lines down — the `dataUpdateCount` bump itself is not conditioned on `manual`).
+   * Two properties follow directly from that reducer shape, and together they are exactly what
+   * round 7 was missing:
+   *
+   * - It CANNOT collide: it is a plain integer incremented by exactly 1 on every accepted result,
+   *   never re-derived from a clock. Two accepted results in the same millisecond still produce
+   *   two DIFFERENT counter values, so `Object.is` always sees a change and the effect always
+   *   re-runs — round 7's failure is structurally impossible here, not just less likely.
+   * - It IS published atomically with `data`: `dataUpdateCount` and `data`/`dataUpdatedAt` are set
+   *   by the SAME object spread inside the SAME reducer action, so they live on the identical
+   *   `query.state` snapshot. `queryClient.getQueryState(...)` (below) reads that exact `state`
+   *   object `useQuery`'s own observer builds `encounterQuery` from, so there is no path where one
+   *   updates in an earlier render than the other — round 5's lead-the-render hazard cannot recur.
+   *
+   * `dataUpdateCount` is deliberately NOT read off `encounterQuery` itself: verified against
+   * `queryObserver.js`'s `createResult`, it is used internally to derive `isFetchedAfterMount`
+   * but is never copied into the `QueryObserverResult` `useQuery` returns. `queryClient.
+   * getQueryState` is the only way to reach it, so that read happens once per render, right below,
+   * and is passed into this effect's dependency array as a plain number.
+   *
+   * Like `dataUpdatedAt` before it, `encounterDataUpdateCount` ALSO advances on a local optimistic
+   * write (see above) — so on its own it still does not distinguish a real GET from an optimistic
+   * one. It doesn't need to: exactly as established at round 3, it is consulted here purely as a
+   * "something in the query settled — go re-examine" WAKE-UP, never as the gating comparison
+   * itself. The actual decision is still `encounterReadRevisionRef.current` (bumped ONLY by a
+   * real, non-aborted GET inside `queryFn`, never by `setQueryData`) versus `reorderResyncArmedAt`,
+   * unchanged since round 5. An optimistic write firing this effect still finds
+   * `encounterReadRevisionRef` unchanged and leaves the gate armed — it just wakes the check, it
+   * does not answer it.
    */
+  const encounterDataUpdateCount = queryClient.getQueryState<EncounterWithCombatants>(queryKeys.encounter(eid))?.dataUpdateCount ?? 0;
   const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);
   const isAwaitingReorderResyncNow = reorderResyncArmedAt !== null;
   useEffect(() => {
     if (reorderResyncArmedAt !== null && !isAwaitingReorderResync(reorderResyncArmedAt, encounterReadRevisionRef.current)) {
       setReorderResyncArmedAt(null);
     }
-    // See the doc comment above for why `encounterQuery.dataUpdatedAt` — not
-    // `encounterReadRevision`, not `encounter` — is the correct dependency here.
-  }, [encounterQuery.dataUpdatedAt, reorderResyncArmedAt]);
+    // See the doc comment above for why `encounterDataUpdateCount` — not `encounterReadRevision`,
+    // not `encounter`, and not `encounterQuery.dataUpdatedAt` — is the correct dependency here.
+  }, [encounterDataUpdateCount, reorderResyncArmedAt]);
 
   /**
    * Manual initiative reorder (issue #1923) — drag (InitiativeStrip + roster) and the
@@ -2856,22 +2884,39 @@ export default function RunSessionPage() {
       operations: new Map(),
     };
   }
-  const replayPendingOptimisticHpDeltas = useCallback(() => {
+  const replayPendingOptimisticHpDeltas = useCallback((rolledBackId?: number) => {
     const queue = optimisticHpQueueRef.current;
     if (queue.encounterId !== eid) return;
     const { base } = queue;
     if (!base) return;
-    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
-      ...base,
-      combatants: replayOptimisticHpDeltas(
-        base.combatants,
-        [...queue.operations.values()]
-          .sort((a, b) => a.sequence - b.sequence)
-          .map(({ combatantId, delta }) => ({ combatantId, delta })),
-        ruleSystem,
-        campaign?.customMechanicsProfile,
-      ),
-    });
+    // `rolledBackId`, when given, is a combatant whose OWN operation was just
+    // deleted from `queue.operations` (a failure) — it must still be merged so
+    // its stale optimistic HP is rolled back, even though it is no longer a
+    // live target. `replayOptimisticHpDeltas` above already recomputes it as a
+    // pass-through of `base`'s untouched entry (no operation targets it after
+    // the delete), which is the same value `ctx.previousCombatant` captured at
+    // that operation's own onMutate — the authoritative pre-operation state,
+    // not a re-derivation from a separately stale source.
+    const targetIds = new Set([...queue.operations.values()].map(({ combatantId }) => combatantId));
+    if (rolledBackId !== undefined) targetIds.add(rolledBackId);
+    const recomputed = replayOptimisticHpDeltas(
+      base.combatants,
+      [...queue.operations.values()]
+        .sort((a, b) => a.sequence - b.sequence)
+        .map(({ combatantId, delta }) => ({ combatantId, delta })),
+      ruleSystem,
+      campaign?.customMechanicsProfile,
+    );
+    // Merge only the HP-owned fields for the targeted combatants onto the
+    // freshest cached encounter. `base` can be older than a snapshot another
+    // writer (next-turn seeding, an encounter PATCH response) has since
+    // installed — not just at the encounter level (`turnVersion`,
+    // `currentCombatantId`), but per combatant too (`turnState`, conditions,
+    // ...). This replay has no business reverting either; only `hpCurrent`
+    // and its siblings are its business.
+    queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+      current ? mergeOptimisticHpTargets(current, recomputed, targetIds) : current,
+    );
   }, [eid, queryClient, ruleSystem, campaign?.customMechanicsProfile]);
   const hpDelta = useKeyedMutation({
     mutationKey: HP_MUTATION_KEY,
@@ -2964,7 +3009,7 @@ export default function RunSessionPage() {
       appendHpFeedbackEvents(events);
       if (observed) hpFeedbackSnapshotRef.current?.combatants.set(combatant.id, combatant);
     },
-    onError: (err, _vars, ctx) => {
+    onError: (err, vars, ctx) => {
       const queue = optimisticHpQueueRef.current;
       if (
         ctx?.encounterId === eid &&
@@ -2972,7 +3017,11 @@ export default function RunSessionPage() {
         ctx.optimisticOperationId &&
         queue.operations.delete(ctx.optimisticOperationId)
       ) {
-        replayPendingOptimisticHpDeltas();
+        // Pass the failed combatant's own id explicitly: it was just removed
+        // from `queue.operations`, so it is no longer a live target, but its
+        // now-invalid optimistic HP is still sitting in the cache and must be
+        // merged back to its pre-operation value — not silently left stale.
+        replayPendingOptimisticHpDeltas(vars.combatantId);
         seedHpFeedbackSnapshot(queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid)));
       }
       // An ambiguous failure must NOT be reported as a plain error: the optimistic HP was
@@ -3052,10 +3101,17 @@ export default function RunSessionPage() {
               if (targets.has(combatant.id)) snapshot.combatants.set(combatant.id, combatant);
             }
           }
-          queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
-            ...previous,
-            combatants: optimisticCombatants,
-          });
+          // Merge only the HP-owned fields — for exactly the combatants this
+          // write actually touched (this bulk apply's own targets, plus any
+          // still-queued single-stepper targets folded into `pendingBaseline`
+          // above) — onto the freshest cached encounter. `optimisticCombatants`
+          // was built off the captured `previous`, so its non-HP fields (and
+          // any OTHER combatant's fields) are stale; `current` wins for those.
+          // See `mergeOptimisticHpTargets`. Apply-to-all is an HP mechanism and
+          // has no business reverting turn fields, encounter-level or per-combatant.
+          queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
+            current ? mergeOptimisticHpTargets(current, optimisticCombatants, new Set([...targets, ...queuedTargetIds])) : current,
+          );
         }
         const feedbackOperation = { targets, stale: new Map<number, HpFeedbackSnapshot>(), emitted: new Set<number>() };
         bulkHpFeedbackOperationsRef.current.set(bulkOperationId, feedbackOperation);
