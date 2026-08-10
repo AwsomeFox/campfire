@@ -10178,7 +10178,7 @@ export class EncountersService {
       if (!character || character.campaignId !== campaignId) {
         throw new NotFoundException(`Character ${input.characterId} not found`);
       }
-      if (role !== 'dm' && character.ownerUserId !== user.id) {
+      if (role === 'viewer' || (role !== 'dm' && character.ownerUserId !== user.id)) {
         throw new ForbiddenException('Only dm or the owning player may roll for this character');
       }
       characterId = character.id;

@@ -3014,4 +3014,16 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       upgraded.sqlite.close();
     }
   });
+
+  it('0183 adds durable roll audience and character/combatant context columns (#1511)', () => {
+    expect(MIGRATION_NAMES).toContain('0183_dice_rolls_context_1511');
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const cols = columnNames(sqlite, 'dice_rolls');
+      expect(cols).toEqual(expect.arrayContaining(['character_id', 'combatant_id', 'visibility']));
+    } finally {
+      sqlite.close();
+    }
+  });
 });

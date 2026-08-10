@@ -1,7 +1,7 @@
 import { Controller, Param, ParseIntPipe, Req, Sse, type MessageEvent } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger';
-import { fromEvent, interval, merge, map, type Observable } from 'rxjs';
-import { filter, takeUntil } from 'rxjs/operators';
+import { asyncScheduler, fromEvent, interval, merge, map, type Observable } from 'rxjs';
+import { delay, filter, takeUntil } from 'rxjs/operators';
 import type { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -66,19 +66,21 @@ export class CampaignEventsController {
   ): Promise<Observable<MessageEvent>> {
     const role = await this.access.requireMember(user, campaignId);
 
-    // Issue #527 / #867 / #1511: complete the moment THIS user is revoked or updated,
-    // OR the campaign is trashed. Applied with takeUntil to the WHOLE merged stream
-    // below (not just the data path) so the heartbeat interval stops too — otherwise
-    // merge keeps the SSE connection alive on keepalive pings after the data stream
-    // has ended, defeating the teardown. The notifier subscribes to the same Subject
-    // the data path reads, so it fires synchronously with the (filtered-out) control frame.
+    // Issue #527 / #867: complete immediately when THIS user is revoked OR the campaign is trashed.
     const closed = this.events.streamFor(campaignId).pipe(
       filter(
         (event) =>
           (event.type === 'membership.revoked' && event.userId === user.id) ||
-          (event.type === 'membership.updated' && event.userId === user.id) ||
           event.type === 'campaign.trashed',
       ),
+    );
+
+    // Issue #1511 / #437: when THIS user's role is updated/demoted, deliver the membership.updated
+    // frame over dataStream first, then complete the stream on the next tick so the client reconnects
+    // under its new server authorization without dropping the role-change notification.
+    const roleUpdatedClosed = this.events.streamFor(campaignId).pipe(
+      filter((event) => event.type === 'membership.updated' && event.userId === user.id),
+      delay(0, asyncScheduler),
     );
 
     // Issue #2126: complete the stream the instant the HTTP client disconnects. Nest's
@@ -117,6 +119,6 @@ export class CampaignEventsController {
     return merge(
       dataStream,
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
-    ).pipe(takeUntil(merge(closed, clientDisconnected)));
+    ).pipe(takeUntil(merge(closed, roleUpdatedClosed, clientDisconnected)));
   }
 }
