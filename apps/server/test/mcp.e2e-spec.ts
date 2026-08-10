@@ -3526,19 +3526,25 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
     expect(denied.isError).toBe(true);
 
+    const conditionDefinitions = [{
+      name: 'Frostbite', durationRounds: 3, timing: 'end-of-turn', saveTiming: 'end-of-turn',
+      saveAbility: 'CON', saveDc: 14, isConcentration: false, stacks: 1, notes: 'Save ends',
+    }];
     const updated = await dmClient.callTool({
       name: 'update_campaign',
-      arguments: { campaignId: upCampaign, name: 'Renamed Realm', description: 'A general-field update over MCP.' },
+      arguments: { campaignId: upCampaign, name: 'Renamed Realm', description: 'A general-field update over MCP.', conditionDefinitions },
     });
     expect(updated.isError).toBeFalsy();
-    const result = parseResult(updated) as { name: string; description: string };
+    const result = parseResult(updated) as { name: string; description: string; conditionDefinitions: unknown[] };
     expect(result.name).toBe('Renamed Realm');
     expect(result.description).toBe('A general-field update over MCP.');
+    expect(result.conditionDefinitions).toEqual(conditionDefinitions);
 
     // Verify via REST.
     const restGet = await dmAgent.get(`/api/v1/campaigns/${upCampaign}`);
     expect(restGet.body.name).toBe('Renamed Realm');
     expect(restGet.body.description).toBe('A general-field update over MCP.');
+    expect(restGet.body.conditionDefinitions).toEqual(conditionDefinitions);
 
     // Empty patch is rejected.
     const empty = await dmClient.callTool({ name: 'update_campaign', arguments: { campaignId: upCampaign } });

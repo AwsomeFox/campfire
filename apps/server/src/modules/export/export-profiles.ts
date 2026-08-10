@@ -233,7 +233,7 @@ export const PUBLISHABLE_FIELDS = {
   // A homebrew system IS its profile — carrying the slug while stripping the profile exported
   // a campaign whose rule system silently reverted to 5e on import, the same class of omission
   // the `character` entry below documents for `speed`.
-  campaign: ['id', 'name', 'description', 'status', 'dangerLevel', 'narrationLanguage', 'ruleSystem', 'customMechanicsProfile', 'mapAttachmentId', 'currentLocationId'],
+  campaign: ['id', 'name', 'description', 'status', 'dangerLevel', 'narrationLanguage', 'ruleSystem', 'customMechanicsProfile', 'conditionDefinitions', 'mapAttachmentId', 'currentLocationId'],
   quest: ['id', 'campaignId', 'parentId', 'title', 'body', 'giverNpcId', 'reward', 'sortOrder', 'objectives'],
   questObjective: ['id', 'questId', 'text', 'sortOrder'],
   npc: ['id', 'campaignId', 'name', 'role', 'disposition', 'locationId', 'factionId', 'body', 'portraitUrl', 'iconSlug'],

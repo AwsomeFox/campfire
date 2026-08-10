@@ -234,6 +234,56 @@ export type MapAlignment = z.infer<typeof MapAlignment>;
 export const CampaignStatus = z.enum(['active', 'paused', 'completed']);
 export type CampaignStatus = z.infer<typeof CampaignStatus>;
 
+/**
+ * When a repeating effect prompts a save or applies its tick. 5e "save ends"
+ * effects repeat at the END of the affected creature's turn; ongoing damage / regeneration
+ * conventionally apply at the START. `none` = no timed prompt (a static condition/buff).
+ */
+export const EffectTiming = z.enum(['start-of-turn', 'end-of-turn', 'none']);
+export type EffectTiming = z.infer<typeof EffectTiming>;
+
+/**
+ * A DM-authored, campaign-scoped condition template (issue #1505). It deliberately
+ * excludes an instance id and source/provenance: those belong to each application,
+ * while these fields prefill the encounter condition picker consistently for every
+ * campaign member.
+ */
+export const CampaignConditionDefinition = z.object({
+  // Keep this aligned with the legacy derived `combatant.conditions` projection,
+  // whose strings are capped at 40 characters.
+  name: z.string().trim().min(1).max(40),
+  // A duration of zero has no meaningful application: the picker treats a duration
+  // as a positive number of rounds and otherwise uses null for "until removed".
+  durationRounds: z.number().int().positive().nullable().default(null),
+  timing: EffectTiming.default('none'),
+  saveTiming: EffectTiming.default('none'),
+  saveDc: z.number().int().positive().nullable().default(null),
+  saveAbility: z.string().max(24).nullable().default(null),
+  isConcentration: z.boolean().default(false),
+  stacks: z.number().int().min(1).max(99).default(1),
+  notes: z.string().max(300).default(''),
+});
+export type CampaignConditionDefinition = z.infer<typeof CampaignConditionDefinition>;
+
+export const CampaignConditionDefinitions = z
+  .array(CampaignConditionDefinition)
+  .max(50)
+  .superRefine((definitions, ctx) => {
+    const names = new Set<string>();
+    for (const [index, definition] of definitions.entries()) {
+      const canonical = definition.name.trim().toLowerCase();
+      if (names.has(canonical)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index, 'name'],
+          message: 'Condition definitions must have unique names (case-insensitive)',
+        });
+      }
+      names.add(canonical);
+    }
+  })
+  .default([]);
+
 export const Campaign = z.object({
   id: Id,
   name: z.string().min(1).max(120),
@@ -296,6 +346,10 @@ export const Campaign = z.object({
   // `ruleSystemAdapter(ruleSystem, customMechanicsProfile)`. null (default) — no homebrew
   // profile stored, and every existing campaign has this column NULL after migration.
   customMechanicsProfile: HomebrewMechanicsProfile.nullable().default(null),
+  // Campaign-owned condition vocabulary (issue #1505). These definitions are shared with
+  // every member through the campaign read surface, and let players apply only the
+  // DM-approved homebrew conditions alongside the active adapter's built-in vocabulary.
+  conditionDefinitions: CampaignConditionDefinitions,
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
   // Per-campaign upload quota in bytes, or null for no limit (issue #24). Set by a
   // server admin via the storage console — NOT part of CampaignCreate/Update, so a
@@ -335,7 +389,7 @@ export const CampaignStatusTransition = z.object({
 });
 export type CampaignStatusTransition = z.infer<typeof CampaignStatusTransition>;
 
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, enabledPackSlugs: true, mapAttachmentId: true, customMechanicsProfile: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, enabledPackSlugs: true, conditionDefinitions: true, mapAttachmentId: true, customMechanicsProfile: true });
 export const CampaignUpdate = CampaignCreate.partial().extend({
   // Map replacement lifecycle (issue #870). 'reset' clears location pin coordinates
   // in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.
@@ -11312,14 +11366,6 @@ export type HpBand = z.infer<typeof HpBand>;
 
 // ---------- current-turn workspace: effects + per-turn action economy (issue #413) ----------
 
-/**
- * When a repeating effect prompts a save or applies its tick (issue #413). 5e "save ends"
- * effects repeat at the END of the affected creature's turn; ongoing damage / regeneration
- * conventionally apply at the START. `none` = no timed prompt (a static condition/buff).
- */
-export const EffectTiming = z.enum(['start-of-turn', 'end-of-turn', 'none']);
-export type EffectTiming = z.infer<typeof EffectTiming>;
-
 /** What an active effect does, so the workspace can raise the right start/end-turn prompt. */
 export const ActiveEffectKind = z.enum(['ongoing-damage', 'regeneration', 'condition', 'buff', 'other']);
 export type ActiveEffectKind = z.infer<typeof ActiveEffectKind>;
@@ -12629,6 +12675,9 @@ export const CampaignEventType = z.enum([
   // Issue #1899: shared dice roll feed tick. Thin id-only variant so connected clients can
   // refetch the roll log and trigger spectator animations without carrying faces on wire.
   'dice.rolled',
+  // Campaign metadata changed. Deliberately id-only: subscribers refetch the
+  // permission-checked campaign projection rather than receiving its contents.
+  'campaign.updated',
   // Issue #867: campaign moved to Trash. SSE controllers tear down EVERY open
   // stream on the campaign (control signal — filtered from the data path like
   // membership.revoked). A reconnect hits requireMember and 404s.
@@ -12683,6 +12732,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     // HP/condition/spell-slot mirror, `adjustCombatantResource`), so the client can
     // invalidate `campaignCharacters` precisely instead of on every encounter update.
     sheetMirrored: z.boolean().optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    // Thin invalidation for an open campaign context (including the run-session
+    // condition picker). Campaign data is always re-read through the normal
+    // role-scoped endpoint.
+    type: z.literal('campaign.updated'),
+    campaignId: Id,
     at: IsoDate,
   }),
   z.object({

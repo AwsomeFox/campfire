@@ -11,6 +11,7 @@ import {
   Campaign as CampaignSchema,
   CampaignClone,
   CampaignCloneMode,
+  CampaignConditionDefinitions,
   CampaignCreate,
   CampaignImport,
   CampaignPurge,
@@ -471,6 +472,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     ruleSystem: row.ruleSystem,
     enabledPackSlugs: fromJsonText<string[]>(row.enabledPackSlugs, []),
     customMechanicsProfile: fromJsonText<HomebrewMechanicsProfile | null>(row.customMechanicsProfile, null),
+    conditionDefinitions: CampaignConditionDefinitions.catch([]).parse(fromJsonText<unknown>(row.conditionDefinitions, [])),
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
     deletedAt: row.deletedAt ?? null,
@@ -911,6 +913,7 @@ export class CampaignsService {
             ruleSystem: input.ruleSystem ?? '',
             enabledPackSlugs: JSON.stringify(enabledPackSlugs ?? []),
             customMechanicsProfile: input.customMechanicsProfile ? JSON.stringify(input.customMechanicsProfile) : null,
+            conditionDefinitions: JSON.stringify(input.conditionDefinitions ?? []),
             mapAttachmentId: input.mapAttachmentId ?? null,
             // Issue #851: the operator's default quota, inherited atomically with the row
             // itself. null (unlimited) unless an admin has configured one — never touches
@@ -1052,6 +1055,7 @@ export class CampaignsService {
       mapAlignment,
       customMechanicsProfile: customMechanicsProfileInput,
       enabledPackSlugs: enabledPackSlugsInput,
+      conditionDefinitions: conditionDefinitionsInput,
       statusChangeReason,
       ...campaignInput
     } = input;
@@ -1127,6 +1131,8 @@ export class CampaignsService {
     }
     const customMechanicsProfilePatch =
       nextCustomMechanicsProfile !== undefined ? { customMechanicsProfile: nextCustomMechanicsProfile } : {};
+    const conditionDefinitionsPatch =
+      conditionDefinitionsInput !== undefined ? { conditionDefinitions: JSON.stringify(conditionDefinitionsInput) } : {};
     const revalidatePackSelectionTx = (
       tx: Parameters<Parameters<DrizzleDb['transaction']>[0]>[0],
     ): { enabledPackSlugs?: string } => {
@@ -1259,6 +1265,7 @@ export class CampaignsService {
       if (statusChanging) {
         await this.recordStatusTransition(id, existing.status, 'active', statusChangeReason ?? '', user);
       }
+      this.events.emit({ type: 'campaign.updated', campaignId: id });
       return toDomain(updatedRow);
     }
 
@@ -1292,7 +1299,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, publicInvitesEnabled: false, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, ...conditionDefinitionsPatch, publicInvitesEnabled: false, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1355,6 +1362,7 @@ export class CampaignsService {
       if (statusChanging) {
         await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
       }
+      this.events.emit({ type: 'campaign.updated', campaignId: id });
       return toDomain(row);
     }
 
@@ -1398,7 +1406,7 @@ export class CampaignsService {
         }
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, ...conditionDefinitionsPatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1442,7 +1450,7 @@ export class CampaignsService {
         sampleMechanics(tx);
         const row = tx
           .update(campaigns)
-          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, updatedAt: ts })
+          .set({ ...campaignInput, ...txEnabledPackSlugsPatch, ...customMechanicsProfilePatch, ...conditionDefinitionsPatch, updatedAt: ts })
           .where(eq(campaigns.id, id))
           .returning()
           .get();
@@ -1495,8 +1503,10 @@ export class CampaignsService {
     if (archiving) {
       await this.invites.suspendForCampaign(id, user, 'archive');
       const [fresh] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
+      this.events.emit({ type: 'campaign.updated', campaignId: id });
       return toDomain(fresh ?? updatedRow);
     }
+    this.events.emit({ type: 'campaign.updated', campaignId: id });
     return toDomain(updatedRow);
   }
 
@@ -1928,6 +1938,7 @@ export class CampaignsService {
           ruleSystem: campaigns.ruleSystem,
           enabledPackSlugs: campaigns.enabledPackSlugs,
           customMechanicsProfile: campaigns.customMechanicsProfile,
+          conditionDefinitions: campaigns.conditionDefinitions,
         })
         .from(campaigns)
         .where(and(eq(campaigns.id, id), notDeleted(campaigns.deletedAt)))
@@ -1967,6 +1978,9 @@ export class CampaignsService {
           // otherwise a clone of a homebrew campaign would silently resolve to the 5e adapter
           // fallback (no ADAPTERS entry for the slug, no profile to pair it with).
           customMechanicsProfile: currentSourcePacks.customMechanicsProfile,
+          // Condition templates are campaign configuration, so both full and template
+          // clones retain the DM-approved player vocabulary and its picker defaults.
+          conditionDefinitions: currentSourcePacks.conditionDefinitions,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
           // Issue #851: the operator's default quota, inherited atomically with the
           // row — deliberately NOT the source campaign's own storageQuotaBytes.
@@ -2874,6 +2888,10 @@ export class CampaignsService {
     const aiExternalContentPolicy = aiExternalContentPolicyParsed.success
       ? aiExternalContentPolicyParsed.data
       : 'member_consent';
+    // Imports are untrusted. Invalid/duplicate legacy definitions degrade to the
+    // empty vocabulary rather than making the rest of a campaign export unusable.
+    const importedConditionDefinitions = CampaignConditionDefinitions.safeParse(campaignSrc.conditionDefinitions);
+    const conditionDefinitions = importedConditionDefinitions.success ? importedConditionDefinitions.data : [];
 
     const locationRows = asArr(doc.locations);
     const npcRows = asArr(doc.npcs);
@@ -3078,6 +3096,7 @@ export class CampaignsService {
           ruleSystem,
           enabledPackSlugs: JSON.stringify(enabledPackSlugs),
           customMechanicsProfile,
+          conditionDefinitions: JSON.stringify(conditionDefinitions),
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
           // Issue #851: the operator's default quota, inherited atomically with the
           // row — never touches an existing campaign's own storageQuotaBytes.

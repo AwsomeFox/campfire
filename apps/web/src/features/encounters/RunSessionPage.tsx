@@ -55,7 +55,7 @@ import { detectSseTurnBeat, isStaleTurnBeatFrame, previousTurnBeatForFrame, shou
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { useCampaign } from '../../app/CampaignContext';
+import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
@@ -854,6 +854,7 @@ export default function RunSessionPage() {
   const canDmWriteRef = useRef(canDmWrite);
   canDmWriteRef.current = canDmWrite;
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
+  const { refresh: refreshCampaigns } = useCampaigns();
   const announce = useAnnounce();
   // #599/#1933: mirrors the server's assertNoSafetyHold rejection on start/nextTurn/
   // undoTurn/endTurn as a GatedControl reason — no server or authorization change, just
@@ -868,7 +869,15 @@ export default function RunSessionPage() {
   const activeAdapter = useMemo(() => ruleSystemAdapter(ruleSystem, campaign?.customMechanicsProfile), [ruleSystem, campaign?.customMechanicsProfile]);
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
-  const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
+  const conditionSuggestions = useMemo(() => {
+    const seen = new Set<string>();
+    return [...activeAdapter.conditions, ...(campaign?.conditionDefinitions ?? []).map((definition) => definition.name)].filter((name) => {
+      const canonical = name.toLowerCase();
+      if (seen.has(canonical)) return false;
+      seen.add(canonical);
+      return true;
+    });
+  }, [activeAdapter, campaign?.conditionDefinitions]);
   // Issue #1910 review: the vitals header's speed fallback must read the ACTIVE
   // campaign's own adapter default, not a hardcoded 30 — a system without a
   // movement slot at all (e.g. PF2e) has no adapter default to fall back to.
@@ -1913,6 +1922,13 @@ export default function RunSessionPage() {
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
+        // Campaign-owned condition definitions are part of the context snapshot,
+        // not the encounter read. A REST or MCP campaign update therefore needs
+        // its own thin signal so an open picker receives the new vocabulary.
+        if (event.type === 'campaign.updated') {
+          void refreshCampaigns();
+          return;
+        }
         if (event.type === 'party.rest.updated') {
           // This one event represents the whole atomic recovery batch. Linked
           // encounter rows emit their own post-commit encounter.updated frame.
@@ -2071,7 +2087,7 @@ export default function RunSessionPage() {
         // to satisfy "after the encounter.updated-driven refetch (or within one poll cycle)".
         void queryClient.invalidateQueries({ queryKey: queryKeys.encounterEvents(eid) });
       },
-      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, encounter?.turnVersion, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, encounter?.turnVersion, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership, refreshCampaigns],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
@@ -2090,11 +2106,12 @@ export default function RunSessionPage() {
       // turn, so without this the controls stay wrongly enabled (or wrongly gated) until
       // useTableSafety's 20s poll happens to land.
       invalidateTableSafety(queryClient, cid);
+      void refreshCampaigns();
       // Issue #2092: a dropped connection may have swallowed an `encounter.turn_changed`
       // frame outright — re-arm the REST turn-beat baseline resync (see
       // `awaitingTurnBeatResyncRef`'s own comment) so the catch-up encounter read above
       // re-derives it.
-    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership, refreshCampaigns]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
       setResyncPending(true);
@@ -2104,7 +2121,8 @@ export default function RunSessionPage() {
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
       invalidateTableSafety(queryClient, cid);
-    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
+      void refreshCampaigns();
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership, refreshCampaigns]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
@@ -5223,6 +5241,7 @@ export default function RunSessionPage() {
                       }
                       busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
                       conditionSuggestions={conditionSuggestions}
+                      conditionDefinitions={campaign?.conditionDefinitions}
                       conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
                       defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
                       ruleSystem={ruleSystem}

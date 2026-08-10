@@ -51,6 +51,8 @@ describe('encounters (e2e)', () => {
 
     const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Encounter Campaign' });
     campaignId = campRes.body.id;
+    // Omitted campaign definitions preserve the adapter-only vocabulary for existing callers.
+    expect(campRes.body.conditionDefinitions).toEqual([]);
 
     // Party member with DEX 16 (mod +3), owned by "dev:p-1" (see character ownership
     // convention: dev-header players carry serverRole admin but ownerUserId is still set
@@ -681,6 +683,79 @@ describe('encounters (e2e)', () => {
         .send({ removeConditions: ['prone'] });
     });
 
+    it('a DM-defined campaign condition can be applied by its owning player with structured defaults (issue #1505)', async () => {
+      const server = ctx.app.getHttpServer();
+      const broadcasts: Array<{ type: string; campaignId: number }> = [];
+      const subscription = ctx.app
+        .get(CampaignEventsService)
+        .streamFor(campaignId)
+        .subscribe((event) => broadcasts.push(event));
+      const definition = {
+        name: 'Frostbite',
+        durationRounds: 3,
+        timing: 'end-of-turn',
+        saveTiming: 'end-of-turn',
+        saveAbility: 'CON',
+        saveDc: 14,
+        isConcentration: false,
+        stacks: 1,
+        notes: 'Save ends',
+      };
+      try {
+        const campaign = await request(server)
+          .patch(`/api/v1/campaigns/${campaignId}`)
+          .set(dm)
+          .send({ conditionDefinitions: [definition] });
+        expect(campaign.status).toBe(200);
+        expect(campaign.body.conditionDefinitions).toEqual([definition]);
+        // The browser receives only an invalidation and re-reads the authorized
+        // campaign snapshot, so a live condition picker picks up REST/MCP updates.
+        expect(broadcasts).toContainEqual(expect.objectContaining({ type: 'campaign.updated', campaignId }));
+
+        const zeroDuration = await request(server)
+          .patch(`/api/v1/campaigns/${campaignId}`)
+          .set(dm)
+          .send({ conditionDefinitions: [{ ...definition, durationRounds: 0 }] });
+        expect(zeroDuration.status).toBe(400);
+        const zeroSaveDc = await request(server)
+          .patch(`/api/v1/campaigns/${campaignId}`)
+          .set(dm)
+          .send({ conditionDefinitions: [{ ...definition, saveDc: 0 }] });
+        expect(zeroSaveDc.status).toBe(400);
+
+        const added = await request(server)
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+          .set(player)
+          .send({
+            addConditionInstance: {
+              id: 'frostbite-player',
+              name: 'Frostbite',
+              durationRounds: 3,
+              roundsRemaining: 3,
+              timing: 'end-of-turn',
+              saveTiming: 'end-of-turn',
+              saveAbility: 'CON',
+              saveDc: 14,
+              isConcentration: false,
+              stacks: 1,
+              notes: 'Save ends',
+              custom: false,
+            },
+          });
+        expect(added.status).toBe(200);
+        expect(added.body.conditionInstances).toContainEqual(expect.objectContaining({
+          id: 'frostbite-player', name: 'Frostbite', roundsRemaining: 3, saveAbility: 'CON', saveDc: 14, custom: false,
+        }));
+
+        await request(server)
+          .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+          .set(player)
+          .send({ removeConditionInstanceId: 'frostbite-player' });
+      } finally {
+        subscription.unsubscribe();
+      }
+    });
+
     it('DM may mint a custom condition label outside the vocabulary (issue #495)', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server)
@@ -693,6 +768,45 @@ describe('encounters (e2e)', () => {
         .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
         .set(dm)
         .send({ removeConditions: ['hexed_by_patron'] });
+    });
+
+    it('allows a player to update an existing DM-minted condition but rejects a new unknown name (issue #1505)', async () => {
+      const server = ctx.app.getHttpServer();
+      const customCondition = {
+        id: 'hexed-by-patron-instance',
+        name: 'hexed_by_patron',
+        durationRounds: null,
+        roundsRemaining: null,
+        timing: 'none',
+        saveTiming: 'none',
+        saveAbility: null,
+        saveDc: null,
+        isConcentration: false,
+        stacks: 1,
+        notes: 'DM applied',
+        custom: true,
+      };
+      const added = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ addConditionInstance: customCondition });
+      expect(added.status).toBe(200);
+
+      const updated = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ updateConditionInstance: { ...customCondition, notes: 'Player updated' } });
+      expect(updated.status).toBe(200);
+      expect(updated.body.conditionInstances).toContainEqual(expect.objectContaining({
+        id: customCondition.id, notes: 'Player updated',
+      }));
+
+      const renamed = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ updateConditionInstance: { ...customCondition, name: 'unknown_player_condition' } });
+      expect(renamed.status).toBe(400);
+      expect(JSON.stringify(renamed.body)).toMatch(/unknown_player_condition|vocabulary|Unknown condition/i);
     });
 
     // Strict-validation (task P1 item 3): CombatantUpdateDto is now .strict() at
