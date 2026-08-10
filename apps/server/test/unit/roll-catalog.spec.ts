@@ -7,6 +7,7 @@ import {
   ruleSystemAdapter,
   checkCatalogForAdapter,
   creatureCheckCatalogForAdapter,
+  CreatureCheckRollRequest,
   findCheckInCatalog,
   neutralCheckCatalog,
   dnd5eProficiencyBonus,
@@ -75,6 +76,23 @@ describe('creature roll catalog — adapter-derived statblocks (issue #1314)', (
     expect(catalog.filter((check) => check.category === 'save')).toEqual([
       expect.objectContaining({ id: 'save:dex', modifier: 4 }),
     ]);
+  });
+
+  it('bounds generated creature ids so every catalog option is accepted by the roll request', () => {
+    const longSkill = `ancient_${'shadow_'.repeat(12)}lore`;
+    const similarlyPrefixedSkill = `${longSkill}_beyond_the_known_realm`;
+    const longSave = `eldritch_${'will_'.repeat(14)}save`;
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { skills: { [longSkill]: 9, [similarlyPrefixedSkill]: 8 }, saves: { [longSave]: 7 } },
+    });
+
+    const generated = catalog.filter((check) => check.category === 'skill' || check.category === 'save');
+    expect(generated).toHaveLength(3);
+    expect(new Set(generated.map((check) => check.id)).size).toBe(generated.length);
+    for (const check of generated) {
+      expect(check.id).toHaveLength(60);
+      expect(CreatureCheckRollRequest.safeParse({ checkId: check.id }).success).toBe(true);
+    }
   });
 });
 

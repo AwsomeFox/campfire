@@ -6087,6 +6087,33 @@ function creatureCheckLabel(key: string): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+const MAX_CHECK_ID_LENGTH = 60;
+
+/**
+ * Keep catalog ids consumable by {@link CheckRollRequest}. Short, established ids
+ * retain their exact spelling; only an imported/homebrew key that would overflow the
+ * request contract gains a deterministic suffix. The collision fallback remains
+ * bounded and keeps the catalog unique even for adversarial keys.
+ */
+function boundedCreatureCheckId(prefix: 'save' | 'skill', rawKey: string, usedIds: ReadonlySet<string>): string {
+  const full = `${prefix}:${rawKey.trim().toLowerCase()}`;
+  if (full.length <= MAX_CHECK_ID_LENGTH && !usedIds.has(full)) return full;
+
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < full.length; index += 1) {
+    hash = Math.imul(hash ^ full.charCodeAt(index), 0x01000193);
+  }
+  const suffix = (hash >>> 0).toString(36);
+  const stemLength = MAX_CHECK_ID_LENGTH - suffix.length - 1;
+  const stem = full.slice(0, stemLength);
+  let candidate = `${stem}-${suffix}`;
+  for (let collision = 2; usedIds.has(candidate); collision += 1) {
+    const collisionSuffix = `-${collision}`;
+    candidate = `${full.slice(0, MAX_CHECK_ID_LENGTH - suffix.length - collisionSuffix.length - 1)}-${suffix}${collisionSuffix}`;
+  }
+  return candidate;
+}
+
 /**
  * Build the roll catalog for a creature statblock (issue #1314). Unlike characters, a
  * creature's saves/skills are already-published final modifiers, so this function NEVER
@@ -6142,7 +6169,7 @@ export function creatureCheckCatalogForAdapter(
   for (const [rawKey, modifier] of Object.entries(saves)) {
     const label = creatureCheckLabel(rawKey);
     add({
-      id: `save:${rawKey.trim().toLowerCase()}`,
+      id: boundedCreatureCheckId('save', rawKey, ids),
       label: `${label} save`,
       category: 'save',
       ability: null,
@@ -6160,7 +6187,7 @@ export function creatureCheckCatalogForAdapter(
   for (const [rawKey, modifier] of Object.entries(skills)) {
     const label = creatureCheckLabel(rawKey);
     add({
-      id: `skill:${rawKey.trim().toLowerCase()}`,
+      id: boundedCreatureCheckId('skill', rawKey, ids),
       label,
       category: 'skill',
       ability: null,
