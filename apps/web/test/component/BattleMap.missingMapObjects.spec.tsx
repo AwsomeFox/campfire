@@ -123,7 +123,7 @@ describe('BattleMap tolerates an encounter with no mapObjects field (issue #1308
     expect('mapObjects' in unvalidated).toBe(false);
 
     expect(() => renderBattleMap(unvalidated)).not.toThrow();
-    expect(screen.getByTestId('battle-map-surface')).toBeInTheDocument();
+    expect(screen.getByTestId('battle-map-surface')).toBeTruthy();
   });
 
   test('a real (schema-validated) encounter still renders normally, as a contrast case', () => {
@@ -138,6 +138,6 @@ describe('BattleMap tolerates an encounter with no mapObjects field (issue #1308
     });
     expect(encounter.mapObjects).toEqual([]);
     renderBattleMap(encounter);
-    expect(screen.getByTestId('battle-map-surface')).toBeInTheDocument();
+    expect(screen.getByTestId('battle-map-surface')).toBeTruthy();
   });
 });
