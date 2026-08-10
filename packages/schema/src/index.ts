@@ -12787,16 +12787,17 @@ export const InventoryItem = z.object({
    */
   equippedActionSource: EquippedActionSource.nullable().default(null),
   /**
-   * Issue #2157: item weight in pounds (lb) — the unit 5e, PF2e-as-written-in-pounds,
-   * and most other supported rule systems' source material already prints gear weight
-   * in. Deliberately NOT ruleset-aware: PF2e's own native encumbrance unit is "Bulk", an
-   * abstract count rather than a physical weight, and several other registered adapters
-   * (Ironsworn/Starforged, Open Legend, 13th Age) have no encumbrance concept at all. A
-   * plain pounds field lets every table that tracks physical weight use it and costs
-   * nothing to a table whose system doesn't; a Bulk-aware or per-system unit conversion
-   * is a larger, adapter-level feature left for a follow-up rather than guessed at here.
-   * Manually entered only — see `InventoryService.acquireFromCompendium` for why compendium
-   * acquisition does not populate it in this slice.
+   * Issue #2157: item weight in pounds (lb) — the unit 5e and most other supported rule
+   * systems' source material already prints gear weight in. PF2e is the notable exception:
+   * its own native encumbrance unit is "Bulk", an abstract count rather than a physical
+   * weight, so a pounds value here is not what a PF2e table's own rules would compute from.
+   * Several other registered adapters (Ironsworn/Starforged, Open Legend, 13th Age) have no
+   * encumbrance concept at all. Shipping a plain pounds field anyway lets every table that
+   * DOES track physical weight use it today and costs nothing to a table whose system
+   * doesn't; a Bulk-aware or per-system unit conversion is a larger, adapter-level feature
+   * left for a follow-up rather than guessed at here. Manually entered only — see
+   * `InventoryService.acquireFromCompendium` for why compendium acquisition does not
+   * populate it in this slice.
    */
   weight: z.number().min(0).max(10_000).default(0),
   ...timestamps,

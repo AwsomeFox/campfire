@@ -15,8 +15,15 @@ import type { InventoryItem, PartyCharacter, Character } from '@campfire/schema'
 import '../../src/i18n';
 import { ItemSection, ItemRow } from '../../src/features/inventory/inventoryShared';
 
-const { patchMock } = vi.hoisted(() => ({
+const { patchMock, formattingLocale } = vi.hoisted(() => ({
   patchMock: vi.fn(async (_path: string, _body?: unknown) => ({}) as unknown),
+  // Mutable box read by the mocked useFormattingLocale below, so individual tests can force
+  // a specific locale (issue #2179 review: the comma-decimal round-trip bug) without fighting
+  // the real localeController singleton, whose supported UI languages (en/ar/pseudo) don't
+  // include a comma-decimal one — the real production trigger is a comma-decimal SYSTEM
+  // (browser) locale, which format.ts only surfaces through the `formatLocale` value this hook
+  // returns, not through anything this test needs to drive via the UI.
+  formattingLocale: { current: undefined as string | undefined },
 }));
 
 vi.mock('../../src/lib/api', async (importOriginal) => {
@@ -30,10 +37,19 @@ vi.mock('../../src/lib/api', async (importOriginal) => {
   };
 });
 
+vi.mock('../../src/lib/format', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/format')>();
+  return {
+    ...actual,
+    useFormattingLocale: () => formattingLocale.current,
+  };
+});
+
 afterEach(() => {
   cleanup();
   patchMock.mockReset();
   patchMock.mockResolvedValue({});
+  formattingLocale.current = undefined;
 });
 
 function baseItem(overrides: Partial<InventoryItem> = {}): InventoryItem {
@@ -158,5 +174,68 @@ describe('ItemRow weight display and edit (issue #2157)', () => {
     fireEvent.blur(input);
     expect(await screen.findByTestId('inventory-item-weight-error')).toBeTruthy();
     expect(patchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('ItemRow weight round-trips correctly under a comma-decimal locale (issue #2179 review)', () => {
+  // Regression for a real data-integrity bug: seeding/resetting the weight draft with plain
+  // `String(committed.weight)` always emits an ASCII `.` decimal, but the draft is re-parsed
+  // with the ACTIVE locale's separators. In a comma-decimal locale `.` reads as a GROUPING
+  // character and is stripped before parsing, so `String(7.25)` silently round-tripped as the
+  // digit run "725" — parsed as 725, not 7.25 — with no validation error and no visible sign
+  // anything was wrong. A test that only runs under `en` cannot catch this: `en`'s decimal IS
+  // `.`, so the corrupting collision between "the ASCII decimal `String()` emits" and "the
+  // locale's grouping character" never occurs there. These tests force a real comma-decimal
+  // `formatLocale` (de-DE) via the mocked `useFormattingLocale` above.
+
+  test('seeding the draft from a committed weight is lossless — the input shows the LOCALE-correct value, not a bare ASCII string', () => {
+    formattingLocale.current = 'de-DE';
+    const item = baseItem({ id: 42, weight: 7.25 });
+    render(
+      <ItemRow item={item} editable characters={noCharacters} writableOwners={noWritableOwners} onChanged={() => {}} />,
+    );
+    const input = screen.getByTestId('inventory-item-weight-input') as HTMLInputElement;
+    // The bug's specific shape: a naive `String(7.25)` seed would show "7.25" here — which
+    // LOOKS fine, but is silently mis-parsed the moment the user blurs without typing anything,
+    // because "." reads as a de-DE grouping character. The fix must show "7,25" instead.
+    expect(input.value).toBe('7,25');
+  });
+
+  test('blurring an UNTOUCHED draft under a comma-decimal locale does NOT corrupt the value 100x — this is the actual bug', async () => {
+    formattingLocale.current = 'de-DE';
+    const item = baseItem({ id: 42, weight: 7.25 });
+    render(
+      <ItemRow item={item} editable characters={noCharacters} writableOwners={noWritableOwners} onChanged={() => {}} />,
+    );
+    const input = screen.getByTestId('inventory-item-weight-input') as HTMLInputElement;
+    // No fireEvent.change — the user opens the row and blurs without editing anything, e.g. by
+    // tabbing through the row. With the pre-fix `String(...)` seed, this silently PATCHed
+    // { weight: 725 } (the digit run "725" parsed as an integer once "." was stripped as a
+    // de-DE grouping separator) — not a validation error, a WRONG committed write.
+    fireEvent.blur(input);
+    // Give any (incorrect) patch a chance to fire before asserting it didn't.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(patchMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('inventory-item-weight-error')).toBeNull();
+  });
+
+  test('editing to a new comma-decimal value PATCHes the correct numeric weight, not a 100x-corrupted one', async () => {
+    formattingLocale.current = 'de-DE';
+    const item = baseItem({ id: 42, weight: 1 });
+    patchMock.mockResolvedValue({ ...item, weight: 8.5 });
+    render(
+      <ItemRow item={item} editable characters={noCharacters} writableOwners={noWritableOwners} onChanged={() => {}} />,
+    );
+    const input = screen.getByTestId('inventory-item-weight-input') as HTMLInputElement;
+    // A de-DE user types the comma form, exactly as their own locale expects.
+    fireEvent.change(input, { target: { value: '8,5' } });
+    fireEvent.blur(input);
+    await waitFor(() => {
+      expect(patchMock).toHaveBeenCalledWith('/api/v1/inventory/42', { weight: 8.5 });
+    });
+    // The redisplayed draft after a successful commit must ALSO stay locale-correct — a
+    // regression here would only surface on the NEXT untouched blur, so it is asserted
+    // directly rather than trusted implicitly.
+    expect(input.value).toBe('8,5');
   });
 });

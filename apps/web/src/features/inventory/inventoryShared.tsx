@@ -22,7 +22,7 @@ import { Markdown } from '../../components/Markdown';
 import { getIcon } from '../../lib/icons';
 import { defaultItemIconSlug, itemIconSlug } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger, parseLocalizedNumber } from '../../lib/i18nNumbers';
-import { useFormattingLocale, formatNumber } from '../../lib/format';
+import { useFormattingLocale, formatNumber, formatNumberForEditing } from '../../lib/format';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 import { useDialog } from '../../components/useDialog';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
@@ -151,12 +151,24 @@ export function ItemRow({
   // icon/notes fields elsewhere on this row, rather than a separate save button. Draft state
   // is reset from `committed.weight` whenever the item changes so a stale edit never survives
   // a concurrent update from another player.
-  const [weightDraft, setWeightDraft] = useState(String(committed.weight));
-  const [weightError, setWeightError] = useState<string | null>(null);
+  //
+  // Issue #2179 review: the draft MUST be seeded/reset with `formatNumberForEditing`, not
+  // plain `String(...)`. `String()` always emits an ASCII `.` decimal, but `commitWeight`
+  // below re-parses this draft with the ACTIVE locale's separators — in a comma-decimal
+  // locale, `.` reads as a GROUPING character and gets stripped before parsing, so
+  // `String(7.25)` silently round-trips as the integer 725 on the next blur. No error, no
+  // visible sign anything is wrong — just a value 100x too large persisted to the server.
+  // `formatNumberForEditing` emits the same decimal separator `parseLocalizedNumber` expects
+  // for this locale, so the round-trip is lossless instead of silently corrupting.
   const formatLocale = useFormattingLocale();
+  const [weightDraft, setWeightDraft] = useState(formatNumberForEditing(committed.weight, formatLocale));
+  const [weightError, setWeightError] = useState<string | null>(null);
   useEffect(() => {
-    setWeightDraft(String(committed.weight));
+    setWeightDraft(formatNumberForEditing(committed.weight, formatLocale));
     setWeightError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- resetting on the SERVER value
+    // changing, deliberately not on formatLocale — a live locale switch must not clobber an
+    // in-progress edit; it only takes effect the next time this item's weight itself changes.
   }, [committed.weight]);
 
   async function commitWeight() {
@@ -170,7 +182,7 @@ export function ItemRow({
       return;
     }
     setWeightError(null);
-    setWeightDraft(String(parsed.value));
+    setWeightDraft(formatNumberForEditing(parsed.value, formatLocale));
     if (parsed.value === committed.weight) return;
     await patch({ weight: parsed.value });
   }
