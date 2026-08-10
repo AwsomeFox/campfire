@@ -63,3 +63,59 @@ export function diceRollKindLabelKey(
       return null;
   }
 }
+
+/**
+ * Same-kind CSS var per roll kind, for the run-accent border/tint (issue #2183).
+ * Reuses the exact custom properties `.tag-*` already shades from in nocturne.css —
+ * no new colour tokens. `null` for `undefined` (unclassified), matching
+ * `diceRollKindTagClass`.
+ */
+export function diceRollKindAccentVar(kind: DiceRollKind | undefined): string | null {
+  switch (kind) {
+    case 'to-hit':
+      return 'var(--color-accent)';
+    case 'damage':
+      return 'var(--color-amber)';
+    case 'check':
+      return 'var(--color-accent-2)';
+    case 'roll':
+      return 'var(--color-neutral-500)';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Issue #2183 (follow-up to #2155/#2182): the shared dice log's literal per-kind
+ * *grouping*. #2182 shipped colour only; this decides how consecutive same-kind
+ * rows read as one thing.
+ *
+ * The log is a real-time, chronologically-ordered feed (SSE-pushed, 4-8 rows
+ * visible) — its whole job is "what just happened, in order." Hard sections or a
+ * kind filter would fight that: same-kind rolls that happen seconds apart (a bulk
+ * initiative roll, several checks in a skill challenge) would still land together
+ * on screen, but an attack's to-hit immediately followed by its damage roll — two
+ * DIFFERENT kinds — would be torn apart into different regions, and a live SSE
+ * insert could land mid-screen instead of always at the top. So this keeps the
+ * existing chronological order and array untouched, and instead marks *runs* of
+ * consecutive same-kind rows (adjacent in the already-time-ordered list) so the
+ * renderer can band them with one shared accent — literal grouping, zero
+ * reordering.
+ *
+ * `undefined` (unclassified: pre-#2155 rows, manual/physical rolls) is always
+ * `'solo'`, deliberately — it never starts, extends, or is absorbed into a
+ * neighbour's run, because doing so would imply a guessed kind. It keeps exactly
+ * today's standalone rendering, in its normal chronological slot.
+ */
+export type DiceRollGroupRole = 'solo' | 'start' | 'middle' | 'end';
+
+export function diceRollGroupRole(rolls: DiceRoll[], index: number): DiceRollGroupRole {
+  const kind = rolls[index]?.kind;
+  if (!kind) return 'solo';
+  const prevSame = index > 0 && rolls[index - 1]?.kind === kind;
+  const nextSame = index < rolls.length - 1 && rolls[index + 1]?.kind === kind;
+  if (!prevSame && !nextSame) return 'solo';
+  if (!prevSame && nextSame) return 'start';
+  if (prevSame && nextSame) return 'middle';
+  return 'end';
+}
