@@ -12949,7 +12949,20 @@ export const TimelineEventAuditPayload = z.object({
 });
 export type TimelineEventAuditPayload = z.infer<typeof TimelineEventAuditPayload>;
 
-export const AuditPayload = z.discriminatedUnion('kind', [TimelineEventAuditPayload]);
+export const InventoryItemAuditPayload = z.object({
+  version: z.literal(1),
+  kind: z.literal('inventory_item'),
+  action: z.enum(['item.create', 'item.update', 'item.delete', 'item.restore']),
+  actor: z.object({ id: z.string().max(200), role: AuditActorRole }),
+  source: z.object({ transport: z.enum(['rest', 'mcp', 'system']), requestId: z.string().max(128).nullable() }),
+  entity: z.object({ type: z.literal('inventory_item'), id: Id, label: z.string().min(1).max(200), navigation: z.object({ route: z.literal('inventory'), query: z.literal('item') }) }),
+  changes: z.array(AuditFieldChange).min(1).max(12),
+  snapshot: z.object({ name: z.string().max(200), qty: z.number().int().min(0), notes: z.string().max(5_000), iconSlug: z.string().max(80), ownerType: z.enum(['party', 'character']), characterId: Id.nullable(), equipped: z.boolean(), equipSlot: z.string().max(60).nullable() }).nullable(),
+  reason: z.string().max(500).nullable(),
+});
+export type InventoryItemAuditPayload = z.infer<typeof InventoryItemAuditPayload>;
+
+export const AuditPayload = z.discriminatedUnion('kind', [TimelineEventAuditPayload, InventoryItemAuditPayload]);
 export type AuditPayload = z.infer<typeof AuditPayload>;
 
 export const AuditEntry = z.object({
