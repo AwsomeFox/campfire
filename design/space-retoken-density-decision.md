@@ -1,8 +1,9 @@
 # Decision record: does retokening `--space-*` remap the density ramp, or accept the growth? (issue #2168)
 
-**Status:** recommendation — the core factual question is settled by measurement below;
-the residual choice is a product-feel call, escalated to the coordinator rather than
-decided unilaterally (see "Escalation" at the end). **Date:** 2026-08-10.
+**Status:** **decided.** Remap the four control-padding declarations; preserve today's
+rendered geometry everywhere. Coordinator sign-off:
+[issue #2168, comment 5246503988](https://github.com/AwsomeFox/campfire/issues/2168#issuecomment-5246503988).
+**Date:** 2026-08-10 (measured), decided 2026-08-10.
 **Type:** design-system decision, gating #2169 (the retokening execution) in the
 #1533 / #1688 → #2167 → **#2168 (this)** → #2169 chain. This file is a written decision,
 not a UI reference like the rest of `design/` (same convention as
@@ -168,82 +169,89 @@ which option is chosen.
   available width at 320px). Flagged as a gap for whoever executes #2169 to close before
   merging, not something this decision should be read as having ruled out.
 
-## Recommendation
+## Decision
 
-**The factual part is settled**: option 1 ("accept the growth") is not what its own
-description promises. It is uniform and low-risk for card/dialog padding, but for control
-(button) padding — the app's highest-traffic primitive — it is an uneven, partial change
-that measurably compresses the `compact`/`default` density distinction, as a side effect
-of which specific declarations happen to reference `--space-*` today rather than a
-deliberate choice about how dense `compact` controls should feel relative to `default`
-after retokening.
+**Remap the four control-padding declarations so the ramp holds its current ratios.
+Leave card/dialog padding `--space-*`-derived, since it already retokens uniformly.**
+Decided by the coordinator on 2026-08-10
+([issue #2168, comment 5246503988](https://github.com/AwsomeFox/campfire/issues/2168#issuecomment-5246503988)),
+accepting this doc's recommendation as written. #2169 must implement this, not
+re-litigate it — the density ramp's rendered geometry is not to change as part of the
+retokening, full stop.
 
-Given that, whichever option is picked must be picked **with this specific effect in
-view**, not by defaulting into option 1 on the strength of its (correct, but only
-partial) claim to uniformity. My recommendation, with the caveat in "Escalation" below:
+**What moves:** all four `--cf-density-*-card-padding` steps, `--cf-density-*-dialog-padding`
+steps, and everything that already flows through `--space-*` outside the density ramp
+(headings, `.hr`, `.cf-vtt-header`, etc. — #2167's territory, not this ramp's).
+**What does not move:** `--cf-density-{xs,compact}-control-padding-{y,x}`
+(`index.css:486,487,490,491`) get repointed at literal px values equal to today's
+rendered numbers (7.84px, 10.08px, 2.8px, 5.6px) instead of `var(--space-N)`/
+`calc(var(--space-N) * k)`, so `compact` stays exactly where it is relative to `default`
+(58.3% of `default`'s padding-y, unchanged) rather than drifting to 83.3% as it would
+under a bare token substitution. `default`/`comfortable` were already unaffected
+(hardcoded `rem`, not `--space-*`-derived) and need no change.
 
-**Prefer option 2 (remap) for the control-padding declarations specifically —
-`--cf-density-{xs,compact}-control-padding-{y,x}` and the two `calc()` expressions that
-derive from them.** These are a small, already-fully-cataloged set (4 declarations —
-`index.css:486,487` for padding-y, `:490,491` for the padding-x `calc()` pair, all in one
-`:root` block), so the "more engineering" cost the issue
-warns option 2 carries is modest and well-scoped here specifically — not the sprawling,
-whole-file remap a naive reading of "remap the density ramp" might suggest. Repointing
-just these four at literal px values equal to today's rendered numbers (7.84px, 10.08px,
-2.8px, 5.6px) delivers exactly zero visible change for controls at zero risk to the WCAG
-floor (unaffected either way) and zero risk to card/dialog padding (already safe under
-option 1, so leave those `--space-*`-derived and let them grow — no reason to also remap
-what is already proven uniform).
+**Why, in the coordinator's own words** (full reasoning at the linked comment; summarized
+here so this file reads as the decision record, not a pointer to one):
 
-This is a hybrid of the issue's two named options, applied per-primitive rather than
-ramp-wide, because the evidence above shows the ramp's own primitives do not currently
-behave uniformly under retokening — treating "the density ramp" as one lever when it is
-measurably two (a fully `--space-*`-derived card/dialog half, and a half-`--space-*`,
-half-literal control half) is itself informative and worth recording even if a different
-final call is made.
+1. **This migration is a refactor, and a refactor that changes rendered output is a
+   redesign wearing a refactor's clothes.** The #2167 → #2168 → #2169 chain exists
+   because #1688 found 2,124 call sites shifting at once with nobody able to see the
+   effect. Letting `compact`'s ratio drift from 58.3% to 83.3% as a side effect of which
+   declarations happen to be `--space-*`-derived would be exactly the invisible,
+   unintended change the chain was built to prevent — just in the opposite direction,
+   and now with a test suite watching instead of not.
+2. **The ramp's distinction is load-bearing and was expensive to get.** #1533 exists
+   because the density ramp had no step below 36px and the design system was being
+   bypassed as a result. Compressing `compact` toward `default` erodes the separation
+   that issue was filed to create. Narrowing it should require someone arguing for a
+   denser-feeling product, with evidence — not fall out of a token substitution.
+3. **Nobody has asked for it.** No issue, user report, or design reference wants
+   `compact` controls to feel closer to `default`. Absent that, holding the pixels where
+   they are is the conservative and correct default.
 
-## Strongest argument against this recommendation
+**On the counter-argument this doc states above:** the coordinator accepted it explicitly
+— "Purity of derivation is not worth a silent redesign" of 268 `.btn` sites plus the
+`.cf-btn` set. The permanent documented exception to "everything traces to `--space-*`"
+is a real, accepted cost, not an oversight. **This paragraph is that permanent record —
+the next person reading `index.css:486-493` and wondering why two of four density steps
+don't reference `--space-*` should be pointed here.**
 
-Remapping even four declarations means the app's spacing story is no longer "everything
-traces to `--space-*`" — it becomes "everything traces to `--space-*`, except these four,
-which are deliberately pinned to pre-retokening values for density-ramp reasons." That is
-a permanent, documented exception, not a one-time migration cost — every future reader of
-the density ramp has to know this carve-out exists. The simplicity #1688 valued in
-choosing "retoken, don't bridge" in the first place (a single scale, one clean lever) is
-partially undone by carving an exception back out of it immediately after. If the product
-genuinely wants `compact` controls to grow closer to `default`'s density as part of this
-migration — a legitimate design decision, not obviously wrong — accepting the growth
-everywhere, including controls, is simpler and arguably more honest about what's
-happening than remapping four values to simulate that nothing changed.
+## A caution for #2169's implementer: measure the cascade, do not reason about it
 
-## Escalation
+Two independent investigations in this same working session hit the identical
+unlayered-beats-`@layer utilities` cascade mechanism (nocturne.css's plain `:root`/
+element rules are imported unlayered; Tailwind utilities live in `@layer utilities`; an
+unlayered rule always wins at equal specificity, regardless of source order intuition)
+— once in each direction:
 
-The desync finding above is a fact, verified by measurement, and should be treated as
-settled: whoever executes #2169 must not let the control-padding growth happen as an
-unexamined side effect. But the actual choice this leaves — remap those four control
-values to hold `compact` exactly where it is today (this doc's recommendation), or accept
-that `compact` buttons will render measurably closer to `default`'s density post-retoken
-as a deliberate, named product decision (a valid "third option" in the issue's own terms,
-just applied narrowly rather than ramp-wide) — is a product-feel call about how dense
-`compact` controls should look, not something the measurements above can resolve further.
-Per the coordinator's own instruction not to manufacture false certainty on a taste
-question: **this specific sub-choice is escalated to the coordinator for sign-off**,
-citing the two options and the compact/default ratio numbers above (58.3%→83.3% under
-accept, 58.3%→58.3% under remap) as the concrete thing being decided between.
+- #2189's review found `.hr`'s own margin (unlayered) unexpectedly **beats** Tailwind's
+  `my-1` utility at `Layout.tsx:973`, keeping a class this decision's earlier drafts
+  assumed was dead code actually live.
+- This investigation found nocturne.css's own `.btn { padding: … }` (`nocturne.css:191`)
+  is unexpectedly **dead**, silently overridden by a *later* unlayered `.btn` rule at
+  `index.css:1699-1703` that routes through the density ramp instead (folded into #2192,
+  which tracks unused nocturne rules).
 
-Card/dialog padding needs no such escalation — the evidence above shows accepting the
-growth there is safe, uniform, and matches the issue's own description of option 1
-exactly.
+Specificity intuition predicts neither outcome correctly on its own — the deciding factor
+in both cases was layer membership, not selector weight or file order alone, and it cut
+in opposite directions in the same session. **Before landing #2169, measure every
+touched selector's real rendered value with `measureBox`/`renderCssFixture`
+(`apps/web/e2e/lib/computedStyle.ts`) rather than reasoning from the source text about
+which rule "should" win.** This decision doc's own numbers were produced exactly that
+way for that reason.
 
 ## Follow-ups this decision does not resolve
 
-Named here for the coordinator to file or fold into #2169 as wanted — not filed
-automatically, since this issue's scope was the decision itself:
+Named here for whoever executes #2169 to close out, not filed as separate issues
+automatically since this issue's scope was the decision itself:
 
 - Re-verify card padding at 320px against a real dashboard card before #2169 merges (the
-  one empirical check this investigation could not complete — see above).
+  one empirical check this investigation could not complete — see above). Left
+  unresolved deliberately, not re-run after the sign-off above — narrow-viewport
+  regressions are #2169's surface to catch, not this decision's.
 - Re-verify the VTT cockpit header's documented "max 2 visible rows, not a scroller"
   contract at narrow widths against #2169's actual diff, not just this decision's
   measured +7.1% height delta on today's code.
-- The coordinator's sign-off on the compact/default control-padding sub-choice above,
-  before #2169 is implemented.
+- Implement the four-declaration remap above and confirm via `measureBox` (not by
+  reading the new declarations) that `compact`'s rendered padding is byte-for-byte
+  unchanged pre/post-#2169, given the cascade caution immediately above.
