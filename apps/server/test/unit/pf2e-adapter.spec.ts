@@ -3,6 +3,9 @@ import {
   PF2E_ADAPTER_ID,
   PF2E_PACK_SLUG,
   PF2E_CONDITIONS,
+  PF2E_DAMAGE_TYPES,
+  PF2E_DAMAGE_TYPE_CATEGORIES,
+  DND5E_DAMAGE_TYPES,
   Sf2eAdapter,
   SF2E_ADAPTER_ID,
   SF2E_PACK_SLUG,
@@ -12,6 +15,7 @@ import {
   pf2eLevelBasedDC,
   pf2eSimpleDC,
   pf2eDegreeOfSuccess,
+  damageDefensesFromStatblock,
 } from '@campfire/schema';
 
 /**
@@ -300,5 +304,139 @@ describe('Pf2eAdapter — statblock mapping', () => {
     expect(Pf2eAdapter.monsterHitPoints({ hp: 0 })).toBeNull();
     expect(Pf2eAdapter.monsterHitPoints({})).toBeNull();
     expect(Pf2eAdapter.monsterHitPoints({ hp: 'lots' })).toBeNull();
+  });
+});
+
+/**
+ * Issue #2150 — PF2e monster defences parsed best-effort because Pf2eAdapter declared no
+ * damageTypes vocabulary. An AoN `immunity: ['fire','paralyzed','sleep']` registered the two
+ * CONDITIONS as damage immunities, and a resolvable spec carrying "slashing damage" sailed
+ * past a slashing resistance. Declaring the vocabulary fixes both, but a naive list of the 16
+ * types would silently drop the category-shaped entries PF2e prints ("resistance 5 physical",
+ * "all damage") that are real defences — so the adapter also declares `damageTypeCategories`,
+ * which the parser expands to plain members at parse time.
+ */
+describe('Pf2eAdapter — damage-type vocabulary (#2150)', () => {
+  it('declares the plain 16 Player Core damage types, distinct from 5e', () => {
+    expect(Pf2eAdapter.damageTypes).toBe(PF2E_DAMAGE_TYPES);
+    // The 16 grouped the way Player Core groups them.
+    for (const type of [
+      'bludgeoning', 'piercing', 'slashing',
+      'acid', 'cold', 'electricity', 'fire', 'force', 'sonic', 'vitality', 'void',
+      'mental', 'poison', 'bleed', 'precision', 'spirit',
+    ]) {
+      expect(Pf2eAdapter.damageTypes).toContain(type);
+    }
+    expect(Pf2eAdapter.damageTypes).toHaveLength(16);
+    // PF2e does NOT carry 5e's renamed/absent types — these would silently fail to match a
+    // real PF2e defence if they leaked in.
+    for (const dnd5eOnly of ['lightning', 'thunder', 'necrotic', 'radiant', 'psychic']) {
+      expect(Pf2eAdapter.damageTypes).not.toContain(dnd5eOnly);
+    }
+    // "Untyped" is the ABSENCE of a type, never a selectable one.
+    expect(Pf2eAdapter.damageTypes).not.toContain('untyped');
+  });
+
+  it('is the list the damage-type picker and the direct-damage check read — no category words', () => {
+    // Both consumers (BattleMap picker + EncountersService direct-damage type check) read
+    // `damageTypes` directly, so a DM selects "slashing", never the category "physical".
+    for (const category of Object.keys(PF2E_DAMAGE_TYPE_CATEGORIES)) {
+      expect(Pf2eAdapter.damageTypes).not.toContain(category);
+    }
+    // Sanity: the 5e list is a different vocabulary (no overlap on the renamed types).
+    expect(DND5E_DAMAGE_TYPES).not.toEqual(PF2E_DAMAGE_TYPES);
+  });
+
+  it('declares the category map physical/energy/all-damage expand to plain members', () => {
+    expect(Pf2eAdapter.damageTypeCategories).toBe(PF2E_DAMAGE_TYPE_CATEGORIES);
+    expect(PF2E_DAMAGE_TYPE_CATEGORIES.physical).toEqual(['bludgeoning', 'piercing', 'slashing']);
+    // Every category fans out to members that are themselves in the plain vocabulary, so a
+    // canonical parse keeps the expanded defence rather than dropping it.
+    for (const members of Object.values(PF2E_DAMAGE_TYPE_CATEGORIES)) {
+      for (const member of members) {
+        expect(PF2E_DAMAGE_TYPES).toContain(member);
+      }
+    }
+    // "all damage" / "all" cover the full plain list.
+    expect(PF2E_DAMAGE_TYPE_CATEGORIES['all damage']).toEqual(PF2E_DAMAGE_TYPES);
+    expect(PF2E_DAMAGE_TYPE_CATEGORIES.all).toEqual(PF2E_DAMAGE_TYPES);
+  });
+
+  it('SF2e inherits both the vocabulary and the categories (it spreads Pf2eAdapter)', () => {
+    expect(Sf2eAdapter.damageTypes).toBe(PF2E_DAMAGE_TYPES);
+    expect(Sf2eAdapter.damageTypeCategories).toBe(PF2E_DAMAGE_TYPE_CATEGORIES);
+  });
+});
+
+describe('damageDefensesFromStatblock — PF2e shapes (#2150)', () => {
+  // The exact AoN shape: an immunity ARRAY that mixes one damage type with conditions.
+  it('drops conditions from an immunity list, keeping only canonical damage types', () => {
+    const defenses = damageDefensesFromStatblock(
+      { immunities: ['fire', 'paralyzed', 'sleep'] },
+      PF2E_DAMAGE_TYPES,
+      PF2E_DAMAGE_TYPE_CATEGORIES,
+    );
+    expect(defenses.immunities).toEqual(['fire']);
+    expect(defenses.resistances).toEqual([]);
+    // Without a vocabulary the same list is taken verbatim (the bug this issue fixes).
+    const bestEffort = damageDefensesFromStatblock({ immunities: ['fire', 'paralyzed', 'sleep'] });
+    expect(bestEffort.immunities).toEqual(['fire', 'paralyzed', 'sleep']);
+  });
+
+  it('expands a "physical" category immunity to its three member types', () => {
+    const defenses = damageDefensesFromStatblock(
+      { immunities: ['physical'] },
+      PF2E_DAMAGE_TYPES,
+      PF2E_DAMAGE_TYPE_CATEGORIES,
+    );
+    expect(defenses.immunities).toEqual(['bludgeoning', 'piercing', 'slashing']);
+  });
+
+  it('expands "all damage" to every plain type, so a slashing Strike lands on the resistance', () => {
+    const defenses = damageDefensesFromStatblock(
+      { resistances: ['all damage'] },
+      PF2E_DAMAGE_TYPES,
+      PF2E_DAMAGE_TYPE_CATEGORIES,
+    );
+    expect(defenses.resistances).toEqual([...PF2E_DAMAGE_TYPES]);
+    // The expansion is what makes the exact-match defence apply to a typed attack.
+    expect(defenses.resistances).toContain('slashing');
+    expect(defenses.resistances).toContain('mental');
+  });
+
+  it('expands a record-form "physical" resistance the same way a string clause does', () => {
+    const defenses = damageDefensesFromStatblock(
+      { resistances: [{ name: 'Physical', key: 'physical' }] },
+      PF2E_DAMAGE_TYPES,
+      PF2E_DAMAGE_TYPE_CATEGORIES,
+    );
+    expect(defenses.resistances).toEqual(['bludgeoning', 'piercing', 'slashing']);
+  });
+
+  it('keeps a category alongside a plain type and drops a non-vocabulary token in the same clause', () => {
+    // "physical, fire" → bludgeoning + piercing + slashing + fire; a trailing "ichor" (not a
+    // type, not a category) takes the whole clause down with it, exactly as 5e treats a clause
+    // whose entries are not all canonical.
+    const kept = damageDefensesFromStatblock(
+      { resistances: ['physical, fire'] },
+      PF2E_DAMAGE_TYPES,
+      PF2E_DAMAGE_TYPE_CATEGORIES,
+    );
+    expect(kept.resistances).toEqual(['bludgeoning', 'piercing', 'slashing', 'fire']);
+    const dropped = damageDefensesFromStatblock(
+      { resistances: ['physical, ichor'] },
+      PF2E_DAMAGE_TYPES,
+      PF2E_DAMAGE_TYPE_CATEGORIES,
+    );
+    expect(dropped.resistances).toEqual([]);
+  });
+
+  it('leaves a system without categories on the literal-membership behaviour (5e unchanged)', () => {
+    // 5e has no `damageTypeCategories`, so a "physical" resistance is still dropped under its
+    // vocabulary — the category expansion is PF2e's, not a behaviour change for every system.
+    const dnd5e = damageDefensesFromStatblock({ resistances: ['physical'] }, DND5E_DAMAGE_TYPES);
+    expect(dnd5e.resistances).toEqual([]);
+    const dnd5eKept = damageDefensesFromStatblock({ resistances: ['fire'] }, DND5E_DAMAGE_TYPES);
+    expect(dnd5eKept.resistances).toEqual(['fire']);
   });
 });

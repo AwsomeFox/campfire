@@ -1476,6 +1476,10 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   character_id INTEGER,
   combatant_id INTEGER,
   visibility TEXT NOT NULL DEFAULT 'party_shared',
+  -- Issue #2155: what the roll is (DiceRollKind in @campfire/schema) for the shared
+  -- log's grouping/colour. Nullable — a fresh install's own rows still start unclassified
+  -- until a write path sets it; see RollsService.recordInTransaction.
+  kind TEXT,
   created_at TEXT NOT NULL
 );
 

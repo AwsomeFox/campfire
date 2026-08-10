@@ -637,20 +637,45 @@ function hasMeaningfulQualifier(value: Record<string, unknown>): boolean {
  * is supplied, retain only unconditional canonical types. Structured qualifier/exception
  * metadata and qualified display prose are deliberately excluded until attack source tags
  * are part of direct-damage requests.
+ *
+ * `categories` (issue #2150) lets a system declare category tokens its statblocks print where
+ * a plain damage type is expected — PF2e's "physical" / "all damage" / "energy". They are real
+ * defences but are not themselves damage types, so a naive canonical parse would DROP them
+ * once a vocabulary is declared. Because defences match by EXACT lowercased type, a category
+ * is expanded to its members (intersected with `vocabulary`) at parse time: a creature
+ * resistant to "physical" is stored as resistant to bludgeoning, piercing, AND slashing, so a
+ * slashing Strike lands on the resistance. An adapter without categories keeps the literal-
+ * membership behaviour unchanged.
  */
-export function damageDefensesFromStatblock(data: Record<string, unknown> | null | undefined, vocabulary?: readonly string[]): TargetDefenses {
+export function damageDefensesFromStatblock(
+  data: Record<string, unknown> | null | undefined,
+  vocabulary?: readonly string[],
+  categories?: Readonly<Record<string, readonly string[]>>,
+): TargetDefenses {
   const nested = recordValue(data?.resistances_and_immunities) ?? recordValue(data?.resistancesAndImmunities);
   // An adapter may support direct-damage rules before declaring a closed vocabulary.
   // Treat an empty list as best-effort parsing, not as "no type is canonical".
   const canonical = vocabulary && vocabulary.length > 0
     ? vocabulary.map((type) => type.toLowerCase())
     : undefined;
+  // Expand a single lowercased entry: a category token fans out to its members (kept only
+  // when they are canonical, so "all damage" stays inside the adapter's own vocabulary); any
+  // other entry passes through untouched for the caller's membership test to decide.
+  const expandEntry = (entry: string): string[] => {
+    const members = categories?.[entry];
+    if (members) {
+      const lower = members.map((m) => m.toLowerCase());
+      return canonical ? lower.filter((m) => canonical.includes(m)) : lower;
+    }
+    return [entry];
+  };
   const normalizeStrings = (raw: string): string[] => {
     return raw.split(';').flatMap((clause) => {
       const parts = clause.split(',').map((item) => item.trim()).filter(Boolean);
       if (!canonical) return parts;
       const normalized = parts.map((entry) => entry.toLowerCase().replace(/^and\s+/, ''));
-      return normalized.length > 0 && normalized.every((entry) => canonical.includes(entry)) ? normalized : [];
+      const expanded = normalized.flatMap((entry) => expandEntry(entry));
+      return expanded.length > 0 && expanded.every((entry) => canonical.includes(entry)) ? expanded : [];
     });
   };
   const readList = (nestedKey: string, ...keys: string[]): string[] => {
@@ -673,8 +698,10 @@ export function damageDefensesFromStatblock(data: Record<string, unknown> | null
       const type = String(typeRecord.key ?? typeRecord.name ?? '').trim();
       if (!type) return [];
       if (!canonical) return [type];
-      const normalized = type.toLowerCase();
-      return canonical.includes(normalized) && (!displayedTypes || displayedTypes.has(normalized)) ? [normalized] : [];
+      const expanded = expandEntry(type.toLowerCase());
+      return expanded.length > 0 && expanded.every((entry) => canonical.includes(entry) && (!displayedTypes || displayedTypes.has(entry)))
+        ? expanded
+        : [];
     });
     return [...new Set(entries)];
   };

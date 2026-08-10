@@ -1790,6 +1790,11 @@ export const diceRolls = sqliteTable('dice_rolls', {
   characterId: integer('character_id'),
   combatantId: integer('combatant_id'),
   visibility: text('visibility').notNull().default('party_shared'),
+  // Issue #2155: what the roll is (DiceRollKind in @campfire/schema), for the shared
+  // log's grouping/colour. Nullable, no default — every row written before this column
+  // existed has no way to know its own kind, and guessing one would render as a wrong
+  // kind rather than an honest "unclassified".
+  kind: text('kind'),
   createdAt: text('created_at').notNull(),
 }, (table) => ({
   campaignVisibility: index('idx_dice_rolls_campaign_visibility_id_desc').on(table.campaignId, table.visibility, table.id),
