@@ -366,7 +366,7 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     ]);
   });
 
-  test('an empty initial history response removes cached rows but keeps concurrent SSE rows', () => {
+  test('an initial authoritative snapshot replaces cached rows but keeps concurrent SSE rows', () => {
     const cached = transcriptReducer(emptyTranscript, {
       type: 'localPlayer',
       id: 'cached-player',
@@ -375,22 +375,39 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
       at,
     });
     const streamed = {
-      eventId: 'live-player', seq: 1, campaignId: 1, kind: 'player.action' as const,
+      eventId: 'live-player', seq: 2, campaignId: 1, kind: 'player.action' as const,
       actorUserId: 'user-1', actorName: 'Runa', clientRef: null, turnId: null,
       payload: { text: 'Arrived through SSE during the history read.' }, at,
+    };
+    const snapshot = {
+      eventId: 'snapshot-player', seq: 1, campaignId: 1, kind: 'player.action' as const,
+      actorUserId: 'user-2', actorName: 'Mira', clientRef: null, turnId: null,
+      payload: { text: 'Returned by the initial history snapshot.' }, at,
     };
     const withLiveRow = transcriptReducer(cached, { type: 'serverEvents', events: [streamed] });
 
     const reconciled = transcriptReducer(withLiveRow, {
-      type: 'reconcileEmptyAuthoritative',
+      type: 'reconcileInitialAuthoritative',
+      events: [snapshot],
       keepEntryIds: new Set([transcriptEntryId(streamed)]),
     });
 
     expect(reconciled.entries).toMatchObject([
+      { id: 'snapshot-player', kind: 'player', text: 'Returned by the initial history snapshot.' },
       { id: 'live-player', kind: 'player', text: 'Arrived through SSE during the history read.' },
     ]);
     expect(reconciled.entries).not.toContainEqual(expect.objectContaining({ id: 'cached-player' }));
-    expect(reconciled.lastSeq).toBe(1);
+    expect(reconciled.lastSeq).toBe(2);
+
+    const emptySnapshot = transcriptReducer(withLiveRow, {
+      type: 'reconcileInitialAuthoritative',
+      events: [],
+      keepEntryIds: new Set([transcriptEntryId(streamed)]),
+    });
+    expect(emptySnapshot.entries).toMatchObject([
+      { id: 'live-player', kind: 'player', text: 'Arrived through SSE during the history read.' },
+    ]);
+    expect(emptySnapshot.entries).not.toContainEqual(expect.objectContaining({ id: 'cached-player' }));
   });
 
   test('go-live still silences hydrated history and batched session seed', () => {

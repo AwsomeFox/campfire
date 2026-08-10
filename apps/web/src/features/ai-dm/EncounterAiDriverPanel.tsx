@@ -93,7 +93,6 @@ export function EncounterAiDriverPanel({
   const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
   const narrationOwnerRef = useRef('');
   const composerOwnerRef = useRef('');
-  const transcriptGenerationRef = useRef(liveActivity.transcriptGeneration);
   const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
   const [narrationAnnouncements, setNarrationAnnouncements] = useState<NarrationLogAddition[]>([]);
   const displayNarrationAdditions = useCallback(
@@ -166,10 +165,6 @@ export function EncounterAiDriverPanel({
     setUndoError(null);
     return () => { composerOwnerRef.current = ''; };
   }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role]);
-
-  useEffect(() => {
-    transcriptGenerationRef.current = liveActivity.transcriptGeneration;
-  }, [liveActivity.transcriptGeneration]);
 
   useEffect(() => {
     if (!liveActivity.transcriptFetched) {
@@ -255,7 +250,7 @@ export function EncounterAiDriverPanel({
     setSubmitError(null);
     const clientRef = newClientRef();
     const submissionOwner = composerOwnerRef.current;
-    const submissionGeneration = transcriptGenerationRef.current;
+    const submissionGeneration = liveActivity.getTranscriptGeneration();
     const body: {
       input: string;
       scene?: string;
@@ -273,7 +268,10 @@ export function EncounterAiDriverPanel({
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
-      if (composerOwnerRef.current !== submissionOwner || transcriptGenerationRef.current !== submissionGeneration) return;
+      if (
+        composerOwnerRef.current !== submissionOwner
+        || liveActivity.getTranscriptGeneration() !== submissionGeneration
+      ) return;
       dispatchTranscript({ type: 'localPlayer', memberName, characterName, text, clientRef });
       setInput('');
       setSceneField('');

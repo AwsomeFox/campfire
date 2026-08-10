@@ -242,7 +242,11 @@ export type TranscriptAction =
    * events are merged by their stable `eventId`, so re-delivery never duplicates a line.
    */
   | { type: 'serverEvents'; events: AiDmTranscriptEvent[] }
-  | { type: 'reconcileEmptyAuthoritative'; keepEntryIds: ReadonlySet<string> }
+  /**
+   * Replace a hydrated cache with the first authoritative history page, retaining only
+   * SSE rows that won its fetch race.
+   */
+  | { type: 'reconcileInitialAuthoritative'; events: AiDmTranscriptEvent[]; keepEntryIds: ReadonlySet<string> }
   /** Echo this client's own submission immediately (before/independent of the stream). */
   | {
       type: 'localPlayer';
@@ -946,8 +950,18 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       return ordered.reduce(applyServerEvent, state);
     }
 
-    case 'reconcileEmptyAuthoritative': {
-      const entries = state.entries.filter((entry) => action.keepEntryIds.has(entry.id));
+    case 'reconcileInitialAuthoritative': {
+      // The initial REST page is a snapshot, not an incremental reconnect page: stale cache
+      // rows absent from it must disappear. Preserve only durable stream rows explicitly
+      // observed while that request was in flight; those may be newer than its snapshot.
+      const snapshot = [...action.events]
+        .sort((a, b) => a.seq - b.seq)
+        .reduce<TranscriptState>(applyServerEvent, { entries: [], authoritative: true });
+      const snapshotIds = new Set(snapshot.entries.map((entry) => entry.id));
+      const entries = orderBySeq([
+        ...snapshot.entries,
+        ...state.entries.filter((entry) => action.keepEntryIds.has(entry.id) && !snapshotIds.has(entry.id)),
+      ]);
       const lastSeq = entries.reduce((max, entry) => Math.max(max, entry.seq ?? 0), 0);
       return { entries, authoritative: true, ...(lastSeq > 0 ? { lastSeq } : {}) };
     }

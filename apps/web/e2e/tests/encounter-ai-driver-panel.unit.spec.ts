@@ -41,9 +41,9 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/composerOwnerRef/);
     expect(panel).toMatch(/return \(\) => \{ composerOwnerRef\.current = ''; \}/);
     expect(panel).toMatch(/const submissionOwner = composerOwnerRef\.current/);
-    expect(panel).toMatch(/const submissionGeneration = transcriptGenerationRef\.current/);
+    expect(panel).toMatch(/const submissionGeneration = liveActivity\.getTranscriptGeneration\(\)/);
     expect(panel).toMatch(/composerOwnerRef\.current !== submissionOwner/);
-    expect(panel).toMatch(/transcriptGenerationRef\.current !== submissionGeneration/);
+    expect(panel).toMatch(/liveActivity\.getTranscriptGeneration\(\) !== submissionGeneration/);
     expect(panel).toMatch(/composerOwnerRef\.current === submissionOwner/);
     expect(panel).toMatch(/composerOwnerRef\.current = owner;[\s\S]{0,500}\}, \[campaignId, isDm, liveActivity\.mode, me\?\.user\.id, myMembership\?\.role\]\);/);
     expect(panel).toMatch(/catch \(err\) \{\s*if \(composerOwnerRef\.current === submissionOwner\)/);
@@ -80,8 +80,10 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(hook).toMatch(/transcriptOwnerRef\.current === key \? transcript : emptyTranscript/);
     expect(hook).toMatch(/transcriptEntryId\(event\.event\)/);
     expect(hook).toMatch(/preHydrationLiveEntryIdsRef/);
-    expect(hook).toMatch(/type: 'reconcileEmptyAuthoritative'/);
-    expect(hook).toMatch(/else if \(watermark === undefined\) \{[\s\S]{0,900}clearTranscript\(viewerId, campaignId, 'activity'\);[\s\S]{0,400}type: 'reconcileEmptyAuthoritative'/);
+    expect(hook).toMatch(/type: 'reconcileInitialAuthoritative'/);
+    expect(hook).toMatch(/if \(watermark === undefined\) \{[\s\S]{0,700}clearTranscript\(viewerId, campaignId, 'activity'\);[\s\S]{0,400}type: 'reconcileInitialAuthoritative'/);
+    expect(hook).toMatch(/const getTranscriptGeneration = useCallback\(\(\) => transcriptGenerationRef\.current, \[\]\)/);
+    expect(hook).toMatch(/event\.type === 'transcript\.reset'[\s\S]{0,700}advanceTranscriptGeneration\(\);/);
     expect(hook).toMatch(/err instanceof ApiError/);
     expect(hook).toMatch(/err\.status === 403 \|\| err\.status === 404/);
     expect(hook).toMatch(/clearTranscript\(viewerId, campaignId\);/);
