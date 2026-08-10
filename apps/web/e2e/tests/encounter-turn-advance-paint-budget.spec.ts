@@ -57,39 +57,48 @@ import { PNG_16_9, seed, stateFor, restoreSeedEncounter } from './seed';
  * back) crosses the Node/browser boundary, and that crossing is outside every measured span.
  *
  * BUDGET_MS derivation — real CI numbers on the corrected (in-page, `/turn`-mocked) probe, not
- * a local-box guess and not the numbers from the harness-latency-dominated first cut (see PR
- * #2165's description for that history and why those earlier numbers were discarded rather than
- * reused): this exact test ran on 2026-08-10 in this repo's own `e2e-web` shard — see PR #2165's
- * description for the exact job link and logged p50/p95/max — and BUDGET_MS is fixed at
- * BUDGET_MULTIPLIER × that observed p95, rounded up to a clean constant. The multiplier leans
- * generous on purpose because this derivation rests on ONE CI job's ONE run — inter-run variance
- * (a different runner instance, a noisier host, cache-cold Chromium) is not something a single
- * run's intra-run p50/p95/max can observe, only intra-run jitter is. If this budget ever flakes
- * on CI, the fix is to look at what THAT run's own `[perf]` log line reports and either confirm
- * a genuine one-off outlier or recompute BUDGET_MS from a wider multi-run sample — never to
- * silently widen it back toward "generous" without that evidence.
+ * a local-box guess and not the numbers from the harness-latency-dominated first cut (those
+ * earlier numbers were discarded rather than reused once the harness-latency bug was found):
+ * this exact test ran on 2026-08-10 in this repo's own `e2e-web` shard —
+ * https://github.com/AwsomeFox/campfire/actions/runs/31394914742/job/93475839086 — and logged:
  *
- * What this budget can/cannot catch — re-measured against the CORRECTED (in-page, `/turn`-
- * mocked) probe specifically, per PR #2165 review (the earlier "barely moves it" observation
- * was measured against the harness-latency-dominated version above and was retested rather than
- * trusted): stripping `CombatantRow`'s `memo()` wrapper entirely — so all 20 rows re-render on
- * every turn-advance instead of the 2 actually affected — was run locally against this exact
- * in-page probe at both SAMPLE_COUNT=20 and SAMPLE_COUNT=50, twice each. Every mutated
- * distribution fell WITHIN the memoized baseline's own run-to-run p50/p95/max spread (e.g. at
- * n=50: baseline p50=198.9/p95=324.6/max=338.4ms vs. mutated p50=202.9/p95=312.1/max=376.1ms —
- * the mutated p95 was actually LOWER than one baseline run). Removing the harness latency did
- * NOT surface a clear signal: a full row-memo-boundary removal is simply not a large enough
- * cost, at THIS fixture size (20 rows, 200 static log lines), to rise above ordinary paint/
- * layout/compositing noise for a page this size. This is a real, verified limit of this probe,
- * not a leftover harness artifact — see PR #2165's description for the full sample sets.
- * Concretely: this budget is a catastrophic-regression backstop ONLY (an accidentally
- * quadratic/exponential effect, a synchronous blocking call, a runaway loop — the kind of
- * defect that would turn "a bit slower" into "visibly hung"). It does not catch, and should not
- * be relied on to catch, a memo-boundary regression of any single component, however total —
- * that job belongs entirely to the behavioural/source-assertion containment guards
- * (`GridOverlay.memoBoundary.spec.tsx`, `BattleMap.dragContainment.spec.tsx`,
- * `encounter-render-containment.unit.spec.ts`), which this probe is explicitly NOT a substitute
- * for and was never able to be, harness overhead or not.
+ *   samples (ms): 93.2, 119.0, 123.9, 123.9, 134.0, 142.6, 143.9, 145.8, 147.2, 147.7, 148.2,
+ *                 152.5, 155.8, 156.3, 163.0, 181.1, 192.9, 198.5, 199.4, 229.2
+ *   p50=147.7ms  p95=199.4ms  max=229.2ms
+ *
+ * BUDGET_MS = round(BUDGET_MULTIPLIER × 199.4) = round(5 × 199.4) = 997, rounded to 1000 for a
+ * clean constant. The multiplier leans generous on purpose because this derivation rests on ONE
+ * CI job's ONE run — inter-run variance (a different runner instance, a noisier host, cache-cold
+ * Chromium) is not something a single run's intra-run p50/p95/max can observe, only intra-run
+ * jitter is. If this budget ever flakes on CI, the fix is to look at what THAT run's own
+ * `[perf]` log line reports and either confirm a genuine one-off outlier or recompute BUDGET_MS
+ * from a wider multi-run sample — never to silently widen it back toward "generous" without
+ * that evidence.
+ *
+ * What this probe CANNOT catch — stated plainly, not hedged, because a green `e2e-web` here
+ * must not be mistaken for containment coverage: this probe cannot detect a `CombatantRow`
+ * memo-boundary regression, even a total one, at this fixture size. Re-measured specifically
+ * against the CORRECTED (in-page, `/turn`-mocked) probe above — the earlier "barely moves it"
+ * observation was measured against the harness-latency-dominated version and was retested
+ * rather than trusted — stripping `CombatantRow`'s `memo()` wrapper entirely (so all 20 rows
+ * re-render on every turn-advance instead of the 2 actually affected) was run locally twice at
+ * both SAMPLE_COUNT=20 and SAMPLE_COUNT=50. At n=50:
+ *
+ *   memoized baseline:   p50=198.9ms  p95=324.6ms  max=338.4ms
+ *   memo() stripped:     p50=202.9ms  p95=312.1ms  max=376.1ms
+ *
+ * The mutated distribution sits INSIDE the memoized baseline's own run-to-run spread — its p95
+ * was even lower than the baseline's. Removing harness latency did not surface a signal because
+ * there is no signal to surface at this size: a full row-memo-boundary removal is not a large
+ * enough cost, against 20 rows and 200 static log lines, to rise above ordinary paint/layout/
+ * compositing noise for a page this size. That is a verified property of this probe at this
+ * fixture size, not an artifact of measurement technique. Consequently: this budget is a
+ * catastrophic-regression backstop ONLY (an accidentally quadratic/exponential effect, a
+ * synchronous blocking call, a runaway loop — the kind of defect that turns "a bit slower" into
+ * "visibly hung"). Detecting a memo-boundary regression of any single component is entirely the
+ * job of the behavioural/source-assertion containment guards (`GridOverlay.memoBoundary.spec.tsx`,
+ * `BattleMap.dragContainment.spec.tsx`, `encounter-render-containment.unit.spec.ts`) — this
+ * probe cannot do that job, at any budget, at this fixture size.
  */
 
 const MAP_ATTACHMENT_ID = 1_917_100;
