@@ -3048,7 +3048,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
    * proves the next boot restores the column. Modeled on the equivalent
    * weapon_proficiencies-migration.spec.ts coverage for issue #2144's own-entry migration.
    */
-  it('0189 restores dice_rolls.kind on an database that predates it, without re-running 0183 (#2155)', () => {
+  it('0189 restores dice_rolls.kind on a database that predates it, without re-running 0183 (#2155)', () => {
     dataDir = makeTempDataDir();
     const first = openDatabase(dataDir);
     first.sqlite.close();
