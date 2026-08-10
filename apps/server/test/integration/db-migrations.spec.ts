@@ -542,7 +542,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           'idx_dice_rolls_campaign_roller_id_desc',
         ]),
       );
-      expect(MIGRATION_NAMES).toContain('0182_dice_rolls_context_1511');
+      expect(MIGRATION_NAMES).toContain('0183_dice_rolls_context_1511');
       expect(columnNames(sqlite, 'dice_rolls')).toEqual(
         expect.arrayContaining(['character_id', 'combatant_id', 'visibility']),
       );
