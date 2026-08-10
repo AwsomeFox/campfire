@@ -189,6 +189,36 @@ export const formatNumber = formatters.formatNumber;
 /** Format a relative timestamp (e.g. "just now", "5m ago", "2h ago", "3d ago"). */
 export const timeAgo = formatters.timeAgo;
 
+/**
+ * Render a number for an EDITABLE text field that will be re-parsed by
+ * `parseLocalizedNumber` (apps/web/src/lib/i18nNumbers.ts) in the same locale — as
+ * opposed to {@link formatNumber} above, which is for read-only display and may add
+ * grouping separators a parser would then have to strip back out.
+ *
+ * Issue #2179 review: a draft field seeded or reset with plain `String(value)` is a
+ * real data-integrity bug, not a formatting nit. `String()` always emits an ASCII
+ * `.` decimal, but `parseLocalizedNumber` reads the decimal/grouping separators for
+ * the ACTIVE locale — in a comma-decimal locale (de, fr, …) `.` is a member of the
+ * *grouping* set, so its separator-stripping step silently deletes it before parsing.
+ * `String(7.25)` round-trips through such a locale as the digit run `"725"`, parsed
+ * as the integer 725 — no validation error, no visible sign anything went wrong,
+ * just a value 100x too large silently written on blur.
+ *
+ * `useGrouping: false` keeps the output free of grouping separators (so a later
+ * edit does not have to fight stray commas/periods/spaces the user never typed),
+ * and `maximumFractionDigits` is generous enough to round-trip typical decimal
+ * inputs without visibly truncating precision, while `toLocaleString` still emits
+ * the correct decimal separator for `locale` — the same one `parseLocalizedNumber`
+ * will look for when this string is edited and re-parsed. Takes an explicit
+ * `locale` parameter (defaulting to {@link activeLocale}) rather than going through
+ * `formatNumber`'s closure-bound one, matching `parseLocalizedNumber`'s own explicit-
+ * locale convention and keeping both ends of a round-trip trivially testable against
+ * the same, deliberately chosen locale.
+ */
+export function formatNumberForEditing(value: number, locale: string | undefined = activeLocale()): string {
+  return value.toLocaleString(locale, { useGrouping: false, maximumFractionDigits: 6 });
+}
+
 /** Hook that triggers a re-render every `intervalMs` (default 60s) so relative timestamps update. */
 export function useTimeTick(intervalMs: number = 60_000): number {
   const [now, setNow] = useState(() => Date.now());

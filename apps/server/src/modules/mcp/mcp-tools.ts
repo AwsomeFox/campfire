@@ -5717,7 +5717,7 @@ export class McpToolsService {
       server,
       user,
       'update_inventory_item',
-      'player: update an inventory item\'s name/notes/icon, or MOVE it by changing ownerType/characterId. Character ' +
+      'player: update an inventory item\'s name/notes/icon/weight, or MOVE it by changing ownerType/characterId. Character ' +
         'items are writable only by the dm or the owning player; a move requires write access at both source and ' +
         'destination. Quantity (issue #782): prefer qtyDelta + idempotencyKey for atomic +/-; an absolute qty ' +
         'requires expectedUpdatedAt (CAS) and 409s on conflict. A qtyDelta that would take quantity negative 400s ' +

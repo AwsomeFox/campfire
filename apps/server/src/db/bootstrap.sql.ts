@@ -1626,6 +1626,7 @@ CREATE TABLE IF NOT EXISTS inventory_items (
   equipped INTEGER NOT NULL DEFAULT 0,
   equip_slot TEXT,
   equipped_action TEXT,
+  weight REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   deleted_at TEXT,

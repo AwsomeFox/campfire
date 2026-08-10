@@ -25,6 +25,9 @@
     "quantity": "Quantity",
     "quantityHelp": "Whole number from {{min}} to {{max}}, step {{step}}.",
     "notesPlaceholder": "Notes",
+    "searchPlaceholder": "بحث عن عناصر…",
+    "searchAria": "البحث في عناصر المخزون بالاسم أو الملاحظات",
+    "searchNoResults": "لا توجد عناصر مطابقة لـ \"{{query}}\".",
     "chooseIcon": "Choose icon",
     "changeIcon": "Change icon",
     "autoIcon": "Auto",
@@ -80,6 +83,15 @@
       "notes": {
         "label": "Notes",
         "help": "Optional short description or usage notes."
+      },
+      "weight": {
+        "label": "الوزن (رطل)",
+        "help": "اختياري. وزن الوحدة بالأرطال — يُستخدم لإجمالي وزن القسم.",
+        "shortLabel": "الوزن",
+        "ariaEdit": "تعديل وزن {{name}}",
+        "display": "{{weight}} رطل",
+        "sectionTotal": "· إجمالي {{weight}} رطل",
+        "rangeError": "يجب أن يكون الوزن بين 0 و10,000 رطل."
       }
     },
     "equip": {

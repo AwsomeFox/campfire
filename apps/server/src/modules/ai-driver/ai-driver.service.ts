@@ -1853,11 +1853,20 @@ export const DRIVER_LIVE_PLAY_TOOL_ARG_RULES: Readonly<Record<string, DriverLive
     forbidden: new Set(['set']),
   },
   'add_inventory_item': {
-    allowed: new Set(['campaignId', 'ownerType', 'name', 'qty', 'notes', 'iconSlug']),
+    // Issue #2157: `weight` joins `name`/`notes`/`iconSlug` here, not the qty/characterId
+    // forbidden side — it is a plain physical descriptor with no economy value of its own
+    // (unlike qty, which is capped and session-tracked) and does not target a specific
+    // character (unlike characterId, forbidden below). It carries no more authority than
+    // naming or describing the granted item already does, and the shared schema still
+    // bounds it to [0, 10000] regardless of this allowlist.
+    allowed: new Set(['campaignId', 'ownerType', 'name', 'qty', 'notes', 'iconSlug', 'weight']),
     forbidden: new Set(['characterId']),
   },
   'update_inventory_item': {
-    allowed: new Set(['itemId', 'qtyDelta', 'idempotencyKey', 'name', 'notes', 'iconSlug']),
+    // Issue #2157: same reasoning as add_inventory_item above — `weight` is metadata, not an
+    // economic or targeting field, so it is classified alongside name/notes/iconSlug rather
+    // than with the forbidden qty/ownerType/characterId/equip fields.
+    allowed: new Set(['itemId', 'qtyDelta', 'idempotencyKey', 'name', 'notes', 'iconSlug', 'weight']),
     // Issue #1901 rework: `displaceEquipped` (and its CAS guard pair
     // `expectedConflictingItemId`, added alongside it in review) only do anything together
     // with `equipped`/`equipSlot`, which are already forbidden here (#1326) — the driver does
@@ -1962,10 +1971,12 @@ export function recordDriverUndoableCommit(
  *  - add_inventory_item: grant-only — party/treasury owner only (no `ownerType: 'character'`,
  *    no `characterId`), `qty` bounded per call ({@link DRIVER_INVENTORY_GRANT_MAX_QTY}).
  *  - update_inventory_item: ALLOWLIST (issue #1326 review) — only `itemId` + a positive
- *    `qtyDelta` (+ `idempotencyKey`) or metadata-only (`name`/`notes`/`iconSlug`) are
+ *    `qtyDelta` (+ `idempotencyKey`) or metadata-only (`name`/`notes`/`iconSlug`/`weight`) are
  *    permitted; every other argument is refused, including any future field the tool's
  *    schema gains. This is the one guard branch converted from denylist to allowlist so far;
- *    see #1792 for the rest.
+ *    see #1792 for the rest. `weight` (issue #2157) was classified as metadata alongside
+ *    name/notes/iconSlug — a physical descriptor with no economy value and no character
+ *    targeting, unlike the qty/owner fields this guard exists to bound.
  */
 export function guardDriverLivePlayArgs(
   toolName: string,
@@ -2208,7 +2219,7 @@ export function guardDriverLivePlayArgs(
         ok: false,
         code: 'forbidden_inventory_field',
         message:
-          'The driver may only grant items to the party pool (name, qty, notes, iconSlug). ' +
+          'The driver may only grant items to the party pool (name, qty, notes, iconSlug, weight). ' +
           `Rejected: ${unknown.join(', ')}.`,
       };
     }
@@ -2270,17 +2281,20 @@ export function guardDriverLivePlayArgs(
         ok: false,
         code: 'forbidden_inventory_field',
         message:
-          'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. ' +
+          'The driver may only grant item quantity or edit name/notes/icon/weight via update_inventory_item. ' +
           `Rejected: ${unknown.join(', ')}.`,
       };
     }
     const hasDelta = 'qtyDelta' in args;
-    const hasMeta = 'name' in args || 'notes' in args || 'iconSlug' in args;
+    // Issue #2157: `weight` is metadata in the same sense as name/notes/iconSlug — a
+    // weight-only PATCH (no qtyDelta, no other field) must be accepted the same way a
+    // notes-only or iconSlug-only one already is, not rejected as "nothing to do".
+    const hasMeta = 'name' in args || 'notes' in args || 'iconSlug' in args || 'weight' in args;
     if (!hasDelta && !hasMeta) {
       return {
         ok: false,
         code: 'forbidden_inventory_field',
-        message: 'The driver must provide a positive qtyDelta or metadata (name/notes/iconSlug) to update_inventory_item.',
+        message: 'The driver must provide a positive qtyDelta or metadata (name/notes/iconSlug/weight) to update_inventory_item.',
       };
     }
     const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : 0;
