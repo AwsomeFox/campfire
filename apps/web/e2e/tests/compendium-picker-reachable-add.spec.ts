@@ -98,7 +98,8 @@ test.describe('compendium item picker — the Add button stays reachable', () =>
 
       // Short enough that the card's 85vh cap actually binds. This is the whole point:
       // the defect is invisible on a tall window.
-      await page.setViewportSize({ width: 1024, height: 560 });
+      const viewport = { width: 1024, height: 560 };
+      await page.setViewportSize(viewport);
       await page.goto(`/c/${campaignId}/inventory`);
 
       await page.getByRole('button', { name: /from compendium/i }).click();
@@ -124,7 +125,14 @@ test.describe('compendium item picker — the Add button stays reachable', () =>
         Math.round(addBox!.y + addBox!.height),
         'the Add button must sit inside the card, not below its overflow-hidden edge',
       ).toBeLessThanOrEqual(Math.round(modalBox!.y + modalBox!.height) + 1);
-      expect(addBox!.y + addBox!.height, 'the Add button must be on screen').toBeLessThanOrEqual(560);
+      // `boundingBox()` is viewport-relative and does NOT carry the scroll offset (verified:
+      // at scrollY 600 it returns the same y as `getBoundingClientRect()`, negative once the
+      // element is above the fold), so comparing it against the viewport height is the right
+      // test for "on screen". Read the height back from the viewport rather than repeating
+      // the literal, so changing the size above cannot leave this checking a stale number.
+      expect(addBox!.y + addBox!.height, 'the Add button must be on screen').toBeLessThanOrEqual(
+        viewport.height,
+      );
 
       // Not merely positioned — a real click at its centre must reach it. Clipping leaves
       // an element that measures fine and receives nothing.
