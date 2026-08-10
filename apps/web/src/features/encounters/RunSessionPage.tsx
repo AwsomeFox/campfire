@@ -4348,7 +4348,17 @@ export default function RunSessionPage() {
   // default only kept people from LANDING there. Drop the tab instead, and fall back to
   // Party if it disappears while selected.
   const turnTabAvailable = encounterRunning || (!isDm && myCombatants.length > 0);
-  const activePanelTab: PanelTab = panelTab === 'turn' && !turnTabAvailable ? 'party' : panelTab;
+  // Issue #2158 review (Copilot): the Driver tab has the identical "selected but no
+  // longer available" shape Turn already had (comment above) — `panelTabChoice` only
+  // stamps `{eid, running}`, not `liveActivity.mode`, so a viewer who picked Driver and
+  // then watched the campaign leave Driver mode kept `panelTab === 'driver'` with no
+  // tab and no VttPanelSection left to match it, a blank panel. Same fallback shape as
+  // Turn: drop to Party, the one tab that's always present.
+  const driverTabAvailable = liveActivity.mode === 'driver' && encounter != null;
+  const activePanelTab: PanelTab =
+    panelTab === 'turn' && !turnTabAvailable ? 'party'
+    : panelTab === 'driver' && !driverTabAvailable ? 'party'
+    : panelTab;
   // Prefer a combatant the viewer can resolve. Fall back only to character combatants
   // (party HP is shared table knowledge); never surface monster/NPC concentration
   // queues to non-resolvers — those embed secret exact damage/DC (#43 / #606).
@@ -4799,11 +4809,10 @@ export default function RunSessionPage() {
         // Issue #2158 (#1513 gap 5): its own tab, alongside Log — not bundled into
         // Table with Discussion and the DM setup tools, which is where it lived
         // before this split and is what made it read as squeezed/hard to find.
-        // Same gate `liveActivity.mode === 'driver' && encounter` already used to
-        // mount the panel itself below, so the tab never appears with nothing in it.
-        ...(liveActivity.mode === 'driver' && encounter
-          ? [{ id: 'driver', label: t('encounters.vtt.tabDriver') }]
-          : []),
+        // `driverTabAvailable` also gates the VttPanelSection below AND feeds
+        // activePanelTab's fallback above, so the tab, the section, and the stored
+        // selection cannot disagree — the identical shape as `turnTabAvailable`.
+        ...(driverTabAvailable ? [{ id: 'driver', label: t('encounters.vtt.tabDriver') }] : []),
         { id: 'table', label: t('encounters.vtt.tabTable') },
       ]}
       activeTabId={activePanelTab}
@@ -5398,10 +5407,11 @@ export default function RunSessionPage() {
           </VttPanelSection>
           {/* Issue #2158 (#1513 gap 5): the AI-DM driver dock's own tab (#427: transcript +
               composer + recovery without leaving tracker), split out of Table where it used
-              to compete for space with Discussion and the DM setup tools. Mirrors the tab
-              array's gate above exactly, so this section only exists (and the tab only
-              appears) once there is something in it. */}
-          {liveActivity.mode === 'driver' && encounter && (
+              to compete for space with Discussion and the DM setup tools. `driverTabAvailable`
+              is the same boolean the tab array and activePanelTab's fallback both use; the
+              trailing `&& encounter` is only here because TypeScript can't narrow `encounter`
+              to non-null through a derived boolean, which `<EncounterAiDriverPanel>` requires. */}
+          {driverTabAvailable && encounter && (
             <VttPanelSection id="driver" activeTabId={activePanelTab}>
               <EncounterAiDriverPanel
                 campaignId={cid}
