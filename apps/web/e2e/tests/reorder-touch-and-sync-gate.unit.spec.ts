@@ -172,9 +172,9 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
   });
 
   /**
-   * Review rounds 5 and 6 (Codex, confirmed both times), pulling in OPPOSITE directions —
-   * which is exactly why the effect's dependency array has to satisfy both at once, and why
-   * these two tests exist side by side:
+   * Review rounds 5, 6, and 7/#2140 all pulled in different directions — which is exactly why
+   * the effect's dependency has gone through three signals, and why this test pins the current
+   * one alongside regression guards for all three prior failures:
    *
    * - Round 5: `encounterReadRevisionRef`/`encounterReadRevision` are bumped SYNCHRONOUSLY
    *   inside `encounterQuery`'s `queryFn`, before that async function returns — strictly
@@ -186,22 +186,30 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
    *   move of the current combatant) — the follow-up GET returns a payload identical to what's
    *   cached, and `@tanstack/query-core`'s `replaceEqualDeep` preserves the OLD `encounter`
    *   reference on a full deep-equal match, so an effect keyed on `encounter` never re-fires.
+   * - Round 7 (issue #2140): depending on `encounterQuery.dataUpdatedAt` looked like it dodged
+   *   both — TanStack-native, published atomically with `data`, advances on every completed
+   *   fetch regardless of reference identity. But `@tanstack/query-core`'s `successState()`
+   *   computes it as `dataUpdatedAt ?? Date.now()`, millisecond-resolution wall-clock time with
+   *   no uniqueness guarantee — two accepted results landing in the same millisecond stamp an
+   *   IDENTICAL value, `Object.is` sees no change, and the effect never re-runs. The gate stays
+   *   armed until an unrelated later write happens to land in a different millisecond.
    *
-   * The fix depends on `encounterQuery.dataUpdatedAt` instead — a TanStack-native field
-   * published atomically with `data` (so it can't arrive in an earlier render, unlike our own
-   * `encounterReadRevision` state) that also advances on EVERY completed fetch regardless of
-   * whether the resulting reference changed (so it can't get stuck the way `encounter` can).
-   * `encounterReadRevisionRef.current`, read INSIDE the now-correctly-triggered effect, is
-   * still what distinguishes a real completed GET from a local optimistic write (verified
-   * against `@tanstack/query-core`'s source: `setQueryData` ALSO bumps `dataUpdatedAt`, so
-   * that field alone cannot make the distinction — it is a wake-up trigger here, never the
-   * comparison itself).
+   * The fix depends on `encounterDataUpdateCount` — read via `queryClient.getQueryState(
+   * queryKeys.encounter(eid))?.dataUpdateCount` — `@tanstack/query-core`'s own per-query
+   * counter, incremented unconditionally in the same reducer branch that publishes `data`. It
+   * cannot collide (a plain integer, never re-derived from a clock) and is published atomically
+   * with `data` (same reducer action, same `query.state` snapshot). `encounterReadRevisionRef
+   * .current`, read INSIDE the now-correctly-triggered effect, is still what distinguishes a
+   * real completed GET from a local optimistic write (verified against `@tanstack/query-core`'s
+   * source: `setQueryData` ALSO bumps `dataUpdateCount`, so that field alone cannot make the
+   * distinction — it is a wake-up trigger here, never the comparison itself, exactly as
+   * `dataUpdatedAt` was before it).
    */
-  test("the clearing effect depends on encounterQuery.dataUpdatedAt — NOT encounterReadRevision (round 5) and NOT encounter (round 6) — and still checks encounterReadRevisionRef.current inside", () => {
+  test("the clearing effect depends on encounterDataUpdateCount — NOT encounterReadRevision (round 5), NOT encounter (round 6), and NOT encounterQuery.dataUpdatedAt (round 7 / issue #2140) — and still checks encounterReadRevisionRef.current inside", () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
     const stateStart = source.indexOf('const [reorderResyncArmedAt, setReorderResyncArmedAt] = useState<number | null>(null);');
     expect(stateStart).toBeGreaterThan(-1);
-    const effectEnd = source.indexOf('\n  }, [encounterQuery.dataUpdatedAt, reorderResyncArmedAt]);', stateStart);
+    const effectEnd = source.indexOf('\n  }, [encounterDataUpdateCount, reorderResyncArmedAt]);', stateStart);
     expect(effectEnd).toBeGreaterThan(stateStart);
     const block = source.slice(stateStart, effectEnd);
 
@@ -213,11 +221,21 @@ test.describe('reorder resync latch is REACTIVE state, correctly ordered against
     // either (structural sharing can leave it unchanged forever on an unchanged payload).
     expect(block).not.toContain('[encounter,');
     expect(block).not.toContain('[encounter]');
-    // The gating COMPARISON is still the ref, not `dataUpdatedAt` itself (round 3's mistake).
+    // Round 7 / issue #2140 regression guard: `dataUpdatedAt` is Date.now()-derived and can
+    // collide across two genuinely separate accepted results, leaving the gate armed forever.
+    expect(block).not.toContain('[encounterQuery.dataUpdatedAt');
+    expect(block).not.toContain(', encounterQuery.dataUpdatedAt]');
+    // The gating COMPARISON is still the ref, not the wake-up trigger itself (round 3's mistake).
     expect(block).toMatch(
       /if \(reorderResyncArmedAt !== null && !isAwaitingReorderResync\(reorderResyncArmedAt, encounterReadRevisionRef\.current\)\) \{/,
     );
     expect(block).toContain('setReorderResyncArmedAt(null);');
+
+    // The wake-up trigger itself: read once per render via `getQueryState`, since
+    // `dataUpdateCount` is not exposed on `useQuery`'s own `QueryObserverResult`.
+    expect(source).toContain(
+      'const encounterDataUpdateCount = queryClient.getQueryState<EncounterWithCombatants>(queryKeys.encounter(eid))?.dataUpdateCount ?? 0;',
+    );
   });
 
   /**
