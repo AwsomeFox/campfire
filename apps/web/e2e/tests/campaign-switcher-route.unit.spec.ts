@@ -68,6 +68,7 @@ function campaign(
     ruleSystem: '',
     enabledPackSlugs: [],
     customMechanicsProfile: null,
+    conditionDefinitions: [],
     mapAttachmentId: null,
     storageQuotaBytes: null,
     deletedAt: null,
