@@ -535,7 +535,17 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       ).toContain('idx_timeline_events_campaign_sort');
       expect(
         (sqlite.pragma('index_list(dice_rolls)') as Array<{ name: string }>).map((index) => index.name),
-      ).toContain('idx_dice_rolls_campaign_id_desc');
+      ).toEqual(
+        expect.arrayContaining([
+          'idx_dice_rolls_campaign_id_desc',
+          'idx_dice_rolls_campaign_visibility_id_desc',
+          'idx_dice_rolls_campaign_roller_id_desc',
+        ]),
+      );
+      expect(MIGRATION_NAMES).toContain('0183_dice_rolls_context_1511');
+      expect(columnNames(sqlite, 'dice_rolls')).toEqual(
+        expect.arrayContaining(['character_id', 'combatant_id', 'visibility']),
+      );
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_purge_tombstones'").get(),
       ).toBeTruthy();
@@ -3002,6 +3012,18 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(upgraded.sqlite, 'notification_digest_queue')).toContain('hidden_status_context');
     } finally {
       upgraded.sqlite.close();
+    }
+  });
+
+  it('0183 adds durable roll audience and character/combatant context columns (#1511)', () => {
+    expect(MIGRATION_NAMES).toContain('0183_dice_rolls_context_1511');
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const cols = columnNames(sqlite, 'dice_rolls');
+      expect(cols).toEqual(expect.arrayContaining(['character_id', 'combatant_id', 'visibility']));
+    } finally {
+      sqlite.close();
     }
   });
 });

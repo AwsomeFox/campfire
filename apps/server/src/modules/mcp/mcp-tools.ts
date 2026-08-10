@@ -4270,12 +4270,20 @@ export class McpToolsService {
         expr: RollRequest.shape.expr.describe('Dice expression: a sum of die terms (NdM) and modifiers, e.g. "1d20+3", "2d20kh1", or "1d20+1d4+3"'),
         label: RollRequest.shape.label.describe('Optional check label, e.g. "DEX save"'),
         dc: RollRequest.shape.dc.describe('Optional difficulty class; success is computed as total >= dc'),
+        characterId: RollRequest.shape.characterId.describe('Optional character whose authority and campaign are verified server-side'),
+        visibility: RollRequest.shape.visibility.describe('party_shared (default), dm_shared, or private'),
       },
-      async ({ campaignId, expr, label, dc }) => {
+      async ({ campaignId, expr, label, dc, characterId, visibility }) => {
         const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         return this.encounters.rollDiceForCampaign(
           campaignId as number,
-          { expr: expr as string, label: label as string | undefined, dc: dc as number | undefined },
+          {
+            expr: expr as string,
+            label: label as string | undefined,
+            dc: dc as number | undefined,
+            characterId: characterId as number | undefined,
+            visibility: visibility as 'party_shared' | 'dm_shared' | 'private',
+          },
           user,
           role,
         );
@@ -4373,7 +4381,7 @@ export class McpToolsService {
         const label = `${abilityKey} save (${proficient ? 'proficient' : 'unproficient'})`;
         const persisted = await this.encounters.rollDiceForCampaign(
           character.campaignId,
-          { expr: diceExpr, label, dc: dcNum },
+          { expr: diceExpr, label, dc: dcNum, visibility: 'party_shared' },
           user,
           role,
         );

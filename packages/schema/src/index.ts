@@ -12479,12 +12479,25 @@ export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
 // the same normalization before relying on this pattern.
 export const DiceExprPattern =
   /^\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))(?:\s*[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))*\s*$/i;
+
+/** Audience for a durable dice-log row. Mirrors the existing note visibility names. */
+export const DiceRollVisibility = z.enum(['party_shared', 'dm_shared', 'private']);
+export type DiceRollVisibility = z.infer<typeof DiceRollVisibility>;
+
 export const RollRequest = z.object({
   expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected a sum of die terms (NdM) and modifiers, e.g. "1d20+3", "2d20kh1", or "1d20+1d4+3"'),
   // Optional check context (issue #130): a human label ("DEX save") and a difficulty
   // class. When dc is present the server computes success (total >= dc) into the result.
   label: z.string().max(120).optional(),
   dc: z.number().int().min(1).max(99).optional(),
+  // A caller may name a character only to ask the server to bind the roll to an
+  // already-authorized sheet. The server resolves campaign membership and dm-or-owner
+  // authority before persisting it; encounter/combatant ids are never client supplied.
+  characterId: Id.optional(),
+  // Match the established note-sharing vocabulary. Existing rolls default to the
+  // historical shared-table behavior, while dm_shared and private are enforced on
+  // every later read and SSE delivery.
+  visibility: DiceRollVisibility.default('party_shared'),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
 
@@ -12570,6 +12583,13 @@ export const RollResult = z.object({
    */
   encounterId: z.number().int().positive().optional(),
   npcId: z.number().int().positive().optional(),
+  // #1511: server-resolved roll identity. These are nullable in storage so existing
+  // history remains valid, and never accept a combatant/encounter id from a client.
+  characterId: z.number().int().positive().optional(),
+  combatantId: z.number().int().positive().optional(),
+  // Producer-side result context stays optional so existing trusted roll builders do
+  // not need to manufacture a field; persistence applies party_shared by default.
+  visibility: DiceRollVisibility.optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 
@@ -12949,6 +12969,7 @@ export const DiceRoll = RollResult.extend({
   campaignId: Id,
   rollerUserId: z.string().max(200), // RequestUser.id — String(users.id) or 'dev:<name>' / 'token:<name>' actors
   rollerName: z.string().max(200).default(''),
+  visibility: DiceRollVisibility.default('party_shared'),
   createdAt: IsoDate,
 });
 export type DiceRoll = z.infer<typeof DiceRoll>;

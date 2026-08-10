@@ -3248,6 +3248,7 @@ export default function RunSessionPage() {
         total: breakdown.total,
         label: `${data.combatant.name} · Initiative`,
         source: 'rolled',
+        visibility: 'party_shared',
         createdAt: new Date().toISOString(),
       };
       showRoll(localRoll, { applyDisabled: true });

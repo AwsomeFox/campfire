@@ -344,7 +344,7 @@ export class ExportService {
       // docstring above) rather than relying on an omitted role defaulting the same way —
       // an omitted role reading as unredacted DM access is exactly the trap the sibling
       // buildMemberExport call below fell into.
-      this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION, role),
+      this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION, role, user.id),
       // Issue #1504: campaign homebrew monsters saved in the library travel with export.
       this.library.listForCampaign(campaignId),
     ]);
@@ -973,7 +973,7 @@ export class ExportService {
       // so a player/viewer's own member export carried the FULL unredacted dice log (hidden-
       // encounter rolls, unmasked hidden-NPC names/ids) even though their live GET
       // /campaigns/:id/rolls would have redacted it — the same leak reaching a second surface.
-      this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION, role),
+      this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION, role, user.id),
       this.scheduling.listForExport(campaignId, role),
       this.revisions.listForCampaign(campaignId),
     ]);

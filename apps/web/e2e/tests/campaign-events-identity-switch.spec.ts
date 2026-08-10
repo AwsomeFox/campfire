@@ -91,3 +91,82 @@ test('an identity change tears down the previous campaign stream and re-establis
     await reader.close();
   }
 });
+
+/**
+ * #1511 — identity is not the only audience dimension. A role change leaves the
+ * account id intact, but changes whether the stream may receive a `dm_shared`
+ * dice tick. Keep the first request pending so this verifies the actual transport
+ * is torn down and recreated after the membership refresh, rather than merely
+ * refreshing page state.
+ */
+test('a campaign-role change tears down and re-establishes the existing campaign stream', async ({ browser }) => {
+  const { campaignId } = seed();
+  const reader = await browser.newContext({ storageState: stateFor('player'), serviceWorkers: 'block' });
+  const dm = await browser.newContext({ storageState: stateFor('dm'), serviceWorkers: 'block' });
+  const page = await reader.newPage();
+
+  const eventRequests: string[] = [];
+  const failedRequests: string[] = [];
+  page.on('request', (req) => {
+    if (req.url().endsWith(`/api/v1/campaigns/${campaignId}/events`)) eventRequests.push(req.url());
+  });
+  page.on('requestfailed', (req) => {
+    if (req.url().endsWith(`/api/v1/campaigns/${campaignId}/events`)) failedRequests.push(req.url());
+  });
+
+  let releaseFirstConnection: () => void = () => {};
+  const firstConnectionHang = new Promise<void>((resolve) => {
+    releaseFirstConnection = resolve;
+  });
+  let connectionAttempts = 0;
+  await page.route(`**/api/v1/campaigns/${campaignId}/events`, async (route) => {
+    connectionAttempts += 1;
+    if (connectionAttempts === 1) {
+      await firstConnectionHang;
+      await route.abort('connectionfailed');
+    } else {
+      await route.continue();
+    }
+  });
+
+  let playerMemberId: number | undefined;
+  try {
+    await page.goto(`/c/${campaignId}/encounters`);
+    await expect.poll(() => eventRequests.length).toBeGreaterThanOrEqual(1);
+
+    const playerMe = await (await page.request.get('/api/v1/me')).json();
+    const members = (await (await dm.request.get(`/api/v1/campaigns/${campaignId}/members`)).json()) as Array<{
+      id: number;
+      userId: number;
+      role: string;
+    }>;
+    const playerMember = members.find((member) => member.userId === playerMe.user.id);
+    if (!playerMember) throw new Error('The E2E fixture needs a player campaign membership');
+    playerMemberId = playerMember.id;
+
+    const promote = await dm.request.patch(`/api/v1/campaigns/${campaignId}/members/${playerMemberId}`, {
+      data: { role: 'dm' },
+    });
+    expect(promote.ok()).toBe(true);
+
+    // The first connection is intentionally held at the browser boundary, so relay
+    // the same membership-refresh signal that a live membership.updated frame sends.
+    await page.evaluate(({ userId, changedCampaignId }: { userId: number; changedCampaignId: number }) => {
+      const channel = new BroadcastChannel(`campfire.membership.sync.${userId}`);
+      channel.postMessage({ type: 'membership.updated', campaignId: changedCampaignId, role: 'dm' });
+      channel.close();
+    }, { userId: playerMe.user.id, changedCampaignId: campaignId });
+
+    await expect.poll(() => failedRequests.length).toBeGreaterThanOrEqual(1);
+    await expect.poll(() => eventRequests.length).toBeGreaterThanOrEqual(2);
+  } finally {
+    if (playerMemberId !== undefined) {
+      await dm.request.patch(`/api/v1/campaigns/${campaignId}/members/${playerMemberId}`, {
+        data: { role: 'player' },
+      });
+    }
+    releaseFirstConnection();
+    await reader.close();
+    await dm.close();
+  }
+});

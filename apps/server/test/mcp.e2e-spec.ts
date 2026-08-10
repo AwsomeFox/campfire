@@ -2203,14 +2203,15 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(denied.isError).toBe(true);
   });
 
-  it('roll_dice rolls within range via dm PAT', async () => {
+  it('roll_dice preserves the shared roll visibility contract via dm PAT (#1511)', async () => {
     const client = await mcpClient(dmToken);
-    const result = await client.callTool({ name: 'roll_dice', arguments: { campaignId, expr: '1d20+1' } });
+    const result = await client.callTool({ name: 'roll_dice', arguments: { campaignId, expr: '1d20+1', visibility: 'dm_shared' } });
     expect(result.isError).toBeFalsy();
-    const rolled = parseResult(result) as { total: number; rolls: number[] };
+    const rolled = parseResult(result) as { total: number; rolls: number[]; visibility: string };
     expect(rolled.rolls).toHaveLength(1);
     expect(rolled.total).toBeGreaterThanOrEqual(2);
     expect(rolled.total).toBeLessThanOrEqual(21);
+    expect(rolled.visibility).toBe('dm_shared');
   });
 
   it('roll_action_dice rolls Open Legend action dice via dm PAT', async () => {
