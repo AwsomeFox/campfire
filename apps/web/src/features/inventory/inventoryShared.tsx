@@ -1177,11 +1177,28 @@ export function CompendiumItemPickerModal({
       aria-labelledby="compendium-picker-title"
       ref={dialogRef}
     >
+      {/* HEIGHT CONTRACT — the Add button must always be on screen.
+          This card is `max-h-[85vh] overflow-hidden`, so anything that does not fit is
+          clipped with no way to scroll to it. Exactly two children may absorb that
+          pressure: the results list and the selected-entry block, both `flex-1 min-h-0`
+          with their own `overflow-y-auto`. Everything else — title, search, footer — is
+          `shrink-0` so it keeps its height no matter what.
+
+          It previously capped only the STATS preview (22vh) and left the rest of the
+          selected-entry block unbounded, while the results list held a `min-h-[200px]`
+          floor it could not shrink past. On an 800px viewport with a fully-specified
+          weapon that came to 767px of content in a 680px card: the owner/quantity/notes
+          fields ran 36px past the edge and the footer — Cancel and Add — sat 105px below
+          it, entirely clipped. Adding an item from the compendium was impossible.
+
+          So: if you add a row here, give it `shrink-0`, or make it another `flex-1
+          min-h-0` scroller. Do not give a fixed `min-h` to anything that is meant to
+          yield. */}
       <Card
         className="w-full max-w-xl max-h-[85vh] flex flex-col space-y-4 overflow-hidden"
         data-testid="compendium-item-picker-modal"
       >
-        <div className="flex items-center justify-between pb-2 border-b border-[var(--color-neutral-800)]">
+        <div className="shrink-0 flex items-center justify-between pb-2 border-b border-[var(--color-neutral-800)]">
           <h2 id="compendium-picker-title" className="font-bold text-white text-base flex items-center gap-2">
             <GameIcon slug="backpack" size={UI_ICON_SIZE.sm} />
             {t('inventory.fromCompendiumTitle')}
@@ -1193,7 +1210,7 @@ export function CompendiumItemPickerModal({
 
         {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
 
-        <div className="space-y-3">
+        <div className="shrink-0 space-y-3">
           <TextInput
             type="text"
             value={query}
@@ -1207,7 +1224,15 @@ export function CompendiumItemPickerModal({
           />
         </div>
 
-        <div className="flex-1 overflow-y-auto min-h-[200px] space-y-2 pr-1" style={{ borderColor: 'var(--color-neutral-800)' }}>
+        {/* The floor keeps the list from collapsing to a sliver WHILE BROWSING, when it is
+            the only thing on screen worth reading. Once an entry is selected it drops to
+            zero: the form and the Add button below are what the viewer is now working
+            with, and a floor here is a floor that pushes them off a short viewport. At
+            375x420 the fixed 120px floor plus a wrapped footer still overflowed. */}
+        <div
+          className={`flex-1 overflow-y-auto space-y-2 pr-1 ${selectedEntry ? 'min-h-0' : 'min-h-[120px]'}`}
+          style={{ borderColor: 'var(--color-neutral-800)' }}
+        >
           {loading ? (
             <Skeleton lines={4} />
           ) : items.length === 0 ? (
@@ -1254,18 +1279,18 @@ export function CompendiumItemPickerModal({
         </div>
 
         {selectedEntry && (
-          <div className="pt-3 border-t border-[var(--color-neutral-800)] space-y-3">
+          <div className="flex-1 min-h-0 overflow-y-auto pt-3 border-t border-[var(--color-neutral-800)] space-y-3">
             {/* Stats for the highlighted row, so the choice is made on damage/price/bulk
                 rather than on the name alone.
 
-                Height-bounded and independently scrollable ON PURPOSE. This card is
-                `max-h-[85vh] overflow-hidden` and the results list above it holds a
-                `min-h-[200px]` floor, so it cannot shrink to absorb a tall sibling: an
-                unbounded preview (a magic weapon carries a dozen-plus facts) would push the
-                owner/quantity fields and the Add button past the card edge, clipped with no
-                way to scroll to them. */}
+                No height cap of its own any more: the whole selected-entry block above is
+                the scroll region (`flex-1 min-h-0 overflow-y-auto`), so a long fact list
+                scrolls WITH the owner/quantity/notes fields instead of against them. The
+                previous shape capped only this preview at 22vh and left the rest of the
+                block unbounded, which is how the footer still got pushed out — see the
+                container comment on the Card. */}
             {hasEntryFacts(selectedEntry.dataJson) && (
-              <div className="max-h-[22vh] overflow-y-auto pr-1" data-testid="compendium-picker-stats">
+              <div data-testid="compendium-picker-stats">
                 <EntryFacts data={selectedEntry.dataJson} compact label={t('inventory.compendium.statsLabel')} />
               </div>
             )}
@@ -1324,7 +1349,7 @@ export function CompendiumItemPickerModal({
           </div>
         )}
 
-        <div className="flex items-center justify-between pt-2 border-t border-[var(--color-neutral-800)]">
+        <div className="shrink-0 flex items-center justify-between pt-2 border-t border-[var(--color-neutral-800)]">
           <a
             href={`/c/${campaignId}/compendium?type=item`}
             className="text-xs text-[var(--color-accent)] hover:underline"

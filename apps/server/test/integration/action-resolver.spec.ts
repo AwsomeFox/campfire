@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { and, eq } from 'drizzle-orm';
-import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState } from '@campfire/schema';
+import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState, PF2E_DAMAGE_TYPES, PF2E_DAMAGE_TYPE_CATEGORIES } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
 import { actionApplyChains, actionPendingResolutions, auditLog, campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks, users } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -920,6 +920,298 @@ describe('action resolver (real SQLite, service layer)', () => {
     expect(t.totalDamage).toBeGreaterThan(0);
     const hpAfter = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent;
     expect(hpAfter).toBe(60 - t.totalDamage);
+  });
+
+  /**
+   * Issue #2156 — `TargetDefenses` was already fully modeled and applied by the resolver, but
+   * only ever derived from a monster/NPC statblock (`damageDefensesFromStatblock`); a
+   * character-kind combatant always got `EMPTY_DEFENSES` because `statblockData` only reads
+   * `ruleEntryId`, which a character-linked combatant never carried. These tests exercise the
+   * new `ActionResolverService.targetDefenses` branch directly (the same private-method-access
+   * pattern `resolvePinnedPf2eTarget` below already uses in this file) so the precedence rule
+   * is pinned deterministically rather than through dice-roll-dependent full resolution.
+   */
+  describe('issue #2156: character-level damage defences', () => {
+    function seedCharacterCombatant(characterOverrides: Record<string, unknown> = {}, combatantOverrides: Record<string, unknown> = {}) {
+      const { orm, service } = build();
+      const ts = new Date().toISOString();
+      const [campaign] = orm.insert(campaigns).values({ name: 'Defenses Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+      const [char] = orm
+        .insert(characters)
+        .values({
+          campaignId: campaign.id,
+          ownerUserId: alice.id,
+          name: 'Defender PC',
+          hpCurrent: 30,
+          hpMax: 30,
+          resistances: JSON.stringify(['cold']),
+          vulnerabilities: JSON.stringify(['fire']),
+          immunities: JSON.stringify(['poison']),
+          createdAt: ts,
+          updatedAt: ts,
+          ...characterOverrides,
+        })
+        .returning()
+        .all();
+      const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+      const [combat] = orm
+        .insert(combatants)
+        .values({
+          encounterId: encounter.id,
+          kind: 'character',
+          characterId: char.id,
+          name: 'Defender PC',
+          initiative: 10,
+          hpCurrent: 30,
+          hpMax: 30,
+          sortOrder: 0,
+          ...combatantOverrides,
+        })
+        .returning()
+        .all();
+      const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
+      return { orm, service, row };
+    }
+
+    it("a character-kind combatant applies its OWN authored resistances/vulnerabilities/immunities, not EMPTY_DEFENSES", () => {
+      const { service, row } = seedCharacterCombatant();
+      const defenses = (service as any).targetDefenses(row);
+      expect(defenses).toEqual({ resistances: ['cold'], vulnerabilities: ['fire'], immunities: ['poison'] });
+    });
+
+    it('a full save-based resolution against a character target actually applies its resistance end to end (not just the private accessor above)', () => {
+      const { orm, service } = build();
+      const ts = new Date().toISOString();
+      // Save-based, not attack-based (same reasoning as fireball(1)/fireball(21) above): a
+      // 5e ATTACK roll auto-misses on a natural 1 regardless of AC, so an attack-based test
+      // would carry a ~1-in-20 flake risk. A SAVE has no such quirk here (classifySaveOutcome
+      // is a plain total>=dc comparison for the default/5e adapter) — DC 21 against a
+      // DEX-10/no-proficiency defender (nat 20 + mod 0 = 20 < 21) always FAILS, guaranteeing
+      // full (pre-resistance) damage every run.
+      const iceLance = {
+        name: 'Ice Lance',
+        kind: 'spell',
+        toHit: '',
+        damage: '8d6 cold',
+        notes: '',
+        spec: {
+          mode: 'save',
+          save: { ability: 'DEX', dc: { kind: 'fixed', dc: 21 } },
+          cost: { slot: 'action', count: 1 },
+          uses: { spellLevel: 3 },
+          // 'any' (like fireball above), not 'enemy': both combatants here are character-kind,
+          // which assertTargetAllowed treats as allies, not enemies.
+          targets: { count: 1, allow: 'any' },
+          outcomes: { failure: { damage: [{ formula: '8d6', type: 'cold' }] }, success: { halfDamage: true } },
+        },
+      };
+      const [campaign] = orm.insert(campaigns).values({ name: 'Defenses E2E Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+      const [attackerChar] = orm
+        .insert(characters)
+        .values({
+          campaignId: campaign.id,
+          ownerUserId: alice.id,
+          name: 'Attacker PC',
+          level: 5,
+          stats: JSON.stringify({ STR: 18 }),
+          hpCurrent: 30,
+          hpMax: 30,
+          actions: JSON.stringify([iceLance]),
+          spellSlots: JSON.stringify({ '3': { max: 1, used: 0 } }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const [defenderChar] = orm
+        .insert(characters)
+        .values({
+          campaignId: campaign.id,
+          ownerUserId: bob.id,
+          name: 'Defender PC',
+          hpCurrent: 30,
+          hpMax: 30,
+          resistances: JSON.stringify(['cold']),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+      const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+      const [attackerCombat] = orm
+        .insert(combatants)
+        .values({ encounterId: encounter.id, kind: 'character', characterId: attackerChar.id, name: 'Attacker PC', initiative: 20, hpCurrent: 30, hpMax: 30, sortOrder: 0 })
+        .returning()
+        .all();
+      const [defenderCombat] = orm
+        .insert(combatants)
+        .values({ encounterId: encounter.id, kind: 'character', characterId: defenderChar.id, name: 'Defender PC', initiative: 10, hpCurrent: 30, hpMax: 30, sortOrder: 1 })
+        .returning()
+        .all();
+      orm.update(encounters).set({ currentCombatantId: attackerCombat.id }).where(eq(encounters.id, encounter.id)).run();
+
+      const res = service.resolve(
+        encounter.id,
+        ActionResolveRequest.parse({ actorCombatantId: attackerCombat.id, actionIndex: 0, targetIds: [defenderCombat.id], commit: true }),
+        alice,
+        'player',
+      );
+      const t = res.resolution.targets[0];
+      expect(t.outcome).toBe('failure');
+      expect(t.damage[0].applied).toBe('resistant');
+      expect(t.totalDamage).toBeGreaterThan(0);
+      const hpAfter = orm.select().from(combatants).where(eq(combatants.id, defenderCombat.id)).get()!.hpCurrent;
+      expect(hpAfter).toBe(30 - t.totalDamage);
+    });
+
+    it(
+      "regression (issue #606): a character-kind combatant that has authored NO defences at all still " +
+        'receives its statblock mitigation — the precedence rule is per-category, not "character link wins ' +
+        'outright" (an earlier version of this method WAS outright-wins, and it broke exactly this case: ' +
+        "encounter-turn-workspace.spec.ts's \"queues only post-mitigation direct typed damage\" caught it via " +
+        'EncountersService.targetDamageDefenses, this pins the identical rule on ActionResolverService too)',
+      () => {
+        const { orm, service } = build();
+        const ts = new Date().toISOString();
+        const [campaign] = orm.insert(campaigns).values({ name: 'Empty Defences Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+        const [rulePack] = orm.insert(rulePacks).values({ slug: 'empty-defences-pack', name: 'Empty Defences Pack', installedAt: ts }).returning().all();
+        const [entry] = orm
+          .insert(ruleEntries)
+          .values({
+            packId: rulePack.id,
+            slug: 'resistant-statblock',
+            name: 'Resistant Statblock',
+            type: 'monster',
+            dataJson: JSON.stringify({ armor_class: 10, hit_points: 10, damage_resistances: ['fire'] }),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        // No resistances/vulnerabilities/immunities passed — every field defaults to `[]`,
+        // the exact "never authored anything" shape a pre-#2156 character has today.
+        const [char] = orm
+          .insert(characters)
+          .values({ campaignId: campaign.id, ownerUserId: alice.id, name: 'Defender PC', hpCurrent: 30, hpMax: 30, createdAt: ts, updatedAt: ts })
+          .returning()
+          .all();
+        const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+        const [combat] = orm
+          .insert(combatants)
+          .values({ encounterId: encounter.id, kind: 'character', characterId: char.id, ruleEntryId: entry.id, name: 'Defender PC', initiative: 10, hpCurrent: 30, hpMax: 30, sortOrder: 0 })
+          .returning()
+          .all();
+        const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
+
+        const defenses = (service as any).targetDefenses(row);
+        expect(defenses.resistances).toEqual(['fire']);
+      },
+    );
+
+    it(
+      'per-category precedence: a non-empty authored category overrides the SAME category on a same-row ' +
+        "statblock outright (not merged), while a DIFFERENT category the character left empty still falls " +
+        'through to the statblock — proving categories are resolved independently, not all-or-nothing',
+      () => {
+        const { orm, service } = build();
+        const ts = new Date().toISOString();
+        const [campaign] = orm.insert(campaigns).values({ name: 'Per-Category Precedence Test', ruleSystem: '', createdAt: ts, updatedAt: ts }).returning().all();
+        const [rulePack] = orm.insert(rulePacks).values({ slug: 'per-category-pack', name: 'Per-Category Pack', installedAt: ts }).returning().all();
+        // Same category as the character's own (resistances) but a DIFFERENT type ('fire'), so a
+        // test that passed by accident (e.g. merging character+statblock resistances together)
+        // fails loudly — and a separate category (immunities) the character never touched.
+        const [entry] = orm
+          .insert(ruleEntries)
+          .values({
+            packId: rulePack.id,
+            slug: 'mixed-statblock',
+            name: 'Mixed Statblock',
+            type: 'monster',
+            dataJson: JSON.stringify({ armor_class: 10, hit_points: 10, damage_resistances: ['fire'], damage_immunities: ['poison'] }),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        const [char] = orm
+          .insert(characters)
+          .values({ campaignId: campaign.id, ownerUserId: alice.id, name: 'Defender PC', hpCurrent: 30, hpMax: 30, resistances: JSON.stringify(['cold']), createdAt: ts, updatedAt: ts })
+          .returning()
+          .all();
+        const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+        // The combatant row carries BOTH a characterId AND a ruleEntryId — a shape the schema
+        // permits even though ordinary application flow never produces it for a character-kind
+        // combatant. The precedence rule must hold regardless.
+        const [combat] = orm
+          .insert(combatants)
+          .values({ encounterId: encounter.id, kind: 'character', characterId: char.id, ruleEntryId: entry.id, name: 'Defender PC', initiative: 10, hpCurrent: 30, hpMax: 30, sortOrder: 0 })
+          .returning()
+          .all();
+        const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
+
+        const defenses = (service as any).targetDefenses(row);
+        // Character authored resistances ('cold') → wins outright for THAT category; the
+        // statblock's 'fire' resistance is entirely superseded, not unioned in alongside it.
+        expect(defenses.resistances).toEqual(['cold']);
+        // Character left immunities empty → falls through to the statblock's 'poison' immunity.
+        expect(defenses.immunities).toEqual(['poison']);
+      },
+    );
+
+    it(
+      "per-category precedence holds against a PF2e CATEGORY-expanded statblock too (#2177): a character's " +
+        "OWN authored 'slashing' vulnerability is reported exactly as authored — never widened or narrowed " +
+        "by category membership — while a category the character left empty (resistances) still falls " +
+        "through to the statblock's category-expanded value, since that expansion happens only inside " +
+        '`damageDefensesFromStatblock`, on the fallback path',
+      () => {
+        const { orm, service } = build();
+        const ts = new Date().toISOString();
+        const [campaign] = orm.insert(campaigns).values({ name: 'Category Precedence Test', ruleSystem: 'pf2e', createdAt: ts, updatedAt: ts }).returning().all();
+        const [rulePack] = orm.insert(rulePacks).values({ slug: 'category-precedence-pack', name: 'Category Precedence Pack', installedAt: ts }).returning().all();
+        // Statblock resistant to the whole 'physical' CATEGORY, which #2177's expansion turns
+        // into member types including 'slashing'. The character never authored anything in the
+        // resistances category, so this SHOULD fall through and be visible, category-expanded.
+        const [entry] = orm
+          .insert(ruleEntries)
+          .values({
+            packId: rulePack.id,
+            slug: 'conflicting-category-statblock',
+            name: 'Conflicting Category Statblock',
+            type: 'monster',
+            dataJson: JSON.stringify({ armor_class: 10, hit_points: 10, damage_resistances: ['physical'] }),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        const [char] = orm
+          .insert(characters)
+          .values({ campaignId: campaign.id, ownerUserId: alice.id, name: 'Defender PC', hpCurrent: 30, hpMax: 30, vulnerabilities: JSON.stringify(['slashing']), createdAt: ts, updatedAt: ts })
+          .returning()
+          .all();
+        const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+        const [combat] = orm
+          .insert(combatants)
+          .values({ encounterId: encounter.id, kind: 'character', characterId: char.id, ruleEntryId: entry.id, name: 'Defender PC', initiative: 10, hpCurrent: 30, hpMax: 30, sortOrder: 0 })
+          .returning()
+          .all();
+        const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
+
+        // Pass BOTH `damageTypes` and `categories`, exactly as the real call site does
+        // (`adapter.damageTypes`/`adapter.damageTypeCategories` together — see the call in
+        // `resolveOneTarget`). This is load-bearing, not decorative: `damageDefensesFromStatblock`
+        // only expands a category token when it has a non-empty vocabulary to expand INTO —
+        // passing `categories` alone with no `damageTypes` (an earlier version of this test did
+        // exactly that) leaves the raw, unexpanded 'physical' token sitting in the result, which
+        // this test would then wrongly read as evidence category expansion doesn't apply here.
+        const defenses = (service as any).targetDefenses(row, PF2E_DAMAGE_TYPES, PF2E_DAMAGE_TYPE_CATEGORIES);
+        // The character's own authored category: exactly as authored, untouched by expansion.
+        expect(defenses.vulnerabilities).toEqual(['slashing']);
+        // The category the character left empty: falls through to the category-expanded statblock.
+        expect(defenses.resistances).toEqual(['bludgeoning', 'piercing', 'slashing']);
+      },
+    );
   });
 
   function resolvePinnedPf2eTarget(spec: ActionSpec, fixed: Record<string, number> = { '1d20': 1, '2d6': 7, '4d6': 14 }) {

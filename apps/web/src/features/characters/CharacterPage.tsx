@@ -69,12 +69,14 @@ import {
   hasDegreesOfSuccessForAdapter,
   hasAdapterOwnedAttackRoll,
   sortCheckCatalog,
+  filterCheckCatalog,
   DND5E_ABILITY_KEYS,
   formatCheckBreakdown,
   restOptionsForAdapter,
   inferActionSpecFromText,
   isResolvableSpec,
   hasDeathSavesForAdapter,
+  resolveStatStrip,
 } from '@campfire/schema';
 import { DeathSaveTracker } from '../encounters/combat/DeathSaves';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
@@ -118,6 +120,8 @@ import {
   CHARACTER_CONDITION_HELP,
   CHARACTER_CONDITION_LABEL,
   CHARACTER_CONDITION_PREFIX,
+  CHARACTER_DEFENSE_PREFIX,
+  CHARACTER_DEFENSE_TYPE_LABEL,
   CHARACTER_EDIT_PREFIX,
   CHARACTER_FIELD,
   CHARACTER_HP_MAX_HELP,
@@ -346,8 +350,6 @@ export default function CharacterPage() {
     : classField.visible
       ? `${classField.label} not set · `
       : '';
-  const defenseLabel = adapter.presentation?.defense.short ?? adapter.presentation?.defense.full ?? 'AC';
-  const defenseTitle = adapter.presentation?.defense.full ?? 'Defense';
   const showSavingThrowEditor = adapter.characterSheet?.supportsSavingThrowEditor ?? true;
   const showSkillEditor = adapter.characterSheet?.supportsSkillEditor ?? true;
   const showSpellSlotEditor = adapter.characterSheet?.supportsSpellSlotEditor ?? true;
@@ -530,8 +532,6 @@ export default function CharacterPage() {
           onError={setActionError}
           roller={roller}
           leveledConditionTrack={leveledConditionTrack}
-          defenseLabel={defenseLabel}
-          defenseTitle={defenseTitle}
         />
 
         <div className="min-w-0 space-y-4">
@@ -1566,8 +1566,6 @@ function CharacterVitalsRail({
   onError,
   roller,
   leveledConditionTrack,
-  defenseLabel,
-  defenseTitle,
 }: {
   character: Character;
   adapter: RuleSystemAdapter;
@@ -1586,8 +1584,6 @@ function CharacterVitalsRail({
   onError: (msg: string | null) => void;
   roller: Roller;
   leveledConditionTrack: LeveledConditionTrack | null | undefined;
-  defenseLabel: string;
-  defenseTitle: string;
 }) {
   // See `showsInitiativeTile`: the catalog decides whether the roll may HAPPEN, this decides
   // whether the tile appears at all — an absent entry would otherwise render "Initiative —".
@@ -1689,8 +1685,6 @@ function CharacterVitalsRail({
         initiative={showInitiative ? initiative : null}
         showInitiative={showInitiative}
         canRoll={canEdit}
-        defenseLabel={defenseLabel}
-        defenseTitle={defenseTitle}
       />
 
       <section
@@ -1718,24 +1712,21 @@ function CharacterVitalsRail({
             excludeName={leveledConditionTrack?.name}
           />
         </Card>
+        <DamageDefensesCard character={character} canEdit={canEdit} onChange={onChange} onError={onError} adapter={adapter} />
       </section>
     </div>
   );
 }
 
 /**
- * The template's 2×2 vitals tiles. Initiative is a catalog check like any other, so it
- * rolls from here through the same server-resolved path Skills/Saves use; the rest are
- * read-only readouts of sheet fields (edited in "Edit sheet"). Starfinder's EAC/KAC pair
- * replaces the single defense tile when set.
- *
- * The template's fourth tile is 5e's proficiency bonus, and this shows LEVEL instead. A
- * single level-derived proficiency number is a 5e concept: PF2e's proficiency is level
- * plus a per-rank bonus, and Starforged/Open Legend have none at all, so a tile driven by
- * `profBonus` would state a plausible wrong number on every non-5e sheet. No adapter
- * exposes a global proficiency value to read instead, and none is invented here — the
- * per-check bonus is already visible, honestly and per system, in each catalog check's
- * own breakdown (see `formatCheckBreakdown` in the Skills and Saving throws cards).
+ * The template's 2×2 vitals tiles — now adapter-declared (issue #2159). The SHAPE (which tiles,
+ * in what order) comes from `statStripForAdapter`: 5e declares PB / Speed / Initiative / AC, and
+ * every other system inherits the neutral AC / Initiative / Speed / Level block — never a
+ * hardcoded 5e row, because a single level-derived proficiency number IS a 5e concept (PF2e's is
+ * level plus a per-rank bonus; Starforged / Open Legend have none). The VALUES are sourced by
+ * `resolveStatStrip` from the catalog and the character's own fields; initiative stays a catalog
+ * check like any other, so it rolls from here through the same server-resolved path Skills/Saves
+ * use. Starfinder's EAC/KAC pair still replaces the single defense tile when set.
  */
 function VitalsBlock({
   character,
@@ -1744,8 +1735,6 @@ function VitalsBlock({
   initiative,
   showInitiative,
   canRoll,
-  defenseLabel,
-  defenseTitle,
 }: {
   character: Character;
   adapter: RuleSystemAdapter;
@@ -1755,10 +1744,13 @@ function VitalsBlock({
   showInitiative: boolean;
   /** Whether this viewer may roll at all — see AbilityScoresCard's `canRoll`. */
   canRoll: boolean;
-  defenseLabel: string;
-  defenseTitle: string;
 }) {
-  const splitDefense = character.eac != null || character.kac != null;
+  // The strip is adapter-declared (issue #2159); values are sourced from the catalog and the
+  // character's own fields. `initiative` is the catalog check (already null when the character
+  // has no initiative source — see CharacterVitalsRail), passed in so this stays a pure render.
+  const cells = useMemo(() => resolveStatStrip(adapter, character, initiative), [adapter, character, initiative]);
+  // A group-initiative system shows no per-character initiative tile (see `showsInitiativeTile`).
+  const visible = showInitiative ? cells : cells.filter((c) => c.kind !== 'initiative');
   const tile = 'cf-inset text-center py-2 px-1.5';
   const tileLabel = 'text-[length:var(--type-label)] tracking-wide text-secondary';
   const tileValue = 'text-[17px] font-heading mt-0.5';
@@ -1766,56 +1758,42 @@ function VitalsBlock({
     <Card className="space-y-2.5" data-testid="character-vitals">
       <span className="card-kicker mb-0">Vitals</span>
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
-        {splitDefense ? (
-          <>
-            <div className={tile}>
-              <p className={tileLabel}>EAC</p>
-              <p className={tileValue}>{character.eac ?? '—'}</p>
-            </div>
-            <div className={tile}>
-              <p className={tileLabel}>KAC</p>
-              <p className={tileValue}>{character.kac ?? '—'}</p>
-            </div>
-          </>
-        ) : (
-          <div className={tile} title={defenseTitle}>
-            <p className={tileLabel}>{defenseLabel}</p>
-            <p className={tileValue}>{character.ac ?? '—'}</p>
-          </div>
-        )}
-        {initiative && canRoll ? (
-          <div className={tile}>
-            <RollContextMenu
-              allowAdvantage={initiative.supportsAdvantage}
-              allowCrit={false}
-              className="w-full h-full block"
-              onRoll={(m) => {
-                const resolved = toCheckRollMode(initiative.supportsAdvantage ? m : 'normal');
-                void roller.rollCheck(character.id, initiative.id, resolved, undefined, checkRollExpr(initiative, resolved));
-              }}
-              disabled={roller.rolling}
-              style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-              title={`Roll initiative (${signed(initiative.modifier)}) [${formatCheckBreakdown(initiative)}]`}
-              aria-label={`Roll initiative (${signed(initiative.modifier)})`}
+        {visible.map((cell, index) => {
+          if (cell.kind === 'initiative' && cell.rollCheck && canRoll) {
+            const check = cell.rollCheck;
+            return (
+              <div className={tile} key={`${cell.kind}-${index}`} data-testid="character-vitals-initiative">
+                <RollContextMenu
+                  allowAdvantage={check.supportsAdvantage}
+                  allowCrit={false}
+                  className="w-full h-full block"
+                  onRoll={(m) => {
+                    const resolved = toCheckRollMode(check.supportsAdvantage ? m : 'normal');
+                    void roller.rollCheck(character.id, check.id, resolved, undefined, checkRollExpr(check, resolved));
+                  }}
+                  disabled={roller.rolling}
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                  title={`Roll initiative (${signed(check.modifier)}) [${formatCheckBreakdown(check)}]`}
+                  aria-label={`Roll initiative (${signed(check.modifier)})`}
+                >
+                  <p className={tileLabel}>{cell.label}</p>
+                  <p className={tileValue}>{cell.value}</p>
+                </RollContextMenu>
+              </div>
+            );
+          }
+          return (
+            <div
+              className={tile}
+              key={`${cell.kind}-${index}`}
+              data-testid={`character-vitals-${cell.label.toLowerCase()}`}
+              {...(cell.title ? { title: cell.title } : {})}
             >
-              <p className={tileLabel}>Initiative</p>
-              <p className={tileValue}>{signed(initiative.modifier)}</p>
-            </RollContextMenu>
-          </div>
-        ) : showInitiative ? (
-          <div className={tile}>
-            <p className={tileLabel}>Initiative</p>
-            <p className={tileValue}>{initiative ? signed(initiative.modifier) : '—'}</p>
-          </div>
-        ) : null}
-        <div className={tile}>
-          <p className={tileLabel}>Speed</p>
-          <p className={tileValue}>{character.speed ?? '—'}</p>
-        </div>
-        <div className={tile}>
-          <p className={tileLabel}>Level</p>
-          <p className={tileValue}>{character.level}</p>
-        </div>
+              <p className={tileLabel}>{cell.label}</p>
+              <p className={tileValue}>{cell.value}</p>
+            </div>
+          );
+        })}
       </div>
       <p className="text-[11px] text-secondary cf-print-hide">
         {adapter.presentation?.defense.full ?? 'Defense'} and speed are set in Edit sheet.
@@ -2118,6 +2096,12 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
   const skillChecks = useMemo(() => catalog.filter((c) => c.category === 'skill'), [catalog]);
 
+  // Issue #2154: a long skill list is searchable, mirroring the encounter card's
+  // `CharacterStatCard` skill search — same shared `filterCheckCatalog`, same
+  // `check-search` testid — so a player/DM can narrow a full catalog without scrolling.
+  const [skillQuery, setSkillQuery] = useState('');
+  const skills = useMemo(() => filterCheckCatalog(skillChecks, skillQuery), [skillChecks, skillQuery]);
+
   async function cycle(name: string) {
     if (!canEdit || busy) return;
     setBusy(true);
@@ -2147,8 +2131,18 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
           tap a skill to roll{canEdit ? <span className="cf-print-hide">; tap the ○/●/★ to cycle proficiency</span> : ''}
         </span>
       </div>
+      <input
+        type="search"
+        value={skillQuery}
+        onChange={(e) => setSkillQuery(e.target.value)}
+        placeholder="Search skills…"
+        aria-label={`Search ${character.name}'s skills`}
+        data-testid="check-search"
+        className="input cf-print-hide"
+        style={{ fontSize: 12, minHeight: 32, maxWidth: 220 }}
+      />
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
-        {skillChecks.map((def) => {
+        {skills.map((def) => {
           const name = def.label;
           const ability = def.ability;
           const rank = character.skills[name] ?? (def.proficiency as SkillRank | null);
@@ -2217,6 +2211,11 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
             </div>
           );
         })}
+        {skills.length === 0 && skillQuery.trim() !== '' && (
+          <span className="text-[12px] text-secondary">
+            No skills match “{skillQuery}”.
+          </span>
+        )}
       </div>
     </Card>
   );
@@ -3656,6 +3655,240 @@ function ConditionsRow({
               + add
             </button>
           </>
+        ))}
+    </div>
+  );
+}
+
+/**
+ * Category config for {@link DamageDefenseRow} (issue #2156) — one row per `Character`
+ * damage-defense array. Kept local rather than three separately-named label constants: unlike
+ * `ConditionsRow` (one field, one vocabulary), all three rows share the SAME free-text-plus-
+ * adapter-datalist shape and only differ in field name / copy, so a small config array reads
+ * more directly than nine near-duplicate exports in formFieldLabels.ts.
+ */
+const DAMAGE_DEFENSE_CATEGORIES: ReadonlyArray<{
+  field: 'resistances' | 'vulnerabilities' | 'immunities';
+  label: string;
+  help: string;
+  empty: string;
+}> = [
+  { field: 'resistances', label: 'Resistant to', help: 'Takes half damage from this type (rounded down).', empty: 'No resistances.' },
+  { field: 'vulnerabilities', label: 'Vulnerable to', help: 'Takes double damage from this type.', empty: 'No vulnerabilities.' },
+  { field: 'immunities', label: 'Immune to', help: 'Takes no damage from this type.', empty: 'No immunities.' },
+];
+
+/**
+ * Damage resistances/vulnerabilities/immunities editor (issue #2156), beside the CONDITIONS
+ * chips above. `TargetDefenses` (the action resolver's own shape) was already applied to a
+ * monster/NPC statblock; a player character had no way to author any of the three, so they
+ * never fed the resolver for a character-kind combatant (see
+ * `ActionResolverService.targetDefenses`, which now reads these fields when the combatant is
+ * character-linked).
+ *
+ * Deliberately a bare `Card` (which itself renders a `<section>`), NOT wrapped in its own
+ * outer `<section>` — same shape as `WeaponTrainingCard` sitting inside the Skills section
+ * (#2151), and rendered as a second child of the CALLER's `<section id={...('conditions')}>`
+ * rather than as a sibling `<section>` under `CharacterVitalsRail`'s own `space-y-4` column.
+ * That is not just tidiness: `space-y-4`'s Tailwind selector is `:not(:last-child)`, a
+ * purely structural DOM check that `display:none` does NOT exempt an element from — so an
+ * extra top-level `<section>` sibling, even print-hidden, would still knock the PRECEDING
+ * section out of being `:last-child` and give it an unwanted 16px `margin-block-end` in
+ * print. Nesting here instead never changes `.cf-sheet-rail`'s direct-child count at all,
+ * screen or print, hidden or shown — this broke `print-layout.spec.ts`'s
+ * `character-sheet-print` golden by exactly 16px before this fix, verified by measurement.
+ */
+function DamageDefensesCard({
+  character,
+  canEdit,
+  onChange,
+  onError,
+  adapter,
+}: {
+  character: Character;
+  canEdit: boolean;
+  onChange: () => void | Promise<void>;
+  onError: (msg: string | null) => void;
+  adapter: RuleSystemAdapter;
+}) {
+  // Same "hide the whole card in print when empty" rule WeaponTrainingCard already applies
+  // (#2151) — an on-screen "No resistances." placeholder is useful while editing, but a
+  // printed sheet with nothing authored in any of the three categories should not grow a
+  // "Damage defenses" section at all.
+  const hasAny = character.resistances.length > 0 || character.vulnerabilities.length > 0 || character.immunities.length > 0;
+  return (
+    <Card className={`space-y-2.5${hasAny ? '' : ' cf-print-hide'}`} data-testid="character-damage-defenses">
+      <h2 className="card-kicker mb-0">Damage defenses</h2>
+      {DAMAGE_DEFENSE_CATEGORIES.map((category) => (
+        <DamageDefenseRow
+          key={category.field}
+          character={character}
+          canEdit={canEdit}
+          onChange={onChange}
+          onError={onError}
+          adapter={adapter}
+          category={category}
+        />
+      ))}
+    </Card>
+  );
+}
+
+function DamageDefenseRow({
+  character,
+  canEdit,
+  onChange,
+  onError,
+  adapter,
+  category,
+}: {
+  character: Character;
+  canEdit: boolean;
+  onChange: () => void | Promise<void>;
+  onError: (msg: string | null) => void;
+  adapter: RuleSystemAdapter;
+  category: (typeof DAMAGE_DEFENSE_CATEGORIES)[number];
+}) {
+  const [adding, setAdding] = useState(false);
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
+  // Issue #854: IME confirm Enter must not add; Escape must not dismiss mid-composition.
+  const compositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (compositionGateRef.current === null) {
+    compositionGateRef.current = createCompositionSubmitGate();
+  }
+  const compositionGate = compositionGateRef.current;
+
+  const current = character[category.field];
+  const idPrefix = `${CHARACTER_DEFENSE_PREFIX}-${category.field}`;
+
+  // Full-snapshot replace via the general PATCH endpoint (same contract as
+  // saveProficiencies/weaponProficiencies — see characters.service.ts), not a dedicated
+  // add/remove endpoint like conditions has: these three fields are plain string arrays with
+  // no chained-state (no leveled track, no live-tracker mirror) to coordinate.
+  // Returns whether the write was actually attempted AND succeeded, so a caller can gate its
+  // announcement on that rather than merely on having clicked — a busy-skip (the `if (busy)
+  // return` below) and a failed request (caught below, surfaced via onError) both need to
+  // suppress the announcement the same way: an assistive-tech user told "removed"/"added"
+  // when nothing actually changed is actively misinformed, worse than no announcement at all.
+  async function patchDefenses(next: string[]): Promise<boolean> {
+    if (busy) return false;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.patch(`${API}/characters/${character.id}`, { [category.field]: next });
+      await onChange();
+      return true;
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : `Couldn't update ${category.label.toLowerCase()}.`);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addValue(name: string) {
+    const v = name.trim();
+    if (!v || busy) return;
+    if (current.some((c) => c.trim().toLowerCase() === v.toLowerCase())) {
+      setValue('');
+      setAdding(false);
+      return;
+    }
+    const ok = await patchDefenses([...current, v]);
+    setValue('');
+    setAdding(false);
+    if (ok) announce(`Added ${category.label.toLowerCase()} ${v}`);
+  }
+
+  async function removeValue(name: string) {
+    const ok = await patchDefenses(current.filter((c) => c !== name));
+    if (ok) announce(`Removed ${category.label.toLowerCase()} ${name}`);
+  }
+
+  return (
+    <div
+      className={`flex items-center gap-1.5 flex-wrap${current.length === 0 ? ' cf-print-hide' : ''}`}
+      data-testid={`character-damage-defense-${category.field}`}
+    >
+      <span className="text-muted text-xs" style={{ minWidth: 92 }}>{category.label}</span>
+      {current.map((v) => (
+        <span key={v} className="tag tag-outline" style={{ gap: 6 }}>
+          {v}
+          {canEdit && (
+            <button
+              type="button"
+              className="cf-target-44 cf-print-hide"
+              aria-label={`Remove ${category.label.toLowerCase()} ${v}`}
+              onClick={() => void removeValue(v)}
+              disabled={busy}
+              style={{
+                cursor: busy ? 'default' : 'pointer',
+                opacity: 0.7,
+                background: 'transparent',
+                border: 0,
+                padding: 0,
+                font: 'inherit',
+                color: 'inherit',
+              }}
+            >
+              <UIIcon name="close" size="xs" />
+            </button>
+          )}
+        </span>
+      ))}
+      {current.length === 0 && <span className="text-muted text-xs">{category.empty}</span>}
+      {canEdit &&
+        (adding ? (
+          <form
+            className="inline-flex items-end gap-1 cf-print-hide"
+            onSubmit={compositionSafeFormSubmit(compositionGate, () => {
+              void addValue(value);
+            })}
+          >
+            <Field
+              idPrefix={idPrefix}
+              name="name"
+              label={CHARACTER_DEFENSE_TYPE_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              className="field !mb-0"
+              autoFocus
+              list={`${idPrefix}-vocab`}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={compositionSafeEscapeHandler(compositionGate, () => {
+                setAdding(false);
+                setValue('');
+              })}
+              {...compositionGate.inputProps}
+              density="xs"
+              help={category.help}
+              placeholder="Damage type…"
+              maxLength={24}
+              style={{ width: '7rem' }}
+            />
+            {adapter.damageTypes && adapter.damageTypes.length > 0 && (
+              <datalist id={`${idPrefix}-vocab`}>
+                {adapter.damageTypes.map((t) => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
+            )}
+            <button type="submit" disabled={busy || !value.trim()} className="cf-chip cf-chip-available">
+              Add
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="btn btn-ghost cf-density-xs cf-print-hide"
+            aria-label={`Add ${category.label.toLowerCase()}`}
+            style={{ border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+          >
+            + add
+          </button>
         ))}
     </div>
   );
