@@ -3,14 +3,27 @@ import type { Combatant, EncounterWithCombatants } from '@campfire/schema';
 import { PNG_16_9, seed, stateFor, restoreSeedEncounter } from './seed';
 
 /**
- * Browser render-containment probes (issue #1917 stages 1-2). A MutationObserver watches
- * real DOM mutations — the thing a memo boundary either does or does not prevent — rather
- * than asserting on React internals, which nothing outside React can observe directly.
+ * Browser DOM-stability probes (issue #1917 stages 1-2). A MutationObserver watches real DOM
+ * mutations on the grid-overlay subtree during an HP change and a token drag, and asserts
+ * zero — a real invariant worth pinning on its own (a user-visible flicker or unwanted
+ * reconciliation would show up here).
  *
- * Each probe here was mutation-verified by hand during development: the specific memo
- * wrapper / stabilized prop it exists to catch was removed, the probe was re-run and
- * confirmed to fail with a nonzero mutation count, then the fix was restored and the probe
- * re-confirmed green. See the PR description for the exact commands and failure output.
+ * IMPORTANT — corrected per issue #2079's measurement, do not revert this framing: these two
+ * probes do NOT prove a memo boundary works, and must never be cited as if they do. On both
+ * interactions scripted below, none of `GridOverlay`'s own prop VALUES change, so a memoized
+ * render (skipped entirely) and an unmemoized render (runs, reconciles, produces
+ * byte-identical DOM because React only touches the DOM when a value actually differs) commit
+ * the exact same DOM either way. A MutationObserver watches the DOM, so it structurally cannot
+ * tell those two cases apart — #2079 measured, by hand, that both probes below stay green with
+ * `memo()` removed from `GridOverlay` entirely. The unit-tier source assertion
+ * (`encounter-render-containment.unit.spec.ts`) catches `memo()` being deleted from the
+ * source, but is equally blind to `memo()` staying in the source while failing to actually
+ * bail on an unstable prop — which is exactly what shipped on `main` for the whole life of PR
+ * #2078, fixed only in the #2083 follow-up. The one guard that actually exercises what a memo
+ * boundary controls (render-function invocation, not DOM output) is the component-tier
+ * behavioural test in `apps/web/test/component/GridOverlay.memoBoundary.spec.tsx` — see its
+ * header for the full explanation and for `BattleMap.dragContainment.spec.tsx`'s stage-3
+ * equivalent.
  */
 
 const MAP_ATTACHMENT_ID = 1_917_000;

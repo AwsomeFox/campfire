@@ -85,4 +85,41 @@ test.describe('encounter cockpit memo boundaries (issue #1917 stage 1)', () => {
     expect(source).toContain('rowRef={getCombatantRowRef(c.id)}');
     expect(source).not.toContain('rowRef={(el) => setCombatantRowRef(c.id, el)}');
   });
+
+  // Issue #1917 stage 3: `dragPos` was BattleMap's own `useState`, so every pointer-move during
+  // a token drag re-ran BattleMap's entire render function (a component's own state update
+  // re-runs its own render regardless of `memo()` — memo only guards re-renders triggered by a
+  // PARENT). Stage 3 replaced it with a plain external store (`createDragPositionStore`) that
+  // BattleMap writes to without reading in its own render, and two extracted components —
+  // `MapTokenSlot` and `DragDistanceOverlay` — subscribe to it directly via
+  // `useSyncExternalStore`. This is a DIFFERENT containment mechanism than the `React.memo`
+  // wrappers above, so "guards that the memo wrappers stay in place" doesn't literally apply to
+  // these two — there is nothing to `memo()`, since neither is a child BattleMap would otherwise
+  // re-render into; the invariant worth pinning at this tier is that the store-subscription
+  // shape stays in place. Like every other case in this file: this proves only that the source
+  // still has this shape, not that it behaves correctly at runtime (that's
+  // `BattleMap.dragContainment.spec.tsx`'s job, the same behavioural render-invocation-count
+  // technique `GridOverlay.memoBoundary.spec.tsx` established for stage 2).
+  test('dragPos stays out of BattleMap\'s own render path, via MapTokenSlot/DragDistanceOverlay subscribing to an external store (issue #1917 stage 3)', () => {
+    const source = readFileSync(BATTLE_MAP, 'utf8');
+    // BattleMap must never reintroduce dragPos as its own useState — the exact regression
+    // stage 3 exists to prevent.
+    expect(source).not.toMatch(/\[\s*dragPos\s*,\s*setDragPos\s*\]\s*=\s*useState/);
+    expect(source).toContain('function createDragPositionStore(): DragPositionStore {');
+
+    expect(source).toContain('function MapTokenSlot({');
+    // MapTokenSlot's own `useSyncExternalStore` call is what lets only the dragged token's
+    // instance re-render per pointer-move frame — a non-dragged token's selector always
+    // returns the same `null`, so `useSyncExternalStore`'s `Object.is` check bails it out.
+    expect(source).toMatch(/const live = useSyncExternalStore\(\s*dragPosStore\.subscribe,\s*\(\)\s*=>\s*\(isDragging \? dragPosStore\.getSnapshot\(\) : null\),\s*\);/);
+
+    expect(source).toContain('function DragDistanceOverlay({');
+    expect(source).toContain('const live = useSyncExternalStore(dragPosStore.subscribe, dragPosStore.getSnapshot);');
+
+    // Both call sites inside BattleMap's own render must pass the SAME store instance (a
+    // ref's `.current`, stable across BattleMap's own re-renders) rather than each
+    // constructing its own — sharing one store is what lets BattleMap write without reading.
+    expect(source).toContain('const dragPosStoreRef = useRef(createDragPositionStore());');
+    expect(source).toContain('dragPosStore={dragPosStore}');
+  });
 });
