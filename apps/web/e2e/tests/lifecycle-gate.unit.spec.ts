@@ -324,14 +324,22 @@ test.describe('turnTimerControlVisible / turnTimerControlDisabled (issue #1935 r
   });
 });
 
-test.describe('DmLifecycleHeader wiring (issue #1935 review) — the turn-timer control is actually gated, not just the pure functions', () => {
+test.describe('Turn-timer wiring (issue #1935 review) — the control is actually gated, not just the pure functions', () => {
+  // The control moved out of DmLifecycleHeader into RunSessionPage's header meta pill,
+  // beside the `Round N · m:ss` readout it configures — it used to sit at the head of the
+  // lifecycle control group as an unlabeled stopwatch, a row away from its own effect.
+  // Both gates moved with it, which is what this tripwire exists to hold.
   const header = readFileSync(
-    resolve(__dirname, '../../src/features/encounters/DmLifecycleHeader.tsx'),
+    resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx'),
     'utf8',
   );
 
   test('the control is rendered behind turnTimerControlVisible(lifecycle.reopen)', () => {
-    expect(header).toMatch(/\{turnTimerControlVisible\(lifecycle\.reopen\)\s*&&\s*\(/);
+    // Not anchored to an opening brace: at its new site the guard is one conjunct of a
+    // longer condition (`{isDm && turnTimerControlVisible(lifecycle.reopen) && …`). What
+    // must hold is that the render is gated on this predicate, not where it sits in the
+    // expression.
+    expect(header).toMatch(/turnTimerControlVisible\(lifecycle\.reopen\)\s*&&\s*\(/);
   });
 
   test('its disabled prop comes from turnTimerControlDisabled, not a bare headerBusy', () => {

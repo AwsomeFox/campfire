@@ -2,6 +2,7 @@
   "encounters": {
     "title": "Encounters",
     "combatLogHeading": "Combat log",
+    "tableSetup": "Table setup",
     "actions": {
       "title": "Actions",
       "use": "Use",
@@ -272,6 +273,19 @@
         "updateError": "Couldn't update the object.",
         "removed": "Removed {{label}}",
         "removeError": "Couldn't remove the object."
+      },
+      "setup": "Map setup",
+      "fog": {
+        "undo": "Undo",
+        "redo": "Redo"
+      },
+      "manage": {
+        "title": "Manage tokens",
+        "select": "Select",
+        "arrange": "Arrange",
+        "formations": "Formations",
+        "selectedTokens": "Selected tokens",
+        "selectedTokenList": "Selected token list"
       }
     },
     "workspace": {

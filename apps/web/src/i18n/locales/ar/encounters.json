@@ -2,6 +2,7 @@
   "encounters": {
     "title": "المواجهات",
     "combatLogHeading": "سجل القتال",
+    "tableSetup": "إعداد الطاولة",
     "actions": {
       "title": "الإجراءات",
       "use": "استخدام",
@@ -272,6 +273,19 @@
         "updateError": "تعذر تحديث العنصر.",
         "removed": "تمت إزالة {{label}}",
         "removeError": "تعذرت إزالة العنصر."
+      },
+      "setup": "إعداد الخريطة",
+      "fog": {
+        "undo": "تراجع",
+        "redo": "إعادة"
+      },
+      "manage": {
+        "title": "إدارة الرموز",
+        "select": "تحديد",
+        "arrange": "ترتيب",
+        "formations": "التشكيلات",
+        "selectedTokens": "الرموز المحددة",
+        "selectedTokenList": "قائمة الرموز المحددة"
       }
     },
     "workspace": {

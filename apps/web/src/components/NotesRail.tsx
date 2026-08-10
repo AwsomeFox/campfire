@@ -176,7 +176,9 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
 
   return (
     <Card className="space-y-3" data-testid="notes-rail">
-      <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.sm} /> Notes</h2>
+      {/* See CommentsThread's note: an unlayered `h2 { font-size: 2rem }` in nocturne.css
+          beats Tailwind's layered `text-sm`, so this heading rendered at 32px. */}
+      <h2 className="card-kicker flex items-center gap-2 font-bold"><GameIcon slug="quill-ink" size={UI_ICON_SIZE.sm} /> Notes</h2>
       {error && <ErrorNote message={error} onRetry={load} />}
       {notes.map((n) => (
         <div key={n.id} className="cf-inset p-3 space-y-1">
@@ -225,7 +227,11 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
         />
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div
-            className="seg seg-wrap min-w-0 flex-1"
+            // No `flex-1`: the segmented control was authored for a narrow notes rail, but
+            // on the character sheet it sits in the full-width column and grew to ~870px,
+            // stretching four options across the page. It keeps `seg-wrap` so it still
+            // wraps rather than clipping "Whisper" when the rail IS narrow.
+            className="seg seg-wrap min-w-0"
             role="radiogroup"
             aria-label={NOTE_VISIBILITY_GROUP_LABEL}
             aria-describedby={visHelpId}

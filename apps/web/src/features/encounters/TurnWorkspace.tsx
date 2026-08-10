@@ -97,8 +97,9 @@ interface TurnWorkspaceProps {
   onEndTurn?: (expectedCurrentCombatantId: number) => void;
   endTurnBusy?: boolean;
   /** #599: mirrors the server's assertNoSafetyHold rejection on endTurn — no server change,
-   *  just surfacing the same table-wide safety-hold state (already visible via SafetyHoldBar)
-   *  as a reason on the control it actually blocks. */
+   *  just surfacing the table-wide safety-hold state as a reason on the control it actually
+   *  blocks. The cockpit does not mount SafetyHoldBar, so this reason is the only place the
+   *  hold is named here. */
   safetyHoldActive?: boolean;
   gridUnit?: string | null;
   gridScale?: number | null;
@@ -439,7 +440,11 @@ export function TurnWorkspace({
               ));
             })()}
           </div>
-          <div className="flex gap-1.5 mt-3 overflow-x-auto py-1 max-w-full flex-wrap sm:flex-nowrap" data-testid="standard-actions-bar">
+          {/* Wraps at every width. `sm:flex-nowrap` keys off the VIEWPORT, so on a desktop
+              this bar went single-line inside the ~400px VTT rail and turned into a
+              horizontal scroller — a visible scrollbar cutting through the row with the
+              last action hidden off the right edge. */}
+          <div className="flex gap-1.5 mt-3 py-1 max-w-full flex-wrap" data-testid="standard-actions-bar">
             {STANDARD_ACTIONS.map((act) => {
               // Issue #1939: undefined on any adapter without an authored hint (every
               // non-5e system today) — no affordance renders, never 5e text on another system.
@@ -495,13 +500,10 @@ export function TurnWorkspace({
         </section>
       )}
 
-      {/* Reaction + concentration summary. */}
+      {/* Reaction + concentration summary. Movement is deliberately NOT repeated here:
+          the action-economy card directly above already carries it, with its own
+          +/− controls, so the second copy read as two different numbers to reconcile. */}
       <div className="flex gap-4 flex-wrap text-sm">
-        {turn.movement && (
-          <span className="text-muted">
-            Movement: <span className="text-white">{turn.movement.usedFt}/{turn.movement.maxFt} {!gridUnit || gridUnit === 'ft' || gridUnit === 'feet' ? (gridUnit || 'ft') : 'ft'}</span>
-          </span>
-        )}
         <span className="text-muted">
           Reaction: <span className="text-white">{turn.reactionAvailable ? 'available' : 'used'}</span>
         </span>

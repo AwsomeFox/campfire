@@ -20,7 +20,10 @@ test.describe('Character print view owner control hiding (#1761)', () => {
 
     // HP editor & rest controls container
     expect(code).toContain('space-y-2 cf-print-hide');
-    expect(code).toMatch(/className="flex gap-2 flex-wrap cf-print-hide"/);
+    // The HP editor is a 4-up delta grid stacked over "Full heal" (it never fit one
+    // wrapping row in the 16rem vitals rail); what this assertion guards is that its
+    // container still carries cf-print-hide, not the particular flex direction.
+    expect(code).toMatch(/className="flex flex-col gap-2 cf-print-hide"/);
     expect(code).toMatch(/className="flex gap-2 items-center flex-wrap pt-1 cf-print-hide"/);
 
     // Roll mode choosers and status indicators
