@@ -94,6 +94,16 @@ describe('creature roll catalog — adapter-derived statblocks (issue #1314)', (
       expect(CreatureCheckRollRequest.safeParse({ checkId: check.id }).success).toBe(true);
     }
   });
+
+  it('deduplicates skill keys that normalize to the same id', () => {
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { skills: { Stealth: 6, stealth: 2 } },
+    });
+
+    expect(catalog.filter((check) => check.category === 'skill')).toEqual([
+      expect.objectContaining({ id: 'skill:stealth', modifier: 6 }),
+    ]);
+  });
 });
 
 /**

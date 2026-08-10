@@ -6092,12 +6092,24 @@ const MAX_CHECK_ID_LENGTH = 60;
 /**
  * Keep catalog ids consumable by {@link CheckRollRequest}. Short, established ids
  * retain their exact spelling; only an imported/homebrew key that would overflow the
- * request contract gains a deterministic suffix. The collision fallback remains
- * bounded and keeps the catalog unique even for adversarial keys.
+ * request contract gains a deterministic suffix. Repeated normalized keys reuse their
+ * established id so the catalog's existing deduplication remains intact; distinct
+ * mechanics that collide after bounding receive a unique fallback suffix.
  */
-function boundedCreatureCheckId(prefix: 'save' | 'skill', rawKey: string, usedIds: ReadonlySet<string>): string {
+function boundedCreatureCheckId(
+  prefix: 'save' | 'skill',
+  rawKey: string,
+  usedIds: ReadonlySet<string>,
+  canonicalIds: Map<string, string>,
+): string {
   const full = `${prefix}:${rawKey.trim().toLowerCase()}`;
-  if (full.length <= MAX_CHECK_ID_LENGTH && !usedIds.has(full)) return full;
+  const existing = canonicalIds.get(full);
+  if (existing) return existing;
+
+  if (full.length <= MAX_CHECK_ID_LENGTH && !usedIds.has(full)) {
+    canonicalIds.set(full, full);
+    return full;
+  }
 
   let hash = 0x811c9dc5;
   for (let index = 0; index < full.length; index += 1) {
@@ -6111,6 +6123,7 @@ function boundedCreatureCheckId(prefix: 'save' | 'skill', rawKey: string, usedId
     const collisionSuffix = `-${collision}`;
     candidate = `${full.slice(0, MAX_CHECK_ID_LENGTH - suffix.length - collisionSuffix.length - 1)}-${suffix}${collisionSuffix}`;
   }
+  canonicalIds.set(full, candidate);
   return candidate;
 }
 
@@ -6135,6 +6148,7 @@ export function creatureCheckCatalogForAdapter(
   const supportsAdvantage = adapter.id === DND5E_ADAPTER_ID;
   const out: RollCheckDefinition[] = [];
   const ids = new Set<string>();
+  const canonicalCreatureIds = new Map<string, string>();
   const add = (def: RollCheckDefinition) => {
     if (!ids.has(def.id)) {
       ids.add(def.id);
@@ -6169,7 +6183,7 @@ export function creatureCheckCatalogForAdapter(
   for (const [rawKey, modifier] of Object.entries(saves)) {
     const label = creatureCheckLabel(rawKey);
     add({
-      id: boundedCreatureCheckId('save', rawKey, ids),
+      id: boundedCreatureCheckId('save', rawKey, ids, canonicalCreatureIds),
       label: `${label} save`,
       category: 'save',
       ability: null,
@@ -6187,7 +6201,7 @@ export function creatureCheckCatalogForAdapter(
   for (const [rawKey, modifier] of Object.entries(skills)) {
     const label = creatureCheckLabel(rawKey);
     add({
-      id: boundedCreatureCheckId('skill', rawKey, ids),
+      id: boundedCreatureCheckId('skill', rawKey, ids, canonicalCreatureIds),
       label,
       category: 'skill',
       ability: null,
