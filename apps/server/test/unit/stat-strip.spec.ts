@@ -95,7 +95,10 @@ describe('adapter-declared stat strip (issue #2159)', () => {
       expect(cells.find((c) => c.kind === 'initiative')!.value).toBe('—');
     });
 
-    it("splits the defense tile into Starfinder's EAC/KAC pair when those fields are set", () => {
+    it("splits the defense tile into the EAC/KAC pair (Starfinder shape) when those fields are set on any adapter", () => {
+      // Uses Dnd5eAdapter deliberately: the EAC/KAC split is driven by the
+      // presence of `eac`/`kac` fields on the character, not by the adapter
+      // identity, so any adapter carrying those fields renders the pair.
       const cells = resolveStatStrip(
         Dnd5eAdapter,
         { ac: 16, eac: 14, kac: 18, speed: 30, level: 5 },
