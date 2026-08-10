@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Campaign } from '@campfire/schema';
-import { measureBox } from '../lib/computedStyle';
+import { measureBox, renderCssFixture } from '../lib/computedStyle';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
 import { openCockpitTab } from '../lib/encounterCockpit';
 
@@ -37,7 +37,8 @@ const NARROW_VIEWPORT = { width: 390, height: 844 };
  *   coverage of any kind. A scoped screenshot was tried and dropped — see that test's own
  *   comment for why — so this surface has a `measureBox` padding pin only. Issue #2167
  *   tracks the still-open screenshot coverage for this and the app's other direct
- *   `--space-*` consumers.
+ *   `--space-*` consumers; its own computed-style pins live in the
+ *   "design-system spacing pins (issue #2167)" describe block at the bottom of this file.
  *
  * Only one theme is captured: Campfire ships a single dark theme (see index.css's `@media
  * print` comment — "the app is intentionally optimized for an interactive dark UI") with no
@@ -231,6 +232,20 @@ test.describe('control surface goldens (#1694) — quick capture dialog', () => 
       expect(box.minHeight, 'quick-capture destination buttons must declare a 24px min-height floor').toBe('24px');
     }
 
+    // Issue #2167: the screenshot below covers the dialog's overall look but doesn't pin
+    // any one geometry value precisely. `Dialog` renders `default` density unless a caller
+    // opts out (QuickCaptureDialog doesn't), and `.dialog.cf-density-default` (index.css)
+    // only re-points `padding`/`border-radius` at the `--cf-density-default-dialog-*`
+    // aliases — it does NOT touch `.dialog`'s own base `gap`, and
+    // `--cf-density-default-dialog-padding` (index.css) is itself `var(--space-4)`, so this
+    // still reads the real `--space-4` value straight through the density indirection.
+    // 11.2px is --space-4 on the current 2.8px scale; #2169's retokening moves it to 16px.
+    const dialogBox = await measureBox(dialog);
+    expect(
+      dialogBox.paddingTop,
+      '.dialog padding-top must equal --space-4 (11.2px on the current 2.8px scale) today — see the comment above before changing this value',
+    ).toBe('11.2px');
+
     await page.evaluate(() => (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts?.ready ?? Promise.resolve());
     await expect(dialog).toHaveScreenshot('quick-capture-dialog.png', {
       animations: 'disabled',
@@ -240,5 +255,132 @@ test.describe('control surface goldens (#1694) — quick capture dialog', () => 
 
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
+  });
+});
+
+/**
+ * Direct `--space-*` consumer coverage beyond #2166's single `.cf-vtt-header` pin (issue
+ * #2167, the continuation issue #2166 itself named). #1688's re-measurement found 85 direct
+ * `var(--space-N)` occurrences across index.css/nocturne.css that #2169's retokening (to
+ * Tailwind's 4/8/12/16/24/32px scale) will move all at once; #2166 covered only the
+ * highest-value slice (`.cf-vtt-header`, ~40 of the 85). This block covers nocturne.css's
+ * base typographic layer (renders on nearly every page, had zero coverage of any kind) plus
+ * one more slice of the VTT cockpit chrome and the `.dialog` pin added above.
+ *
+ * Deliberately NOT covered here (reported, not silently skipped):
+ *  - `.btn`/`.btn-ghost`/`.btn-block` padding (nocturne.css) — very high call-site count
+ *    (268), already indirectly exercised by two screenshots (turn-workspace,
+ *    quick-capture-dialog above) and two WCAG-floor min-height/min-width pins elsewhere in
+ *    this file; an exact padding-token pin is left for a follow-up.
+ *  - the bare nocturne `.card` class — exactly one live use site
+ *    (CharacterPage.tsx) versus the `cf-card` density system's much larger footprint
+ *    (already exercised, if only by range-checks, in design-system-visual.spec.ts).
+ *  - the rest of the VTT rail/tray/FAB beyond `.cf-vtt-panel-tabs` below — the header pin
+ *    plus this file's screenshots of two other dense surfaces already give the highest-value
+ *    slice a second, independent check; a full sweep of every remaining `.cf-vtt-*` rule is
+ *    left for a follow-up rather than growing this one patch further.
+ */
+test.describe('design-system spacing pins (issue #2167)', () => {
+  test.use({ storageState: stateFor('dm') });
+
+  test('nocturne base typographic layer: heading and paragraph margins', async ({ page }) => {
+    // nocturne.css's `h1,h2,h3,h4,h5,h6 { margin: 0 0 var(--space-2); }` and
+    // `p { margin: 0 0 var(--space-3); }` apply everywhere EXCEPT the app's own on-screen
+    // headings/paragraphs, which all carry their own component classes or Tailwind margin
+    // utilities that override the base rule (see e.g. `.login-intro h1 { margin: 0; }`).
+    // The one place a plain, unstyled `<h1>`/`<p>` actually renders — with the base rule the
+    // only source of their margin — is a detail page's screen-hidden print reference sheet
+    // (`.cf-print-only`, revealed under `@media print`, the same technique
+    // print-layout.spec.ts already uses for its own goldens). This is a real, already-built
+    // page, not a synthetic fixture — `page.emulateMedia` only changes which of the page's
+    // own rules apply, it does not inject any markup.
+    const { campaignId, navigation } = seed();
+    await page.goto(`/c/${campaignId}/quests/${navigation.questId}`);
+    await page.emulateMedia({ media: 'print' });
+
+    const printSheet = page.locator('.cf-print-only.cf-print-paper');
+    await expect(printSheet).toBeVisible();
+
+    const heading = printSheet.locator('h1').first();
+    await expect(heading).toBeVisible();
+    const headingBox = await measureBox(heading);
+    // 5.6px is --space-2 on the current 2.8px scale; #2169's retokening moves it to 8px.
+    expect(
+      headingBox.marginBottom,
+      'h1-h6 margin-bottom must equal --space-2 (5.6px on the current 2.8px scale) today — see the comment above before changing this value',
+    ).toBe('5.6px');
+
+    const paragraph = printSheet.locator('p').first();
+    await expect(paragraph).toBeVisible();
+    const pBox = await measureBox(paragraph);
+    // 8.4px is --space-3 on the current 2.8px scale; #2169's retokening moves it to 12px.
+    expect(
+      pBox.marginBottom,
+      'p margin-bottom must equal --space-3 (8.4px on the current 2.8px scale) today — see the comment above before changing this value',
+    ).toBe('8.4px');
+  });
+
+  test('VTT cockpit side-panel tab strip padding', async ({ page }) => {
+    // Decision for this issue's "does the rest of the VTT chrome need its own golden"
+    // question: a computed-style pin, not a screenshot — same rationale #2166 already
+    // documented for `.cf-vtt-header` (no CI-verifiable local baseline in this environment;
+    // see that test's comment above). `.cf-vtt-panel-tabs` is the side panel's always-visible
+    // tab strip (Turn/Party/Log/Table), open by default once an encounter is running.
+    await restoreSeedEncounter();
+    const { campaignId, encounterId } = seed();
+    await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'turn');
+
+    const panel = page.getByTestId('encounter-vtt-panel');
+    await expect(panel).toBeVisible();
+    const tabStrip = panel.locator('.cf-vtt-panel-tabs');
+    await expect(tabStrip).toBeVisible();
+
+    // `.cf-vtt-panel-tabs` is `padding: var(--space-2) var(--space-2) 0;` (index.css). 5.6px
+    // is --space-2 on the current 2.8px scale; #2169's retokening moves it to 8px.
+    const tabStripBox = await measureBox(tabStrip);
+    expect(
+      tabStripBox.paddingTop,
+      '.cf-vtt-panel-tabs padding-top must equal --space-2 (5.6px on the current 2.8px scale) today — see the comment above before changing this value',
+    ).toBe('5.6px');
+  });
+
+  test('nocturne .hr and .table pin their own declared --space-* values (currently dead code, verified below)', async ({ page }) => {
+    // Both are direct `var(--space-N)` consumers named in this issue's "at minimum" list,
+    // but neither one is reachable through a live page today:
+    //  - `.hr`'s `margin: var(--space-4) 0` (nocturne.css) is overridden by an inline
+    //    `style={{ margin: ... }}` at all three of its call sites in the app
+    //    (AddCombatantPanel.tsx, LoginPage.tsx, QuestPage.tsx) — inline style always wins
+    //    over an external class rule, so the class's own margin value never actually paints
+    //    anywhere. Verified via `grep -rn 'className="hr"' apps/web/src`.
+    //  - `.table` (nocturne.css) has zero JSX consumers at all — every `<table>` in the app
+    //    uses Tailwind utility classes instead (e.g. `className="w-full text-sm"`). Verified
+    //    via `grep -rn '<table' apps/web/src`.
+    // Both rules stay live in the compiled stylesheet and will still shift silently under
+    // #2169's retokening, so they are pinned here via `renderCssFixture` — the documented
+    // fallback in computedStyle.ts for exactly this case ("no convenient live page renders
+    // the exact class combination you need") — against the real compiled CSS, not
+    // hand-duplicated values. Run `npm run build` in apps/web before running this test.
+    await renderCssFixture(
+      page,
+      '<div class="hr" data-testid="fixture-hr"></div>' +
+        '<table class="table"><tbody><tr><td data-testid="fixture-td">cell</td></tr></tbody></table>',
+    );
+
+    const hr = page.getByTestId('fixture-hr');
+    const hrBox = await measureBox(hr);
+    // 11.2px is --space-4 on the current 2.8px scale; #2169's retokening moves it to 16px.
+    expect(
+      hrBox.marginTop,
+      '.hr margin-top must equal --space-4 (11.2px on the current 2.8px scale) today — see the comment above before changing this value',
+    ).toBe('11.2px');
+
+    const td = page.getByTestId('fixture-td');
+    const tdBox = await measureBox(td);
+    // 5.6px is --space-2 on the current 2.8px scale; #2169's retokening moves it to 8px.
+    expect(
+      tdBox.paddingTop,
+      '.table td padding must equal --space-2 (5.6px on the current 2.8px scale) today — see the comment above before changing this value',
+    ).toBe('5.6px');
   });
 });
