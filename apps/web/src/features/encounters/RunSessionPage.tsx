@@ -55,7 +55,7 @@ import { detectSseTurnBeat, isStaleTurnBeatFrame, previousTurnBeatForFrame, shou
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { useCampaign } from '../../app/CampaignContext';
+import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
@@ -854,6 +854,7 @@ export default function RunSessionPage() {
   const canDmWriteRef = useRef(canDmWrite);
   canDmWriteRef.current = canDmWrite;
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
+  const { refresh: refreshCampaigns } = useCampaigns();
   const announce = useAnnounce();
   // #599/#1933: mirrors the server's assertNoSafetyHold rejection on start/nextTurn/
   // undoTurn/endTurn as a GatedControl reason — no server or authorization change, just
@@ -1921,6 +1922,13 @@ export default function RunSessionPage() {
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
+        // Campaign-owned condition definitions are part of the context snapshot,
+        // not the encounter read. A REST or MCP campaign update therefore needs
+        // its own thin signal so an open picker receives the new vocabulary.
+        if (event.type === 'campaign.updated') {
+          void refreshCampaigns();
+          return;
+        }
         if (event.type === 'party.rest.updated') {
           // This one event represents the whole atomic recovery batch. Linked
           // encounter rows emit their own post-commit encounter.updated frame.
@@ -2079,7 +2087,7 @@ export default function RunSessionPage() {
         // to satisfy "after the encounter.updated-driven refetch (or within one poll cycle)".
         void queryClient.invalidateQueries({ queryKey: queryKeys.encounterEvents(eid) });
       },
-      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, encounter?.turnVersion, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership],
+      [eid, cid, navigate, queryClient, addPing, encounter?.combatants, encounter?.turnVersion, characters, charactersQuery.data, charactersQuery.isFetching, me?.user.id, triggerOwnedTurnFeedback, invalidateCampaignCharactersForOwnership, refreshCampaigns],
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {

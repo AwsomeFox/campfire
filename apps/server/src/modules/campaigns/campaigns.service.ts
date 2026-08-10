@@ -1265,6 +1265,7 @@ export class CampaignsService {
       if (statusChanging) {
         await this.recordStatusTransition(id, existing.status, 'active', statusChangeReason ?? '', user);
       }
+      this.events.emit({ type: 'campaign.updated', campaignId: id });
       return toDomain(updatedRow);
     }
 
@@ -1361,6 +1362,7 @@ export class CampaignsService {
       if (statusChanging) {
         await this.recordStatusTransition(id, existing.status, input.status!, statusChangeReason ?? '', user);
       }
+      this.events.emit({ type: 'campaign.updated', campaignId: id });
       return toDomain(row);
     }
 
@@ -1501,8 +1503,10 @@ export class CampaignsService {
     if (archiving) {
       await this.invites.suspendForCampaign(id, user, 'archive');
       const [fresh] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
+      this.events.emit({ type: 'campaign.updated', campaignId: id });
       return toDomain(fresh ?? updatedRow);
     }
+    this.events.emit({ type: 'campaign.updated', campaignId: id });
     return toDomain(updatedRow);
   }
 

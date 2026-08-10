@@ -5225,14 +5225,6 @@ export class EncountersService {
       }
     }
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
-    const [campaign] = await this.db
-      .select({ conditionDefinitions: campaigns.conditionDefinitions })
-      .from(campaigns)
-      .where(eq(campaigns.id, encounterRow.campaignId))
-      .limit(1);
-    const campaignConditionNames = CampaignConditionDefinitions.catch([])
-      .parse(fromJsonText<unknown>(campaign?.conditionDefinitions ?? null, []))
-      .map((definition) => definition.name);
     // Issue #1670: the SAME lookup the character sheet's adjustConditionLevel uses
     // (characters.service.ts), not a second constant or a duplicated cap — that
     // duplication is exactly what let this drift in the first place. `undefined` for
@@ -5281,13 +5273,26 @@ export class EncountersService {
         ...(patch.updateConditionInstance ? [patch.updateConditionInstance.name] : []),
         ...(patch.conditionInstances?.map((instance) => instance.name) ?? []),
       ];
-      const vocabulary = [...adapter.conditions, ...campaignConditionNames];
-      const unknown = conditionNames.filter((c) => !isKnownCondition(vocabulary, c));
-      if (unknown.length > 0) {
-        throw new BadRequestException(
-          `Unknown condition(s) for this campaign: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
-            'Players may only add conditions from the active rule vocabulary or the campaign definitions; the DM may mint custom entries.',
-        );
+      // Most player patches (HP, token movement, or condition removal) do not
+      // introduce a condition name. Avoid a campaign read unless this patch needs
+      // the homebrew vocabulary to authorize a new or replacement condition.
+      if (conditionNames.length > 0) {
+        const [campaign] = await this.db
+          .select({ conditionDefinitions: campaigns.conditionDefinitions })
+          .from(campaigns)
+          .where(eq(campaigns.id, encounterRow.campaignId))
+          .limit(1);
+        const campaignConditionNames = CampaignConditionDefinitions.catch([])
+          .parse(fromJsonText<unknown>(campaign?.conditionDefinitions ?? null, []))
+          .map((definition) => definition.name);
+        const vocabulary = [...adapter.conditions, ...campaignConditionNames];
+        const unknown = conditionNames.filter((c) => !isKnownCondition(vocabulary, c));
+        if (unknown.length > 0) {
+          throw new BadRequestException(
+            `Unknown condition(s) for this campaign: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
+              'Players may only add conditions from the active rule vocabulary or the campaign definitions; the DM may mint custom entries.',
+          );
+        }
       }
     }
 

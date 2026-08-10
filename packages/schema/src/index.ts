@@ -252,10 +252,12 @@ export const CampaignConditionDefinition = z.object({
   // Keep this aligned with the legacy derived `combatant.conditions` projection,
   // whose strings are capped at 40 characters.
   name: z.string().trim().min(1).max(40),
-  durationRounds: z.number().int().nonnegative().nullable().default(null),
+  // A duration of zero has no meaningful application: the picker treats a duration
+  // as a positive number of rounds and otherwise uses null for "until removed".
+  durationRounds: z.number().int().positive().nullable().default(null),
   timing: EffectTiming.default('none'),
   saveTiming: EffectTiming.default('none'),
-  saveDc: z.number().int().nullable().default(null),
+  saveDc: z.number().int().positive().nullable().default(null),
   saveAbility: z.string().max(24).nullable().default(null),
   isConcentration: z.boolean().default(false),
   stacks: z.number().int().min(1).max(99).default(1),
@@ -12673,6 +12675,9 @@ export const CampaignEventType = z.enum([
   // Issue #1899: shared dice roll feed tick. Thin id-only variant so connected clients can
   // refetch the roll log and trigger spectator animations without carrying faces on wire.
   'dice.rolled',
+  // Campaign metadata changed. Deliberately id-only: subscribers refetch the
+  // permission-checked campaign projection rather than receiving its contents.
+  'campaign.updated',
   // Issue #867: campaign moved to Trash. SSE controllers tear down EVERY open
   // stream on the campaign (control signal — filtered from the data path like
   // membership.revoked). A reconnect hits requireMember and 404s.
@@ -12727,6 +12732,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     // HP/condition/spell-slot mirror, `adjustCombatantResource`), so the client can
     // invalidate `campaignCharacters` precisely instead of on every encounter update.
     sheetMirrored: z.boolean().optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    // Thin invalidation for an open campaign context (including the run-session
+    // condition picker). Campaign data is always re-read through the normal
+    // role-scoped endpoint.
+    type: z.literal('campaign.updated'),
+    campaignId: Id,
     at: IsoDate,
   }),
   z.object({
