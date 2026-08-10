@@ -1605,6 +1605,9 @@ export const encounters = sqliteTable('encounters', {
   // Hex orientation (issue #467): 'pointy' | 'flat'. Default pointy matches legacy overlay.
   hexOrientation: text('hex_orientation').notNull().default('pointy'),
   aoe: text('aoe'),
+  // Persistent map icons/set pieces (issue #1308) — JSON MapObject[] blob (null = []).
+  // Added by migration 0186_encounters_map_objects_1308 on older DBs.
+  mapObjects: text('map_objects'),
   // Grid calibration (issue #417) — align the overlay to a map's printed grid. All in
   // percent-of-map-width units; defaults reproduce the pre-#417 top-left square grid.
   // Added by migration on older DBs (see db/db.module.ts migrateEncountersTableForGridCalibration).

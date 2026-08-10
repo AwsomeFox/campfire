@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, CombatantStatblock, CreatureCheckRollRequest, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantReorderRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, CombatantStatblock, CreatureCheckRollRequest, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantReorderRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapObjectCreate, MapObjectUpdate, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 export class QuickRollRequestDto extends createZodDto(QuickRollRequest.strict()) {}
@@ -70,6 +70,12 @@ export class MapPingDto extends createZodDto(MapPing.strict()) {}
 // attribution is stamped from the authenticated request inside EncountersService.
 export class AoeTemplateDeclareDto extends createZodDto(AoeTemplateDeclare) {}
 export class AoeTemplateUpdateDto extends createZodDto(AoeTemplateUpdate) {}
+// Persistent map icons/set pieces (issue #1308) — DM-only, so unlike AoE there is no
+// attribution field to exclude. Both shapes are already `.strict()` at their schema
+// definition (see @campfire/schema), matching AoeTemplateDeclare/AoeTemplateUpdate's own
+// convention of not re-applying `.strict()` here.
+export class MapObjectCreateDto extends createZodDto(MapObjectCreate) {}
+export class MapObjectUpdateDto extends createZodDto(MapObjectUpdate) {}
 // Issue #466: reopen may carry per-character HP resync directions when the sheet
 // advanced after the previous /end.
 export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {}

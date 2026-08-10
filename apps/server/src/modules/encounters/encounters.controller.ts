@@ -7,7 +7,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, CreatureCheckRollDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantReorderDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, CreatureCheckRollDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantReorderDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapObjectCreateDto, MapObjectUpdateDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -593,6 +593,52 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
     return this.encounters.removeAoeTemplate(id, templateId, user, role);
+  }
+
+  @Post(':id/map-objects')
+  @ApiOperation({
+    summary: 'Place a map object',
+    description: 'DM only: place a persistent icon/set piece on the battle map. dmOnly objects never reach a non-DM read (issue #1308).',
+  })
+  @ApiResponse({ status: 201, description: 'Placed object.' })
+  async placeMapObject(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: MapObjectCreateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    // Same 404-before-403 ordering as declareAoeTemplate: a hidden encounter must read
+    // identically to a nonexistent one for a non-DM before the DM-only check ever runs.
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.placeMapObject(id, body, user, role);
+  }
+
+  @Patch(':id/map-objects/:objectId')
+  @ApiOperation({ summary: 'Update a map object', description: 'DM only: move, relabel, re-icon, or flip dmOnly on an existing map object.' })
+  @ApiResponse({ status: 200, description: 'Updated object.' })
+  async updateMapObject(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('objectId') objectId: string,
+    @Body() body: MapObjectUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.updateMapObject(id, objectId, body, user, role);
+  }
+
+  @Delete(':id/map-objects/:objectId')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Remove a map object', description: 'DM only: delete a placed icon/set piece.' })
+  @ApiResponse({ status: 200, description: 'Removed object.' })
+  async removeMapObject(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('objectId') objectId: string,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.removeMapObject(id, objectId, user, role);
   }
 
   @Get(':id/events')

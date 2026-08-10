@@ -3,14 +3,14 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CampaignConditionDefinitions, CheckRollRequest, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, creatureCheckCatalogForAdapter, checkRollExpr, formatCheckBreakdown, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CampaignConditionDefinitions, CheckRollRequest, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, MapObject, MapObjectCreate, MapObjectUpdate, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, creatureCheckCatalogForAdapter, checkRollExpr, formatCheckBreakdown, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, filterMapObjectsForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
   // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
   // the turn tick, the same pure math the resolver uses so this service can never decide a
   // pool recharges differently than an apply/reject message described it.
   parseRechargeRange,
   effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, CheckRollResponse, CreatureCheckCatalogInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollCheckDefinition, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, CheckRollResponse, CreatureCheckCatalogInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapObject as MapObjectType, MapPing, MonsterHpDisplay, Role, RollCheckDefinition, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaignMembers, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -282,6 +282,31 @@ function parseAoeForScopedWrite(text: string | null): AoeTemplateType[] {
   return parsed.data;
 }
 
+/**
+ * Parse the stored map-objects JSON back into a MapObject[] (issue #1308). Same defensive
+ * degrade-to-empty as parseAoe: corrupt/legacy text or any invalid entry makes the stored
+ * list unreadable rather than failing the whole encounter read.
+ */
+function parseMapObjects(text: string | null): MapObjectType[] {
+  if (text == null) return [];
+  const parsed = zod.array(MapObject).safeParse(fromJsonText<unknown>(text, null));
+  return parsed.success ? parsed.data : [];
+}
+
+/**
+ * Scoped map-object writes must never persist parseMapObjects's read-time degraded value
+ * — same reasoning as parseAoeForScopedWrite: one malformed saved entry must not turn a
+ * single place/move/delete into a destructive rewrite of the whole list.
+ */
+function parseMapObjectsForScopedWrite(text: string | null): MapObjectType[] {
+  if (text == null) return [];
+  const parsed = zod.array(MapObject).safeParse(fromJsonText<unknown>(text, null));
+  if (!parsed.success) {
+    throw new ConflictException('Encounter map objects contain invalid saved data and must be repaired before they can be changed');
+  }
+  return parsed.data;
+}
+
 function parseCombatantStatblock(text: string | null): CombatantStatblock | null {
   if (text == null) return null;
   const parsed = CombatantStatblock.safeParse(fromJsonText(text, null));
@@ -453,6 +478,7 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     gridOpacity: row.gridOpacity ?? 0.35,
     fog: parseFog(row.fog),
     aoe: parseAoe(row.aoe),
+    mapObjects: parseMapObjects(row.mapObjects),
     hidden: row.hidden,
     // Monster-HP display dial (issue #1925). Readable by every viewer — DM and player
     // alike — so a player's client knows whether to expect a number, a band, or
@@ -1997,9 +2023,15 @@ export class EncountersService {
     const aoe = viewerRole !== undefined && viewerRole !== 'dm'
       ? this.filterAoeTemplatesForViewer(this.db, row, withLinks.aoe ?? [], viewerUserId)
       : withLinks.aoe ?? [];
+    // Issue #1308: a `dmOnly` map object must not reach a non-DM response at all —
+    // coordinates or existence. filterMapObjectsForViewer drops it wholesale rather than
+    // nulling coordinates (there is no fog cross-check here, unlike AoE templates above;
+    // see that function's own doc for why a static per-object flag is the whole gate).
+    const mapObjects = filterMapObjectsForViewer(withLinks.mapObjects ?? [], viewerRole);
     return {
       ...withLinks,
       aoe,
+      mapObjects,
       combatants: list,
       ...(hpSyncConflicts && hpSyncConflicts.length > 0 ? { hpSyncConflicts } : {}),
     };
@@ -2818,6 +2850,158 @@ export class EncountersService {
       entityId: encounterId,
       campaignId: encounter.campaignId,
       detail: templateId,
+    });
+    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    return { ok: true };
+  }
+
+  /**
+   * DM-only write gate for map objects (issue #1308). Unlike AoE templates there is no
+   * player-declare branch — the issue's whole feature is DM prep, so any non-DM write is
+   * simply forbidden once the encounter itself is visible. The hidden check still runs
+   * FIRST so a non-DM gets the same 404-not-403 a hidden encounter gives everywhere else
+   * (issue #869) rather than leaking its existence through a 403.
+   */
+  private assertMapObjectWriteAccess(encounter: typeof encounters.$inferSelect, role: Role): void {
+    if (!isVisibleTo({ hidden: encounter.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounter.id} not found`);
+    }
+    if (role !== 'dm') {
+      throw new ForbiddenException('Only the DM may place, move, label, or delete map objects.');
+    }
+  }
+
+  /**
+   * Place a new map object (issue #1308) — REST's create-only POST and MCP's
+   * `place_map_object` both land here. `id` is caller-supplied (mirrors `AoeTemplate.id`)
+   * so a client/AI caller can reference the object again (move, label, delete) without a
+   * round trip to learn a server-generated id first.
+   */
+  async placeMapObject(encounterId: number, input: unknown, user: RequestUser, role: Role): Promise<MapObjectType> {
+    const create = MapObjectCreate.parse(input);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertMapObjectWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseMapObjectsForScopedWrite(fresh.mapObjects);
+      if (current.some((o) => o.id === create.id)) {
+        throw new ConflictException(`Map object ${create.id} already exists`);
+      }
+      if (current.length >= 200) {
+        throw new ConflictException('An encounter may have at most 200 map objects');
+      }
+      current.push(create);
+      tx.update(encounters)
+        .set({ mapObjects: toJsonText(current), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+    });
+
+    const encounter = emittedEncounter!;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.map_object.place',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounter.campaignId,
+      detail: create.id,
+    });
+    this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    return create;
+  }
+
+  /** Move, relabel, re-icon, or flip the dmOnly flag on an existing map object (issue #1308). */
+  async updateMapObject(
+    encounterId: number,
+    objectId: string,
+    input: unknown,
+    user: RequestUser,
+    role: Role,
+  ): Promise<MapObjectType> {
+    MapObject.shape.id.parse(objectId);
+    const patch = MapObjectUpdate.parse(input);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+    let updated: MapObjectType | undefined;
+    let changed = false;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertMapObjectWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseMapObjectsForScopedWrite(fresh.mapObjects);
+      const index = current.findIndex((o) => o.id === objectId);
+      if (index < 0) throw new NotFoundException(`Map object ${objectId} not found`);
+      const existing = current[index];
+      updated = MapObject.parse({ ...existing, ...patch });
+      if (isDeepStrictEqual(updated, existing)) {
+        emittedEncounter = fresh;
+        return;
+      }
+      current[index] = updated;
+      tx.update(encounters)
+        .set({ mapObjects: toJsonText(current), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+      changed = true;
+    });
+
+    if (changed) {
+      const encounter = emittedEncounter!;
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.map_object.update',
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounter.campaignId,
+        detail: objectId,
+      });
+      this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
+    }
+    return updated!;
+  }
+
+  /** Remove a map object (issue #1308). DM-only, same lifecycle/secrecy gates as place/update. */
+  async removeMapObject(encounterId: number, objectId: string, user: RequestUser, role: Role): Promise<{ ok: true }> {
+    MapObject.shape.id.parse(objectId);
+    let emittedEncounter: typeof encounters.$inferSelect | undefined;
+
+    this.db.transaction((tx) => {
+      const fresh = tx.select().from(encounters).where(eq(encounters.id, encounterId)).get();
+      if (!fresh) throw new NotFoundException(`Encounter ${encounterId} not found`);
+      this.assertMapObjectWriteAccess(fresh, role);
+      this.assertCampaignWritableInTx(tx, fresh.campaignId);
+      this.assertMutable(fresh);
+
+      const current = parseMapObjectsForScopedWrite(fresh.mapObjects);
+      if (!current.some((o) => o.id === objectId)) throw new NotFoundException(`Map object ${objectId} not found`);
+      tx.update(encounters)
+        .set({ mapObjects: toJsonText(current.filter((o) => o.id !== objectId)), updatedAt: nextUpdatedAt(fresh.updatedAt) })
+        .where(eq(encounters.id, encounterId))
+        .run();
+      emittedEncounter = fresh;
+    });
+
+    const encounter = emittedEncounter!;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.map_object.remove',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounter.campaignId,
+      detail: objectId,
     });
     this.emitEncounterEvent('encounter.updated', encounter.campaignId, encounterId, encounter.hidden);
     return { ok: true };

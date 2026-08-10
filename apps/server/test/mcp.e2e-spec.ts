@@ -1488,6 +1488,59 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     ).toEqual({ ok: true });
   });
 
+  it('place_map_object / update_map_object / remove_map_object are DM-only, share REST lifecycle semantics, and dmOnly matches REST redaction (issue #1308)', async () => {
+    const client = await mcpClient(dmToken);
+    const encounter = parseResult(
+      await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP Set Pieces', hidden: false } }),
+    ) as { id: number };
+
+    const placed = parseResult(
+      await client.callTool({
+        name: 'place_map_object',
+        arguments: { encounterId: encounter.id, id: 'mcp-chest', label: 'MCP chest', iconSlug: 'chest', x: 20, y: 30, dmOnly: true },
+      }),
+    ) as { id: string; x: number; dmOnly: boolean };
+    expect(placed).toMatchObject({ id: 'mcp-chest', x: 20, dmOnly: true });
+
+    const moved = parseResult(
+      await client.callTool({ name: 'update_map_object', arguments: { encounterId: encounter.id, objectId: 'mcp-chest', x: 60, dmOnly: false } }),
+    ) as { id: string; x: number; dmOnly: boolean };
+    expect(moved).toMatchObject({ id: 'mcp-chest', x: 60, dmOnly: false });
+
+    // Same REST/MCP-parity assertion the AoE test above makes: reads agree across surfaces.
+    const mcpEncounter = parseResult(await client.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } })) as {
+      mapObjects: Array<{ id: string; x: number }>;
+    };
+    const restEncounter = await dmAgent.get(`/api/v1/encounters/${encounter.id}`);
+    expect(mcpEncounter.mapObjects).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'mcp-chest', x: 60 })]));
+    expect(restEncounter.body.mapObjects).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'mcp-chest', x: 60 })]));
+
+    const actions = (await ctx.app.get<DrizzleDb>(DB).select().from(auditLog).where(eq(auditLog.entityId, encounter.id)))
+      .map((row) => row.action)
+      .filter((action) => action.startsWith('encounter.map_object.'));
+    expect(actions).toEqual(['encounter.map_object.place', 'encounter.map_object.update']);
+
+    // DM-only — no player/viewer branch exists for map objects (unlike AoE templates).
+    const viewerClient = await mcpClient(viewerToken);
+    const viewerAttempt = await viewerClient.callTool({
+      name: 'place_map_object',
+      arguments: { encounterId: encounter.id, id: 'viewer-chest', label: 'nope', iconSlug: 'chest', x: 10, y: 10, dmOnly: false },
+    });
+    expect(viewerAttempt.isError).toBe(true);
+    expect(parseResult(viewerAttempt)).toMatchObject({ error: { status: 403 } });
+
+    const missingUpdate = await client.callTool({
+      name: 'update_map_object',
+      arguments: { encounterId: encounter.id, objectId: 'no-such-object', x: 10 },
+    });
+    expect(missingUpdate.isError).toBe(true);
+    expect(parseResult(missingUpdate)).toMatchObject({ error: { status: 404 } });
+
+    expect(
+      parseResult(await client.callTool({ name: 'remove_map_object', arguments: { encounterId: encounter.id, objectId: 'mcp-chest' } })),
+    ).toEqual({ ok: true });
+  });
+
   it('ping_map mirrors REST: stamped sender + label/color, viewer 403, hidden 404/no-fan-out (issue #1937)', async () => {
     const dmClient = await mcpClient(dmToken);
     const encounter = parseResult(

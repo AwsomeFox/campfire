@@ -11773,3 +11773,177 @@ describe('encounters — issue #2084: manualOrder records only the DM\'s crossed
     expect(afterRow[0]!.manualOrder).toBeNull();
   });
 });
+
+// Issue #1308 — persistent map icons/set pieces. Own campaign so nothing else pollutes
+// the fixtures. The secrecy assertions here are the coordinator's stated priority: a
+// dmOnly object must be ABSENT from a non-DM GET, not merely coordinate-redacted like a
+// fogged token — every assertion below checks for the object's total absence, not a
+// null field on a stub.
+describe('encounters — issue #1308: map objects (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+
+  const chest = { id: 'chest-1', label: 'Trapped chest', iconSlug: 'chest', x: 20, y: 30, dmOnly: false };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Map Objects Campaign' })).body.id;
+    encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Set Piece Fight', hidden: false })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('DM places, moves, labels, and deletes an object; every write is audited and broadcast', async () => {
+    const server = ctx.app.getHttpServer();
+    const broadcasts: Array<{ type: string; encounterId?: number }> = [];
+    const subscription = ctx.app
+      .get(CampaignEventsService)
+      .streamFor(campaignId)
+      .subscribe((event) => broadcasts.push(event));
+
+    try {
+      const placed = await request(server).post(`/api/v1/encounters/${encounterId}/map-objects`).set(dm).send(chest);
+      expect(placed.status).toBe(201);
+      expect(placed.body).toMatchObject(chest);
+
+      // Persists across a fresh GET (issue #1308 acceptance criterion — "place object ->
+      // reload -> object still visible to DM").
+      const afterPlace = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      expect(afterPlace.body.mapObjects).toEqual([chest]);
+
+      // Move + relabel in one PATCH.
+      const moved = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/map-objects/chest-1`)
+        .set(dm)
+        .send({ x: 60, y: 70, label: 'Empty chest (looted)' });
+      expect(moved.status).toBe(200);
+      expect(moved.body).toMatchObject({ id: 'chest-1', x: 60, y: 70, label: 'Empty chest (looted)', iconSlug: 'chest', dmOnly: false });
+
+      const afterMove = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      expect(afterMove.body.mapObjects).toEqual([{ ...chest, x: 60, y: 70, label: 'Empty chest (looted)' }]);
+
+      const removed = await request(server).delete(`/api/v1/encounters/${encounterId}/map-objects/chest-1`).set(dm);
+      expect(removed.status).toBe(200);
+      expect(removed.body).toEqual({ ok: true });
+
+      const afterRemove = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      expect(afterRemove.body.mapObjects).toEqual([]);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const actions = (await db.select().from(auditLog).where(eq(auditLog.entityId, encounterId)).orderBy(asc(auditLog.id)))
+        .filter((row) => row.action.startsWith('encounter.map_object.'));
+      expect(actions.map((row) => row.action)).toEqual([
+        'encounter.map_object.place',
+        'encounter.map_object.update',
+        'encounter.map_object.remove',
+      ]);
+      // Real actor identity, not a generic "system" stamp (AGENTS.md: audit every domain
+      // write with the real actor or token identity).
+      expect(actions.every((row) => row.actor === 'dev:dm-1')).toBe(true);
+      expect(broadcasts.filter((event) => event.type === 'encounter.updated' && event.encounterId === encounterId)).toHaveLength(3);
+    } finally {
+      subscription.unsubscribe();
+    }
+  });
+
+  it('a dmOnly object is wholly absent from a player or viewer GET — not coordinate-redacted', async () => {
+    const server = ctx.app.getHttpServer();
+    const visibleObj = { id: 'visible-marker', label: 'Quest marker', iconSlug: 'flag', x: 15, y: 15, dmOnly: false };
+    const secretObj = { id: 'secret-trap', label: 'Poison dart trap', iconSlug: 'trap', x: 85, y: 85, dmOnly: true };
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/map-objects`).set(dm).send(visibleObj)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/map-objects`).set(dm).send(secretObj)).status).toBe(201);
+
+    const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(dmRes.body.mapObjects.map((o: { id: string }) => o.id).sort()).toEqual(['secret-trap', 'visible-marker']);
+
+    const playerRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(playerRes.body.mapObjects).toEqual([visibleObj]);
+    // Not just id-absent: the WHOLE response body must carry no trace of the secret object —
+    // coordinates, label, or icon.
+    expect(JSON.stringify(playerRes.body)).not.toContain('secret-trap');
+    expect(JSON.stringify(playerRes.body)).not.toContain('Poison dart trap');
+
+    const viewerRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(viewer);
+    expect(viewerRes.body.mapObjects).toEqual([visibleObj]);
+
+    // Flipping dmOnly back to false on a live object reveals it on the very next player read.
+    const revealed = await request(server).patch(`/api/v1/encounters/${encounterId}/map-objects/secret-trap`).set(dm).send({ dmOnly: false });
+    expect(revealed.status).toBe(200);
+    const playerAfterReveal = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(playerAfterReveal.body.mapObjects.map((o: { id: string }) => o.id).sort()).toEqual(['secret-trap', 'visible-marker']);
+
+    await request(server).delete(`/api/v1/encounters/${encounterId}/map-objects/visible-marker`).set(dm);
+    await request(server).delete(`/api/v1/encounters/${encounterId}/map-objects/secret-trap`).set(dm);
+  });
+
+  it('only the DM may place, move, or delete — a player and a viewer both get 403 on a visible encounter', async () => {
+    const server = ctx.app.getHttpServer();
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/map-objects`).set(player).send(chest)).status).toBe(403);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/map-objects`).set(viewer).send(chest)).status).toBe(403);
+
+    const seeded = await request(server).post(`/api/v1/encounters/${encounterId}/map-objects`).set(dm).send(chest);
+    expect(seeded.status).toBe(201);
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}/map-objects/chest-1`).set(player).send({ x: 10 })).status).toBe(403);
+    expect((await request(server).delete(`/api/v1/encounters/${encounterId}/map-objects/chest-1`).set(player)).status).toBe(403);
+    await request(server).delete(`/api/v1/encounters/${encounterId}/map-objects/chest-1`).set(dm);
+  });
+
+  it('a hidden encounter is non-enumerating for a non-DM (404, matching every other encounter-scoped write)', async () => {
+    const server = ctx.app.getHttpServer();
+    const hiddenId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Hidden Set Pieces', hidden: true })
+    ).body.id;
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/map-objects`).set(player).send(chest)).status).toBe(404);
+    expect((await request(server).patch(`/api/v1/encounters/${hiddenId}/map-objects/missing`).set(player).send({ x: 10 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${hiddenId}/map-objects/missing`).set(player)).status).toBe(404);
+    // The DM itself still works normally on its own hidden prep encounter.
+    expect((await request(server).post(`/api/v1/encounters/${hiddenId}/map-objects`).set(dm).send(chest)).status).toBe(201);
+  });
+
+  it('an ended encounter is immutable for map objects (409), matching AoE/token writes', async () => {
+    const server = ctx.app.getHttpServer();
+    const endedId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ended Set Pieces', hidden: false })
+    ).body.id;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(encountersTable).set({ status: 'ended', endedAt: new Date().toISOString() }).where(eq(encountersTable.id, endedId));
+    expect((await request(server).post(`/api/v1/encounters/${endedId}/map-objects`).set(dm).send(chest)).status).toBe(409);
+  });
+
+  it('rejects a duplicate id (409) and a write against an unknown object id (404)', async () => {
+    const server = ctx.app.getHttpServer();
+    const fresh = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Dup Id Fight', hidden: false })
+    ).body.id;
+    expect((await request(server).post(`/api/v1/encounters/${fresh}/map-objects`).set(dm).send(chest)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${fresh}/map-objects`).set(dm).send(chest)).status).toBe(409);
+    expect((await request(server).patch(`/api/v1/encounters/${fresh}/map-objects/no-such-id`).set(dm).send({ x: 10 })).status).toBe(404);
+    expect((await request(server).delete(`/api/v1/encounters/${fresh}/map-objects/no-such-id`).set(dm)).status).toBe(404);
+  });
+
+  it('rejects an out-of-range coordinate and an empty iconSlug (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    const fresh = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Bad Coord Fight', hidden: false })
+    ).body.id;
+    expect((await request(server).post(`/api/v1/encounters/${fresh}/map-objects`).set(dm).send({ ...chest, x: 150 })).status).toBe(400);
+    expect((await request(server).post(`/api/v1/encounters/${fresh}/map-objects`).set(dm).send({ ...chest, iconSlug: '' })).status).toBe(400);
+  });
+
+  it('an archived campaign blocks map-object writes for the DM too (403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const archivable = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Archivable Set Piece Campaign' })).body.id;
+    const archivedEncounterId = (
+      await request(server).post(`/api/v1/campaigns/${archivable}/encounters`).set(dm).send({ name: 'Soon Archived', hidden: false })
+    ).body.id;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ status: 'archived' }).where(eq(campaigns.id, archivable));
+    expect((await request(server).post(`/api/v1/encounters/${archivedEncounterId}/map-objects`).set(dm).send(chest)).status).toBe(403);
+  });
+});

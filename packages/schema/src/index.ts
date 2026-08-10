@@ -10404,6 +10404,64 @@ export const MapPing = z.object({
 });
 export type MapPing = z.infer<typeof MapPing>;
 
+/**
+ * A persistent icon or set piece placed on a battle map (issue #1308) — a chest, trap,
+ * door, hazard, or quest marker that is not tied to a combatant. Same percent-of-map
+ * overlay model as a combatant token (`x`/`y` 0–100), and the same game-icons.net
+ * vocabulary already used for entity avatars (`GameIcon`/icon picker) rather than a new
+ * symbol system.
+ *
+ * `dmOnly` is the whole secrecy surface: a caller-chosen id (mirrors `AoeTemplate.id` —
+ * stable across an update/remove round trip without a server round trip to learn it) and
+ * a flag the SERVER enforces via {@link filterMapObjectsForViewer} — never the client. A
+ * DM-only object must not reach a non-DM response at all, coordinates included; see that
+ * function's own doc for why this is a wholesale drop, not a coordinate null-out.
+ *
+ * Deliberately no `sizePct`/resize field this pass: the issue's acceptance criteria list
+ * place/move/label/delete, not resize, and a fixed render size keeps this slice's surface
+ * area matched to what's actually required. Also deliberately no fog interaction — unlike
+ * `AoeTemplate`, an object's visibility is the static `dmOnly` flag alone, not cross-checked
+ * against revealed fog regions; folding fog in is a natural follow-up once this lands.
+ */
+export const MapObject = z.object({
+  id: z.string().min(1).max(40),
+  label: z.string().max(200).default(''),
+  iconSlug: z.string().min(1).max(80),
+  x: z.number().min(0).max(100),
+  y: z.number().min(0).max(100),
+  dmOnly: z.boolean().default(false),
+});
+export type MapObject = z.infer<typeof MapObject>;
+
+/** A caller-supplied new object. `.strict()` — every field on a placement is caller-owned (no server-attributed field to protect, unlike `AoeTemplateDeclare`). */
+export const MapObjectCreate = MapObject.strict();
+export type MapObjectCreate = z.infer<typeof MapObjectCreate>;
+
+/** Fields a DM may change on an existing map object. Omitted keys are left unchanged (matches `AoeTemplateUpdate`'s partial-patch convention). */
+export const MapObjectUpdate = z.object({
+  label: z.string().max(200).optional(),
+  iconSlug: z.string().min(1).max(80).optional(),
+  x: z.number().min(0).max(100).optional(),
+  y: z.number().min(0).max(100).optional(),
+  dmOnly: z.boolean().optional(),
+}).strict();
+export type MapObjectUpdate = z.infer<typeof MapObjectUpdate>;
+
+/**
+ * The server's one map-object visibility computation (issue #1308) — every non-DM read
+ * (REST `GET /encounters/:id`, MCP `get_encounter`, exports) must call this rather than
+ * filtering ad hoc, so a `dmOnly` object is dropped WHOLESALE (not coordinate-nulled like
+ * a fogged token) for anyone who isn't the DM. Existence, label, and icon are as secret as
+ * position: a coordinate-only redaction would still tell a player "the DM placed something
+ * here," which is exactly the leak `dmOnly` exists to prevent. `role === undefined` is the
+ * DM-facing internal-caller convention used across this module (exports, scribe) — see
+ * `RollsService.listForCampaign`'s own doc for the same convention.
+ */
+export function filterMapObjectsForViewer(objects: readonly MapObject[], role: Role | undefined): MapObject[] {
+  if (role === undefined || role === 'dm') return [...objects];
+  return objects.filter((o) => !o.dmOnly);
+}
+
 export const Encounter = z.object({
   id: Id,
   campaignId: Id,
@@ -10483,6 +10541,10 @@ export const Encounter = z.object({
   // Shared AoE templates (issue #238) — circle/cone/line shapes every client sees, unlike the
   // original client-local circle. Empty by default; capped so the JSON blob stays bounded.
   aoe: z.array(AoeTemplate).max(50).default([]),
+  // Persistent map icons/set pieces (issue #1308) — chests, traps, doors, quest markers.
+  // Already redacted by `filterMapObjectsForViewer` before this reaches a non-DM response
+  // (see `EncountersService.getWithCombatantsOrThrow`); a DM-facing read sees every object.
+  mapObjects: z.array(MapObject).max(200).default([]),
   // Entity-level secrecy (issue #262) — see Quest.hidden. A hidden encounter is a
   // DM's prepared (not-yet-sprung) fight: its combatant roster (Ancient Red Dragon ×3)
   // and computed 5e difficulty stay DM-only, and the encounter is dropped WHOLESALE

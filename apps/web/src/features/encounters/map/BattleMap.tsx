@@ -51,6 +51,7 @@ import {
 } from '../tokenStateBadges';
 import { UI_ICON_SIZE } from '../../../lib/uiIcons';
 import { GridOverlay } from './GridOverlay';
+import { MapObjectsOverlay } from './MapObjectsOverlay';
 export const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
 
 /** Measure an element's rendered pixel box, tracking resizes — used for square grid cells + the ruler. */
@@ -3095,6 +3096,12 @@ export const BattleMap = memo(function BattleMap({
                   opacity={gridOverlayOpacity}
                   encounterId={encounter.id}
                 />
+
+                {/* Persistent map icons/set pieces (issue #1308) — read-only; place/move/label/
+                    delete happen through the "Set pieces" DM panel, not by dragging this layer.
+                    `encounter.mapObjects` is already server-redacted (a dmOnly object is dropped
+                    wholesale for a non-DM before this component ever sees it). */}
+                <MapObjectsOverlay mapObjects={encounter.mapObjects} mapRect={mapRect} />
 
                 {/* Calibration anchors (issue #417) — DM-only, only in the Calibrate tool.
                     Drag the origin anchor to a corner of the map's printed grid, then drag the

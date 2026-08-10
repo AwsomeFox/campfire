@@ -255,6 +255,23 @@
         "overSpeed": "تجاوز السرعة",
         "movedMessage": "تحرك {{feet}} {{unit}}.",
         "undoneMessage": "تم التراجع عن الحركة."
+      },
+      "objects": {
+        "title": "القطع الثابتة",
+        "empty": "لم توضع أي قطع ثابتة بعد.",
+        "chooseIcon": "اختر أيقونة",
+        "labelField": "التسمية",
+        "labelPlaceholder": "التسمية (مثال: صندوق مفخخ)",
+        "xField": "X %",
+        "yField": "Y %",
+        "dmOnly": "لمدير اللعبة فقط",
+        "add": "إضافة",
+        "placing": "جارٍ الوضع…",
+        "placed": "تم وضع {{label}}",
+        "placeError": "تعذر وضع العنصر.",
+        "updateError": "تعذر تحديث العنصر.",
+        "removed": "تمت إزالة {{label}}",
+        "removeError": "تعذرت إزالة العنصر."
       }
     },
     "workspace": {
