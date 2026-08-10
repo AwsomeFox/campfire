@@ -6712,7 +6712,9 @@ export const PF2E_DAMAGE_TYPES = [
  * AND slashing, so a slashing Strike lands on the resistance. "all damage" fans out to every
  * type. The members are intersected with the adapter's own {@link damageTypes} at parse time,
  * so this map stays the source of truth for what a category MEANS regardless of the caller's
- * vocabulary. Keys are matched case-insensitively (the parser lowercases first).
+ * vocabulary. Statblock TOKENS are matched case-insensitively — the parser lowercases the
+ * token before lookup — so this map's KEYS must be lowercase to match: a capitalized key like
+ * `Physical` would never be hit, because the lookup runs against the already-lowercased token.
  */
 export const PF2E_DAMAGE_TYPE_CATEGORIES: Readonly<Record<string, readonly string[]>> = {
   physical: ['bludgeoning', 'piercing', 'slashing'],
