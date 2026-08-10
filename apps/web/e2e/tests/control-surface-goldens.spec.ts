@@ -30,13 +30,14 @@ const NARROW_VIEWPORT = { width: 390, height: 844 };
  * - `character-sheet-tabs` — the character sheet's control column (`.seg-opt`, the exact
  *   class #1693 gave a WCAG floor to), captured at both desktop and a phone viewport since
  *   density problems show up first where space is tight.
- * - `encounter-vtt-title` (added for issue #1688) — the encounter cockpit's persistent
- *   header title region (`EncounterVttShell.tsx`'s `.cf-vtt-header`/`.cf-vtt-title`), added
- *   after re-measuring #1688 found the VTT cockpit shell is now the single largest
- *   concentration of direct `var(--space-N)` consumers in the app (~40 of ~85 total) and had
- *   zero prior golden coverage. Scoped to the title sub-region rather than the whole header
- *   to avoid the header's live sync-status chip and turn-timer as flake sources — see that
- *   test's own comment for what is and is not covered.
+ * - `encounter cockpit header` (added for issue #1688) — NOT a screenshot, a computed-style
+ *   pin. The encounter cockpit's persistent header (`EncounterVttShell.tsx`'s
+ *   `.cf-vtt-header`) is, after re-measuring #1688, the single largest concentration of
+ *   direct `var(--space-N)` consumers in the app (~40 of ~85 total) and had zero prior
+ *   coverage of any kind. A scoped screenshot was tried and dropped — see that test's own
+ *   comment for why — so this surface has a `measureBox` padding pin only. Issue #2167
+ *   tracks the still-open screenshot coverage for this and the app's other direct
+ *   `--space-*` consumers.
  *
  * Only one theme is captured: Campfire ships a single dark theme (see index.css's `@media
  * print` comment — "the app is intentionally optimized for an interactive dark UI") with no
@@ -121,13 +122,17 @@ test.describe('control surface goldens (#1694)', () => {
     // (EncounterVttShell.tsx, index.css's `.cf-vtt-*` block) has grown into the single
     // largest concentration of direct `var(--space-N)` consumers in the app — ~40 of the
     // ~85 current occurrences — and none of it was covered by any golden before this test.
-    // Scoped to the title region specifically, not the full header: the header also hosts
-    // a live sync-status chip and (for the DM, mid-turn) a turn-elapsed timer, both of
-    // which can legitimately change text between navigation and snapshot — a flake source
-    // unrelated to spacing. The title region (`.cf-vtt-title`, encounter name + status +
-    // difficulty badges) is fully deterministic once `restoreSeedEncounter()` has run and
-    // has no such moving parts, while still exercising the header's own --space-2/3/4
-    // padding and gap (measured directly below, not just photographed).
+    //
+    // NOT a screenshot (deliberately, not an oversight): a screenshot was attempted first,
+    // scoped to `.cf-vtt-title` to dodge the header's live sync-status chip and DM turn
+    // timer as flake sources. It failed in CI — the baseline had to be generated locally
+    // against a substitute Chromium build (this sandbox has no network path to the pinned
+    // revision), and CI's real browser rendered the title 2px narrower (551px vs 549px,
+    // ~11% of pixels differing), most likely a font-metrics difference between browser
+    // builds rather than anything related to spacing. Rather than commit a screenshot this
+    // environment cannot verify against the browser CI actually uses, this test keeps only
+    // the computed-style pin below — see issue #2167 for the still-open screenshot
+    // coverage of this and the remaining direct `--space-*` consumers.
     await restoreSeedEncounter();
     const { campaignId, encounterId } = seed();
     await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
@@ -142,18 +147,12 @@ test.describe('control surface goldens (#1694)', () => {
 
     // `.cf-vtt-header` is `padding: var(--space-2) var(--space-4); gap: var(--space-3)`
     // (index.css) — a direct consumer that would move under #1688's retokening path
-    // (5.6px -> 8px here). Pinned on the header itself (not the title sub-element) since
-    // padding is a static property of the container regardless of what its dynamic
-    // children render, so this assertion carries none of the flake risk the scoped
-    // screenshot below is avoiding.
+    // (5.6px -> 8px here). This is the check that actually matters for #1688's purposes:
+    // it reads a CSS value, not pixels, so it is unaffected by the browser-build issue
+    // above and would still catch the retokening even if a screenshot's tolerance had
+    // absorbed it.
     const headerBox = await measureBox(header);
     expect(headerBox.paddingTop, '.cf-vtt-header padding-top must equal --space-2 (5.6px) today').toBe('5.6px');
-
-    await expect(title).toHaveScreenshot('encounter-vtt-title.png', {
-      animations: 'disabled',
-      caret: 'hide',
-      maxDiffPixelRatio: 0.01,
-    });
   });
 
   test('character sheet control column (desktop)', async ({ page }) => {
