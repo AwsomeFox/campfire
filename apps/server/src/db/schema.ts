@@ -845,6 +845,47 @@ export const comments = sqliteTable('comments', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Issue #829 — per-user, per-thread discussion subscription + read state. One row
+// per (user, campaign, anchored entity). `watching` opts a member into notifications
+// for the thread; `muted` opts them out (and wins over watching); `last_read_comment_id`
+// is the read cursor that drives unread counts. entity_type/entity_id is the SAME
+// polymorphic soft reference `comments` uses (no single FK can cover it), and the
+// application-level campaign purge + entity-remove cleanup tear these rows down with
+// their thread (see CampaignsService.purge). campaign_id carries ON DELETE CASCADE
+// (declared in BOOTSTRAP_SQL); user_id is a plain INTEGER matching notifications/
+// api_tokens (no FK), so the cascade-test seed is not blocked by a synthetic user id.
+export const commentThreadState = sqliteTable(
+  'comment_thread_state',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    userId: integer('user_id').notNull(), // recipient users.id
+    entityType: text('entity_type').notNull(),
+    entityId: integer('entity_id').notNull(),
+    watching: integer('watching', { mode: 'boolean' }).notNull().default(false),
+    muted: integer('muted', { mode: 'boolean' }).notNull().default(false),
+    lastReadCommentId: integer('last_read_comment_id'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    // The single state row per (user, campaign, anchor); upserts key on this.
+    userCampaignAnchor: uniqueIndex('idx_comment_thread_state_user_campaign_anchor').on(
+      t.userId,
+      t.campaignId,
+      t.entityType,
+      t.entityId,
+    ),
+    // Fan-out ("who is watching this thread?") and the per-user inbox read.
+    campaignAnchor: index('idx_comment_thread_state_campaign_anchor').on(
+      t.campaignId,
+      t.entityType,
+      t.entityId,
+    ),
+    userCampaign: index('idx_comment_thread_state_user_campaign').on(t.userId, t.campaignId),
+  }),
+);
+
 // Prose revision history (issue #157) — one row per committed prose update, holding a
 // snapshot of the entity's PRIOR content so a blind last-write-wins overwrite can be
 // listed and restored. entity_type/entity_id is a polymorphic (soft) reference across

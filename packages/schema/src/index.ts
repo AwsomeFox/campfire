@@ -3388,6 +3388,110 @@ export const CommentReplyPage = z.object({
 });
 export type CommentReplyPage = z.infer<typeof CommentReplyPage>;
 
+// ---------- per-user comment thread state (issue #829) ----------
+// Explicit discussion subscription + read state. Before #829 a comment notified
+// only members who had ALREADY posted on the same thread, so a brand-new thread's
+// first post had zero recipients — an async/play-by-post scene could sit
+// undiscovered. #829 adds three per-member, per-thread knobs:
+//
+//   - `watching` opts the member INTO notifications for one anchored thread,
+//   - `muted`   opts them OUT (it wins over `watching`),
+//   - `lastReadCommentId` is the read cursor that drives unread counts.
+//
+// Auto-subscription rules (issue #829, deliberately bounded — never a campaign
+// broadcast): posting a comment subscribes the author/replier; a thread's FIRST
+// post reaches its intended audience — a `session` thread notifies that session's
+// attendees (their character owners) plus the campaign's facilitators (DMs), and
+// any other anchor notifies the facilitators — and subscribes that audience.
+// Mute is honored on both the auto-subscribe and the ongoing fan-out paths.
+// `lastReadCommentId` advances only on an explicit mark-read, so unread state is
+// retained across devices until the member actually reads the thread.
+export const CommentThreadState = z.object({
+  campaignId: Id,
+  entityType: EntityType,
+  entityId: Id,
+  watching: z.boolean().default(false),
+  muted: z.boolean().default(false),
+  // Highest comment id the member has read on this thread. Null until they first
+  // mark the thread read; unread = live comments with id > this cursor, excluding
+  // the member's own posts. Retained until an explicit mark-read advances it.
+  lastReadCommentId: Id.nullable().default(null),
+  unreadCount: z.number().int().nonnegative().default(0),
+  updatedAt: IsoDate.nullable().default(null),
+});
+export type CommentThreadState = z.infer<typeof CommentThreadState>;
+
+/** PUT body for the per-thread Watch/Mute controls (issue #829). */
+export const CommentThreadStateUpdate = z
+  .object({
+    entityType: EntityType,
+    entityId: Id,
+    watching: z.boolean().optional(),
+    muted: z.boolean().optional(),
+  })
+  .strict()
+  .refine((v) => v.watching !== undefined || v.muted !== undefined, {
+    message: 'Provide at least one of watching or muted',
+  });
+export type CommentThreadStateUpdate = z.infer<typeof CommentThreadStateUpdate>;
+
+/** POST body to advance the per-thread read cursor (issue #829). */
+export const CommentThreadMarkRead = z
+  .object({
+    entityType: EntityType,
+    entityId: Id,
+    // Advance the cursor to this comment id; omit (or null) to mark the thread
+    // read up to its latest visible live comment.
+    commentId: Id.nullable().optional(),
+  })
+  .strict();
+export type CommentThreadMarkRead = z.infer<typeof CommentThreadMarkRead>;
+
+/**
+ * One entry in the per-member unread summary (issue #829). Drives unread badges on
+ * session cards and the discussion inbox. `unreadCount` counts only comments on
+ * anchors the caller may see (hidden quest/npc/faction threads and unexplored
+ * locations are excluded) and excludes the member's own posts.
+ */
+export const CommentUnreadSummaryEntry = z.object({
+  entityType: EntityType,
+  entityId: Id,
+  watching: z.boolean().default(false),
+  muted: z.boolean().default(false),
+  unreadCount: z.number().int().nonnegative().default(0),
+  lastReadCommentId: Id.nullable().default(null),
+});
+export type CommentUnreadSummaryEntry = z.infer<typeof CommentUnreadSummaryEntry>;
+
+export const CommentUnreadSummary = z.object({
+  items: z.array(CommentUnreadSummaryEntry),
+});
+export type CommentUnreadSummary = z.infer<typeof CommentUnreadSummary>;
+
+/**
+ * One unread thread in the campaign-wide discussion inbox (issue #829). Sorted by
+ * `lastCommentAt` desc by the server. Deep-links via the standard comment entity
+ * link (see `entityHref`), which focuses the exact comment inside the thread.
+ */
+export const CommentInboxItem = z.object({
+  campaignId: Id,
+  entityType: EntityType,
+  entityId: Id,
+  // Resolved display name of the anchored entity (session title, quest name, …),
+  // resolved server-side at read time — null when the entity no longer exists.
+  entityName: z.string().max(300).nullable().default(null),
+  watching: z.boolean().default(false),
+  unreadCount: z.number().int().nonnegative().default(0),
+  lastCommentId: Id.nullable().default(null),
+  lastCommentAt: IsoDate.nullable().default(null),
+});
+export type CommentInboxItem = z.infer<typeof CommentInboxItem>;
+
+export const CommentInboxPage = z.object({
+  items: z.array(CommentInboxItem),
+});
+export type CommentInboxPage = z.infer<typeof CommentInboxPage>;
+
 // ---------- notifications (in-app) ----------
 // Per-user notification rows written by the server when something a member cares
 // about happens while they're not looking: a session recap is posted, someone

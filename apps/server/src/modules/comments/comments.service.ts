@@ -1,10 +1,36 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, count, eq, gt, inArray, isNull, ne } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, isNull, max, ne } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
-import type { Comment, CommentReplyPage, CommentThread, CommentThreadPage, Role, PageParams } from '@campfire/schema';
+import type {
+  Comment,
+  CommentInboxItem,
+  CommentInboxPage,
+  CommentReplyPage,
+  CommentThread,
+  CommentThreadPage,
+  CommentThreadState,
+  CommentUnreadSummary,
+  CommentUnreadSummaryEntry,
+  Role,
+  PageParams,
+} from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, characters, comments, users } from '../../db/schema';
+import {
+  attachments,
+  campaignMembers,
+  campaigns,
+  characters,
+  commentThreadState,
+  comments,
+  factions,
+  locations,
+  npcs,
+  quests,
+  sessionAttendees,
+  sessions,
+  users,
+} from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { notDeleted } from '../../common/soft-delete';
@@ -29,6 +55,9 @@ import { ModerationService, QUARANTINE_BODY } from '../moderation/moderation.ser
 type CommentCreateInput = z.infer<typeof CommentCreate>;
 type CommentUpdateInput = z.infer<typeof CommentUpdate>;
 type EntityTypeValue = z.infer<typeof EntityType>;
+
+/** A drizzle handle usable for writes — either the top-level db or a transaction tx. */
+type WriteDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 /**
  * Body shown in place of the real content for a tombstoned comment (issue #503).
@@ -615,7 +644,7 @@ export class CommentsService {
       entityId: row.id,
       campaignId,
     });
-    await this.notifyThreadParticipants(row, user);
+    await this.afterCommentCreated(row, user);
     return toDomain(row);
   }
 
@@ -898,39 +927,623 @@ export class CommentsService {
   }
 
   /**
-   * Fan-out on a new comment: notify every OTHER member who has already posted
-   * on the same entity thread (the people following this discussion), plus the
-   * author of the parent comment when this is a reply. Best-effort, like every
-   * other notify* emitter — a notification failure never fails the post.
+   * Fan-out + auto-subscription on a new comment (issue #829). Replaces the pre-#829
+   * recipient rule ("everyone who already posted on this thread"): the recipient set
+   * is now the thread's explicit WATCHERS, which the auto-subscribe rules populate.
+   *
+   *   1. The author/replier is auto-subscribed (`watching`) — they are now following
+   *      the discussion.
+   *   2. On a thread's FIRST post, the intended audience is auto-subscribed too: a
+   *      `session` thread reaches that session's attendees (their character owners)
+   *      plus the campaign's facilitators (DMs); any other anchor reaches the
+   *      facilitators. This is a deliberately bounded set — never a campaign
+   *      broadcast — and is exactly the audience the pre-#829 rule could not reach
+   *      (a brand-new thread had zero prior authors).
+   *   3. Fan-out then notifies every WATCHING, non-muted member of the thread
+   *      (minus the author, minus anyone who can no longer SEE the anchor, minus
+   *      anyone who blocked the actor — the block filter runs in dispatch). A mute
+   *      wins over a watch at this step, never at the subscribe step, so un-muting
+   *      restores notification without re-subscribing.
+   *
+   * Best-effort, like every other notify* emitter — a notification failure never
+   * fails the post. Subscriptions are written synchronously here (cheap upserts on
+   * the unique per-user-anchor index) so the watching set is current before fan-out.
    */
-  private async notifyThreadParticipants(row: typeof comments.$inferSelect, user: RequestUser): Promise<void> {
-    const siblings = await this.db
-      .select({ authorUserId: comments.authorUserId })
+  private async afterCommentCreated(row: typeof comments.$inferSelect, user: RequestUser): Promise<void> {
+    const entityType = row.entityType as EntityTypeValue;
+    const authorId = Number(row.authorUserId);
+    const authorNumeric = Number.isInteger(authorId) && authorId > 0 ? authorId : null;
+
+    // (1) Auto-subscribe the author. Dev/PAT authors (non-numeric ids) have no users
+    // row and cannot hold thread state, matching the numeric-recipient fan-out rule.
+    if (authorNumeric !== null) {
+      this.upsertWatching(this.db, row.campaignId, authorNumeric, entityType, row.entityId);
+    }
+
+    // (2) First post? The anchor had no comments before this one, so the thread's
+    // intended audience has not been subscribed yet.
+    const priorRow = await this.db
+      .select({ value: count() })
       .from(comments)
       .where(
         and(
           eq(comments.campaignId, row.campaignId),
           eq(comments.entityType, row.entityType),
           eq(comments.entityId, row.entityId),
+          ne(comments.id, row.id),
         ),
       );
-    const recipients = new Set<number>();
-    for (const sibling of siblings) {
-      const authorId = Number(sibling.authorUserId);
-      if (Number.isInteger(authorId) && authorId > 0 && String(authorId) !== user.id) {
-        recipients.add(authorId);
+    const isFirstPost = (priorRow[0]?.value ?? 0) === 0;
+    if (isFirstPost) {
+      const audience = await this.computeFirstPostAudience(row.campaignId, entityType, row.entityId, authorNumeric);
+      for (const audienceUserId of audience) {
+        this.upsertWatching(this.db, row.campaignId, audienceUserId, entityType, row.entityId);
       }
     }
+
+    // (3) Fan out to watchers.
+    await this.notifyWatchers(row, user, authorNumeric);
+  }
+
+  /**
+   * Idempotent upsert of a `watching` thread-state row. On conflict it only sets
+   * `watching = true` and bumps `updated_at` — it never touches `muted` (a member's
+   * explicit mute is honored at fan-out, not silently cleared by an auto-subscribe)
+   * and never moves `last_read_comment_id` backward. Safe to call on either the
+   * top-level handle or a transaction `tx` (the comment write path is not itself
+   * transactional with this upsert, but the signature accepts both for symmetry).
+   */
+  private upsertWatching(
+    db: WriteDb,
+    campaignId: number,
+    userId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+  ): void {
+    const ts = nowIso();
+    db.insert(commentThreadState)
+      .values({
+        campaignId,
+        userId,
+        entityType,
+        entityId,
+        watching: true,
+        muted: false,
+        lastReadCommentId: null,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .onConflictDoUpdate({
+        target: [
+          commentThreadState.userId,
+          commentThreadState.campaignId,
+          commentThreadState.entityType,
+          commentThreadState.entityId,
+        ],
+        set: { watching: true, updatedAt: ts },
+      })
+      .run();
+  }
+
+  /**
+   * The bounded audience for a thread's first post (issue #829): session attendees
+   * (their character owners) plus facilitators (DMs) for a `session` anchor, just
+   * facilitators for any other anchor. Numeric user ids only; the author is excluded
+   * (they get no notification for their own post).
+   */
+  private async computeFirstPostAudience(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+    excludeUserId: number | null,
+  ): Promise<number[]> {
+    const audience = new Set<number>();
+    if (entityType === 'session') {
+      const attendees = await this.db
+        .select({ ownerUserId: characters.ownerUserId })
+        .from(sessionAttendees)
+        .innerJoin(characters, eq(characters.id, sessionAttendees.characterId))
+        .where(
+          and(
+            eq(sessionAttendees.sessionId, entityId),
+            eq(characters.campaignId, campaignId),
+            notDeleted(characters.deletedAt),
+          ),
+        );
+      for (const a of attendees) {
+        const owner = Number(a.ownerUserId);
+        if (Number.isInteger(owner) && owner > 0) audience.add(owner);
+      }
+    }
+    // Facilitators (DMs) oversee every thread in their campaign.
+    const dms = await this.db
+      .select({ userId: campaignMembers.userId })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.role, 'dm')));
+    for (const d of dms) audience.add(d.userId);
+    if (excludeUserId !== null) audience.delete(excludeUserId);
+    return [...audience];
+  }
+
+  /**
+   * Notify the thread's watchers of a new comment, applying every suppression:
+   * mute, author-exclusion, lapsed membership, anchor secrecy (a recipient whose
+   * role can no longer see a since-hidden anchor is dropped), and the safety block
+   * filter (run inside dispatch). A notification failure for one recipient never
+   * fails the post.
+   */
+  private async notifyWatchers(
+    row: typeof comments.$inferSelect,
+    user: RequestUser,
+    authorNumeric: number | null,
+  ): Promise<void> {
+    const entityType = row.entityType as EntityTypeValue;
+    const watching = await this.db
+      .select({ userId: commentThreadState.userId, muted: commentThreadState.muted })
+      .from(commentThreadState)
+      .where(
+        and(
+          eq(commentThreadState.campaignId, row.campaignId),
+          eq(commentThreadState.entityType, row.entityType),
+          eq(commentThreadState.entityId, row.entityId),
+          eq(commentThreadState.watching, true),
+        ),
+      );
+    let candidateIds = watching.filter((w) => !w.muted).map((w) => w.userId);
+    if (authorNumeric !== null) candidateIds = candidateIds.filter((id) => id !== authorNumeric);
+    if (candidateIds.length === 0) return;
+
+    // Secrecy: resolve the anchor's visibility for a NON-DM once. DMs always see the
+    // anchor; a non-DM watcher is dropped if the entity was hidden after they
+    // subscribed, so a notification deep-link can never leak a secret entity.
+    const nonDmCanSee = await this.isAnchorVisible(row.campaignId, entityType, row.entityId, 'player');
+    const memberRows = await this.db
+      .select({ userId: campaignMembers.userId, role: campaignMembers.role })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, row.campaignId), inArray(campaignMembers.userId, candidateIds)));
+    const roleByUser = new Map(memberRows.map((m) => [m.userId, m.role as Role]));
+    const recipients = candidateIds.filter((id) => {
+      const memberRole = roleByUser.get(id);
+      if (memberRole === undefined) return false; // no longer a member
+      return memberRole === 'dm' ? true : nonDmCanSee;
+    });
+    if (recipients.length === 0) return;
+
     for (const recipient of recipients) {
       await this.notifications.notifyUser(recipient, row.campaignId, user, {
         type: 'comment_reply',
         title: `${user.name || 'Someone'} posted on a ${row.entityType} discussion`,
         body: excerpt(row.body),
-        entityType: row.entityType as EntityTypeValue,
+        entityType,
         entityId: row.entityId,
         commentId: row.id,
         actorName: user.name,
       });
+    }
+  }
+
+  /**
+   * The caller's per-thread subscription + read state (issue #829). Membership AND
+   * anchor visibility are enforced: a thread on a hidden entity 404s for a non-DM
+   * exactly as the entity's own GET does, so the state endpoint cannot probe a
+   * secret anchor. `unreadCount` counts only live comments after the read cursor,
+   * excluding the caller's own posts.
+   */
+  async getThreadState(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<CommentThreadState> {
+    await this.assertAnchorVisible(campaignId, entityType, entityId, role);
+    const userId = Number(user.id);
+    const numeric = Number.isInteger(userId) && userId > 0;
+    const state = numeric
+      ? (await this.db
+          .select()
+          .from(commentThreadState)
+          .where(
+            and(
+              eq(commentThreadState.userId, userId),
+              eq(commentThreadState.campaignId, campaignId),
+              eq(commentThreadState.entityType, entityType),
+              eq(commentThreadState.entityId, entityId),
+            ),
+          )
+          .limit(1))[0]
+      : undefined;
+    const unreadCount = numeric ? await this.countUnread(campaignId, userId, entityType, entityId) : 0;
+    return {
+      campaignId,
+      entityType,
+      entityId,
+      watching: state?.watching ?? false,
+      muted: state?.muted ?? false,
+      lastReadCommentId: state?.lastReadCommentId ?? null,
+      unreadCount,
+      updatedAt: state?.updatedAt ?? null,
+    };
+  }
+
+  /**
+   * PUT the per-thread Watch/Mute controls (issue #829). Only the provided field is
+   * changed; the other and the read cursor are preserved. A real (numeric) member
+   * seat is required — DEV/PAT identities cannot hold subscription state. Audited.
+   */
+  async setThreadState(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+    user: RequestUser,
+    role: Role,
+    input: { watching?: boolean; muted?: boolean },
+  ): Promise<CommentThreadState> {
+    await this.assertAnchorVisible(campaignId, entityType, entityId, role);
+    const userId = Number(user.id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      throw new ForbiddenException('Sign in with a member account to manage discussion subscriptions');
+    }
+    const ts = nowIso();
+    const set: Partial<typeof commentThreadState.$inferInsert> = { updatedAt: ts };
+    if (input.watching !== undefined) set.watching = input.watching;
+    if (input.muted !== undefined) set.muted = input.muted;
+    this.db
+      .insert(commentThreadState)
+      .values({
+        campaignId,
+        userId,
+        entityType,
+        entityId,
+        watching: input.watching ?? false,
+        muted: input.muted ?? false,
+        lastReadCommentId: null,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .onConflictDoUpdate({
+        target: [
+          commentThreadState.userId,
+          commentThreadState.campaignId,
+          commentThreadState.entityType,
+          commentThreadState.entityId,
+        ],
+        set,
+      })
+      .run();
+    const detail = [
+      input.watching !== undefined ? `watching=${input.watching}` : null,
+      input.muted !== undefined ? `muted=${input.muted}` : null,
+    ]
+      .filter((s): s is string => s !== null)
+      .join(' ');
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'comment.thread_state',
+      entityType: 'comment',
+      entityId,
+      campaignId,
+      detail,
+    });
+    return this.getThreadState(campaignId, entityType, entityId, user, role);
+  }
+
+  /**
+   * Advance the per-thread read cursor (issue #829). `commentId` (a live comment on
+   * this anchor) moves the cursor there; omit it to mark the thread read up to its
+   * latest live comment. The cursor is monotonic — marking an OLDER comment read
+   * never moves it backward, so unread state is retained until genuinely read.
+   * Deep-linking lands the member on the exact comment; this is what clears it.
+   */
+  async markThreadRead(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+    user: RequestUser,
+    role: Role,
+    commentId?: number | null,
+  ): Promise<CommentThreadState> {
+    await this.assertAnchorVisible(campaignId, entityType, entityId, role);
+    const userId = Number(user.id);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      throw new ForbiddenException('Sign in with a member account to track read state');
+    }
+    let cursor: number;
+    if (commentId != null) {
+      const target = await this.getRowOrThrow(commentId, true);
+      if (
+        target.campaignId !== campaignId ||
+        target.entityType !== entityType ||
+        target.entityId !== entityId
+      ) {
+        throw new NotFoundException(`Comment ${commentId} not found`);
+      }
+      cursor = target.id;
+    } else {
+      const [last] = await this.db
+        .select({ id: comments.id })
+        .from(comments)
+        .where(
+          and(
+            eq(comments.campaignId, campaignId),
+            eq(comments.entityType, entityType),
+            eq(comments.entityId, entityId),
+            isNull(comments.deletedAt),
+          ),
+        )
+        .orderBy(desc(comments.id))
+        .limit(1);
+      cursor = last?.id ?? 0;
+    }
+    // Advance the cursor monotonically: never move it backward, so marking an
+    // OLDER comment read cannot un-read newer ones. Computed in JS rather than via
+    // SQLite's scalar `max()` because `max(NULL, x)` returns NULL in SQLite — which
+    // would silently drop a fresh cursor to NULL whenever the member had no prior
+    // read state (the common case for a first read).
+    const [existing] = await this.db
+      .select({ lastReadCommentId: commentThreadState.lastReadCommentId })
+      .from(commentThreadState)
+      .where(
+        and(
+          eq(commentThreadState.userId, userId),
+          eq(commentThreadState.campaignId, campaignId),
+          eq(commentThreadState.entityType, entityType),
+          eq(commentThreadState.entityId, entityId),
+        ),
+      )
+      .limit(1);
+    const nextCursor = Math.max(existing?.lastReadCommentId ?? 0, cursor);
+    const ts = nowIso();
+    this.db
+      .insert(commentThreadState)
+      .values({
+        campaignId,
+        userId,
+        entityType,
+        entityId,
+        watching: false,
+        muted: false,
+        lastReadCommentId: nextCursor,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .onConflictDoUpdate({
+        target: [
+          commentThreadState.userId,
+          commentThreadState.campaignId,
+          commentThreadState.entityType,
+          commentThreadState.entityId,
+        ],
+        set: { lastReadCommentId: nextCursor, updatedAt: ts },
+      })
+      .run();
+    return this.getThreadState(campaignId, entityType, entityId, user, role);
+  }
+
+  /**
+   * Per-anchor unread counts for the caller (issue #829), driving session-card badges
+   * and the inbox. Only anchors the caller may see are included (hidden quest/npc/
+   * faction threads and unexplored locations are dropped), muted threads are skipped,
+   * and the caller's own posts never count as unread. Pass `entityType` to scope
+   * (e.g. session cards). Only entries with `unreadCount > 0` are returned.
+   */
+  async unreadSummary(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    entityType?: EntityTypeValue,
+  ): Promise<CommentUnreadSummary> {
+    const userId = Number(user.id);
+    if (!Number.isInteger(userId) || userId <= 0) return { items: [] };
+    const stateRows = await this.db
+      .select()
+      .from(commentThreadState)
+      .where(and(eq(commentThreadState.userId, userId), eq(commentThreadState.campaignId, campaignId)));
+    const stateByAnchor = new Map<string, (typeof stateRows)[number]>(
+      stateRows.map((s) => [`${s.entityType}:${s.entityId}`, s] as const),
+    );
+    // Distinct anchors with live comments the caller did not author.
+    const groups = await this.db
+      .select({ entityType: comments.entityType, entityId: comments.entityId })
+      .from(comments)
+      .where(
+        and(
+          eq(comments.campaignId, campaignId),
+          ne(comments.authorUserId, String(userId)),
+          isNull(comments.deletedAt),
+        ),
+      )
+      .groupBy(comments.entityType, comments.entityId);
+    const items: CommentUnreadSummaryEntry[] = [];
+    const visibleAnchor = new Map<string, boolean>();
+    for (const group of groups) {
+      const anchorType = group.entityType as EntityTypeValue;
+      if (entityType && anchorType !== entityType) continue;
+      const key = `${anchorType}:${group.entityId}`;
+      const state = stateByAnchor.get(key);
+      if (state?.muted) continue; // muted: opted out of unread surfacing for this thread.
+      let visible = visibleAnchor.get(key);
+      if (visible === undefined) {
+        visible = await this.isAnchorVisible(campaignId, anchorType, group.entityId, role);
+        visibleAnchor.set(key, visible);
+      }
+      if (!visible) continue;
+      const cursor = state?.lastReadCommentId ?? 0;
+      const [countRow] = await this.db
+        .select({ value: count() })
+        .from(comments)
+        .where(
+          and(
+            eq(comments.campaignId, campaignId),
+            eq(comments.entityType, anchorType),
+            eq(comments.entityId, group.entityId),
+            ne(comments.authorUserId, String(userId)),
+            isNull(comments.deletedAt),
+            gt(comments.id, cursor),
+          ),
+        );
+      const unreadCount = countRow?.value ?? 0;
+      if (unreadCount > 0) {
+        items.push({
+          entityType: anchorType,
+          entityId: group.entityId,
+          watching: state?.watching ?? false,
+          muted: false,
+          unreadCount,
+          lastReadCommentId: state?.lastReadCommentId ?? null,
+        });
+      }
+    }
+    return { items };
+  }
+
+  /**
+   * Campaign-wide discussion inbox (issue #829): the caller's WATCHING threads that
+   * have unread comments, with a resolved entity name and the most recent live
+   * comment for sort/preview. Sorted newest-first. Hidden anchors the caller cannot
+   * see are dropped. Each item deep-links to its latest comment via `entityHref`.
+   */
+  async inbox(campaignId: number, user: RequestUser, role: Role): Promise<CommentInboxPage> {
+    const userId = Number(user.id);
+    if (!Number.isInteger(userId) || userId <= 0) return { items: [] };
+    const stateRows = await this.db
+      .select()
+      .from(commentThreadState)
+      .where(
+        and(
+          eq(commentThreadState.userId, userId),
+          eq(commentThreadState.campaignId, campaignId),
+          eq(commentThreadState.watching, true),
+          eq(commentThreadState.muted, false),
+        ),
+      );
+    const items: CommentInboxItem[] = [];
+    const visibleAnchor = new Map<string, boolean>();
+    for (const state of stateRows) {
+      const anchorType = state.entityType as EntityTypeValue;
+      const key = `${anchorType}:${state.entityId}`;
+      let visible = visibleAnchor.get(key);
+      if (visible === undefined) {
+        visible = await this.isAnchorVisible(campaignId, anchorType, state.entityId, role);
+        visibleAnchor.set(key, visible);
+      }
+      if (!visible) continue;
+      const [agg] = await this.db
+        .select({ unread: count(), lastId: max(comments.id), lastAt: max(comments.createdAt) })
+        .from(comments)
+        .where(
+          and(
+            eq(comments.campaignId, campaignId),
+            eq(comments.entityType, anchorType),
+            eq(comments.entityId, state.entityId),
+            ne(comments.authorUserId, String(userId)),
+            isNull(comments.deletedAt),
+          ),
+        );
+      const totalUnread = agg?.unread ?? 0;
+      if (totalUnread === 0) continue;
+      // `unreadCount` is the count AFTER the caller's read cursor (what the badge
+      // shows); `totalUnread` (above) is the cheap guard that skips fully-read threads
+      // before the per-cursor countUnread round-trip.
+      const unreadCount = await this.countUnread(campaignId, userId, anchorType, state.entityId);
+      if (unreadCount === 0) continue;
+      items.push({
+        campaignId,
+        entityType: anchorType,
+        entityId: state.entityId,
+        entityName: await this.resolveAnchorName(campaignId, anchorType, state.entityId),
+        watching: true,
+        unreadCount,
+        lastCommentId: agg?.lastId ?? null,
+        lastCommentAt: agg?.lastAt ?? null,
+      });
+    }
+    items.sort((a, b) => (b.lastCommentAt ?? '').localeCompare(a.lastCommentAt ?? ''));
+    return { items };
+  }
+
+  /** Live comments after the caller's read cursor on one anchor (own posts excluded). */
+  private async countUnread(
+    campaignId: number,
+    userId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+  ): Promise<number> {
+    const [state] = await this.db
+      .select({ lastReadCommentId: commentThreadState.lastReadCommentId })
+      .from(commentThreadState)
+      .where(
+        and(
+          eq(commentThreadState.userId, userId),
+          eq(commentThreadState.campaignId, campaignId),
+          eq(commentThreadState.entityType, entityType),
+          eq(commentThreadState.entityId, entityId),
+        ),
+      )
+      .limit(1);
+    const cursor = state?.lastReadCommentId ?? 0;
+    const [row] = await this.db
+      .select({ value: count() })
+      .from(comments)
+      .where(
+        and(
+          eq(comments.campaignId, campaignId),
+          eq(comments.entityType, entityType),
+          eq(comments.entityId, entityId),
+          ne(comments.authorUserId, String(userId)),
+          isNull(comments.deletedAt),
+          gt(comments.id, cursor),
+        ),
+      );
+    return row?.value ?? 0;
+  }
+
+  /**
+   * Display name of an anchored entity (issue #829 inbox), resolved at read time so
+   * renames stay current. Null when the entity no longer exists. Covers every
+   * anchorable EntityType; types with no name column fall back to null.
+   */
+  private async resolveAnchorName(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+  ): Promise<string | null> {
+    switch (entityType) {
+      case 'session': {
+        const [r] = await this.db
+          .select({ title: sessions.title })
+          .from(sessions)
+          .where(and(eq(sessions.id, entityId), eq(sessions.campaignId, campaignId)))
+          .limit(1);
+        return r?.title || null;
+      }
+      case 'quest': {
+        const [r] = await this.db.select({ title: quests.title }).from(quests).where(and(eq(quests.id, entityId), eq(quests.campaignId, campaignId))).limit(1);
+        return r?.title || null;
+      }
+      case 'npc': {
+        const [r] = await this.db.select({ name: npcs.name }).from(npcs).where(and(eq(npcs.id, entityId), eq(npcs.campaignId, campaignId))).limit(1);
+        return r?.name || null;
+      }
+      case 'location': {
+        const [r] = await this.db.select({ name: locations.name }).from(locations).where(and(eq(locations.id, entityId), eq(locations.campaignId, campaignId))).limit(1);
+        return r?.name || null;
+      }
+      case 'character': {
+        const [r] = await this.db.select({ name: characters.name }).from(characters).where(and(eq(characters.id, entityId), eq(characters.campaignId, campaignId))).limit(1);
+        return r?.name || null;
+      }
+      case 'faction': {
+        const [r] = await this.db.select({ name: factions.name }).from(factions).where(and(eq(factions.id, entityId), eq(factions.campaignId, campaignId))).limit(1);
+        return r?.name || null;
+      }
+      case 'campaign': {
+        const [r] = await this.db.select({ name: campaigns.name }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
+        return r?.name || null;
+      }
+      default:
+        return null;
     }
   }
 

@@ -68,6 +68,7 @@ import {
   sessionSeries,
   seriesExceptions,
   comments,
+  commentThreadState,
   entityRevisions,
   campaignInvites,
   diceRolls,
@@ -4712,6 +4713,9 @@ export class CampaignsService {
         tx.delete(characters).where(eq(characters.campaignId, id)).run();
         tx.delete(notes).where(eq(notes.campaignId, id)).run();
         tx.delete(comments).where(eq(comments.campaignId, id)).run();
+        // #829: per-user discussion subscription/read state hangs off the same anchor as
+        // comments and is campaign-scoped, so it goes with them on the legacy no-FK path.
+        tx.delete(commentThreadState).where(eq(commentThreadState.campaignId, id)).run();
         tx.delete(entityRevisions).where(eq(entityRevisions.campaignId, id)).run();
         tx.delete(sessionShares).where(eq(sessionShares.campaignId, id)).run();
         tx.delete(castSessions).where(eq(castSessions.campaignId, id)).run();

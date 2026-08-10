@@ -751,6 +751,37 @@ CREATE TABLE IF NOT EXISTS comments (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #829: per-user, per-thread discussion subscription + read state. One row per
+-- (user, campaign, anchored entity). entity_type/entity_id is the SAME polymorphic soft
+-- reference the comments table uses (no single FK can span every anchorable entity), so
+-- the owning service cleans these rows up on entity removal and campaign_id carries the ON
+-- DELETE CASCADE that tears the whole set down with a campaign. user_id FK CASCADE so a
+-- deleted account prunes its own subscription/read state. See db/schema.ts for docs.
+CREATE TABLE IF NOT EXISTS comment_thread_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  -- Plain INTEGER (no FK->users), matching notifications/api_tokens: the cascade
+  -- test seeds these rows with a synthetic user id, and account-deletion pruning is
+  -- not enforced on the sibling notification tables either. campaign_id carries the
+  -- ON DELETE CASCADE that tears the set down with a campaign.
+  user_id INTEGER NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  watching INTEGER NOT NULL DEFAULT 0,
+  muted INTEGER NOT NULL DEFAULT 0,
+  last_read_comment_id INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+-- The single state row per (user, campaign, anchor); upserts key on this.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_thread_state_user_campaign_anchor
+  ON comment_thread_state(user_id, campaign_id, entity_type, entity_id);
+-- Fan-out ("who is watching this thread?") and the per-user inbox read.
+CREATE INDEX IF NOT EXISTS idx_comment_thread_state_campaign_anchor
+  ON comment_thread_state(campaign_id, entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_comment_thread_state_user_campaign
+  ON comment_thread_state(user_id, campaign_id);
+
 -- Prose revision history (issue #157). NEW table, so a plain CREATE TABLE IF NOT EXISTS
 -- in bootstrap reaches both fresh and existing DBs (it runs every boot) — no migrate fn
 -- needed, same as encounter_events (#61). campaign_id carries ON DELETE CASCADE so a
