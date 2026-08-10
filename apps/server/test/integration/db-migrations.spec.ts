@@ -3026,4 +3026,58 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       sqlite.close();
     }
   });
+
+  it('0188 adds dice_rolls.kind on a fresh database (#2155)', () => {
+    expect(MIGRATION_NAMES).toContain('0188_dice_rolls_kind_2155');
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      expect(columnNames(sqlite, 'dice_rolls')).toContain('kind');
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  /**
+   * Issue #2155 — `dice_rolls.kind` reaches an EXISTING database, proving it has its OWN
+   * migration entry rather than being folded into `0183_dice_rolls_context_1511` (the same
+   * table, which would have been the obvious-but-wrong home). `runMigrations` skips any step
+   * whose name is already recorded, and 0183 is recorded on every database that has ever
+   * booted — so this boots a real DB, takes `kind` away, forgets ONLY the 0188 step (leaving
+   * 0183 recorded, exactly the state a database upgrading from an earlier release is in), and
+   * proves the next boot restores the column. Modeled on the equivalent
+   * weapon_proficiencies-migration.spec.ts coverage for issue #2144's own-entry migration.
+   */
+  it('0188 restores dice_rolls.kind on an database that predates it, without re-running 0183 (#2155)', () => {
+    dataDir = makeTempDataDir();
+    const first = openDatabase(dataDir);
+    first.sqlite.close();
+    const path = dbFilePath(dataDir);
+
+    const raw = new Database(path);
+    try {
+      // SQLite cannot DROP a column on older versions, so rebuild the table without it.
+      const cols = (raw.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>)
+        .map((c) => c.name)
+        .filter((c) => c !== 'kind');
+      raw.pragma('foreign_keys = OFF');
+      raw.exec(`CREATE TABLE dice_rolls_old AS SELECT ${cols.join(', ')} FROM dice_rolls`);
+      raw.exec('DROP TABLE dice_rolls');
+      raw.exec('ALTER TABLE dice_rolls_old RENAME TO dice_rolls');
+      // Forget only THIS step, leaving 0183 (and every other dice_rolls migration) recorded.
+      raw.prepare('DELETE FROM __migrations WHERE name = ?').run('0188_dice_rolls_kind_2155');
+      const applied = (raw.prepare('SELECT name FROM __migrations').all() as Array<{ name: string }>).map((r) => r.name);
+      expect(applied).toContain('0183_dice_rolls_context_1511');
+      expect(columnNames(raw, 'dice_rolls')).not.toContain('kind');
+    } finally {
+      raw.close();
+    }
+
+    const second = openDatabase(dataDir);
+    try {
+      expect(columnNames(second.sqlite, 'dice_rolls')).toContain('kind');
+    } finally {
+      second.sqlite.close();
+    }
+  });
 });

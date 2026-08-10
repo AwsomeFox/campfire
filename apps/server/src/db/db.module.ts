@@ -1124,6 +1124,34 @@ function migrateDiceRollsContext1511(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #2155: `dice_rolls.kind` (DiceRollKind in @campfire/schema — 'to-hit' | 'damage' |
+ * 'check' | 'roll'), so the shared log can group/colour by what a roll IS. Plain nullable
+ * ADD COLUMN, no backfill: an existing row was written before any pipeline set this field,
+ * so there is nothing honest to derive it from after the fact (the free-text `label` is not
+ * a reliable enough signal to guess from without risking a WRONG kind, which is worse than
+ * an unclassified one). It reads as unclassified, the same way a fresh install's own
+ * not-yet-kind-aware writes do until this migration's sibling server-side change lands
+ * alongside it. New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ *
+ * Its OWN entry in MIGRATIONS, not folded into `migrateDiceRollsContext1511` above even
+ * though it is the same table: `runMigrations` skips any step whose NAME is already
+ * recorded, and `0183_dice_rolls_context_1511` is recorded on every database that has ever
+ * booted — piggy-backing here would ship the column to fresh installs only and leave every
+ * existing database selecting a column its table lacks.
+ */
+function migrateDiceRollsTableForKind2155(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'kind')) return;
+
+  sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN kind TEXT');
+}
+
+/**
  * Issue #1910: additive nullable `speed` column on `characters` and `combatants` —
  * movement speed in the rule system adapter's movement unit, replacing the hardcoded
  * 30 ft every PC previously got in the turn workspace. NULL on both tables preserves
@@ -5707,6 +5735,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // migration has never shipped on any real database either, so renumbering to 0187
   // is safe by the identical argument.
   { name: '0187_encounters_map_objects_1308', run: migrateEncountersTableForMapObjects1308 },
+  { name: '0188_dice_rolls_kind_2155', run: migrateDiceRollsTableForKind2155 },
 ];
 
 /**

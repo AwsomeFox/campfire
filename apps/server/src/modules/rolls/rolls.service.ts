@@ -1,6 +1,6 @@
 import { Inject, Injectable, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, desc, eq, inArray, lte, notExists, or, sql } from 'drizzle-orm';
-import type { DiceRoll, RollResult, RollResultTerm, Role } from '@campfire/schema';
+import { DiceRollKind, type DiceRoll, type RollResult, type RollResultTerm, type Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { diceRolls, encounters, npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -69,6 +69,11 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
   const kept = row.kept != null ? fromJsonText<number[]>(row.kept, []) : undefined;
   const terms = row.terms != null ? fromJsonText<RollResultTerm[]>(row.terms, []) : undefined;
   const source = row.source === 'manual' ? 'manual' : 'rolled';
+  // Issue #2155: a raw TEXT column, so narrow rather than trust it — a row written before
+  // this column existed (or by some future/rolled-back version) reads as unclassified
+  // rather than rendering as whatever the first enum value happens to be.
+  const kindParsed = row.kind != null ? DiceRollKind.safeParse(row.kind) : null;
+  const kind = kindParsed?.success ? kindParsed.data : undefined;
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -91,6 +96,7 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
     ...(row.characterId != null ? { characterId: row.characterId } : {}),
     ...(row.combatantId != null ? { combatantId: row.combatantId } : {}),
     visibility: row.visibility === 'dm_shared' || row.visibility === 'private' ? row.visibility : 'party_shared',
+    ...(kind !== undefined ? { kind } : {}),
     createdAt: row.createdAt,
   };
 }
@@ -182,6 +188,7 @@ export class RollsService implements OnApplicationBootstrap {
         characterId: result.characterId ?? null,
         combatantId: result.combatantId ?? null,
         visibility: result.visibility ?? 'party_shared',
+        kind: result.kind ?? null,
         createdAt: nowIso(),
       })
       .returning()

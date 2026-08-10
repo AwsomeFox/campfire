@@ -12964,6 +12964,21 @@ export type ActionRollRequest = z.infer<typeof ActionRollRequest>;
 export const DiceRollSource = z.enum(['rolled', 'manual']);
 export type DiceRollSource = z.infer<typeof DiceRollSource>;
 
+/**
+ * What a dice-log entry IS, for grouping/colour-coding the shared log (issue #2155).
+ * Matches the reference VTT's own four buckets — an attack's to-hit roll, its damage
+ * roll, an ability/skill/save/initiative CHECK (one bucket: the reference does not
+ * split those further), and a free-form/quick roll that fits none of the above.
+ *
+ * Server-derived only, from whichever pipeline produced the `RollResult` — never a
+ * client-supplied classification (see the call sites in `EncountersService` and
+ * `CharactersService`, the only writers). `quickRoll`'s `QuickRollRequest.kind` is the
+ * one exception, and even that is trusted server input already branched on for its own
+ * to-hit/damage logic, not a fresh classification accepted at face value.
+ */
+export const DiceRollKind = z.enum(['to-hit', 'damage', 'check', 'roll']);
+export type DiceRollKind = z.infer<typeof DiceRollKind>;
+
 /** Sentinel `expr` stored for a paper-table / physical roll — not a dice expression. */
 export const PHYSICAL_ROLL_EXPR = 'physical';
 
@@ -13015,6 +13030,12 @@ export const RollResult = z.object({
   success: z.boolean().optional(),
   // Issue #673: manual/physical rolls carry honest provenance — no fabricated dice math.
   source: DiceRollSource.optional(),
+  // Issue #2155: what the roll IS, for the shared log's grouping/colour. Producer-side
+  // (server pipeline) context, same optionality convention as `visibility` below — a
+  // trusted roll builder that has no opinion (a quick free-form roll's raw expression, a
+  // manual/physical entry) simply omits it, and it reads as unclassified rather than a
+  // guessed kind.
+  kind: DiceRollKind.optional(),
   /** Who rolled at the table when `source` is `manual` (character/NPC name). */
   actor: z.string().max(120).optional(),
   /** Optional natural d20 face the DM recorded — informational only, not re-rolled. */
