@@ -267,7 +267,23 @@ jobs:
   server-tests:
     name: server-tests (${{ matrix.shard }}/4)
     needs: build
-    timeout-minutes: 10
+    # Raised from 10. Every shard had grown to sit against the old 600s wall —
+    # five consecutive main runs gave per-shard means of 555/556/559/548s with
+    # maxima of 599/585/595/579s. It then tipped over on a PR (run 31349552016,
+    # job 93337932912): the test step ran 584s, all 51 suites and 893 tests
+    # passed, and the ~18s of checkout/restore/download around it pushed the job
+    # to 607s, so a green suite was killed 3 seconds after printing its summary.
+    #
+    # Like `coverage` above, a timeout kill surfaces as `cancelled`, which the
+    # aggregate `ci` job explains as "a newer push cancelled this run" — the
+    # failure points at the wrong cause and invites a pointless re-push.
+    #
+    # Deliberately not rebalanced: the four shard means span 11s and the maxima
+    # span 20s, so the split is already even and moving specs between shards
+    # would buy nothing. The cost is fixed per-shard setup plus a suite total
+    # that has simply grown; the durable fix is a fifth shard or faster suites,
+    # not a redistribution.
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
