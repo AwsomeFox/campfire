@@ -5658,7 +5658,31 @@ export class EncountersService {
               // Update a single instance by id; ignore if not present (no-op).
               const upd = patch.updateConditionInstance;
               const updIdx = instances.findIndex((i) => i.id === upd.id);
-              if (updIdx >= 0) instances[updIdx] = upd;
+              if (updIdx >= 0) {
+                if (!isDm) {
+                  const existingNameMatch =
+                    instances[updIdx].name.trim().toLowerCase() === upd.name.trim().toLowerCase();
+                  if (!existingNameMatch) {
+                    const [campaign] = tx
+                      .select({ conditionDefinitions: campaigns.conditionDefinitions })
+                      .from(campaigns)
+                      .where(eq(campaigns.id, freshEncounter.campaignId))
+                      .limit(1)
+                      .all();
+                    const campaignConditionNames = CampaignConditionDefinitions.catch([])
+                      .parse(fromJsonText<unknown>(campaign?.conditionDefinitions ?? null, []))
+                      .map((definition) => definition.name);
+                    const vocabulary = [...adapter.conditions, ...campaignConditionNames];
+                    if (!isKnownCondition(vocabulary, upd.name)) {
+                      throw new BadRequestException(
+                        `Unknown condition for this campaign: ${JSON.stringify(upd.name)}. ` +
+                          'Players may only add conditions from the active rule vocabulary or the campaign definitions; the DM may mint custom entries.',
+                      );
+                    }
+                  }
+                }
+                instances[updIdx] = upd;
+              }
             }
             if (patch.removeConditionInstanceId !== undefined) {
               // Remove only the targeted instance — not all instances with the same name.

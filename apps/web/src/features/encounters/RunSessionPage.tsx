@@ -2106,11 +2106,12 @@ export default function RunSessionPage() {
       // turn, so without this the controls stay wrongly enabled (or wrongly gated) until
       // useTableSafety's 20s poll happens to land.
       invalidateTableSafety(queryClient, cid);
+      void refreshCampaigns();
       // Issue #2092: a dropped connection may have swallowed an `encounter.turn_changed`
       // frame outright — re-arm the REST turn-beat baseline resync (see
       // `awaitingTurnBeatResyncRef`'s own comment) so the catch-up encounter read above
       // re-derives it.
-    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership, refreshCampaigns]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
       setResyncPending(true);
@@ -2120,7 +2121,8 @@ export default function RunSessionPage() {
       invalidateCampaignCheckRequests(queryClient, cid);
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
       invalidateTableSafety(queryClient, cid);
-    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership]),
+      void refreshCampaigns();
+    }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership, refreshCampaigns]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
