@@ -182,6 +182,8 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
       seriesId, scheduledId, 'cancel', now,
     );
     run('INSERT INTO comments (campaign_id, entity_type, entity_id, author_user_id, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', campaignId, 'quest', questId, 'u1', 'hi', now, now);
+    // #829: per-user discussion subscription/read state is campaign-scoped and must be swept.
+    run('INSERT INTO comment_thread_state (campaign_id, user_id, entity_type, entity_id, watching, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)', campaignId, 1, 'quest', questId, 1, now, now);
     run('INSERT INTO entity_revisions (campaign_id, entity_type, entity_id, created_at) VALUES (?, ?, ?, ?)', campaignId, 'quest', questId, now);
     run('INSERT INTO campaign_invites (campaign_id, code, role, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', campaignId, 'code-235', 'player', now, now, now);
     run('INSERT INTO dice_rolls (campaign_id, roller_user_id, expr, total, created_at) VALUES (?, ?, ?, ?, ?)', campaignId, 'u1', '1d20', 12, now);
@@ -230,7 +232,7 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
       const campaignScoped = [
         'characters', 'quests', 'story_arcs', 'story_beats', 'timeline_events', 'timeline_calendars',
         'session_zero', 'npcs', 'factions', 'locations', 'sessions', 'session_shares', 'cast_sessions', 'scheduled_sessions',
-        'notes', 'comments', 'entity_revisions', 'campaign_guest_dm_grants', 'campaign_members', 'campaign_invites', 'api_tokens',
+        'notes', 'comments', 'comment_thread_state', 'entity_revisions', 'campaign_guest_dm_grants', 'campaign_members', 'campaign_invites', 'api_tokens',
         'proposals', 'attachments', 'encounters', 'dice_rolls', 'notifications', 'inventory_items',
         'party_treasury', 'ai_dm_seats', 'ai_driver_control_state', 'session_series',
         'campaign_module_installs', 'campaign_module_artifacts', 'campaign_module_snapshots',

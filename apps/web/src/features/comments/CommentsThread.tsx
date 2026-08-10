@@ -33,6 +33,7 @@ import { StaleWriteConflict, type ConflictField } from '../../components/StaleWr
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { ReportButton } from '../moderation/ReportDialog';
 import { timeAgo, useTimeTick } from '../../lib/format';
+import { markCommentThreadRead } from './useCommentThreadState';
 
 interface CommentDraft { body: string }
 const COMMENT_CONFLICT_FIELDS: Array<ConflictField<CommentDraft>> = [{ key: 'body', label: 'Comment', merge: true }];
@@ -157,13 +158,24 @@ export function CommentsThread({
       setTotalComments(page.totalComments);
       setHasMoreThreads(page.hasMore);
       setNextThreadCursor(page.nextCursor);
+      // Issue #829: opening the thread reads it — advance the caller's read cursor
+      // so unread state (session-card badge, discussion inbox) clears. This is the
+      // "deep-link to the exact comment; retain unread until read" clear step: a
+      // notification deep-link lands here and is marked read on view. Fire-and-forget
+      // for DEV_AUTH dev users (no thread state) and network errors so the UI never
+      // depends on it; only real (numeric) members hold read state.
+      if (myUserId && /^\d+$/.test(myUserId)) {
+        void markCommentThreadRead(campaignId, entityType, entityId).catch(() => {
+          /* best-effort: unread stays until the next successful view */
+        });
+      }
     } catch {
       if (sequence !== loadSequence.current) return;
       setError("Couldn't load the discussion.");
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [campaignId, entityType, entityId, toLoadedThread]);
+  }, [campaignId, entityType, entityId, toLoadedThread, myUserId]);
 
   const loadMoreThreads = useCallback(async () => {
     if (!nextThreadCursor || loadingMoreThreads || loading) return;
