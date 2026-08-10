@@ -365,6 +365,31 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(playerView.status).toBe(403);
   });
 
+  // Issue #2144 review (chatgpt-codex-connector P2) coverage gap: the full-backup round trip
+  // above proves `weaponProficiencies` survives `importCampaign`'s write, but `backup` is the
+  // one profile that is NOT projected through `PUBLISHABLE_FIELDS` (export-profiles.ts) — so
+  // it cannot catch the allowlist omission that was the OTHER half of this same finding.
+  // `handoff`/`publish` project every character through an explicit field list, and the fix
+  // added `weaponProficiencies` there too; this is the test that actually exercises that path,
+  // the same way issue #1910's speed fix needed both a backup AND a projected round trip.
+  it('weapon training survives a PROJECTED (handoff profile) export -> import round-trip, not just a full backup', async () => {
+    const projected = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json&profile=handoff`);
+    expect(projected.status).toBe(200);
+    const exportedChar = (projected.body.characters as Array<{ id: number; weaponProficiencies: Record<string, string> }>).find(
+      (c) => c.id === characterId,
+    );
+    expect(exportedChar?.weaponProficiencies).toEqual({ martial: 'proficient', longsword: 'expert' });
+
+    const res = await dmAgent.post('/api/v1/campaigns/import').send(projected.body);
+    expect(res.status).toBe(201);
+    const imported = res.body;
+
+    const chars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
+    const importedChar = chars.body.find((c: { name: string }) => c.name === 'Rogue');
+    expect(importedChar).toBeDefined();
+    expect(importedChar.weaponProficiencies).toEqual({ martial: 'proficient', longsword: 'expert' });
+  });
+
   it('a second import yields another independent campaign (no id collisions across imports)', async () => {
     const first = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
     const second = await dmAgent.post('/api/v1/campaigns/import').send(exportDoc);
