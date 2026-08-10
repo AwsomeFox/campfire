@@ -64,6 +64,7 @@ interface PushPayload {
 }
 
 interface QueuedPushSend {
+  critical: boolean;
   run: () => Promise<void>;
   resolve: () => void;
   reject: (error: unknown) => void;
@@ -231,9 +232,19 @@ export class PushNotificationsService {
     return { removed: result.changes > 0 };
   }
 
-  private enqueueSend(run: () => Promise<void>): Promise<void> {
+  private enqueueSend(run: () => Promise<void>, critical = false): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      this.sendQueue.push({ run, resolve, reject });
+      const item: QueuedPushSend = { critical, run, resolve, reject };
+      if (critical) {
+        const firstNormalIndex = this.sendQueue.findIndex((q) => !q.critical);
+        if (firstNormalIndex === -1) {
+          this.sendQueue.push(item);
+        } else {
+          this.sendQueue.splice(firstNormalIndex, 0, item);
+        }
+      } else {
+        this.sendQueue.push(item);
+      }
       this.drainSendQueue();
     });
   }
@@ -326,39 +337,69 @@ export class PushNotificationsService {
           tag: `campfire-${delivery.campaignId}-${delivery.type}-${delivery.entityId ?? 'event'}-${delivery.createdAt}`,
           url: pushPath(delivery),
         };
-        return userSubscriptions.map((subscription) => this.enqueueSend(async () => {
-          try {
-            await this.transport.sendNotification(
-              {
-                endpoint: subscription.endpoint,
-                keys: { p256dh: subscription.p256dh, auth: subscription.auth },
-              },
-              JSON.stringify(payload),
-              {
-                // Campaign excerpts must not sit in a vendor queue after access
-                // is revoked. Deliver immediately or discard; the in-app row is
-                // the durable notification source.
-                TTL: 0,
-                timeout: 5_000,
-                urgency: delivery.critical ? 'high' : 'normal',
-              },
-            );
-            await this.db
-              .update(pushSubscriptions)
-              .set({ lastUsedAt: nowIso() })
-              .where(eq(pushSubscriptions.id, subscription.id));
-          } catch (error) {
-            const statusCode = statusCodeOf(error);
-            if (statusCode === 404 || statusCode === 410) {
-              await this.db.delete(pushSubscriptions).where(eq(pushSubscriptions.id, subscription.id));
-              return;
+        return userSubscriptions.map((subscription) =>
+          this.enqueueSend(async () => {
+            try {
+              // Revalidate subscription existence and active user status when the job starts
+              const [validSub] = await this.db
+                .select({ id: pushSubscriptions.id })
+                .from(pushSubscriptions)
+                .innerJoin(users, eq(pushSubscriptions.userId, users.id))
+                .where(
+                  and(
+                    eq(pushSubscriptions.id, subscription.id),
+                    eq(pushSubscriptions.userId, delivery.userId),
+                    eq(users.disabled, false),
+                  ),
+                );
+              if (!validSub) return;
+
+              // Revalidate campaign membership when job starts unless type is exempt
+              if (!MEMBERSHIP_EXEMPT_TYPES.has(delivery.type)) {
+                const [membership] = await this.db
+                  .select({ userId: campaignMembers.userId })
+                  .from(campaignMembers)
+                  .where(
+                    and(
+                      eq(campaignMembers.userId, delivery.userId),
+                      eq(campaignMembers.campaignId, delivery.campaignId),
+                    ),
+                  );
+                if (!membership) return;
+              }
+
+              await this.transport.sendNotification(
+                {
+                  endpoint: subscription.endpoint,
+                  keys: { p256dh: subscription.p256dh, auth: subscription.auth },
+                },
+                JSON.stringify(payload),
+                {
+                  // Campaign excerpts must not sit in a vendor queue after access
+                  // is revoked. Deliver immediately or discard; the in-app row is
+                  // the durable notification source.
+                  TTL: 0,
+                  timeout: 5_000,
+                  urgency: delivery.critical ? 'high' : 'normal',
+                },
+              );
+              await this.db
+                .update(pushSubscriptions)
+                .set({ lastUsedAt: nowIso() })
+                .where(eq(pushSubscriptions.id, subscription.id));
+            } catch (error) {
+              const statusCode = statusCodeOf(error);
+              if (statusCode === 404 || statusCode === 410) {
+                await this.db.delete(pushSubscriptions).where(eq(pushSubscriptions.id, subscription.id));
+                return;
+              }
+              this.logger.warn(
+                `Browser push delivery failed for user ${delivery.userId}` +
+                  (statusCode === null ? '' : ` (status ${statusCode})`),
+              );
             }
-            this.logger.warn(
-              `Browser push delivery failed for user ${delivery.userId}` +
-                (statusCode === null ? '' : ` (status ${statusCode})`),
-            );
-          }
-        }));
+          }, delivery.critical),
+        );
       }),
     );
   }

@@ -703,7 +703,6 @@ export class NotificationsService implements OnApplicationBootstrap {
     this.schedulePush(this.pushDeliveries([userId], campaignId, event, createdAt, critical));
   }
 
->>>>>>> f8abe458f (Add browser push notifications)
   /** Persist deferred notifications for later flush (digest cadence / after quiet hours). */
   private enqueueDeferredTx(
     tx: SyncDb,
@@ -980,17 +979,13 @@ export class NotificationsService implements OnApplicationBootstrap {
   ): Map<number, HiddenStatusDisposition> {
     const guarded = rows.filter((row) => row.hiddenStatusContext !== null);
     return new Map(this.hiddenStatusDispositionsTx(tx, userId, guarded, user).map((row) => [row.id, row.disposition]));
-=======
-   * Reapply the recipient-facing quarantine/block rules immediately before a
-   * deferred excerpt can become either an in-app row or a browser push. The
-   * caller runs this inside the same SQLite transaction as materialization so
-   * moderation cannot land between the safety read and the insert.
-=======
+  }
+
+  /**
    * Reapply membership plus recipient-facing quarantine/block rules immediately
    * before a deferred excerpt can become either an in-app row or browser push.
    * The caller runs this inside the materialization transaction so access or
    * moderation changes cannot land between these reads and the insert.
->>>>>>> 56cefc894 (fix: close deferred push access gaps)
    */
   private deferredSuppressedIdsTx(
     tx: SyncDb,
@@ -1066,7 +1061,6 @@ export class NotificationsService implements OnApplicationBootstrap {
       }
     }
     return suppressed;
->>>>>>> b134bfd02 (fix: harden deferred browser push delivery)
   }
 
   /**
@@ -1159,7 +1153,6 @@ export class NotificationsService implements OnApplicationBootstrap {
                   },
             );
             deliveredIds.push(row.id);
-          }
           }
           if (deliverRows.length > 0) tx.insert(notifications).values(deliverRows).run();
           const consumedIds = [...deliveredIds, ...removedIds];

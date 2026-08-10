@@ -349,8 +349,14 @@ export async function disableBrowserPush(): Promise<void> {
   const subscription = (await registration?.pushManager.getSubscription()) ?? null;
   const endpoint = subscription?.endpoint ?? rememberedEndpoint();
   if (!endpoint) return;
+  let unsubscribed = true;
+  if (subscription) {
+    unsubscribed = await subscription.unsubscribe();
+  }
+  if (!unsubscribed) {
+    throw new Error('The browser could not remove its push subscription. Try again.');
+  }
   await api.delete(`${API}/notifications/push-subscribe`, { json: { endpoint } });
-  await subscription?.unsubscribe();
   forgetEndpoint();
   await allowAutomaticRebind(registration);
 }
