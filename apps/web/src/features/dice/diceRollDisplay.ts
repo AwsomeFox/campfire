@@ -65,10 +65,21 @@ export function diceRollKindLabelKey(
 }
 
 /**
- * Same-kind CSS var per roll kind, for the run-accent border/tint (issue #2183).
- * Reuses the exact custom properties `.tag-*` already shades from in nocturne.css —
- * no new colour tokens. `null` for `undefined` (unclassified), matching
- * `diceRollKindTagClass`.
+ * Same-kind CSS var per roll kind, for the run-accent border (issue #2183). No new
+ * colour tokens — every var here already exists in nocturne.css for this same kind
+ * family. `null` for `undefined` (unclassified), matching `diceRollKindTagClass`.
+ *
+ * PR #2195 review: this deliberately does NOT match the `-800`/`-100` shades
+ * `diceRollKindTagClass`'s `.tag-accent`/`.tag-accent-2`/`.tag-neutral` badges shade
+ * from (a fill+foreground-text pair, where the fill can be a dark, muted -800 because
+ * light -100 text always sits on top of it for contrast). A border has no text of its
+ * own to pair with — it just has to read as a line against the card's dark surface —
+ * so it needs the more saturated BASE token instead, exactly how the existing
+ * `.tag-outline` class already borders itself with bare `var(--color-accent)` rather
+ * than `--color-accent-800`. `--color-amber` matches `.tag-amber`'s own base (that
+ * badge `color-mix`es FROM the same bare `--color-amber` this uses directly).
+ * `--color-neutral-500` has no bare `--color-neutral` counterpart to reuse, so it is
+ * the family's own mid tone, kept off the `-800`/`-100` extremes for the same reason.
  */
 export function diceRollKindAccentVar(kind: DiceRollKind | undefined): string | null {
   switch (kind) {
@@ -109,7 +120,13 @@ export function diceRollKindAccentVar(kind: DiceRollKind | undefined): string | 
  */
 export type DiceRollGroupRole = 'solo' | 'start' | 'middle' | 'end';
 
-export function diceRollGroupRole(rolls: DiceRoll[], index: number): DiceRollGroupRole {
+// Consumer-side narrowing (AGENTS.md): the only field this pure function reads is
+// `kind`, so the parameter is narrowed to exactly that rather than the full
+// `DiceRoll` — a caller (real or test) can satisfy it with a plain `{ kind }`
+// literal and no cast, and it is checked in both directions: a literal missing
+// `kind` fails here, and this function reaching for any OTHER field would fail
+// to compile against its own declared parameter type.
+export function diceRollGroupRole(rolls: Pick<DiceRoll, 'kind'>[], index: number): DiceRollGroupRole {
   const kind = rolls[index]?.kind;
   if (!kind) return 'solo';
   const prevSame = index > 0 && rolls[index - 1]?.kind === kind;
