@@ -74,15 +74,42 @@ holder_pid() {
 # to prevent. Creating $REAPER is the atomic gate. While it is held nobody else
 # can remove $LOCK, so the pid re-read below cannot be invalidated between the
 # read and the rm.
+# The gate is held for a few milliseconds, so a reclaimer killed inside it is
+# unlikely — but it would otherwise wedge every future reclaim until someone
+# cleared the directory by hand. Recover it only when the owner is gone AND the
+# gate has sat for over a minute, which no live critical section ever does.
+gate_is_abandoned() {
+  gate_pid=$(tr -d '[:space:]' <"$REAPER/pid" 2>/dev/null || true)
+  case "$gate_pid" in
+    '' | *[!0-9]*) gate_pid='' ;;
+  esac
+  if [ -n "$gate_pid" ] && kill -0 "$gate_pid" 2>/dev/null; then return 1; fi
+  [ -n "$(find "$REAPER" -maxdepth 0 -mmin +1 2>/dev/null)" ] || return 1
+  rm -rf "$REAPER"
+}
+
+enter_gate() {
+  if mkdir "$REAPER" 2>/dev/null; then
+    echo $$ >"$REAPER/pid"
+    return 0
+  fi
+  gate_is_abandoned || return 1
+  if mkdir "$REAPER" 2>/dev/null; then
+    echo $$ >"$REAPER/pid"
+    return 0
+  fi
+  return 1
+}
+
 reclaim_if_stale() {
   stale_pid=$(holder_pid) || return 1
   if kill -0 "$stale_pid" 2>/dev/null; then return 1; fi
-  mkdir "$REAPER" 2>/dev/null || return 1
+  enter_gate || return 1
   current_pid=$(holder_pid) || current_pid=''
   if [ "$current_pid" = "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
     rm -rf "$LOCK"
   fi
-  rmdir "$REAPER" 2>/dev/null || true
+  rm -rf "$REAPER"
   return 0
 }
 
@@ -95,7 +122,12 @@ acquire() {
   return 1
 }
 
+# Only ever delete a lock this process actually owns. Releasing unconditionally
+# would let a late or repeated release (the signal path below releases, then the
+# EXIT trap runs too) delete a lock another wrapper has since acquired.
 release() {
+  owner=$(holder_pid) || return 0
+  [ "$owner" = "$$" ] || return 0
   rm -rf "$LOCK"
 }
 
@@ -113,7 +145,7 @@ until acquire; do
   waited=$((waited + POLL))
 done
 
-trap 'release' EXIT INT TERM HUP
+trap 'release' EXIT
 
 # Inherited by everything below, including nested `npm run` hops, so an
 # aggregate script (`test:all`) that calls wrapped leaf scripts does not
@@ -126,8 +158,33 @@ export JEST_MAX_WORKERS="${JEST_MAX_WORKERS:-4}"
 export VITEST_MAX_WORKERS="${VITEST_MAX_WORKERS:-4}"
 export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${CAMPFIRE_TEST_HEAP_MB:-2048}"
 
+# Run the command as a job this shell can still address after a signal. With the
+# child in the foreground, sh defers trap handling until it exits, so a TERM
+# aimed at the wrapper alone would neither stop the test nor release the lock,
+# and the wrapper would then report the finished child's status as if the
+# cancelled run had succeeded. Job control puts the child in its own process
+# group so the signal reaches its workers too.
+set -m 2>/dev/null || true
+"$@" &
+child=$!
+
+# Always forward as TERM: a background child in a non-interactive shell has INT
+# set to ignore, so re-sending INT would not stop it. Signal the child's process
+# group when job control gave it one, falling back to the child alone.
+stop_child() {
+  kill -TERM "-$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  release
+  # Re-raise so the caller sees the wrapper die of the signal, not of a status.
+  trap - "$1"
+  kill -"$1" $$
+}
+trap 'stop_child TERM' TERM
+trap 'stop_child INT' INT
+trap 'stop_child HUP' HUP
+
 set +e
-"$@"
+wait "$child"
 status=$?
 set -e
 exit "$status"
