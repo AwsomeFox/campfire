@@ -639,7 +639,7 @@ describe('ai-provider-config explicit stored-key clear (issue #445, e2e)', () =>
   });
 
   it('stores then clears an OpenAI-compatible key, retaining config and falling back to OPENAI_API_KEY', async () => {
-    const storedKey = 'sk-openai-stored-never-return-4451';
+    const storedKey = 'sk-openai-stored-never-return-4451-ZZQXWV';
     const environmentKey = 'sk-openai-environment-never-return-4452';
     process.env.OPENAI_API_KEY = environmentKey;
 
@@ -696,7 +696,7 @@ describe('ai-provider-config explicit stored-key clear (issue #445, e2e)', () =>
     const clearEntry = audit.body.find((entry: { action: string }) => entry.action === 'ai-provider.key-clear');
     expect(clearEntry).toMatchObject({ entityType: 'ai-provider', detail: 'server' });
     expect(JSON.stringify(clearEntry)).not.toContain(storedKey);
-    expect(JSON.stringify(clearEntry)).not.toContain('4451');
+    expect(JSON.stringify(clearEntry)).not.toContain('ZZQXWV');
     delete process.env.OPENAI_API_KEY;
   });
 
@@ -763,7 +763,7 @@ describe('ai-provider-config explicit stored-key clear (issue #445, e2e)', () =>
         model: 'campaign-model',
         baseUrl: 'https://campaign.example',
         params: { temperature: 0.7, maxTokens: 3000 },
-        apiKey: 'sk-campaign-stored-4456',
+        apiKey: 'sk-campaign-stored-4456-ZZQXWV',
       });
 
     const cleared = await request(server)
@@ -791,8 +791,8 @@ describe('ai-provider-config explicit stored-key clear (issue #445, e2e)', () =>
     const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
     expect(audit.body.some((entry: { action: string; detail: string }) =>
       entry.action === 'ai-provider.key-clear' && entry.detail === 'campaign')).toBe(true);
-    expect(JSON.stringify(audit.body)).not.toContain('sk-campaign-stored-4456');
-    expect(JSON.stringify(audit.body)).not.toContain('4456');
+    expect(JSON.stringify(audit.body)).not.toContain('sk-campaign-stored-4456-ZZQXWV');
+    expect(JSON.stringify(audit.body)).not.toContain('ZZQXWV');
     delete process.env.OPENAI_API_KEY;
   });
 });
