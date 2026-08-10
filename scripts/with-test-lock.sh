@@ -79,13 +79,22 @@ export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${CAMPFIRE_TEST_HEAP
 if command -v perl >/dev/null 2>&1; then
   exec perl -e '
     use strict;
-    use Fcntl qw(:flock);
-    # Keep fds <= 10 clear of close-on-exec so the lock survives the exec below.
-    $^F = 10;
+    use Fcntl qw(:flock F_SETFD);
     my $path = shift @ARGV;
     my $wait = shift @ARGV;
     open(my $fh, ">>", $path) or die "with-test-lock: cannot open $path: $!\n";
+    # Clear close-on-exec on this descriptor specifically, so the lock survives
+    # the exec below. Not $^F, which only covers descriptors up to its value:
+    # with fds 3..10 already inherited, perl would hand back fd 11 and the lock
+    # would be silently dropped the moment the test started.
+    fcntl($fh, F_SETFD, 0) or die "with-test-lock: cannot clear close-on-exec: $!\n";
     unless (flock($fh, LOCK_EX | LOCK_NB)) {
+      # A zero wait means "do not queue": report the conflict now rather than
+      # falling through to a blocking flock, which alarm 0 would never interrupt.
+      if ($wait == 0) {
+        warn "with-test-lock: another test run holds $path — not waiting\n";
+        exit 75;
+      }
       warn "with-test-lock: another test run holds $path — waiting...\n";
       $SIG{ALRM} = sub {
         warn "with-test-lock: gave up after ${wait}s waiting for $path\n";
