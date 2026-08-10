@@ -5267,10 +5267,16 @@ export class EncountersService {
       throw new BadRequestException('Critical damage requires the dice-only damage subtotal');
     }
     if (!isDm) {
+      const updateRetainsExistingConditionName = patch.updateConditionInstance !== undefined &&
+        parseConditionInstances(existing.conditionInstances, fromJsonText<string[]>(existing.conditions, []))
+          .some((instance) =>
+            instance.id === patch.updateConditionInstance!.id &&
+            instance.name.trim().toLowerCase() === patch.updateConditionInstance!.name.trim().toLowerCase(),
+          );
       const conditionNames = [
         ...(patch.addConditions ?? []),
         ...(patch.addConditionInstance ? [patch.addConditionInstance.name] : []),
-        ...(patch.updateConditionInstance ? [patch.updateConditionInstance.name] : []),
+        ...(patch.updateConditionInstance && !updateRetainsExistingConditionName ? [patch.updateConditionInstance.name] : []),
         ...(patch.conditionInstances?.map((instance) => instance.name) ?? []),
       ];
       // Most player patches (HP, token movement, or condition removal) do not

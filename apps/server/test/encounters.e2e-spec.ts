@@ -770,6 +770,45 @@ describe('encounters (e2e)', () => {
         .send({ removeConditions: ['hexed_by_patron'] });
     });
 
+    it('allows a player to update an existing DM-minted condition but rejects a new unknown name (issue #1505)', async () => {
+      const server = ctx.app.getHttpServer();
+      const customCondition = {
+        id: 'hexed-by-patron-instance',
+        name: 'hexed_by_patron',
+        durationRounds: null,
+        roundsRemaining: null,
+        timing: 'none',
+        saveTiming: 'none',
+        saveAbility: null,
+        saveDc: null,
+        isConcentration: false,
+        stacks: 1,
+        notes: 'DM applied',
+        custom: true,
+      };
+      const added = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ addConditionInstance: customCondition });
+      expect(added.status).toBe(200);
+
+      const updated = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ updateConditionInstance: { ...customCondition, notes: 'Player updated' } });
+      expect(updated.status).toBe(200);
+      expect(updated.body.conditionInstances).toContainEqual(expect.objectContaining({
+        id: customCondition.id, notes: 'Player updated',
+      }));
+
+      const renamed = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ updateConditionInstance: { ...customCondition, name: 'unknown_player_condition' } });
+      expect(renamed.status).toBe(400);
+      expect(JSON.stringify(renamed.body)).toMatch(/unknown_player_condition|vocabulary|Unknown condition/i);
+    });
+
     // Strict-validation (task P1 item 3): CombatantUpdateDto is now .strict() at
     // the DTO layer — an unknown/misnamed key like `hpCurrent` (the real column
     // name; CombatantUpdate's actual field is `hpDelta`/`hpSet`) previously
