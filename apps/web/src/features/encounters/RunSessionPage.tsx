@@ -36,9 +36,9 @@ import { endedSummaryTallies } from './encounterEndedSummary';
 import { filterPlayerSafeCombatants } from '../screen/playerSafe';
 import {
   applyOptimisticHpDelta,
+  mergeOptimisticHpTargets,
   replayOptimisticHpDeltas,
   rollbackOptimisticHpTargets,
-  withOptimisticHpCombatants,
   type OptimisticHpDelta,
 } from './optimisticHp';
 import { applyOptimisticSpellSlotDelta } from './optimisticSpellSlots';
@@ -2722,7 +2722,8 @@ export default function RunSessionPage() {
     if (queue.encounterId !== eid) return;
     const { base } = queue;
     if (!base) return;
-    const combatants = replayOptimisticHpDeltas(
+    const targetIds = [...queue.operations.values()].map(({ combatantId }) => combatantId);
+    const recomputed = replayOptimisticHpDeltas(
       base.combatants,
       [...queue.operations.values()]
         .sort((a, b) => a.sequence - b.sequence)
@@ -2730,12 +2731,15 @@ export default function RunSessionPage() {
       ruleSystem,
       campaign?.customMechanicsProfile,
     );
-    // Build off the freshest cached encounter, not the captured `base` — `base`
-    // can be older than a snapshot another writer (next-turn seeding, an
-    // encounter PATCH response) has since installed, and this replay has no
-    // business reverting `turnVersion`/`currentCombatantId` to recompute HP.
+    // Merge only the HP-owned fields for the targeted combatants onto the
+    // freshest cached encounter. `base` can be older than a snapshot another
+    // writer (next-turn seeding, an encounter PATCH response) has since
+    // installed — not just at the encounter level (`turnVersion`,
+    // `currentCombatantId`), but per combatant too (`turnState`, conditions,
+    // ...). This replay has no business reverting either; only `hpCurrent`
+    // and its siblings are its business.
     queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
-      current ? withOptimisticHpCombatants(current, combatants) : current,
+      current ? mergeOptimisticHpTargets(current, recomputed, targetIds) : current,
     );
   }, [eid, queryClient, ruleSystem, campaign?.customMechanicsProfile]);
   const hpDelta = useKeyedMutation({
@@ -2917,11 +2921,16 @@ export default function RunSessionPage() {
               if (targets.has(combatant.id)) snapshot.combatants.set(combatant.id, combatant);
             }
           }
-          // Build off the freshest cached encounter, not the captured `previous` —
-          // see `withOptimisticHpCombatants`. Apply-to-all is an HP mechanism and
-          // has no business reverting encounter-level turn fields either.
+          // Merge only the HP-owned fields — for exactly the combatants this
+          // write actually touched (this bulk apply's own targets, plus any
+          // still-queued single-stepper targets folded into `pendingBaseline`
+          // above) — onto the freshest cached encounter. `optimisticCombatants`
+          // was built off the captured `previous`, so its non-HP fields (and
+          // any OTHER combatant's fields) are stale; `current` wins for those.
+          // See `mergeOptimisticHpTargets`. Apply-to-all is an HP mechanism and
+          // has no business reverting turn fields, encounter-level or per-combatant.
           queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (current) =>
-            current ? withOptimisticHpCombatants(current, optimisticCombatants) : current,
+            current ? mergeOptimisticHpTargets(current, optimisticCombatants, new Set([...targets, ...queuedTargetIds])) : current,
           );
         }
         const feedbackOperation = { targets, stale: new Map<number, HpFeedbackSnapshot>(), emitted: new Set<number>() };

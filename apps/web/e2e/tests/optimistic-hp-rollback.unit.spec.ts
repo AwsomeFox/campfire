@@ -3,9 +3,9 @@ import type { Combatant, EncounterWithCombatants } from '@campfire/schema';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  mergeOptimisticHpTargets,
   replayOptimisticHpDeltas,
   rollbackOptimisticHpTargets,
-  withOptimisticHpCombatants,
 } from '../../src/features/encounters/optimisticHp';
 
 const combatant = { id: 1, hpCurrent: 20, hpMax: 20 } as Combatant;
@@ -61,35 +61,81 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(restored.combatants[1]?.hpCurrent).toBe(9);
   });
 
-  test('issue #2119 — installing replayed combatants preserves a newer seeded turn', () => {
-    // Mirrors the scenario in issue #2119: an HP operation is queued against an
-    // older `base`; before the replay writes, a newer encounter snapshot (e.g.
-    // next-turn seeding, an encounter PATCH response) lands in the cache. The
-    // replay must recompute HP off `base` but install it onto the CURRENT
-    // encounter-level fields, not revert them to `base`'s.
+  test('issue #2119 (P2 follow-up) — merging HP fields preserves a newer per-combatant turnState, not just encounter-level turn fields', () => {
+    // The actual hazard, not just the shape: an HP operation is queued against
+    // an older `base`. Before the replay writes, a newer encounter snapshot
+    // lands — a turn advance that both bumps encounter-level turn fields AND
+    // resets combatant #1's OWN turnState (movement/actions used this turn).
+    // Replacing the whole combatants array with one recomputed from `base`
+    // would silently revert that per-combatant reset; merging must not.
     const base = {
       id: 8,
       currentCombatantId: 1,
       turnVersion: 4,
       round: 1,
-      combatants: [{ ...combatant, hpCurrent: 20 }, { id: 2, hpCurrent: 12, hpMax: 20 } as Combatant],
+      combatants: [
+        { ...combatant, hpCurrent: 20, turnState: { used: { action: true }, movementUsedFt: 30 } },
+        { id: 2, hpCurrent: 12, hpMax: 20 } as Combatant,
+      ],
     } as EncounterWithCombatants;
     const current = {
       ...base,
       currentCombatantId: 2,
       turnVersion: 5,
       round: 2,
+      combatants: [
+        // A newer snapshot (next-turn seeding) reset #1's turn-owned state —
+        // this must survive the merge untouched.
+        { ...base.combatants[0], turnState: { used: {}, movementUsedFt: 0 } },
+        base.combatants[1],
+      ],
     } as EncounterWithCombatants;
 
-    const replayedCombatants = replayOptimisticHpDeltas(base.combatants, [{ combatantId: 1, delta: -5 }]);
-    const installed = withOptimisticHpCombatants(current, replayedCombatants);
+    const recomputed = replayOptimisticHpDeltas(base.combatants, [{ combatantId: 1, delta: -5 }]);
+    const merged = mergeOptimisticHpTargets(current, recomputed, [1]);
 
-    // The HP recompute took effect...
-    expect(installed.combatants[0]?.hpCurrent).toBe(15);
-    // ...but the newer turn state that arrived after `base` was captured survived.
-    expect(installed.currentCombatantId).toBe(2);
-    expect(installed.turnVersion).toBe(5);
-    expect(installed.round).toBe(2);
+    // The queued HP delta (computed off the stale base) still applies...
+    expect(merged.combatants[0]?.hpCurrent).toBe(15);
+    // ...but the newer per-combatant turnState from `current` — NOT the one
+    // recomputed off `base` — survives. Reverting this assertion to check
+    // against `base`'s turnState is exactly the P2: it would prove the bug is
+    // back (the whole array replaced with a base-derived one) rather than
+    // fixed (only HP-owned fields merged).
+    expect(merged.combatants[0]?.turnState).toEqual({ used: {}, movementUsedFt: 0 });
+    // ...and the newer encounter-level turn fields survive too (the original
+    // #2119 fix, still covered here).
+    expect(merged.currentCombatantId).toBe(2);
+    expect(merged.turnVersion).toBe(5);
+    expect(merged.round).toBe(2);
+  });
+
+  test('issue #2119 (P2 follow-up) — a target removed by another client is never resurrected', () => {
+    const base = {
+      id: 8,
+      combatants: [{ ...combatant, hpCurrent: 20 }, { id: 2, hpCurrent: 12, hpMax: 20 } as Combatant],
+    } as EncounterWithCombatants;
+    // Combatant #1 — who has a queued HP delta against the stale base — was
+    // removed by another client before the replay writes.
+    const current = { ...base, combatants: [{ id: 2, hpCurrent: 9, hpMax: 20 } as Combatant] } as EncounterWithCombatants;
+
+    const recomputed = replayOptimisticHpDeltas(base.combatants, [{ combatantId: 1, delta: -5 }]);
+    const merged = mergeOptimisticHpTargets(current, recomputed, [1]);
+
+    expect(merged.combatants).toHaveLength(1);
+    expect(merged.combatants.find((c) => c.id === 1)).toBeUndefined();
+    expect(merged.combatants[0]?.hpCurrent).toBe(9);
+  });
+
+  test('issue #2119 (P2 follow-up) — a combatant added by another client (never in the stale base) is preserved untouched', () => {
+    const base = { id: 8, combatants: [{ ...combatant, hpCurrent: 20 }] } as EncounterWithCombatants;
+    const addedByAnotherClient = { id: 99, hpCurrent: 30, hpMax: 30, name: 'Reinforcement' } as Combatant;
+    const current = { ...base, combatants: [...base.combatants, addedByAnotherClient] } as EncounterWithCombatants;
+
+    const recomputed = replayOptimisticHpDeltas(base.combatants, [{ combatantId: 1, delta: -5 }]);
+    const merged = mergeOptimisticHpTargets(current, recomputed, [1]);
+
+    expect(merged.combatants[0]?.hpCurrent).toBe(15);
+    expect(merged.combatants[1]).toBe(addedByAnotherClient);
   });
 
   test('the HP mutation replays pending deltas instead of restoring a snapshot', () => {
@@ -113,26 +159,32 @@ test.describe('optimistic HP rollback (issue #1754)', () => {
     expect(source).not.toContain('rollbackOptimisticHpDelta');
   });
 
-  test('issue #2119 — the HP replay and bulk apply install combatants onto the live cache, not a captured base', () => {
+  test('issue #2119 — the HP replay and bulk apply merge HP-owned fields onto the live cache, never replace the whole combatants array', () => {
     const source = readFileSync(RUN_SESSION_PAGE, 'utf8');
 
-    // Both writers must route through the narrow helper that only ever touches
-    // `combatants`, reading every other encounter-level field from the freshest
-    // cache entry rather than a captured `base`/`previous` snapshot.
+    // Both writers must route through the narrow helper that merges only
+    // HP-owned fields for the touched combatant ids, reading every other
+    // field — encounter-level AND per-combatant — from the freshest cache
+    // entry rather than a captured `base`/`previous` snapshot. Replacing the
+    // whole `combatants` array (even one recomputed off `base`) is exactly
+    // the P2 this pins against: it would silently revert a per-combatant
+    // field (e.g. `turnState`) another writer set after `base` was captured.
     const replaySite = source.slice(
       source.indexOf('const replayPendingOptimisticHpDeltas = useCallback'),
       source.indexOf('}, [eid, queryClient, ruleSystem, campaign?.customMechanicsProfile]);'),
     );
-    expect(replaySite).toContain('withOptimisticHpCombatants(current, combatants)');
+    expect(replaySite).toContain('mergeOptimisticHpTargets(current, recomputed, targetIds)');
     expect(replaySite).not.toMatch(/setQueryData<EncounterWithCombatants>\(queryKeys\.encounter\(eid\), \{\s*\.\.\.base,/);
+    expect(replaySite).not.toContain('withOptimisticHpCombatants');
 
     const bulkApplySite = source.slice(
       source.indexOf('const applyHpDeltaBulk = useCallback'),
       source.indexOf('const results = await Promise.all(applications.map'),
     );
-    expect(bulkApplySite).toContain('withOptimisticHpCombatants(current, optimisticCombatants)');
+    expect(bulkApplySite).toContain('mergeOptimisticHpTargets(current, optimisticCombatants, new Set([...targets, ...queuedTargetIds]))');
     expect(bulkApplySite).not.toMatch(/setQueryData<EncounterWithCombatants>\(queryKeys\.encounter\(eid\), \{\s*\.\.\.previous,/);
+    expect(bulkApplySite).not.toContain('withOptimisticHpCombatants');
 
-    expect(source).toContain("import {\n  applyOptimisticHpDelta,\n  replayOptimisticHpDeltas,\n  rollbackOptimisticHpTargets,\n  withOptimisticHpCombatants,\n  type OptimisticHpDelta,\n} from './optimisticHp';");
+    expect(source).toContain("import {\n  applyOptimisticHpDelta,\n  mergeOptimisticHpTargets,\n  replayOptimisticHpDeltas,\n  rollbackOptimisticHpTargets,\n  type OptimisticHpDelta,\n} from './optimisticHp';");
   });
 });
