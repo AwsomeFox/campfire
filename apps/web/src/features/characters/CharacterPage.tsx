@@ -1720,9 +1720,8 @@ function CharacterVitalsRail({
             excludeName={leveledConditionTrack?.name}
           />
         </Card>
+        <DamageDefensesCard character={character} canEdit={canEdit} onChange={onChange} onError={onError} adapter={adapter} />
       </section>
-
-      <DamageDefensesCard character={character} canEdit={canEdit} onChange={onChange} onError={onError} adapter={adapter} />
     </div>
   );
 }
@@ -3690,6 +3689,18 @@ const DAMAGE_DEFENSE_CATEGORIES: ReadonlyArray<{
  * never fed the resolver for a character-kind combatant (see
  * `ActionResolverService.targetDefenses`, which now reads these fields when the combatant is
  * character-linked).
+ *
+ * Deliberately a bare `Card` (which itself renders a `<section>`), NOT wrapped in its own
+ * outer `<section>` — same shape as `WeaponTrainingCard` sitting inside the Skills section
+ * (#2151), and rendered as a second child of the CALLER's `<section id={...('conditions')}>`
+ * rather than as a sibling `<section>` under `CharacterVitalsRail`'s own `space-y-4` column.
+ * That is not just tidiness: `space-y-4`'s Tailwind selector is `:not(:last-child)`, a
+ * purely structural DOM check that `display:none` does NOT exempt an element from — so an
+ * extra top-level `<section>` sibling, even print-hidden, would still knock the PRECEDING
+ * section out of being `:last-child` and give it an unwanted 16px `margin-block-end` in
+ * print. Nesting here instead never changes `.cf-sheet-rail`'s direct-child count at all,
+ * screen or print, hidden or shown — this broke `print-layout.spec.ts`'s
+ * `character-sheet-print` golden by exactly 16px before this fix, verified by measurement.
  */
 function DamageDefensesCard({
   character,
@@ -3710,26 +3721,20 @@ function DamageDefensesCard({
   // "Damage defenses" section at all.
   const hasAny = character.resistances.length > 0 || character.vulnerabilities.length > 0 || character.immunities.length > 0;
   return (
-    <section
-      id="character-section-damage-defenses"
-      aria-labelledby="character-section-damage-defenses-heading"
-      className="cf-sheet-section"
-    >
-      <Card className={`space-y-2.5${hasAny ? '' : ' cf-print-hide'}`} data-testid="character-damage-defenses">
-        <h2 id="character-section-damage-defenses-heading" className="card-kicker mb-0">Damage defenses</h2>
-        {DAMAGE_DEFENSE_CATEGORIES.map((category) => (
-          <DamageDefenseRow
-            key={category.field}
-            character={character}
-            canEdit={canEdit}
-            onChange={onChange}
-            onError={onError}
-            adapter={adapter}
-            category={category}
-          />
-        ))}
-      </Card>
-    </section>
+    <Card className={`space-y-2.5${hasAny ? '' : ' cf-print-hide'}`} data-testid="character-damage-defenses">
+      <h2 className="card-kicker mb-0">Damage defenses</h2>
+      {DAMAGE_DEFENSE_CATEGORIES.map((category) => (
+        <DamageDefenseRow
+          key={category.field}
+          character={character}
+          canEdit={canEdit}
+          onChange={onChange}
+          onError={onError}
+          adapter={adapter}
+          category={category}
+        />
+      ))}
+    </Card>
   );
 }
 

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { and, eq } from 'drizzle-orm';
-import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState, PF2E_DAMAGE_TYPE_CATEGORIES } from '@campfire/schema';
+import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState, PF2E_DAMAGE_TYPES, PF2E_DAMAGE_TYPE_CATEGORIES } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
 import { actionApplyChains, actionPendingResolutions, auditLog, campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks, users } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -1198,9 +1198,14 @@ describe('action resolver (real SQLite, service layer)', () => {
           .all();
         const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
 
-        // Pass `categories` explicitly, exactly as the real call site (adapter.damageTypeCategories)
-        // would for a PF2e campaign.
-        const defenses = (service as any).targetDefenses(row, undefined, PF2E_DAMAGE_TYPE_CATEGORIES);
+        // Pass BOTH `damageTypes` and `categories`, exactly as the real call site does
+        // (`adapter.damageTypes`/`adapter.damageTypeCategories` together — see the call in
+        // `resolveOneTarget`). This is load-bearing, not decorative: `damageDefensesFromStatblock`
+        // only expands a category token when it has a non-empty vocabulary to expand INTO —
+        // passing `categories` alone with no `damageTypes` (an earlier version of this test did
+        // exactly that) leaves the raw, unexpanded 'physical' token sitting in the result, which
+        // this test would then wrongly read as evidence category expansion doesn't apply here.
+        const defenses = (service as any).targetDefenses(row, PF2E_DAMAGE_TYPES, PF2E_DAMAGE_TYPE_CATEGORIES);
         // The character's own authored category: exactly as authored, untouched by expansion.
         expect(defenses.vulnerabilities).toEqual(['slashing']);
         // The category the character left empty: falls through to the category-expanded statblock.
