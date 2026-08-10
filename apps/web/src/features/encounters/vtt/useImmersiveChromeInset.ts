@@ -1,13 +1,17 @@
 /**
  * Keep Layout's campaign-wide interrupts on screen above an immersive surface.
  *
- * `Layout.tsx` mounts the participant safety hold (`SafetyHoldBar`, issue #599) and
- * the player check-request prompts (issue #415) once, outside the routed page, so
- * they are present on EVERY campaign route rather than only where an author
- * remembered them. The encounter cockpit is `position: fixed; inset: 0` with an
- * opaque background, so without this it painted straight over both: an active hold
- * was invisible, and neither the "pause the table" control nor a delivered check
- * prompt could be clicked while combat was on screen.
+ * `Layout.tsx` mounts the player check-request prompts (issue #415) once, outside the
+ * routed page, so they are present on every campaign route rather than only where an
+ * author remembered them. The encounter cockpit is `position: fixed; inset: 0` with an
+ * opaque background, so without this it painted straight over them: a delivered check
+ * prompt could not be clicked while combat was on screen.
+ *
+ * The participant safety hold (`SafetyHoldBar`, issue #599) is measured too, and was the
+ * other original motivation, but it no longer mounts on this route — it is scoped to the
+ * AI Table (see `onPlaySurface`). The selector stays because this hook runs on any
+ * immersive surface and costs one miss when absent, not because the cockpit still has a
+ * hold to clear.
  *
  * Rather than re-mounting those components inside the cockpit (two live queries, two
  * `role="status"` regions, and a safety control that disappears if the page below it

@@ -11,8 +11,6 @@ import {
   startGateReason,
   startRosterHintReason,
   syncOnlyGateReason,
-  turnTimerControlDisabled,
-  turnTimerControlVisible,
   undoTurnGateReason,
 } from './lifecycleGate';
 
@@ -22,8 +20,15 @@ const START_ROSTER_HINT_ID = 'start-roster-hint';
 /** Turn timer (issue #1935) preset choices — 0 = off (elapsed-only, DM-facing chip). */
 const TURN_TIMER_PRESETS = [0, 60, 90, 120] as const;
 
-/** Small inline stopwatch popover: DM sets the pacing-limit preset via the existing PATCH. */
-function TurnTimerControl({
+/**
+ * Small inline stopwatch popover: DM sets the pacing-limit preset via the existing PATCH.
+ *
+ * Rendered by RunSessionPage inside the header's meta pill, immediately after the
+ * `TurnElapsedChip` it configures — NOT here in the lifecycle control group. It sat at the
+ * head of that group as an unlabeled stopwatch glyph, a row below the `Round 3 · 1:12`
+ * readout it drives, which read as a stray icon rather than that readout's settings.
+ */
+export function TurnTimerControl({
   turnTimerSeconds,
   onSetTurnTimerSeconds,
   disabled,
@@ -70,8 +75,9 @@ export type Props = {
   headerBusy: boolean;
   riskyBlocked: boolean;
   /** #599: mirrors the server's assertNoSafetyHold rejection on start/nextTurn/undoTurn —
-   *  no server change, just surfacing the same table-wide safety-hold state (already
-   *  visible via SafetyHoldBar) as a reason on the controls it actually blocks. */
+   *  no server change, just surfacing the table-wide safety-hold state as a reason on the
+   *  controls it actually blocks. The cockpit does not mount SafetyHoldBar, so this reason
+   *  is the only place the hold is named here. */
   safetyHoldActive: boolean;
   needsInitiativeCount: number;
   /**
@@ -95,9 +101,6 @@ export type Props = {
   onRequestEnd: () => void;
   onRequestReopen: () => void;
   onRequestDelete: () => void;
-  /** Turn timer (issue #1935) — current DM-set pacing limit, and how to change it. */
-  turnTimerSeconds: number;
-  onSetTurnTimerSeconds: (seconds: number) => void;
 };
 
 export type EncounterSyncBannerProps = {
@@ -126,8 +129,6 @@ export function DmLifecycleHeader({
   onRequestEnd,
   onRequestReopen,
   onRequestDelete,
-  turnTimerSeconds,
-  onSetTurnTimerSeconds,
 }: Props) {
   const { t } = useTranslation();
 
@@ -140,13 +141,6 @@ export function DmLifecycleHeader({
           unexplained error banner for a tap that can never succeed), and disabled
           alongside the other conflict-prone writes when the sync state is stale
           (riskyBlocked), not just while a request is already in flight. */}
-      {turnTimerControlVisible(lifecycle.reopen) && (
-        <TurnTimerControl
-          turnTimerSeconds={turnTimerSeconds}
-          onSetTurnTimerSeconds={onSetTurnTimerSeconds}
-          disabled={turnTimerControlDisabled({ headerBusy, riskyBlocked })}
-        />
-      )}
       {lifecycle.rollInitiative && lifecycle.start && (
         <>
           {/* Issue #702: the server treats a fully-rolled roster as a no-op (no

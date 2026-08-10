@@ -88,7 +88,7 @@ export function QuickRollButtons({
   useTranslation();
   const queryClient = useQueryClient();
   const announce = useAnnounce();
-  const { showRoll } = useRollResultToast();
+  const { beginRollAnimation, cancelRollAnimation, showRoll } = useRollResultToast();
   const [lastOutcome, setLastOutcome] = useState<{
     kind: 'to-hit' | 'damage';
     total: number;
@@ -123,6 +123,31 @@ export function QuickRollButtons({
   const damageInfo = parseDamageDisplay(effectiveDamage);
 
   const quickRoll = useMutation({
+    /**
+     * Throw the dice before the request goes out, like every other roll surface.
+     *
+     * These buttons were the one roll path that produced a toast with no dice: the
+     * result simply appeared. `beginRollAnimation` starts the overlay (and the clatter)
+     * immediately on press, and `showRoll` in `onSuccess` lands the settled faces on it —
+     * the same begin/show pairing `useRoller`, SharedDiceLog and the initiative roll use.
+     *
+     * The animated expression is not the submitted one. To-hit submits a BONUS (`+3`) and
+     * the server builds the d20 around it, so the dice to show are `1d20` — or the
+     * two-die keep-highest/lowest pair when rolling with (dis)advantage. Damage submits a
+     * real expression, but one that can carry a trailing damage type (`1d4+1 slashing`);
+     * `expandDiceSidesFromExpr` reads the dice terms and ignores the rest.
+     */
+    onMutate: (vars: { kind: 'to-hit' | 'damage'; expr: string; mode?: 'flat' | 'advantage' | 'disadvantage' }) => {
+      const animationExpr =
+        vars.kind === 'damage'
+          ? vars.expr
+          : vars.mode === 'advantage'
+            ? '2d20kh1'
+            : vars.mode === 'disadvantage'
+              ? '2d20kl1'
+              : '1d20';
+      beginRollAnimation(animationExpr);
+    },
     mutationFn: (vars: { kind: 'to-hit' | 'damage'; expr: string; mode?: 'flat' | 'advantage' | 'disadvantage' }) =>
       api.post<{
         roll: any;
@@ -143,6 +168,10 @@ export function QuickRollButtons({
       invalidateEncounter(queryClient, encounterId);
       if (data.roll) {
         showRoll(data.roll);
+      } else {
+        // Nothing to settle onto — clear the overlay rather than leave dice tumbling
+        // over a result that already arrived by another route.
+        cancelRollAnimation();
       }
       setLastOutcome({
         kind: vars.kind,
@@ -158,6 +187,11 @@ export function QuickRollButtons({
       } else {
         announce(`${actionName} damage: ${data.total}`);
       }
+    },
+    // A failed roll must take its dice with it: without this the overlay tumbles
+    // indefinitely, because only `showRoll`/`cancelRollAnimation` ever settle it.
+    onError: () => {
+      cancelRollAnimation();
     },
   });
 

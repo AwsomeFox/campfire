@@ -341,8 +341,7 @@ export default function DashboardPage() {
       */}
       <div className="cf-dashboard-deck grid gap-4 min-w-0 items-start xl:grid-cols-[17rem_minmax(0,1fr)] 2xl:grid-cols-[17rem_minmax(0,1fr)_20rem]">
         <aside
-          className="cf-dashboard-rail min-w-0 space-y-4 xl:sticky xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)] xl:overflow-y-auto xl:overscroll-contain"
-          style={{ top: 'calc(var(--app-header-h, 0px) + 1rem)' }}
+          className="cf-dashboard-rail min-w-0 space-y-4"
           aria-label="Session and party"
           data-testid="dashboard-session-rail"
         >
@@ -375,8 +374,7 @@ export default function DashboardPage() {
         </div>
 
         <aside
-          className="cf-dashboard-rail min-w-0 xl:col-span-2 2xl:col-span-1 2xl:sticky 2xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)]"
-          style={{ top: 'calc(var(--app-header-h, 0px) + 1rem)' }}
+          className="cf-dashboard-rail min-w-0 xl:col-span-2 2xl:col-span-1"
           aria-label="Table rail"
           data-testid="dashboard-table-rail"
         >

@@ -109,8 +109,14 @@ export function CombatantActionsList({
               })
             : undefined);
         return (
-          <div key={a.index} className="flex items-center justify-between gap-2 text-sm">
-            <div className="min-w-0 flex-1 flex flex-wrap items-center gap-2">
+          // The row wraps rather than squeezing: the label column carries fixed-size 44×44
+          // quick-roll targets (issue #428) that cannot shrink, so a `flex-1` column against a
+          // `shrink-0` button group used to be crushed below its content width and — because
+          // overflow stays visible — painted the damage badge ON TOP of "Run for group" in the
+          // narrow VTT rail. `basis-48` is the width the label column actually needs; below
+          // that the button group drops to its own line instead.
+          <div key={a.index} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <div className="min-w-0 grow shrink basis-48 flex flex-wrap items-center gap-2">
               <span className="font-medium text-white">{a.name}</span>
               {a.uses && (
                 <span
@@ -131,36 +137,36 @@ export function CombatantActionsList({
               />
               {a.notes && <span className="text-xs text-muted">({a.notes})</span>}
             </div>
-          <div className="flex items-center gap-1 shrink-0">
-            {onUseGroupAction && (
+            <div className="flex items-center gap-1 shrink-0 ml-auto">
+              {onUseGroupAction && (
+                <Btn
+                  type="button"
+                  ghost
+                  className="!min-h-8 text-xs"
+                  data-testid={`combatant-actions-${combatantId}-use-group-${a.index}`}
+                  disabled={!!disabledReason}
+                  title={disabledReason}
+                  aria-describedby={disabledReason ? blockedReasonId : undefined}
+                  onClick={() => a.spec && onUseGroupAction(a.index, a.name, a.spec, a)}
+                >
+                  {t('encounters.actions.useGroup', { defaultValue: 'Run for group' })}
+                </Btn>
+              )}
               <Btn
                 type="button"
                 ghost
                 className="!min-h-8 text-xs"
-                data-testid={`combatant-actions-${combatantId}-use-group-${a.index}`}
-                disabled={!!disabledReason}
-                title={disabledReason}
-                aria-describedby={disabledReason ? blockedReasonId : undefined}
-                onClick={() => a.spec && onUseGroupAction(a.index, a.name, a.spec, a)}
+                disabled={!!useReason}
+                title={useReason}
+                aria-describedby={disabledReason ? blockedReasonId : exhausted ? exhaustedReasonId : undefined}
+                onClick={() => a.spec && onUseAction(a.index, a.name, a.spec)}
               >
-                {t('encounters.actions.useGroup', { defaultValue: 'Run for group' })}
+                {t('encounters.actions.use', { defaultValue: 'Use' })}
               </Btn>
-            )}
-            <Btn
-              type="button"
-              ghost
-              className="!min-h-8 text-xs"
-              disabled={!!useReason}
-              title={useReason}
-              aria-describedby={disabledReason ? blockedReasonId : exhausted ? exhaustedReasonId : undefined}
-              onClick={() => a.spec && onUseAction(a.index, a.name, a.spec)}
-            >
-              {t('encounters.actions.use', { defaultValue: 'Use' })}
-            </Btn>
+            </div>
           </div>
-        </div>
-      );
-    })}
+        );
+      })}
     </div>
   );
 }

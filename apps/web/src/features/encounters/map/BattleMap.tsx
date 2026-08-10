@@ -690,6 +690,24 @@ export const BattleMap = memo(function BattleMap({
     regionLabel: 'Grid and fog settings',
   });
   const gridPanelOpen = gridDisclosure.open;
+  /**
+   * In the cockpit, map setup and token selection are rail tools that open on demand —
+   * the same disclosure contract as Grid & fog above.
+   *
+   * They used to be permanent floating panels: "Token detail / Replace map / Remove map"
+   * camped on the map's top-left and the multi-selection helpers on its top-right, so a
+   * board the whole screen exists to show was covered by controls nobody was using at
+   * that moment. Only the cockpit is affected; in the card layout these sit in normal
+   * flow below the board and cover nothing, so they stay visible there.
+   */
+  const mapSetupDisclosure = useDisclosure({
+    focusManagement: false,
+    regionLabel: 'Map setup',
+  });
+  const selectionDisclosure = useDisclosure({
+    focusManagement: false,
+    regionLabel: 'Manage tokens',
+  });
   // Shared AoE templates (issue #238) live in encounter state; `selectedAoeId` is the DM's local
   // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
@@ -2289,9 +2307,13 @@ export const BattleMap = memo(function BattleMap({
             {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region. Shift-click a grid cell when the grid is on.')}
             {effectiveCanDmWrite && modeBtn('erase', 'Erase', !fogOn, fogOn ? 'Click-drag to hide a fog region' : 'Enable fog first')}
             {effectiveCanDmWrite && modeBtn('select', 'Select', !fogOn, fogOn ? 'Select, drag, or delete a revealed region' : 'Enable fog first')}
-            {effectiveCanDmWrite && fogOn && (
+            {/* Fog undo/redo and Calibrate are not rail tools in the cockpit. Undo/redo are
+                viewport-level actions, so they sit in the viewport toolbar with pan/zoom;
+                Calibrate only means anything once the grid is on, so it lives inside the
+                Grid & fog panel that owns the grid. Both keep their rail slots in the card
+                layout, which has no viewport toolbar and no floating panel. */}
+            {!isVtt && effectiveCanDmWrite && fogOn && (
               <>
-                {isVtt && <span className="cf-vtt-rail-sep" aria-hidden />}
                 <button
                   type="button"
                   className="cf-map-tool cf-map-focusable"
@@ -2300,10 +2322,7 @@ export const BattleMap = memo(function BattleMap({
                   disabled={!fogUndoUi.canUndo}
                   onClick={undoFogEdit}
                 >
-                  {isVtt && <span className="cf-vtt-rail-glyph" aria-hidden>↶</span>}
-                  <span className={isVtt ? 'cf-vtt-rail-label' : undefined}>
-                    Undo
-                  </span>
+                  <span>{t('encounters.map.fog.undo')}</span>
                 </button>
                 <button
                   type="button"
@@ -2313,14 +2332,11 @@ export const BattleMap = memo(function BattleMap({
                   disabled={!fogUndoUi.canRedo}
                   onClick={redoFogEdit}
                 >
-                  {isVtt && <span className="cf-vtt-rail-glyph" aria-hidden>↷</span>}
-                  <span className={isVtt ? 'cf-vtt-rail-label' : undefined}>
-                    Redo
-                  </span>
+                  <span>{t('encounters.map.fog.redo')}</span>
                 </button>
               </>
             )}
-            {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
+            {!isVtt && effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
             {effectiveCanDeclareAoe && canAoe && (
               <>
                 {isVtt ? (
@@ -2384,6 +2400,32 @@ export const BattleMap = memo(function BattleMap({
                 </button>
               </>
             )}
+            {isVtt && effectiveIsDm && (
+              <button
+                type="button"
+                className="cf-map-tool cf-map-focusable"
+                {...mapSetupDisclosure.buttonProps}
+                data-testid="map-setup-toggle"
+                title="Map setup — token detail and the map file"
+                style={{ borderColor: mapSetupDisclosure.open ? 'var(--color-accent)' : 'transparent' }}
+              >
+                <span className="cf-vtt-rail-glyph" aria-hidden>▤</span>
+                <span className="cf-vtt-rail-label">{t('encounters.map.setup')}</span>
+              </button>
+            )}
+            {isVtt && effectiveIsDm && (
+              <button
+                type="button"
+                className="cf-map-tool cf-map-focusable"
+                {...selectionDisclosure.buttonProps}
+                data-testid="map-selection-toggle"
+                title="Manage tokens — select, arrange, and place"
+                style={{ borderColor: selectionDisclosure.open ? 'var(--color-accent)' : 'transparent' }}
+              >
+                <span className="cf-vtt-rail-glyph" aria-hidden>⛶</span>
+                <span className="cf-vtt-rail-label">{t('encounters.map.manage.title')}</span>
+              </button>
+            )}
           </div>
           )}
 
@@ -2394,32 +2436,34 @@ export const BattleMap = memo(function BattleMap({
             className={isVtt ? 'cf-vtt-map-aside' : undefined}
             style={isVtt ? undefined : { display: 'contents' }}
           >
-          {isVtt && effectiveIsDm && (
-            <label className="flex items-center gap-2 text-muted" style={{ fontSize: 11 }}>
-              <span>{t('encounters.map.tokenDetails.label')}</span>
-              <select
-                className="cf-map-tool"
-                data-testid="map-token-detail-mode"
-                aria-label={t('encounters.map.tokenDetails.label')}
-                value={dmTokenDetailMode}
-                onChange={(event) => setTokenDetailMode(event.target.value as TokenDetailMode)}
-                style={{ minWidth: 92, textTransform: 'none', letterSpacing: 0 }}
-              >
-                <option value="full">{t('encounters.map.tokenDetails.full')}</option>
-                <option value="minimal">{t('encounters.map.tokenDetails.minimal')}</option>
-                <option value="off">{t('encounters.map.tokenDetails.off')}</option>
-              </select>
-            </label>
-          )}
-          {isVtt && effectiveCanDmWrite && (
-            <div className="flex items-center gap-2 flex-wrap">
-              <MapUploadButton
-                campaignId={campaignId}
-                hasMap
-                uploading={uploading || busy}
-                onPick={(file) => void uploadMapFile(file)}
-                onRemove={() => void openMapRemoveDialog()}
-              />
+          {isVtt && effectiveIsDm && mapSetupDisclosure.open && (
+            <div {...mapSetupDisclosure.regionProps} className="flex flex-col gap-2">
+              <label className="flex items-center gap-2 text-muted" style={{ fontSize: 11 }}>
+                <span>{t('encounters.map.tokenDetails.label')}</span>
+                <select
+                  className="cf-map-tool"
+                  data-testid="map-token-detail-mode"
+                  aria-label={t('encounters.map.tokenDetails.label')}
+                  value={dmTokenDetailMode}
+                  onChange={(event) => setTokenDetailMode(event.target.value as TokenDetailMode)}
+                  style={{ minWidth: 92, textTransform: 'none', letterSpacing: 0 }}
+                >
+                  <option value="full">{t('encounters.map.tokenDetails.full')}</option>
+                  <option value="minimal">{t('encounters.map.tokenDetails.minimal')}</option>
+                  <option value="off">{t('encounters.map.tokenDetails.off')}</option>
+                </select>
+              </label>
+              {effectiveCanDmWrite && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <MapUploadButton
+                    campaignId={campaignId}
+                    hasMap
+                    uploading={uploading || busy}
+                    onPick={(file) => void uploadMapFile(file)}
+                    onRemove={() => void openMapRemoveDialog()}
+                  />
+                </div>
+              )}
             </div>
           )}
           {/* Derivative lifecycle for the battle map (issue #604). The board always
@@ -2682,6 +2726,26 @@ export const BattleMap = memo(function BattleMap({
               className="flex flex-wrap gap-3 items-center"
               style={{ padding: '10px 14px', margin: '8px 14px 0', border: '1px solid var(--color-divider)', borderRadius: 8, fontSize: 12 }}
             >
+              {/* Calibrate belongs to the grid, so it lives with the grid rather than
+                  holding a permanent rail slot for a tool that is inert until the grid
+                  is switched on right here. */}
+              {isVtt && effectiveCanDmWrite && (
+                <button
+                  type="button"
+                  className="cf-map-tool cf-map-tool--compact cf-map-focusable"
+                  data-testid="map-tool-calibrate"
+                  disabled={!canCalibrate}
+                  aria-pressed={tool === 'calibrate'}
+                  title={canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first'}
+                  onClick={() => changeTool('calibrate')}
+                  style={{
+                    borderColor: tool === 'calibrate' ? 'var(--color-accent)' : 'var(--color-divider)',
+                    color: tool === 'calibrate' ? 'var(--color-accent)' : undefined,
+                  }}
+                >
+                  Calibrate
+                </button>
+              )}
               <label className="flex items-center gap-1">
                 <input
                   type="checkbox"
@@ -2883,7 +2947,7 @@ export const BattleMap = memo(function BattleMap({
               </label>
               <button
                 type="button"
-                className="cf-chip"
+                className="cf-map-tool cf-map-tool--compact"
                 disabled={!fogOn}
                 onClick={() => commitFogEdit({ enabled: true, revealed: [{ x: 0, y: 0, w: 100, h: 100 }] })}
                 style={{ cursor: fogOn ? 'pointer' : 'default', opacity: fogOn ? 1 : 0.5 }}
@@ -2892,7 +2956,7 @@ export const BattleMap = memo(function BattleMap({
               </button>
               <button
                 type="button"
-                className="cf-chip"
+                className="cf-map-tool cf-map-tool--compact"
                 disabled={!fogOn || (fog?.revealed.length ?? 0) === 0}
                 onClick={() => commitFogEdit({ enabled: true, revealed: [] })}
                 style={{ cursor: fogOn && (fog?.revealed.length ?? 0) > 0 ? 'pointer' : 'default', opacity: fogOn && (fog?.revealed.length ?? 0) > 0 ? 1 : 0.5 }}
@@ -2926,6 +2990,35 @@ export const BattleMap = memo(function BattleMap({
             role="toolbar"
             aria-label="Map viewport navigation"
           >
+            {/* Fog history, with the other viewport-level actions. Proper glyphs rather
+                than the bare `↶`/`↷` arrows these carried in the rail. */}
+            {isVtt && effectiveCanDmWrite && fogOn && (
+              <>
+                <button
+                  type="button"
+                  className="cf-map-tool cf-map-focusable"
+                  data-testid="map-fog-undo"
+                  title="Undo last fog edit (Ctrl+Z)"
+                  aria-label="Undo last fog edit"
+                  disabled={!fogUndoUi.canUndo}
+                  onClick={undoFogEdit}
+                >
+                  <GameIcon slug="anticlockwise-rotation" size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="cf-map-tool cf-map-focusable"
+                  data-testid="map-fog-redo"
+                  title="Redo fog edit (Ctrl+Shift+Z)"
+                  aria-label="Redo fog edit"
+                  disabled={!fogUndoUi.canRedo}
+                  onClick={redoFogEdit}
+                >
+                  <GameIcon slug="clockwise-rotation" size={14} />
+                </button>
+                <span className="cf-map-toolbar-sep" aria-hidden />
+              </>
+            )}
             <button
               type="button"
               className="cf-map-tool cf-map-focusable"
@@ -3784,19 +3877,50 @@ export const BattleMap = memo(function BattleMap({
             className={isVtt ? 'cf-vtt-map-tray' : undefined}
             style={isVtt ? undefined : { display: 'contents' }}
           >
-          {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
-            <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">
+          {/* In the cockpit this tray is behind the rail's "Manage tokens" tool (see
+              `selectionDisclosure`); in the card layout it is always in flow, where it
+              covers nothing.
+
+              The disclosure gate applies to DMs ONLY, because the button that opens it
+              is itself DM-gated. Applying it to everyone hid the Unplaced list — the one
+              way a player puts their own character on the board — behind a control no
+              player can see, so in the cockpit a player simply could not place their
+              token and had to ask the DM to do it. Players keep the tray in flow, as
+              they had it before the disclosure existed. */}
+          {!isCast && (!isVtt || !effectiveIsDm || selectionDisclosure.open) && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
+            <div
+              className="flex flex-col gap-2"
+              style={{ padding: '0 14px 10px' }}
+              data-testid="map-token-trays"
+              {...(isVtt && effectiveIsDm ? selectionDisclosure.regionProps : {})}
+            >
+              {/* Three labelled groups, not one flat run of buttons: what you are
+                  selecting, what to do with the selection, and saved formations. The
+                  unlabelled pile gave "Select party", "Cluster" and "Save formation"
+                  identical weight, so nothing signalled that the middle group acts ON
+                  the first group's result. */}
               {effectiveIsDm && (
-                <div className="flex flex-wrap gap-2 items-center" aria-label="Token multi-selection controls">
-                  <span aria-live="polite" className="text-muted" style={{ fontSize: 11 }}>
+                <div className="cf-token-manage" aria-label={t('encounters.map.manage.title')}>
+                  <div className="cf-token-manage__status" aria-live="polite">
                     {selectedTokenIds.size} token{selectedTokenIds.size === 1 ? '' : 's'} selected
-                  </span>
-                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(new Set())}>Clear selection</button>
-                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'character'))}>Select party</button>
-                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind !== 'character'))}>Select enemies</button>
-                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'monster'))}>Select monsters</button>
-                  <button type="button" className="cf-chip" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'npc'))}>Select NPCs</button>
-                  {(['line', 'cluster', 'sides'] as const).map(kind => <button key={kind} type="button" className="cf-chip" disabled={!tokenPlanningReady || selectedTokenIds.size === 0 || !onBatchTokens} onClick={() => {
+                  </div>
+                  <div className="cf-token-manage__group" role="group" aria-label={t('encounters.map.manage.select')}>
+                    <span className="cf-token-manage__label">{t('encounters.map.manage.select')}</span>
+                  <button type="button" className="cf-map-tool cf-map-tool--compact" onClick={() => setSelectedTokenIds(new Set())}>Clear selection</button>
+                  <button type="button" className="cf-map-tool cf-map-tool--compact" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'character'))}>Select party</button>
+                  <button type="button" className="cf-map-tool cf-map-tool--compact" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind !== 'character'))}>Select enemies</button>
+                  <button type="button" className="cf-map-tool cf-map-tool--compact" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'monster'))}>Select monsters</button>
+                  <button type="button" className="cf-map-tool cf-map-tool--compact" onClick={() => setSelectedTokenIds(selectBy(placed, c => c.kind === 'npc'))}>Select NPCs</button>
+                  <details>
+                    <summary className="cf-map-tool cf-map-tool--compact" style={{ cursor: 'pointer' }}>{t('encounters.map.manage.selectedTokens')}</summary>
+                    <div role="group" aria-label={t('encounters.map.manage.selectedTokenList')} className="flex flex-col gap-1" style={{ maxHeight: 150, overflow: 'auto', padding: 6 }}>
+                      {placed.map(c => <label key={c.id}><input type="checkbox" checked={selectedTokenIds.has(c.id)} onChange={() => setSelectedTokenIds(current => toggleTokenSelection(current, c.id, true))} /> {c.name}</label>)}
+                    </div>
+                  </details>
+                  </div>
+                  <div className="cf-token-manage__group" role="group" aria-label={t('encounters.map.manage.arrange')}>
+                    <span className="cf-token-manage__label">{t('encounters.map.manage.arrange')}</span>
+                  {(['line', 'cluster', 'sides'] as const).map(kind => <button key={kind} type="button" className="cf-map-tool cf-map-tool--compact" disabled={!tokenPlanningReady || selectedTokenIds.size === 0 || !onBatchTokens} onClick={() => {
                     const chosen = placed.filter(c => selectedTokenIds.has(c.id));
                     let plan: Array<{ combatantId: number; x: number; y: number }>;
                     try { plan = planFormationPlacement(encounter.combatants, selectedTokenIds, kind, { x: 50, y: 50 }, gridOn ? Math.max(1, gridSize ?? 5) : 5, gridOn && gridType === 'hex' ? 'hex' : 'square', tokenPlanningAspect, calibration, mapRect).map(p => ({ combatantId: p.id, x: p.x, y: p.y })); }
@@ -3805,21 +3929,20 @@ export const BattleMap = memo(function BattleMap({
                     if (!window.confirm(`Preview ${kind} formation: ${plan.length} included, ${chosen.length - plan.length} omitted. Apply this atomic placement?`)) return;
                     void onBatchTokens(plan, tokenPlanningAspect).then(result => { beginTokenBatchUndo(result.undoToken); announce(`${kind} formation preview applied: ${plan.length} included`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
                   }}>{kind === 'sides' ? 'Party / enemy sides' : `${kind[0].toUpperCase()}${kind.slice(1)}`}</button>)}
-                  <details>
-                    <summary className="cf-chip" style={{ cursor: 'pointer' }}>Selected tokens</summary>
-                    <div role="group" aria-label="Selected token list" className="flex flex-col gap-1" style={{ maxHeight: 150, overflow: 'auto', padding: 6 }}>
-                      {placed.map(c => <label key={c.id}><input type="checkbox" checked={selectedTokenIds.has(c.id)} onChange={() => setSelectedTokenIds(current => toggleTokenSelection(current, c.id, true))} /> {c.name}</label>)}
-                    </div>
-                  </details>
-                  <TextInput aria-label="Saved formation name" value={formationName} onChange={(e) => setFormationName(e.target.value)} placeholder="Formation name" style={{ width: 130 }} />
-                  <button type="button" className="cf-chip" disabled={!tokenPlanningReady || !formationName.trim() || selectedTokenIds.size === 0} onClick={() => {
+                  </div>
+                  <div className="cf-token-manage__group" role="group" aria-label={t('encounters.map.manage.formations')}>
+                    <span className="cf-token-manage__label">{t('encounters.map.manage.formations')}</span>
+                  {/* Grows to the tray's width: at the old fixed 130px the placeholder
+                      itself was clipped to "Formation nan", which reads as a bug. */}
+                  <TextInput aria-label="Saved formation name" value={formationName} onChange={(e) => setFormationName(e.target.value)} placeholder="Formation name" style={{ flex: '1 1 11rem', minWidth: '9rem' }} />
+                  <button type="button" className="cf-map-tool cf-map-tool--compact" disabled={!tokenPlanningReady || !formationName.trim() || selectedTokenIds.size === 0} onClick={() => {
                     const chosen = placed.filter(c => selectedTokenIds.has(c.id));
                     const anchor = chosen[0]; if (!anchor || anchor.tokenX == null || anchor.tokenY == null) return;
                     void api.post(`${API}/campaigns/${campaignId}/encounters/token-formations`, { name: formationName, slots: chosen.map(c => ({ side: c.kind === 'character' ? 'party' : 'enemy', kind: c.kind, x: (c.tokenX ?? anchor.tokenX!) - anchor.tokenX!, y: (c.tokenY ?? anchor.tokenY!) - anchor.tokenY! })) }).then(() => {
                       setFormationName(''); void formationsQuery.refetch(); announce('Formation saved');
                     }).catch(error => onError(error instanceof Error ? error.message : 'Unable to save formation'));
                   }}>Save formation</button>
-                  {(formationsQuery.data ?? []).map(formation => <span key={formation.id} className="flex gap-1 items-center"><button type="button" className="cf-chip" disabled={!tokenPlanningReady} onClick={() => {
+                  {(formationsQuery.data ?? []).map(formation => <span key={formation.id} className="flex gap-1 items-center"><button type="button" className="cf-map-tool cf-map-tool--compact" disabled={!tokenPlanningReady} onClick={() => {
                     try {
                       const slots = JSON.parse(formation.layoutJson) as Array<{ side: 'party' | 'enemy' | 'any'; kind?: string; x: number; y: number }>;
                       const remaining = [...placed.filter(c => selectedTokenIds.size === 0 || selectedTokenIds.has(c.id))];
@@ -3833,7 +3956,8 @@ export const BattleMap = memo(function BattleMap({
                       if (!window.confirm(`Preview ${formation.name}: ${plan.length} included, ${remaining.length} omitted. Apply this atomic placement?`)) return;
                       void onBatchTokens(plan, tokenPlanningAspect).then(result => { beginTokenBatchUndo(result.undoToken); announce(`${formation.name} placed`); }).catch(error => onError(error instanceof Error ? error.message : 'Unable to place formation'));
                     } catch (error) { onError(error instanceof Error ? error.message : 'Invalid saved formation'); }
-                  }}>{formation.name}</button><button type="button" aria-label={`Delete ${formation.name} formation`} className="cf-chip" onClick={() => void api.delete(`${API}/campaigns/${campaignId}/encounters/token-formations/${formation.id}`).then(() => void formationsQuery.refetch())}><UIIcon name="close" size="xs" /></button></span>)}
+                  }}>{formation.name}</button><button type="button" aria-label={`Delete ${formation.name} formation`} className="cf-map-tool cf-map-tool--compact" onClick={() => void api.delete(`${API}/campaigns/${campaignId}/encounters/token-formations/${formation.id}`).then(() => void formationsQuery.refetch())}><UIIcon name="close" size="xs" /></button></span>)}
+                  </div>
                 </div>
               )}
               {unplaced.length > 0 && (
@@ -3842,7 +3966,7 @@ export const BattleMap = memo(function BattleMap({
                   {effectiveIsDm && (
                     <button
                       type="button"
-                      className="cf-chip"
+                      className="cf-map-tool cf-map-tool--compact"
                       data-testid="map-token-place-all"
                       disabled={!tokenPlanningReady || busy}
                       onClick={() => {
@@ -3866,7 +3990,7 @@ export const BattleMap = memo(function BattleMap({
                       <button
                         key={c.id}
                         type="button"
-                        className="cf-chip"
+                        className="cf-map-tool cf-map-tool--compact"
                         data-testid={`map-token-unplaced-${c.id}`}
                         disabled={!movable || busy}
                         onClick={() => onMoveToken(c.id, 50, 50)}

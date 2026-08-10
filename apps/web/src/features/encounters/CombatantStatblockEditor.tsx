@@ -155,7 +155,10 @@ export function CombatantStatblockEditor({
         <legend className="text-sm px-1" title={COMBATANT_STATBLOCK_HELP.abilityScores}>
           Abilities
         </legend>
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+        {/* auto-fit, not a `sm:` breakpoint: `sm:grid-cols-6` keys off the VIEWPORT, so on
+            a 1440px screen this editor got six columns even though it lives in the ~400px
+            VTT rail — each field ended up ~50px wide and clipped a two-digit score. */}
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(4.5rem,1fr))] gap-2">
           {abilityFields.map((field) => (
             <label key={field.key} className="flex flex-col gap-0.5 text-xs">
               <span>{field.label}</span>
@@ -197,8 +200,10 @@ export function CombatantStatblockEditor({
         </div>
         {statblock.actions.map((action, index) => (
           <div key={index} className="rounded-md border border-neutral-700 p-2 flex flex-col gap-2">
-            <div className="flex gap-2 items-start">
-              <label className="flex-1 flex flex-col gap-0.5 text-xs">
+            {/* Wraps: three side-by-side fields plus Remove need ~380px, which the VTT
+                rail does not have — unwrapped, "1d4+1 slashing" showed as "1d4·". */}
+            <div className="flex flex-wrap gap-2 items-start">
+              <label className="flex-1 basis-32 flex flex-col gap-0.5 text-xs">
                 <span title={COMBATANT_STATBLOCK_HELP.actionName}>Name</span>
                 <input
                   className="input !min-h-8"
@@ -207,7 +212,7 @@ export function CombatantStatblockEditor({
                   onChange={(e) => patchAction(index, { name: e.target.value })}
                 />
               </label>
-              <label className="w-24 flex flex-col gap-0.5 text-xs">
+              <label className="w-20 shrink-0 flex flex-col gap-0.5 text-xs">
                 <span title={COMBATANT_STATBLOCK_HELP.toHit}>To hit</span>
                 <input
                   className="input !min-h-8"
@@ -216,7 +221,7 @@ export function CombatantStatblockEditor({
                   onChange={(e) => patchAction(index, { toHit: e.target.value })}
                 />
               </label>
-              <label className="flex-1 flex flex-col gap-0.5 text-xs">
+              <label className="flex-1 basis-32 flex flex-col gap-0.5 text-xs">
                 <span title={COMBATANT_STATBLOCK_HELP.damage}>Damage</span>
                 <input
                   className="input !min-h-8"

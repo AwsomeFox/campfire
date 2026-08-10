@@ -1,17 +1,34 @@
 /**
  * Campaign-wide interrupts stay reachable over the encounter cockpit.
  *
- * `Layout.tsx` mounts the participant safety hold (#599) and a player's check-request
- * prompts (#415) outside the routed page, precisely so they reach EVERY campaign route.
- * The cockpit is `position: fixed; inset: 0` with an opaque background, so it painted
- * over both: an active hold was invisible and the "pause the table" control could not
- * be clicked while combat was on screen. `useImmersiveChromeInset` publishes how far
- * down that chrome reaches and the shell insets its own top by it.
+ * `Layout.tsx` mounts a player's check-request prompts (#415) and its status banners
+ * outside the routed page, so they reach every campaign route. The cockpit is
+ * `position: fixed; inset: 0` with an opaque background, so it painted straight over
+ * them: a delivered prompt could not be clicked while combat was on screen.
+ * `useImmersiveChromeInset` publishes how far down that chrome reaches and the shell
+ * insets its own top by it.
  *
  * These assertions are deliberately about HIT-TESTING, not visibility. The bug did not
  * hide the elements — `toBeVisible()` passed the whole time, because they were rendered
  * at their normal size underneath an opaque overlay. Only `elementFromPoint` (and an
  * actual click) tells the two states apart.
+ *
+ * WHAT CHANGED, AND WHY THE SAFETY HOLD IS NO LONGER THE SUBJECT HERE
+ *
+ * The participant safety hold (#599) was this file's original motivating case, and the
+ * probes below used to target it. It is now scoped to the AI Table route (Layout's
+ * `onPlaySurface`) and does not mount on the cockpit at all, so "the hold sits above the
+ * cockpit and stays clickable" is not a property this route has any more — asserting it
+ * would be asserting the layout the redesign deliberately removed.
+ *
+ * That is a genuine reduction in coverage of #599 on THIS surface, so it is replaced
+ * rather than deleted, in two parts:
+ *   - here, the same inset/hit-testing invariants are re-anchored onto the chrome that
+ *     does still mount over the cockpit (check-request prompts, Layout's banners), which
+ *     is what the hook actually exists to protect;
+ *   - and `the safety hold is absent from the cockpit and present on the table` below
+ *     pins the new scope itself, so a future edit cannot quietly restore the strip or
+ *     drop the control from the route that is supposed to keep it.
  */
 import { expect, request, test, type APIRequestContext, type Page } from '@playwright/test';
 import { stateFor } from './seed';
@@ -62,6 +79,44 @@ async function settledProbe(page: Page, testId: string): Promise<ChromeProbe> {
     })
     .toBe(true);
   return probe(page, testId);
+}
+
+/** Where the cockpit starts, with no particular chrome element to anchor on. */
+async function cockpitTopPx(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const shell = document.querySelector('.cf-vtt');
+    return shell instanceof HTMLElement ? Math.round(shell.getBoundingClientRect().top) : -1;
+  });
+}
+
+/**
+ * Ask for a check against the player's character — the one piece of Layout chrome that
+ * still mounts over the cockpit on demand, and therefore the anchor for the inset
+ * assertions that used to ride on the safety hold.
+ *
+ * Separate from the on-screen wait because the archived-campaign tests below must call
+ * this BEFORE they archive: creating a check request is a domain write, and Campfire
+ * refuses writes to an archived campaign. Archive first and this 4xxs.
+ */
+async function createCheckRequest(fixture: {
+  dm: APIRequestContext;
+  campaignId: number;
+  encounterId: number;
+  characterId: number;
+}) {
+  const created = await fixture.dm.post(`/api/v1/campaigns/${fixture.campaignId}/check-requests`, {
+    data: {
+      characterIds: [fixture.characterId],
+      checkId: 'save:DEX',
+      dc: 10,
+      encounterId: fixture.encounterId,
+    },
+  });
+  expect(created.ok(), `create check request: ${await created.text()}`).toBe(true);
+}
+
+async function expectPromptOnScreen(page: Page) {
+  await expect(page.getByTestId('check-request-prompts')).toBeVisible({ timeout: 15_000 });
 }
 
 /**
@@ -126,23 +181,23 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
   test('tall campaign chrome is honoured, not clipped at half the viewport', async ({ page, baseURL }) => {
     const fixture = await privateFixture(baseURL || undefined);
     try {
-      // Archived banner plus a raised safety hold, on a short viewport: together they can
-      // reach past half the screen, which is where the old share-of-viewport clamp stopped
-      // ceding and the opaque, scroll-locked cockpit began covering the lower banner.
+      // Archived banner plus a delivered check prompt, on a short viewport: together they
+      // can reach past half the screen, which is where the old share-of-viewport clamp
+      // stopped ceding and the opaque, scroll-locked cockpit began covering the lower one.
+      // (The second source used to be a raised safety hold. It no longer paints on this
+      // route, so raising one here would have quietly reduced this to a one-banner test.)
       await page.setViewportSize({ width: 320, height: 560 });
       // NOTE: this viewport does not trip the ceiling — see the 300x280 test below, which
       // does. This one guards the ordinary case: chrome above, cockpit below, both usable.
+      await createCheckRequest(fixture);
       const archived = await fixture.dm.patch(`/api/v1/campaigns/${fixture.campaignId}`, {
         data: { status: 'paused' },
       });
       expect(archived.ok(), `archive campaign: ${await archived.text()}`).toBe(true);
-      const held = await fixture.dm.post(`/api/v1/campaigns/${fixture.campaignId}/safety/hold`, {
-        data: { anonymous: true },
-      });
-      expect(held.ok(), `raise hold: ${await held.text()}`).toBe(true);
 
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await expectPromptOnScreen(page);
 
       // Every bit of Layout chrome above the cockpit must still be on screen: the cockpit
       // starts at or below the lowest of it, and keeps a usable height for itself.
@@ -182,21 +237,23 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
     const fixture = await privateFixture(baseURL || undefined);
     try {
       // Small enough that Layout's own header and banners fill the entire budget on their
-      // own — measured 158px of chrome against a 140px ceiling. Past that line, locking
-      // the page and covering the overflow would strand a safety hold nobody can release,
-      // so the cockpit gives up the viewport instead.
+      // own. Past that line, locking the page and covering the overflow would strand chrome
+      // nobody can reach — a pending check request with no way to scroll to it — so the
+      // cockpit gives up the viewport instead.
       await page.setViewportSize({ width: 300, height: 280 });
+      // The tall chrome is a delivered check prompt. It used to be a raised safety hold,
+      // which no longer mounts here at all — without something in its place the archived
+      // banner alone may not clear the ceiling, and the test would pass by never reaching
+      // the state it exists to describe. Requested BEFORE the archive, which blocks writes.
+      await createCheckRequest(fixture);
       const archived = await fixture.dm.patch(`/api/v1/campaigns/${fixture.campaignId}`, {
         data: { status: 'paused' },
       });
       expect(archived.ok(), `archive campaign: ${await archived.text()}`).toBe(true);
-      const raised = await page.request.post(`/api/v1/campaigns/${fixture.campaignId}/safety/hold`, {
-        data: { anonymous: true },
-      });
-      expect(raised.ok(), `raise hold: ${await raised.text()}`).toBe(true);
 
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await expectPromptOnScreen(page);
 
       await expect
         .poll(
@@ -244,15 +301,15 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
 
       // The scroll caps come off with the lock. They exist only because the page cannot
       // scroll, and the cap they read is zero here by definition — that is what tripped
-      // the hatch — so leaving them on collapses the safety bar to its own padding.
-      const bar = await page.evaluate(() => {
-        const el = document.querySelector('[data-testid="safety-bar"]') as HTMLElement | null;
+      // the hatch — so leaving them on collapses the prompts to their own padding.
+      const prompts = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="check-request-prompts"]') as HTMLElement | null;
         if (!el) return null;
         return { height: Math.round(el.getBoundingClientRect().height), maxHeight: getComputedStyle(el).maxHeight };
       });
-      expect(bar, 'the safety bar must be present').not.toBeNull();
-      expect(bar!.maxHeight).toBe('none');
-      expect(bar!.height, 'the safety bar keeps its content, not just its padding').toBeGreaterThan(24);
+      expect(prompts, 'the check-request prompts must be present').not.toBeNull();
+      expect(prompts!.maxHeight).toBe('none');
+      expect(prompts!.height, 'the prompts keep their content, not just their padding').toBeGreaterThan(24);
 
       // The hatch must survive a re-measure. (The related hazard — a viewer scrolling down
       // to the cockpit making the chrome measure as shrunk, dropping the hatch and
@@ -337,39 +394,46 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
     }
   });
 
-  test('the safety hold stays visible and clickable, raised or idle', async ({ page, baseURL }) => {
+  /**
+   * The scope itself, in both directions (issue #599 as it now stands).
+   *
+   * The hold used to ride above the cockpit as its own strip, and this file used to assert
+   * that. It was removed from here because the cockpit is the densest surface in the app
+   * and a permanent red band is a row off the board — but "removed from the cockpit" is
+   * only correct if the control still exists somewhere a participant can get to. So this
+   * asserts BOTH halves: gone from the encounter, and still there, still clickable, on the
+   * Table page. Half of this passing on its own is a bug either way round.
+   */
+  test('the safety hold is absent from the cockpit and present on the table', async ({ page, baseURL }) => {
     const fixture = await privateFixture(baseURL || undefined);
     try {
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
-      await expect(page.getByTestId('safety-banner')).toHaveCount(0);
+      await expect(page.getByTestId('safety-bar')).toHaveCount(0);
 
-      const idle = await settledProbe(page, 'safety-bar');
-      expect(idle.present).toBe(true);
+      // Idle, on the route that keeps it: present AND reachable, not merely rendered.
+      // Anyone at the table may press it, so this is the PLAYER's own click — see the
+      // `storageState` on `test.use` above — not the DM's.
+      await page.goto(`/c/${fixture.campaignId}/table`);
+      await expect(page.getByTestId('safety-hold-btn')).toBeVisible();
+      await page.getByTestId('safety-hold-btn').click({ trial: true });
 
-      // Not merely rendered — a player must be able to actually reach the control.
-      await page.getByTestId('safety-bar').getByRole('button').first().click({ trial: true });
-
-      // An active hold is taller than the idle row; the inset has to follow it, or the
-      // banner announcing that the table is paused ends up behind the map. Anyone at the
-      // table may raise one, so this is the player's own request.
+      // Not just while idle: an ACTIVE hold must not reintroduce a band on the cockpit
+      // either. The gated lifecycle controls carry the reason there instead of a strip.
       const raised = await page.request.post(`/api/v1/campaigns/${fixture.campaignId}/safety/hold`, {
         data: { anonymous: true },
       });
       expect(raised.ok(), `raise hold: ${await raised.text()}`).toBe(true);
 
-      await expect(page.getByTestId('safety-banner')).toBeVisible();
-      const held = await settledProbe(page, 'safety-bar');
-      expect(held.chromeBottom).toBeGreaterThan(idle.chromeBottom);
-
-      // …and the space goes back to the map once the hold is released.
-      const released = await fixture.dm.post(`/api/v1/campaigns/${fixture.campaignId}/safety/release`, {
-        data: { recovery: 'resume' },
-      });
-      expect(released.ok(), `release hold: ${await released.text()}`).toBe(true);
+      await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
+      await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await expect(page.getByTestId('safety-bar')).toHaveCount(0);
       await expect(page.getByTestId('safety-banner')).toHaveCount(0);
-      const afterRelease = await settledProbe(page, 'safety-bar');
-      expect(afterRelease.chromeBottom).toBeLessThan(held.chromeBottom);
+
+      // …while the Table page shows the raised state in full. Loaded fresh rather than
+      // waiting on the hold poll, so this asserts the scope and not a refetch interval.
+      await page.goto(`/c/${fixture.campaignId}/table`);
+      await expect(page.getByTestId('safety-banner')).toBeVisible();
     } finally {
       await fixture.dispose();
     }
@@ -381,9 +445,11 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
       // A tall page to scroll, then in-app navigation — which preserves `window.scrollY`,
       // and route focus restores focus with `preventScroll`. Without a reset the cockpit
       // locks the page at that offset with Layout's chrome above the viewport: measured
-      // inset 0, safety hold unreachable, and no way to scroll back to it.
+      // inset 0, the chrome unreachable, and no way to scroll back to it.
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
+      await createCheckRequest(fixture);
+      await expectPromptOnScreen(page);
       await page.goto(`/c/${fixture.campaignId}`);
       await page.evaluate(() => {
         document.body.style.minHeight = '4000px';
@@ -400,11 +466,11 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
       );
 
       await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
-      const probe = await settledProbe(page, 'safety-bar');
+      const probe = await settledProbe(page, 'check-request-prompts');
       expect(probe.present).toBe(true);
       // On screen, not merely in the document — a negative `top` is the failure mode.
       expect(probe.chromeBottom).toBeGreaterThan(0);
-      await page.getByTestId('safety-bar').getByRole('button').first().click({ trial: true });
+      await page.getByTestId('check-request-prompts').getByRole('button').first().click({ trial: true });
     } finally {
       await fixture.dispose();
     }
@@ -415,24 +481,22 @@ test.describe('encounter cockpit — campaign-wide chrome', () => {
     try {
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByTestId('encounter-vtt-canvas')).toBeVisible();
-      const before = await settledProbe(page, 'safety-bar');
+      // Baseline with no interrupt on screen. This used to be a probe of the safety row,
+      // which is no longer on this route — so the cockpit's own top is the baseline, and
+      // the prompt has to push it down from there.
+      const before = await cockpitTopPx(page);
+      expect(before, 'the cockpit must be mounted').toBeGreaterThanOrEqual(0);
 
       // The DM requests a check against a character this player owns; the prompt mounts
       // into Layout's chrome while the player is sitting on the cockpit.
-      const created = await fixture.dm.post(`/api/v1/campaigns/${fixture.campaignId}/check-requests`, {
-        data: {
-          characterIds: [fixture.characterId],
-          checkId: 'save:DEX',
-          dc: 10,
-          encounterId: fixture.encounterId,
-        },
-      });
-      expect(created.ok(), `create check request: ${await created.text()}`).toBe(true);
-
-      await expect(page.getByTestId('check-request-prompts')).toBeVisible({ timeout: 15_000 });
+      await createCheckRequest(fixture);
+      await expectPromptOnScreen(page);
       const withPrompt = await settledProbe(page, 'check-request-prompts');
-      // The prompt pushed the cockpit further down than the bare safety row did.
-      expect(withPrompt.cockpitTop).toBeGreaterThan(before.cockpitTop);
+      expect(withPrompt.cockpitTop).toBeGreaterThan(before);
+
+      // Reachable, not merely uncovered — the original bug left it clickable-looking and
+      // dead under an opaque overlay, which only a real hit test catches.
+      await page.getByTestId('check-request-prompts').getByRole('button').first().click({ trial: true });
     } finally {
       await fixture.dispose();
     }

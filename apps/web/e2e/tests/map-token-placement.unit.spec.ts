@@ -90,4 +90,27 @@ test.describe('map token placement trays (issue #418)', () => {
     expect(source).toMatch(/unplaced\.map/);
     expect(source).toMatch(/Place token at center/);
   });
+
+  /**
+   * The Unplaced tray must stay reachable for a PLAYER in the cockpit.
+   *
+   * The cockpit hides the token tray behind the rail's "Manage tokens" disclosure so it
+   * stops covering the board. That toggle is DM-only — and when the gate was written as a
+   * bare `(!isVtt || selectionDisclosure.open)` it therefore hid the tray from players
+   * behind a control they can never see. The Unplaced list is how a player puts their own
+   * character on the board, so this made that impossible in any encounter run from the
+   * cockpit; they had to ask the DM.
+   *
+   * The gate must stay conditioned on `!effectiveIsDm` (or equivalent), so the collapse
+   * applies only to the viewer who has the button.
+   */
+  test('the cockpit token tray disclosure gate never applies to non-DM viewers', () => {
+    const source = readFileSync(BATTLE_MAP, 'utf8');
+    const gate = /\{!isCast && \(([^)]*selectionDisclosure\.open[^)]*)\) &&/.exec(source);
+    expect(gate, 'token tray render gate not found — has the condition been rewritten?').not.toBeNull();
+    expect(
+      gate![1],
+      'the tray gate must exempt non-DMs, or players lose the Unplaced list behind a DM-only toggle',
+    ).toMatch(/!effectiveIsDm/);
+  });
 });

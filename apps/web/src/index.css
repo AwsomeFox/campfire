@@ -1363,6 +1363,22 @@ h1, h2, h3, h4, h5, h6 {
   color: inherit;
   cursor: pointer;
 }
+/* Secondary map controls — the token multi-selection helpers, the fog reveal/hide pair,
+   the saved formations. They need the button chrome (`.cf-chip` alone gave them the
+   status-pill treatment: uppercase text on no background, indistinguishable from the
+   section labels beside them) but not the primary tools' size or shout: `PARTY / ENEMY
+   SIDES` in kicker caps is ~310px, wider than the tray it lives in, so every control
+   took a line of its own. Sentence case at control size fits several per row and still
+   clears the 24×24 AA target minimum (issue #428 reserves 44×44 for primary actions). */
+.cf-map-tool--compact {
+  min-width: 0;
+  min-height: 32px;
+  padding: 0.3rem 0.6rem;
+  font-size: var(--type-control);
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+}
 .cf-map-tool:disabled {
   cursor: default;
   opacity: 0.5;
@@ -1850,10 +1866,20 @@ h1, h2, h3, h4, h5, h6 {
   font-size: var(--cf-density-default-control-font-size);
   min-height: var(--cf-density-default-control-min-height);
 }
+/* Prose, not code. Every textarea in the app is a place someone writes sentences —
+   a comment, a session note, a character's background — and rendering all 27 of them
+   in `ui-monospace` made the one control you type the most into the only control that
+   does not match the page. Markdown support is signalled by the helper text under the
+   field, not by making the field look like a terminal. */
 .cf-textarea {
-  font-family: ui-monospace, Menlo, monospace;
+  font-family: inherit;
   font-size: 0.875rem;
   line-height: 1.6;
+}
+/* Opt-in for a field whose content really is code — none today, but the shape is here
+   so the next one does not reach for the global rule again. */
+.cf-textarea--code {
+  font-family: ui-monospace, Menlo, monospace;
 }
 .cf-textarea:focus,
 .cf-select:focus {
@@ -2687,6 +2713,80 @@ a:hover .cf-name-reveal {
 .cf-turn-beat-pulse { animation: cf-turn-beat-pulse 0.7s ease-out both; }
 /* Transient encounter HP feedback (issue #1907). Kept presentation-only: the
    canonical combatant query remains the single source for its values. */
+/* The roster row (CombatantRow). Wrap-flow by default — that is the full-width
+   encounter-page layout, where initiative, identity, HP and the adjust controls all
+   share one line. */
+.cf-combatant-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+}
+.cf-combatant-identity {
+  flex: 1;
+  min-width: 160px;
+}
+/* Inside the VTT rail there is never room for that. The identity band shared line 1
+   with the fixed-width initiative box and was crushed to ~90px — narrow enough that
+   its own 44×44 quick-roll targets overflowed it — while every band that wrapped below
+   started back at the card edge, leaving a ~100px dead gutter down the left. Give the
+   identity band the full measure and let the fixed-size bands flow under it. */
+@container cf-rail (max-width: 560px) {
+  /*
+   * Reorganised into a readable card rather than a stack of equal-weight bands.
+   *
+   * Every band — initiative, identity, actions, HP, the ±adjust cluster, Reveal — sat at
+   * the same visual level with the same gap, so the row read as a pile of controls with
+   * no order to it. The grouping below states the order the DM actually reads: WHO is
+   * acting (initiative + name), WHAT they can do (actions), and THEIR STATE (HP and the
+   * controls that change it), with the trailing icon actions dropped to a quieter weight.
+   */
+  .cf-combatant-row {
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+  }
+  /*
+   * HP and its adjust cluster read as one block, each taking the full measure.
+   *
+   * Addressed by class, NOT by position. These were `:nth-last-child(4)`/`(3)`, which
+   * only lands on the HP pair when the row happens to end in exactly the expected tail —
+   * and it never reliably does. `CombatantRow`'s trailing children are all conditional:
+   * the statblock Reveal only for a monster/NPC the viewer may edit, Duplicate only with
+   * `onDuplicate`, Remove only with `canRemove`, plus a whisper button and an expanded
+   * whisper composer that come and go per row and per viewer. With the full tail present
+   * the positional rules stretched Reveal and Duplicate while leaving HP cramped — the
+   * exact inverse of the intent.
+   */
+  .cf-combatant-row > .cf-combatant-vitals,
+  .cf-combatant-row > .cf-combatant-hp-adjust {
+    flex-basis: 100%;
+  }
+  /* Reveal / duplicate / remove close the card quietly until the row is engaged. Also by
+     class: `.btn:nth-last-child(n)` dimmed whichever buttons happened to sit there,
+     which on a row with a whisper button was the wrong set. */
+  .cf-combatant-row > .cf-combatant-row-action {
+    opacity: 0.75;
+  }
+  .cf-combatant-row:hover > .cf-combatant-row-action,
+  .cf-combatant-row:focus-within > .cf-combatant-row-action {
+    opacity: 1;
+  }
+  /* `flex: 0 0 100%` — shrink must be 0 or the band simply squeezes in beside the
+     initiative box again instead of taking the line. */
+  .cf-combatant-row > .cf-combatant-identity {
+    flex: 0 0 100%;
+    min-width: 0;
+  }
+  /* Nothing inside may impose the old page width — the statblock editor's field grid
+     in particular was authored against a ~900px row. */
+  .cf-combatant-row .field {
+    min-width: 0 !important;
+    width: auto !important;
+    flex: 1 1 auto !important;
+  }
+}
+
 .cf-hp-feedback-anchor { position: relative; }
 .cf-hp-feedback {
   position: absolute;
@@ -3157,11 +3257,52 @@ a:hover .cf-name-reveal {
   display: flex; flex-direction: column; gap: var(--space-1);
   padding: var(--space-1) var(--space-4);
 }
+/*
+ * Idle safety hold — quiet until it is needed.
+ *
+ * It shipped as a full-bleed strip with a large solid-red button and a bare checkbox
+ * pinned across the top of every play surface: the loudest element on a screen whose
+ * subject is the map, competing with the encounter title for the first read. The
+ * ACTIVE state is the one that must shout, and it still does (`.cf-safety-banner`
+ * below: solid danger border, filled ground, full width).
+ *
+ * So idle is right-aligned, compact, and low-contrast until hover/focus — present at
+ * a known spot on every play surface, one press away, drawing no attention until it is
+ * wanted. Nothing about the interaction changes: still one press, still no confirm.
+ */
 .cf-safety-idle {
-  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
-  font-size: var(--type-control); opacity: 0.9;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font-size: var(--type-meta);
+  opacity: 0.72;
+  transition: opacity 120ms ease-out;
 }
-.cf-safety-anon { display: inline-flex; align-items: center; gap: var(--space-1); }
+.cf-safety-idle:hover,
+.cf-safety-idle:focus-within {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-safety-idle { transition: none; }
+}
+/* The attribution opt-in sat as a raw UA checkbox against the bar's own type — the one
+   unstyled control on the screen. Give it the accent and a real gap so it reads as part
+   of the bar rather than as leftover markup. */
+.cf-safety-anon {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+.cf-safety-anon input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
 .cf-safety-bar-active { padding-block: var(--space-2); }
 .cf-safety-banner {
   display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap;
@@ -3257,7 +3398,11 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
   /* The chrome tone sits between the page ground and the card surface — the
      template's #1c1e2b against #161826 / #232532. */
   --cf-vtt-chrome: color-mix(in srgb, var(--color-surface) 52%, var(--color-bg));
-  --cf-vtt-rail-width: 58px;
+  /* 66px, not 58px: the rail's labels are the tool names, and at 58px the button was
+     44px wide so `CALIBRATE` (49px at this type size) and `GRID & FOG` (50px) were
+     ellipsised to `CALIBR…` / `GRID & …` at EVERY viewport width. Six pixels of canvas
+     buys back a rail whose controls can be read. */
+  --cf-vtt-rail-width: 66px;
   /* The template draws a 356px panel. Campfire's roster rows carry far more per
      combatant than the mock's (HP steppers, conditions, action rows), so the panel
      starts at the template width and grows with the viewport instead of forcing
@@ -3315,9 +3460,12 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
   align-items: center;
   gap: var(--space-3);
   min-height: 54px;
-  /* Bounded and scrollable rather than free to grow: see the grid comment above. */
-  max-height: 30vh;
-  overflow-y: auto;
+  /* Free to wrap, NOT a scroller. The 30vh cap plus `overflow-y: auto` turned the
+     cockpit's own header into a second scrollable region: below ~1200px the controls
+     wrap to three rows, exceed the cap, and the DM has to scroll a 54px-tall bar to
+     reach "End". A header you scroll to use is worse than a header that is two rows
+     tall, and the body below already has its own `minmax()` floor so it cannot be
+     squeezed to nothing by the header growing. */
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--color-divider);
   background: linear-gradient(180deg, var(--color-surface) 0%, var(--cf-vtt-chrome) 100%);
@@ -3510,6 +3658,10 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  /* Named container so content authored for the full-width page (the roster row, the
+     statblock editor grid) can restack itself for the rail's real width instead of
+     guessing from the viewport — the rail is ~430px at every window size. */
+  container: cf-rail / inline-size;
 }
 /* Each tab is its own always-mounted panel; the unselected ones are hidden, never
    unmounted, so no component loses in-flight state to a tab click. */
@@ -3734,7 +3886,7 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
 .cf-vtt-rail .cf-map-tool {
   flex-direction: column;
   gap: 3px;
-  width: 44px;
+  width: 54px;
   min-width: 44px;
   padding: 6px 0;
   font-size: 8px;
@@ -3754,12 +3906,15 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
   font-size: 17px;
   line-height: 1;
 }
+/* Wraps rather than ellipsising: a truncated tool name is worse than a two-line one,
+   and multi-word labels (`GRID & FOG`) break cleanly at the space. Single words still
+   fit on one line at the rail's width. */
 .cf-vtt-rail-label {
   opacity: 0.8;
-  max-width: 42px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  white-space: normal;
+  text-align: center;
+  hyphens: none;
 }
 .cf-vtt-rail-sep {
   width: 26px;
@@ -3786,7 +3941,13 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
      width: between roughly 900px and 1240px they overlapped by up to ~120px, and since
      the tray comes later in the DOM at the same z-index it swallowed pointer input over
      the aside's Grid & fog panel. Below 900px they stop floating altogether. */
-  width: min(340px, calc((100% - var(--cf-vtt-rail-width) - 4 * var(--space-3)) / 2));
+  /* Shrink-to-fit, capped. `width:` fixed at the cap made every small panel — "Token
+     detail: Full", "Replace map / Remove map" — a 340px box a bit over half empty, and
+     on a 1024px screen it handed the tray ~68% of the canvas it floats over. The cap is
+     now a share of the canvas rather than half the free space, so the two overlays still
+     cannot meet (0.42 + 0.42 < 1) but neither swallows the board. */
+  width: fit-content;
+  max-width: min(340px, calc((100% - var(--cf-vtt-rail-width)) * 0.42));
   /* Never zero, and never taller than the room BELOW its own top edge. `100% - 190px`
      alone goes negative — and so clamps to nothing — whenever the canvas is short (the
      body is only guaranteed 96px), which made Grid & fog open onto an empty box despite
@@ -3807,7 +3968,10 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
   pointer-events: none;
 }
 .cf-vtt-map .cf-vtt-map-aside { left: calc(var(--cf-vtt-rail-width) + var(--space-3)); }
-.cf-vtt-map .cf-vtt-map-tray { right: var(--space-3); }
+/* The dice FAB is anchored to the same bottom-right corner. Reserve its footprint as
+   scroll room so the tray's last control can always be brought clear of it rather than
+   coming to rest underneath. */
+.cf-vtt-map .cf-vtt-map-tray { right: var(--space-3); padding-bottom: 56px; }
 .cf-vtt-map .cf-vtt-map-aside > *,
 .cf-vtt-map .cf-vtt-map-tray > * {
   pointer-events: auto;
@@ -3858,8 +4022,13 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
      the pan drill at 375px stopped registering — so the guarantee that the body is never
      squeezed to nothing comes from its `minmax(96px, 1fr)` floor and from both of these
      rows scrolling, not from making the header small enough to be sure. */
+  /* The scroller lives HERE, not on the base rule: at phone width the header genuinely
+     cannot fit (see the note above — tightening it starved the map instead), so it is
+     capped and scrolls. On desktop it simply wraps, because a 54px control bar you have
+     to scroll to reach "End" is the worse trade. */
   .cf-vtt-header {
     max-height: 40vh;
+    overflow-y: auto;
   }
   .cf-vtt-banners {
     max-height: 20vh;
@@ -3979,4 +4148,70 @@ html.cf-vtt-chrome-overflow [data-testid='check-request-prompts'] {
   .cf-vtt-strip,
   .cf-vtt-fab,
   .cf-vtt-tray { display: none !important; }
+}
+
+/* Sidebar term-help marker (issue #518) — present, but not permanent visual noise.
+   Three of eleven nav items carry a `?`, which read as an inconsistency rather than an
+   affordance. The marker now fades in when the row is hovered or anything inside it takes
+   focus, and the row itself carries the one-line gloss as a `title` so hovering explains
+   the item without a click. `opacity` (not `visibility`/`display`) is deliberate: the
+   trigger stays in the layout, the accessibility tree, and the tab order, so it remains
+   the keyboard-operable disclosure #518 built rather than a hover-only tooltip. */
+.cf-nav-help-marker {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.cf-nav-help-row:hover .cf-nav-help-marker,
+.cf-nav-help-row:focus-within .cf-nav-help-marker,
+.cf-nav-help-marker:has([aria-expanded='true']) {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-nav-help-marker { transition: none; }
+}
+/* Coarse pointers have no hover: keep the marker visible so touch users can reach it. */
+@media (hover: none) {
+  .cf-nav-help-marker { opacity: 1; }
+}
+
+/* Divider between action groups inside the map's viewport toolbar (fog history | pan/zoom). */
+.cf-map-toolbar-sep {
+  width: 1px;
+  align-self: stretch;
+  margin-inline: var(--space-1);
+  background: var(--color-divider);
+}
+
+/* Manage tokens panel — labelled groups instead of one undifferentiated run of buttons.
+   The three groups are a sequence: pick a selection, act on it, then save/recall it. */
+.cf-token-manage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.cf-token-manage__status {
+  font-size: var(--type-meta);
+  color: var(--color-text-secondary);
+}
+.cf-token-manage__group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-divider);
+}
+.cf-token-manage__group:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+/* The group name reads as a heading for the row, on its own line so the controls below
+   align to a single left edge rather than being indented by a varying-width label. */
+.cf-token-manage__label {
+  flex-basis: 100%;
+  font-size: var(--type-kicker);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
 }

@@ -16,7 +16,6 @@ import { ImageUpload, MapUploadButton, attachmentFileUrl, attachmentSrcSet, uplo
 import { MapReplaceDialog, type MapReplaceAlignment } from '../../components/MapReplaceDialog';
 import { useAttachmentDerivatives } from '../../components/useAttachmentDerivatives';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
-import { CampaignCover } from '../../components/CampaignCover';
 import { MapConceptGlossary, MapPurposePreview } from '../../components/mapOnboarding';
 import { clampPercentInt } from './mapPercent';
 
@@ -545,12 +544,6 @@ export function RegionMap({
 
   return (
     <Card density="compact" elev="sm" className="reading-exempt" data-testid="dashboard-map" style={{ padding: 0, overflow: 'hidden' }}>
-      <CampaignCover
-        campaignId={campaignId}
-        name={campaign.name}
-        variant="strip"
-        showMonogram={false}
-      />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">World map</span>
         <div style={{ flex: 1 }} />

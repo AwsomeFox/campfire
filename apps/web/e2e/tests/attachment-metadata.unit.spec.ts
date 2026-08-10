@@ -19,8 +19,13 @@ test.describe('attachment metadata handouts (#735)', () => {
     expect(handouts).toContain('meta.attribution || meta.creator');
     expect(handouts).toContain('meta.license');
     expect(handouts).toContain('meta.sourceUrl');
-    expect(handouts).toContain('View {meta.title || a.filename}');
-    expect(handouts).toContain('Download {meta.title || a.filename}');
+    // The name is the link's ACCESSIBLE name now, not its visible text. Repeating the
+    // filename in all three visible labels ("View fog-security-map.png", "Download …",
+    // "Print …") wrapped each link over four lines in the handouts card; the aria-label
+    // keeps the meaningful name #735 asks for without the crowding.
+    expect(handouts).toContain('aria-label={`View ${meta.title || a.filename}`}');
+    expect(handouts).toContain('aria-label={`Download ${meta.title || a.filename}`}');
+    expect(handouts).toContain('aria-label={`Print ${meta.title || a.filename}`}');
   });
 
   test('keeps correction controls DM-only and sends optimistic updatedAt', () => {
