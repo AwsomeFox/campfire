@@ -39,18 +39,34 @@ import { PNG_16_9, seed, stateFor, restoreSeedEncounter } from './seed';
  * its own runner. Read this test's own CI log output (`[perf] turn-advance samples` /
  * `[perf] p50/p95/max`) for the current distribution rather than trusting last time's numbers.
  *
- * BUDGET_MS derivation: on 2026-08-10, this test's own GitHub Actions `e2e-web` shard (job
- * https://github.com/AwsomeFox/campfire/actions/runs/32...) logged p50/p95/max samples in the
- * low-to-mid hundreds of milliseconds (see PR #2165's description for the exact run and
- * numbers). BUDGET_MS is fixed at MULTIPLIER × that observed p95, rounded up — tight enough
- * that a regression on the order the mutation evidence in PR #2165 demonstrated (stripping one
- * component's `memo()` wrapper, a ~1.1-1.4x slowdown at this fixture size) would still not
- * reliably trip it — that job, as documented above, belongs to the behavioural/source-assertion
- * guards — but tight enough to catch a qualitatively different kind of regression: an
- * accidentally quadratic/exponential effect, a synchronous blocking call, or a runaway loop,
- * the kind of defect where flakiness from ordinary CI variance is not a real risk because the
- * failure is not close to the line. It is NOT a tight performance SLO and NOT a substitute for
- * the containment guards this file's header already names.
+ * BUDGET_MS derivation — real CI numbers, not a local-box guess (review finding, PR #2165):
+ * this exact test (the SAMPLE_COUNT-sample version below) ran on 2026-08-10 in this repo's own
+ * `e2e-web` shard —
+ * https://github.com/AwsomeFox/campfire/actions/runs/31391517583/job/93464517384 — and logged:
+ *
+ *   samples (ms): 129.3, 152.3, 154.4, 163.9, 172.0, 173.7, 173.8, 175.6, 177.8, 182.1, 185.2,
+ *                 190.6, 192.8, 193.4, 194.5, 195.9, 199.5, 201.3, 201.6, 243.9
+ *   p50=182.1ms  p95=201.6ms  max=243.9ms
+ *
+ * BUDGET_MS = round(BUDGET_MULTIPLIER × 201.6) = round(5 × 201.6) = 1008, rounded to 1000 for a
+ * clean constant. Multiplier 5 (not the 4 an earlier cut of this file used before real CI data
+ * existed) is deliberately a little more generous than the tightest defensible number, because
+ * this derivation rests on ONE CI job's ONE run — inter-run variance (a different runner
+ * instance, a noisier host, cache-cold Chromium download) is not something a single run's
+ * intra-run p50/p95/max can observe, only intra-run jitter is. If this budget ever flakes on
+ * CI, the fix is to look at what THAT run's own `[perf]` log line reports and either confirm
+ * it was a genuine one-off outlier or recompute BUDGET_MS from a wider multi-run sample —
+ * never to silently widen it back toward "generous" without that evidence.
+ *
+ * 1000ms is tight enough that a regression on the order the mutation evidence in PR #2165
+ * demonstrated (stripping one component's `memo()` wrapper — a measured ~1.1-1.4x slowdown at
+ * this fixture size, well under 1000ms either way) would still not reliably trip it — that job,
+ * as documented above, belongs to the behavioural/source-assertion guards, not this probe — but
+ * tight enough (real p95 × 5, not real p95 × ~15 as the previous 3000ms constant amounted to)
+ * to catch a qualitatively different kind of regression: an accidentally quadratic/exponential
+ * effect, a synchronous blocking call, or a runaway loop — the kind of defect where flakiness
+ * from ordinary CI variance is not a real risk because the failure is not close to the line. It
+ * is NOT a tight performance SLO and NOT a substitute for the containment guards named above.
  */
 
 const MAP_ATTACHMENT_ID = 1_917_100;
@@ -64,13 +80,10 @@ const SECOND_COMBATANT_ID = 1_917_102;
 // SAMPLE_COUNT x a few hundred ms) comfortably inside this suite's per-test timeout.
 const SAMPLE_COUNT = 20;
 
-// Multiplier applied to this test's OWN observed p95 (see file header for the derivation and
-// the CI run it came from) — not a round number picked for comfort. 4x a real CI p95 leaves
-// headroom for a loaded runner or a GC pause on any individual sample without following every
-// routine fluctuation, while four-x-ing (rather than ten-x-ing, as the previous cut of this
-// file did) keeps the budget meaningfully tighter than "effectively disabled".
-const BUDGET_MULTIPLIER = 4;
-const BUDGET_MS = 1_600;
+// Multiplier applied to a REAL observed CI p95 (see file header for the exact run, samples, and
+// full derivation) — not a round number picked for comfort. 1000 = round(5 x 201.6ms).
+const BUDGET_MULTIPLIER = 5;
+const BUDGET_MS = 1_000;
 
 function placedCombatant(id: number, encounterId: number, index: number, name: string): Combatant {
   return Combatant.parse({
