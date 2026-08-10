@@ -550,6 +550,12 @@ function computeSkills(mods: DdbModifier[]): Record<string, 'proficient' | 'expe
  * importing tool and language proficiencies as weapons. Categories cover how nearly every 5e
  * character is armed; a named exception is one entry a player adds on the sheet, and an entry
  * that is missing costs a visible +0 the action's own notes explain, not a silent wrong number.
+ *
+ * The SPLIT forms DDB also publishes (`martial-melee-weapons`) are stored as the spaced
+ * `martial melee`, which `categoryKeys` in the derivation emits alongside the broad `martial`
+ * for every melee martial weapon — so the two halves meet (issue #2144 review,
+ * chatgpt-codex-connector P2). Storing only `martial` here instead would have been wrong in
+ * the other direction: it would grant a martial-MELEE proficiency to longbows too.
  */
 function computeWeaponProficiencies(mods: DdbModifier[]): Record<string, 'proficient'> {
   const out: Record<string, 'proficient'> = {};

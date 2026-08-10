@@ -318,6 +318,9 @@ describe('Open5e magic item importer (#2144)', () => {
     });
     // The magic-item shelf and the weapon discriminator are different axes and both survive.
     expect(data.properties).toContainEqual({ name: 'Versatile', type: null, detail: '1d10' });
+    // …and the base weapon's NAME, which the item's own name never states (#2144 review):
+    // a character trained in `Longsword` is trained with a Longsword (+1).
+    expect(data.baseItem).toBe('Longsword');
   });
 
   it('renders the base stats above the prose that describes the magic', () => {
@@ -357,6 +360,7 @@ describe('Open5e magic item importer (#2144)', () => {
         armor: null,
       }).dataJson!,
     );
+    // No base item, so no `baseItem` key at all — not a null to render or match against.
     expect(data).toEqual({ category: 'Wondrous Item', rarity: 'Uncommon', requiresAttunement: false });
   });
 });

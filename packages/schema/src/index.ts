@@ -5835,18 +5835,26 @@ export function dnd5eCheckCatalog(adapter: Pick<RuleSystemAdapter, 'abilityModif
 
   for (const { name, ability } of DND5E_SKILLS) {
     const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
-    const rank = character.skills?.[name];
-    const profTerm = rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0;
+    // Normalized to the canonical ladder before pricing (issue #2144 review,
+    // chatgpt-codex-connector P2). `SkillRank` accepts both vocabularies, so matching the two
+    // legacy spellings alone silently dropped the proficiency term for a sheet written with
+    // canonical ranks — by a REST/MCP client sending `'trained'`, or by a character carried
+    // over from a PF2e campaign. 5e has only two rungs, so anything above expert prices as
+    // expertise rather than being read as untrained.
+    const stored = character.skills?.[name];
+    const rank = normalizeProficiencyRank(stored);
+    const profTerm = rank === 'untrained' ? 0 : rank === 'trained' ? pb : pb * 2;
     const breakdown: RollBreakdownComponent[] = [{ label: ability, value: mod }];
-    if (rank === 'expertise') breakdown.push({ label: 'expertise', value: profTerm });
-    else if (rank === 'proficient') breakdown.push({ label: 'proficient', value: profTerm });
+    if (rank !== 'untrained') breakdown.push({ label: rank === 'trained' ? 'proficient' : 'expertise', value: profTerm });
     out.push({
       id: `skill:${name}`,
       label: name,
       category: 'skill',
       ability,
-      proficiency: rank ?? null,
-      favorite: rank != null,
+      // The stored spelling is echoed back, so a 5e sheet keeps showing "proficient" while a
+      // canonical-rank client keeps seeing its own word.
+      proficiency: stored ?? null,
+      favorite: stored != null,
       modifier: mod + profTerm,
       breakdown,
       die: 20,

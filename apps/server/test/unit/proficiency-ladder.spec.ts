@@ -1,4 +1,13 @@
-import { bestProficiencyRank, Dnd5eAdapter, normalizeProficiencyRank, Pf2eAdapter, PROFICIENCY_RANKS, SkillRank, weaponProficiencyRank } from '@campfire/schema';
+import {
+  bestProficiencyRank,
+  checkCatalogForAdapter,
+  Dnd5eAdapter,
+  normalizeProficiencyRank,
+  Pf2eAdapter,
+  PROFICIENCY_RANKS,
+  SkillRank,
+  weaponProficiencyRank,
+} from '@campfire/schema';
 
 /**
  * Issue #2144 — one proficiency ladder for every system, and how an equipped weapon finds its
@@ -89,5 +98,41 @@ describe('adapters price the ladder in their own currency (#2144)', () => {
     expect(Pf2eAdapter.weaponProficiencyBonus!(5, 'expert')).toBe(9);
     expect(Pf2eAdapter.weaponProficiencyBonus!(5, 'master')).toBe(11);
     expect(Pf2eAdapter.weaponProficiencyBonus!(5, 'legendary')).toBe(13);
+  });
+});
+
+/**
+ * Issue #2144 review (chatgpt-codex-connector P2) — the 5e roll catalog priced only the two
+ * legacy spellings, so widening `SkillRank` opened a silent hole: a sheet written with
+ * canonical ranks (a REST/MCP client sending `'trained'`, or a character carried over from a
+ * PF2e campaign) rolled its skills with NO proficiency term and nothing said so.
+ */
+describe('the 5e check catalog prices both vocabularies (#2144 review)', () => {
+  const hero = { stats: { DEX: 14 }, level: 5, saveProficiencies: [] };
+  const stealthOf = (skills: Record<string, SkillRank>) =>
+    checkCatalogForAdapter(Dnd5eAdapter, { ...hero, skills }).find((c) => c.id === 'skill:Stealth')!;
+
+  it('prices a canonical rank exactly as its legacy synonym', () => {
+    // Level 5 => proficiency +3, DEX +2.
+    expect(stealthOf({ Stealth: 'proficient' }).modifier).toBe(5);
+    expect(stealthOf({ Stealth: 'trained' }).modifier).toBe(5);
+    expect(stealthOf({ Stealth: 'expertise' }).modifier).toBe(8);
+    expect(stealthOf({ Stealth: 'expert' }).modifier).toBe(8);
+  });
+
+  it('prices the rungs above expert as expertise, never as untrained', () => {
+    // 5e has two rungs; a Master entry is out of its vocabulary but plainly means "at least
+    // expert", and reading it as untrained would be the worst of the three answers.
+    expect(stealthOf({ Stealth: 'master' }).modifier).toBe(8);
+    expect(stealthOf({ Stealth: 'legendary' }).modifier).toBe(8);
+  });
+
+  it('adds nothing for a skill with no entry', () => {
+    expect(stealthOf({}).modifier).toBe(2);
+  });
+
+  it('echoes the STORED spelling back, so neither client sees the other\'s word', () => {
+    expect(stealthOf({ Stealth: 'proficient' }).proficiency).toBe('proficient');
+    expect(stealthOf({ Stealth: 'trained' }).proficiency).toBe('trained');
   });
 });

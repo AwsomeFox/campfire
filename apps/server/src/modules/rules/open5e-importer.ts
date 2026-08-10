@@ -524,7 +524,16 @@ export function mapMagicItem(row: Record<string, unknown>): ImportedEntry {
     // Stats first, then upstream's prose: the prose describes what the magic does, and reads
     // as an answer to the stat block rather than a replacement for it.
     body: [...statLines, desc].filter(Boolean).join('\n\n'),
-    dataJson: JSON.stringify({ category, rarity, requiresAttunement: row.requires_attunement ?? null, ...base }),
+    // `baseItem` is the NAME of the weapon/armour this magic item is built on ("Longsword" for
+    // a Longsword (+1)). Kept because a character trained in that weapon by name is trained in
+    // the magic version of it, and the item's own name never says so (issue #2144 review).
+    dataJson: JSON.stringify({
+      category,
+      rarity,
+      requiresAttunement: row.requires_attunement ?? null,
+      ...base,
+      ...(baseName ? { baseItem: baseName } : {}),
+    }),
     license: licenseOf(row),
     source: sourceOf(row),
   };

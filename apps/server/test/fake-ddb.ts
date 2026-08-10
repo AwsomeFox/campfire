@@ -102,6 +102,9 @@ export const PUBLIC_DDB_CHARACTER = {
       // only the `*-weapons` ones and does not sweep up every proficiency it sees.
       { type: 'proficiency', subType: 'simple-weapons', value: null },
       { type: 'proficiency', subType: 'martial-weapons', value: null },
+      // A SPLIT grant, as some subclasses publish it (#2144 review): it must survive as
+      // `martial melee`, the key `categoryKeys` emits for a melee martial weapon.
+      { type: 'proficiency', subType: 'martial-ranged-weapons', value: null },
       { type: 'proficiency', subType: 'light-armor', value: null },
       { type: 'proficiency', subType: 'thieves-tools', value: null },
     ],

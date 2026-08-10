@@ -978,3 +978,44 @@ describe('PF2e derived attacks (#2144)', () => {
     expect(action.notes).toContain('untrained +0');
   });
 });
+
+/**
+ * Issue #2144 review — the two ways a real proficiency entry failed to match the weapon it
+ * was written for. Both were invisible: the attack still derived, just without its bonus.
+ */
+describe('proficiency matching against the weapon (#2144 review)', () => {
+  it("matches a magic weapon by the BASE weapon it is built on", () => {
+    // chatgpt-codex-connector P2: a magic weapon's inventory name is never its base weapon's,
+    // so a character trained in `Longsword` by name read as untrained with a Longsword (+1) —
+    // the very weapon they specialise in. Open5e embeds the base item; PF2e names it.
+    const magic = { ...open5eWeapon(), baseItem: 'Longsword' };
+    const byName = { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { Longsword: 'proficient' } };
+    const action = deriveEquippedItemAction({ itemName: 'Longsword (+1)', data: magic, character: byName, adapter: dnd5e })!;
+    expect(action.toHit).toBe('+6');
+
+    // …and the base name is a NAME, not a free pass: an unrelated weapon still gets nothing.
+    const other = deriveEquippedItemAction({ itemName: 'Greatsword', data: open5eWeapon(), character: byName, adapter: dnd5e })!;
+    expect(other.toHit).toBe('+3');
+  });
+
+  it("matches D&D Beyond's split martial-melee / martial-ranged categories", () => {
+    // chatgpt-codex-connector P2: DDB grants `martial-melee-weapons`, stored as `martial
+    // melee`, and no weapon used to emit that key — so the proficiency matched nothing at all.
+    const melee = { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { 'martial melee': 'proficient' } };
+    const longsword = deriveEquippedItemAction({ itemName: 'Longsword', data: open5eWeapon(), character: melee, adapter: dnd5e })!;
+    expect(longsword.toHit).toBe('+6');
+
+    // …and it stays a SPLIT grant: a martial RANGED weapon is not covered by it. Collapsing
+    // the split to a bare `martial` would have over-granted exactly here.
+    const longbow = open5eWeapon({
+      damageType: 'Piercing',
+      properties: [{ name: 'Ammunition', type: null, detail: null }],
+    });
+    const bow = deriveEquippedItemAction({ itemName: 'Longbow', data: longbow, character: melee, adapter: dnd5e })!;
+    expect(bow.toHit).toBe('+1'); // DEX +1, no proficiency
+
+    // The broad category still covers both halves.
+    const broad = { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { martial: 'proficient' } };
+    expect(deriveEquippedItemAction({ itemName: 'Longbow', data: longbow, character: broad, adapter: dnd5e })!.toHit).toBe('+4');
+  });
+});

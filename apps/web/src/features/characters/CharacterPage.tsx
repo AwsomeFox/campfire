@@ -2240,8 +2240,15 @@ function WeaponTrainingCard({ character, canEdit, onChange, onError, adapter }: 
     });
   }, [price, character.level]);
 
+  // Untrained (and anything unreadable, which normalizes to untrained) is NOT rendered: the
+  // contract everywhere else is "absent key = untrained", and the rank picker below offers no
+  // untrained option — so such a row would render a <select> whose value matches nothing,
+  // silently displaying the first rank instead of what is stored (issue #2144 review, Copilot).
   const entries = useMemo(
-    () => Object.entries(character.weaponProficiencies).sort(([a], [b]) => a.localeCompare(b)),
+    () =>
+      Object.entries(character.weaponProficiencies)
+        .filter(([, raw]) => normalizeProficiencyRank(raw) !== 'untrained')
+        .sort(([a], [b]) => a.localeCompare(b)),
     [character.weaponProficiencies],
   );
 
@@ -2263,14 +2270,20 @@ function WeaponTrainingCard({ character, canEdit, onChange, onError, adapter }: 
 
   function setRank(key: string, rank: ProficiencyRank | 'remove') {
     const next: Record<string, ProficiencyRank> = {};
-    for (const [k, v] of Object.entries(character.weaponProficiencies)) next[k] = normalizeProficiencyRank(v);
-    if (rank === 'remove') delete next[key];
+    for (const [k, v] of Object.entries(character.weaponProficiencies)) {
+      const normalized = normalizeProficiencyRank(v);
+      // Writing back drops untrained rows rather than preserving them, so the stored shape
+      // converges on the documented one instead of accumulating entries that mean "nothing"
+      // (issue #2144 review, Copilot). Selecting "remove" is the same operation.
+      if (normalized !== 'untrained') next[k] = normalized;
+    }
+    if (rank === 'remove' || rank === 'untrained') delete next[key];
     else next[key] = rank;
     void save(next);
   }
 
   return (
-    <Card className="space-y-2" data-testid="character-weapon-training">
+    <Card className={`space-y-2${entries.length === 0 ? ' cf-print-hide' : ''}`} data-testid="character-weapon-training">
       <div className="flex items-center gap-2 flex-wrap">
         <h2 className="card-kicker mb-0">Weapon training</h2>
         <span className="text-[11px] text-secondary">
@@ -2285,18 +2298,21 @@ function WeaponTrainingCard({ character, canEdit, onChange, onError, adapter }: 
             <div key={key} className="flex items-center gap-1.5 text-[13px] min-h-11" data-testid={`weapon-training-${key}`}>
               <span className="flex-1 truncate" title={key}>{key}</span>
               {canEdit ? (
-                <select
-                  value={rank}
-                  disabled={busy}
-                  aria-label={`${key} training`}
-                  onChange={(e) => setRank(key, e.target.value as ProficiencyRank | 'remove')}
-                  className="cf-input text-[12px] py-0.5"
-                >
-                  {ranks.map((r) => (
-                    <option key={r} value={r}>{r}</option>
-                  ))}
-                  <option value="remove">remove</option>
-                </select>
+                <>
+                  <select
+                    value={rank}
+                    disabled={busy}
+                    aria-label={`${key} training`}
+                    onChange={(e) => setRank(key, e.target.value as ProficiencyRank | 'remove')}
+                    className="cf-input text-[12px] py-0.5 cf-print-hide"
+                  >
+                    {ranks.map((r) => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                    <option value="remove">remove</option>
+                  </select>
+                  <span className="tag tag-neutral cf-print-only">{rank}</span>
+                </>
               ) : (
                 <span className="tag tag-neutral">{rank}</span>
               )}

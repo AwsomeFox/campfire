@@ -157,8 +157,34 @@ interface WeaponProfile {
    * it, so these are what {@link weaponProficiencyRank} matches the sheet against.
    */
   categories: string[];
+  /**
+   * The BASE weapon this one is built on, when the source names it (issue #2144 review,
+   * chatgpt-codex-connector P2): Open5e's magic items embed it, PF2e keeps `base_item`.
+   *
+   * A magic weapon's inventory name is not its base weapon's — "Longsword (+1)", "Smoking
+   * Sword" — so a character trained in `Longsword` by name matched neither, and read as
+   * untrained with the very weapon they specialise in. Category training hid this for most
+   * characters, which is exactly why it would have been missed.
+   */
+  baseName: string;
   /** Lowercased traits/properties, for the system's damage rule (PF2e Propulsive/Thrown). */
   traits: string[];
+}
+
+/**
+ * The proficiency keys a weapon's CATEGORY answers to (issue #2144 review,
+ * chatgpt-codex-connector P2).
+ *
+ * Both the broad category and the melee/ranged split of it, because both are real training
+ * grants: 5e's classes grant "simple weapons"/"martial weapons", while D&D Beyond also
+ * publishes the split forms (`martial-melee-weapons`) that some subclasses grant. Emitting
+ * only the broad word meant an imported character with the split proficiency matched nothing
+ * at all — `martial melee` was a key no weapon ever produced.
+ */
+function categoryKeys(category: string, ranged: boolean): string[] {
+  const base = category.trim().toLowerCase();
+  if (!base) return [];
+  return [base, `${base} ${ranged ? 'ranged' : 'melee'}`];
 }
 
 // Review (chatgpt-codex-connector P2): this used to be a local regex, which accepted shapes
@@ -287,7 +313,8 @@ function weaponProfileFrom(data: unknown): WeaponProfile | null {
       // Open5e's one weapon-category bit. A row that omits it (`isSimple: null` — homebrew, or
       // a magic item whose base weapon the SRD does not name) contributes no category, so the
       // wielder's category training cannot be claimed for it and only a by-name entry counts.
-      categories: typeof d.isSimple === 'boolean' ? [d.isSimple ? 'simple' : 'martial'] : [],
+      categories: typeof d.isSimple === 'boolean' ? categoryKeys(d.isSimple ? 'simple' : 'martial', ranged) : [],
+      baseName: str(d.baseItem),
       traits: propertyNames(d.properties),
     };
   }
@@ -327,7 +354,9 @@ function weaponProfileFrom(data: unknown): WeaponProfile | null {
     // trained in a weapon GROUP ("Sword"); Starfinder 1e and PF1e publish a bare `category`.
     categories: [str(d.weaponCategory), str(d.weaponGroup), str(d.category)]
       .map((v) => v.toLowerCase())
-      .filter((v) => v && v !== 'weapon' && v !== 'weapons' && v !== 'equipment'),
+      .filter((v) => v && v !== 'weapon' && v !== 'weapons' && v !== 'equipment')
+      .flatMap((v) => categoryKeys(v, ranged)),
+    baseName: str(d.baseItem),
     traits,
   };
 }
@@ -435,7 +464,12 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
     // this module used to make and state in its own notes. It is read from the sheet — by the
     // weapon's name first, then the categories it belongs to — so an untrained character now
     // correctly gets no proficiency term instead of a silent grant of one.
-    const rank = weaponProficiencyRank(character.weaponProficiencies, name, profile.categories);
+    const rank = weaponProficiencyRank(character.weaponProficiencies, name, [
+      // The base weapon is matched as a NAME, not a category: being trained in `Longsword`
+      // is training in that weapon, and a "Longsword (+1)" is one.
+      ...(profile.baseName ? [profile.baseName] : []),
+      ...profile.categories,
+    ]);
     const prof = proficiencyFor(character.level, rank);
     const toHit = abilityMod + prof;
     // How much of the modifier reaches DAMAGE is a separate, system-owned question — 5e's "the
