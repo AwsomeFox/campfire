@@ -4724,6 +4724,74 @@ export interface CharacterSheetTopology {
   readonly supportsSpellSlotEditor: boolean;
   /** Honest copy shown when the sheet falls back to generic notes/actions/resources. */
   readonly genericModeDescription?: string;
+  /**
+   * The adapter-declared stat strip — which tiles the sheet's vitals block shows, and in what
+   * order (issue #2159). Omitted by systems that do not declare one; {@link statStripForAdapter}
+   * falls back to {@link NEUTRAL_STAT_STRIP}.
+   *
+   * The reference VTT's strip is PB / Speed / Initiative / AC, but that SHAPE is 5e's: PF2e has
+   * no single proficiency bonus (it is level plus a per-rank term), and Starforged / Open Legend
+   * have none at all, so a hardcoded four-stat row would state a plausible wrong number on every
+   * non-5e sheet. Each adapter declares its own tiles; the values themselves are resolved by
+   * {@link resolveStatStrip} from the catalog and the character's own fields, never baked in here.
+   */
+  readonly statStrip?: readonly StatStripCell[];
+}
+
+/**
+ * The kind of value a stat-strip tile shows (issue #2159). Each kind names a single
+ * adapter-agnostic source the sheet resolves from the catalog or the character's own fields —
+ * never a system-specific number baked into the strip declaration — so a non-5e system cannot
+ * inherit 5e's proficiency bonus by accident.
+ */
+export type StatStripValueKind = 'armorClass' | 'initiative' | 'speed' | 'proficiencyBonus' | 'level';
+
+/**
+ * One adapter-declared stat-strip tile (issue #2159). A tile is just a {@link StatStripValueKind}
+ * in display order; the tile's label and value are resolved by {@link resolveStatStrip} (the
+ * defense tile's label comes from the adapter's own statblock presentation, so Open Legend's
+ * "Guard" is not overwritten by a baked-in "AC").
+ */
+export interface StatStripCell {
+  readonly kind: StatStripValueKind;
+}
+
+/**
+ * The strip every adapter WITHOUT a declared {@link CharacterSheetTopology.statStrip} shows
+ * (issue #2159) — the honest read-only block the sheet already rendered: the adapter's defense,
+ * initiative (when the system rolls one), speed, and level. Level stands in for 5e's
+ * proficiency bonus precisely because a single level-derived proficiency number IS a 5e concept
+ * (PF2e's is level plus a per-rank bonus; Starforged / Open Legend have none), so a "proficiency"
+ * tile here would state a plausible wrong number on every non-5e sheet. Only an adapter with an
+ * honest single global proficiency — 5e — declares a `proficiencyBonus` tile of its own.
+ */
+export const NEUTRAL_STAT_STRIP: readonly StatStripCell[] = [
+  { kind: 'armorClass' },
+  { kind: 'initiative' },
+  { kind: 'speed' },
+  { kind: 'level' },
+];
+
+/**
+ * D&D 5e's stat strip (issue #2159): the reference VTT's PB / Speed / Initiative / AC row. 5e is
+ * the one adapter with an honest single global proficiency bonus ({@link dnd5eProficiencyBonus}),
+ * so it is the one that declares a `proficiencyBonus` tile.
+ */
+export const DND5E_STAT_STRIP: readonly StatStripCell[] = [
+  { kind: 'proficiencyBonus' },
+  { kind: 'speed' },
+  { kind: 'initiative' },
+  { kind: 'armorClass' },
+];
+
+/**
+ * The stat strip an adapter's character sheet shows (issue #2159): the adapter's own
+ * {@link CharacterSheetTopology.statStrip} when it declares one, otherwise {@link NEUTRAL_STAT_STRIP}.
+ */
+export function statStripForAdapter(
+  adapter: Pick<RuleSystemAdapter, 'characterSheet'>,
+): readonly StatStripCell[] {
+  return adapter.characterSheet?.statStrip ?? NEUTRAL_STAT_STRIP;
 }
 
 export const STANDARD_D20_ABILITY_FIELDS: readonly CharacterSheetAbilityField[] = [
@@ -5292,6 +5360,10 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     supportsSavingThrowEditor: true,
     supportsSkillEditor: true,
     supportsSpellSlotEditor: true,
+    // Issue #2159 — 5e is the one adapter with an honest single global proficiency bonus, so it
+    // is the one that declares the reference VTT's PB / Speed / Initiative / AC strip. Every
+    // other system inherits NEUTRAL_STAT_STRIP (AC / Initiative / Speed / Level), never this row.
+    statStrip: DND5E_STAT_STRIP,
   },
   hasDeathSaves: true,
   // #1943 — 5e's group-check convention ("half or more of the party succeeds") is a documented
@@ -6351,6 +6423,98 @@ export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: Ch
   // says does not exist.
   if (hasInitiativeRollForAdapter(adapter)) return catalog;
   return catalog.filter((c) => c.category !== 'initiative');
+}
+
+/**
+ * One resolved stat-strip tile (issue #2159): the label and value the sheet renders, produced by
+ * {@link resolveStatStrip}. The defense tile carries the adapter's own label ("AC", "Guard", …);
+ * an initiative tile carries the catalog check to roll when one exists.
+ */
+export interface ResolvedStatStripCell {
+  readonly kind: StatStripValueKind;
+  readonly label: string;
+  /** Display value already formatted for the tile ("—", "+3", "30", "16"). */
+  readonly value: string;
+  /** Optional hover title (the defense tile's full label). */
+  readonly title?: string;
+  /** Present only on initiative tiles: the catalog check to roll, when one exists. */
+  readonly rollCheck?: RollCheckDefinition;
+}
+
+/**
+ * Resolve an adapter's declared stat strip into renderable tiles (issue #2159). The SHAPE comes
+ * from {@link statStripForAdapter} (adapter-declared); the VALUES come from the catalog and the
+ * character's own fields — never a hardcoded number:
+ *
+ * - `armorClass` — `Character.ac`, OR Starfinder's `eac`/`kac` pair when set (two tiles), with
+ *   the label taken from the adapter's statblock presentation so "Guard" / "Defense" survive.
+ * - `initiative` — the modifier of the catalog's initiative check (`buildCheckCatalog`), passed
+ *   in already computed so this stays pure; `null` when the character has no initiative source.
+ * - `speed` — `Character.speed`.
+ * - `proficiencyBonus` — the adapter's `checkProficiencyBonus(level)`. Only an adapter with an
+ *   honest single global proficiency (5e) declares this tile AND implements that hook, so this
+ *   reads 5e's real curve and never an invented number.
+ * - `level` — `Character.level`.
+ *
+ * The caller decides whether an initiative tile is SHOWN (a group-initiative system hides it)
+ * and whether it ROLLS (`canRoll`) — this resolver only sources the values.
+ */
+export function resolveStatStrip(
+  adapter: Pick<RuleSystemAdapter, 'characterSheet' | 'presentation' | 'checkProficiencyBonus'>,
+  character: {
+    readonly ac: number | null;
+    readonly eac: number | null;
+    readonly kac: number | null;
+    readonly speed: number | null;
+    readonly level: number;
+  },
+  initiativeCheck: RollCheckDefinition | null,
+): ResolvedStatStripCell[] {
+  const defenseLabel = adapter.presentation?.defense.short ?? adapter.presentation?.defense.full ?? 'AC';
+  const defenseTitle = adapter.presentation?.defense.full ?? 'Defense';
+  const out: ResolvedStatStripCell[] = [];
+  for (const cell of statStripForAdapter(adapter)) {
+    switch (cell.kind) {
+      case 'armorClass':
+        // Starfinder's EAC/KAC pair replaces the single defense tile when either is set — the
+        // same per-character split the legacy vitals block made, now two resolved tiles.
+        if (character.eac != null || character.kac != null) {
+          out.push({ kind: 'armorClass', label: 'EAC', value: character.eac == null ? '—' : String(character.eac) });
+          out.push({ kind: 'armorClass', label: 'KAC', value: character.kac == null ? '—' : String(character.kac) });
+        } else {
+          out.push({
+            kind: 'armorClass',
+            label: defenseLabel,
+            value: character.ac == null ? '—' : String(character.ac),
+            title: defenseTitle,
+          });
+        }
+        break;
+      case 'initiative':
+        out.push({
+          kind: 'initiative',
+          label: 'Initiative',
+          value: initiativeCheck == null ? '—' : signedModifier(initiativeCheck.modifier),
+          ...(initiativeCheck ? { rollCheck: initiativeCheck } : {}),
+        });
+        break;
+      case 'speed':
+        out.push({ kind: 'speed', label: 'Speed', value: character.speed == null ? '—' : String(character.speed) });
+        break;
+      case 'proficiencyBonus': {
+        // Only an adapter with an honest single global proficiency (5e) declares this cell, and
+        // only such an adapter implements `checkProficiencyBonus` — so this reads 5e's real PB
+        // curve, never an invented number. A system without one never declares the cell.
+        const pb = adapter.checkProficiencyBonus ? adapter.checkProficiencyBonus(character.level) : null;
+        out.push({ kind: 'proficiencyBonus', label: 'PB', value: pb == null ? '—' : signedModifier(pb) });
+        break;
+      }
+      case 'level':
+        out.push({ kind: 'level', label: 'Level', value: String(character.level) });
+        break;
+    }
+  }
+  return out;
 }
 
 /**
