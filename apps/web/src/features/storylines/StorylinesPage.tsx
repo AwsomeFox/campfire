@@ -394,10 +394,18 @@ export default function StorylinesPage() {
         labelled triggers.
       </p>
 
+      {/* `flexDirection: 'row'` on the Card below is load-bearing, not noise. `.card` sets
+          `flex-direction: column`, and an inline style only overrides the properties it
+          actually declares — so `display: flex` on its own left this form in COLUMN flow.
+          The children ask for `flex: 1 1 180px` / `1 1 220px`, and in column flow a
+          flex-basis is a HEIGHT: the two fields became 180px and 220px tall, giving the card
+          a ~480px body with the inputs strung down its right edge and nothing on the left.
+          The beat form further down is a plain form element with no `.card` rule over it,
+          which is why it never had the problem. */}
       {canDmWrite && (
         <Card
           density="compact" elev="sm" as="form"
-          style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}
+          style={{ display: 'flex', flexDirection: 'row', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}
           onSubmit={compositionSafeFormSubmit(arcCompositionGate, () => {
             void createArc();
           })}
@@ -728,7 +736,10 @@ function ArcCard({
           fontWeight: 500,
           fontSize: 17,
           opacity: arc.status === 'resolved' || arc.status === 'abandoned' ? 0.7 : 1,
-          flex: '1 1 180px',
+          // No `flex` basis here. The parent is `flexDirection: column`, where a
+          // flex-basis is a HEIGHT — `1 1 180px` made every arc title an 180px-tall block
+          // and left ~170px of dead space between the heading and the controls under it.
+          // A heading in column flow should size to its own text.
           minWidth: 0,
           margin: 0,
           overflowWrap: 'anywhere',
@@ -1302,7 +1313,8 @@ function BeatRow({
         style={editingContent ? undefined : {
           fontWeight: 500,
           fontSize: 14,
-          flex: '1 1 150px',
+          // Same column-flow trap as the arc title above: `1 1 150px` was a 150px HEIGHT,
+          // not a width, on every beat in every arc.
           minWidth: 0,
           margin: 0,
           overflowWrap: 'anywhere',
