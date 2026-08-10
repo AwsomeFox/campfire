@@ -1,7 +1,7 @@
 import { Controller, Param, ParseIntPipe, Req, Sse, type MessageEvent } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger';
-import { asyncScheduler, fromEvent, interval, merge, map, type Observable } from 'rxjs';
-import { delay, filter, takeUntil } from 'rxjs/operators';
+import { fromEvent, interval, merge, map, type Observable } from 'rxjs';
+import { filter, takeUntil } from 'rxjs/operators';
 import type { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
