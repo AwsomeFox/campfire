@@ -119,6 +119,8 @@ import {
   CHARACTER_CONDITION_HELP,
   CHARACTER_CONDITION_LABEL,
   CHARACTER_CONDITION_PREFIX,
+  CHARACTER_DEFENSE_PREFIX,
+  CHARACTER_DEFENSE_TYPE_LABEL,
   CHARACTER_EDIT_PREFIX,
   CHARACTER_FIELD,
   CHARACTER_HP_MAX_HELP,
@@ -1719,6 +1721,7 @@ function CharacterVitalsRail({
             excludeName={leveledConditionTrack?.name}
           />
         </Card>
+        <DamageDefensesCard character={character} canEdit={canEdit} onChange={onChange} onError={onError} adapter={adapter} />
       </section>
     </div>
   );
@@ -3678,6 +3681,240 @@ function ConditionsRow({
               + add
             </button>
           </>
+        ))}
+    </div>
+  );
+}
+
+/**
+ * Category config for {@link DamageDefenseRow} (issue #2156) — one row per `Character`
+ * damage-defense array. Kept local rather than three separately-named label constants: unlike
+ * `ConditionsRow` (one field, one vocabulary), all three rows share the SAME free-text-plus-
+ * adapter-datalist shape and only differ in field name / copy, so a small config array reads
+ * more directly than nine near-duplicate exports in formFieldLabels.ts.
+ */
+const DAMAGE_DEFENSE_CATEGORIES: ReadonlyArray<{
+  field: 'resistances' | 'vulnerabilities' | 'immunities';
+  label: string;
+  help: string;
+  empty: string;
+}> = [
+  { field: 'resistances', label: 'Resistant to', help: 'Takes half damage from this type (rounded down).', empty: 'No resistances.' },
+  { field: 'vulnerabilities', label: 'Vulnerable to', help: 'Takes double damage from this type.', empty: 'No vulnerabilities.' },
+  { field: 'immunities', label: 'Immune to', help: 'Takes no damage from this type.', empty: 'No immunities.' },
+];
+
+/**
+ * Damage resistances/vulnerabilities/immunities editor (issue #2156), beside the CONDITIONS
+ * chips above. `TargetDefenses` (the action resolver's own shape) was already applied to a
+ * monster/NPC statblock; a player character had no way to author any of the three, so they
+ * never fed the resolver for a character-kind combatant (see
+ * `ActionResolverService.targetDefenses`, which now reads these fields when the combatant is
+ * character-linked).
+ *
+ * Deliberately a bare `Card` (which itself renders a `<section>`), NOT wrapped in its own
+ * outer `<section>` — same shape as `WeaponTrainingCard` sitting inside the Skills section
+ * (#2151), and rendered as a second child of the CALLER's `<section id={...('conditions')}>`
+ * rather than as a sibling `<section>` under `CharacterVitalsRail`'s own `space-y-4` column.
+ * That is not just tidiness: `space-y-4`'s Tailwind selector is `:not(:last-child)`, a
+ * purely structural DOM check that `display:none` does NOT exempt an element from — so an
+ * extra top-level `<section>` sibling, even print-hidden, would still knock the PRECEDING
+ * section out of being `:last-child` and give it an unwanted 16px `margin-block-end` in
+ * print. Nesting here instead never changes `.cf-sheet-rail`'s direct-child count at all,
+ * screen or print, hidden or shown — this broke `print-layout.spec.ts`'s
+ * `character-sheet-print` golden by exactly 16px before this fix, verified by measurement.
+ */
+function DamageDefensesCard({
+  character,
+  canEdit,
+  onChange,
+  onError,
+  adapter,
+}: {
+  character: Character;
+  canEdit: boolean;
+  onChange: () => void | Promise<void>;
+  onError: (msg: string | null) => void;
+  adapter: RuleSystemAdapter;
+}) {
+  // Same "hide the whole card in print when empty" rule WeaponTrainingCard already applies
+  // (#2151) — an on-screen "No resistances." placeholder is useful while editing, but a
+  // printed sheet with nothing authored in any of the three categories should not grow a
+  // "Damage defenses" section at all.
+  const hasAny = character.resistances.length > 0 || character.vulnerabilities.length > 0 || character.immunities.length > 0;
+  return (
+    <Card className={`space-y-2.5${hasAny ? '' : ' cf-print-hide'}`} data-testid="character-damage-defenses">
+      <h2 className="card-kicker mb-0">Damage defenses</h2>
+      {DAMAGE_DEFENSE_CATEGORIES.map((category) => (
+        <DamageDefenseRow
+          key={category.field}
+          character={character}
+          canEdit={canEdit}
+          onChange={onChange}
+          onError={onError}
+          adapter={adapter}
+          category={category}
+        />
+      ))}
+    </Card>
+  );
+}
+
+function DamageDefenseRow({
+  character,
+  canEdit,
+  onChange,
+  onError,
+  adapter,
+  category,
+}: {
+  character: Character;
+  canEdit: boolean;
+  onChange: () => void | Promise<void>;
+  onError: (msg: string | null) => void;
+  adapter: RuleSystemAdapter;
+  category: (typeof DAMAGE_DEFENSE_CATEGORIES)[number];
+}) {
+  const [adding, setAdding] = useState(false);
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const announce = useAnnounce();
+  // Issue #854: IME confirm Enter must not add; Escape must not dismiss mid-composition.
+  const compositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (compositionGateRef.current === null) {
+    compositionGateRef.current = createCompositionSubmitGate();
+  }
+  const compositionGate = compositionGateRef.current;
+
+  const current = character[category.field];
+  const idPrefix = `${CHARACTER_DEFENSE_PREFIX}-${category.field}`;
+
+  // Full-snapshot replace via the general PATCH endpoint (same contract as
+  // saveProficiencies/weaponProficiencies — see characters.service.ts), not a dedicated
+  // add/remove endpoint like conditions has: these three fields are plain string arrays with
+  // no chained-state (no leveled track, no live-tracker mirror) to coordinate.
+  // Returns whether the write was actually attempted AND succeeded, so a caller can gate its
+  // announcement on that rather than merely on having clicked — a busy-skip (the `if (busy)
+  // return` below) and a failed request (caught below, surfaced via onError) both need to
+  // suppress the announcement the same way: an assistive-tech user told "removed"/"added"
+  // when nothing actually changed is actively misinformed, worse than no announcement at all.
+  async function patchDefenses(next: string[]): Promise<boolean> {
+    if (busy) return false;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.patch(`${API}/characters/${character.id}`, { [category.field]: next });
+      await onChange();
+      return true;
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : `Couldn't update ${category.label.toLowerCase()}.`);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addValue(name: string) {
+    const v = name.trim();
+    if (!v || busy) return;
+    if (current.some((c) => c.trim().toLowerCase() === v.toLowerCase())) {
+      setValue('');
+      setAdding(false);
+      return;
+    }
+    const ok = await patchDefenses([...current, v]);
+    setValue('');
+    setAdding(false);
+    if (ok) announce(`Added ${category.label.toLowerCase()} ${v}`);
+  }
+
+  async function removeValue(name: string) {
+    const ok = await patchDefenses(current.filter((c) => c !== name));
+    if (ok) announce(`Removed ${category.label.toLowerCase()} ${name}`);
+  }
+
+  return (
+    <div
+      className={`flex items-center gap-1.5 flex-wrap${current.length === 0 ? ' cf-print-hide' : ''}`}
+      data-testid={`character-damage-defense-${category.field}`}
+    >
+      <span className="text-muted text-xs" style={{ minWidth: 92 }}>{category.label}</span>
+      {current.map((v) => (
+        <span key={v} className="tag tag-outline" style={{ gap: 6 }}>
+          {v}
+          {canEdit && (
+            <button
+              type="button"
+              className="cf-target-44 cf-print-hide"
+              aria-label={`Remove ${category.label.toLowerCase()} ${v}`}
+              onClick={() => void removeValue(v)}
+              disabled={busy}
+              style={{
+                cursor: busy ? 'default' : 'pointer',
+                opacity: 0.7,
+                background: 'transparent',
+                border: 0,
+                padding: 0,
+                font: 'inherit',
+                color: 'inherit',
+              }}
+            >
+              <UIIcon name="close" size="xs" />
+            </button>
+          )}
+        </span>
+      ))}
+      {current.length === 0 && <span className="text-muted text-xs">{category.empty}</span>}
+      {canEdit &&
+        (adding ? (
+          <form
+            className="inline-flex items-end gap-1 cf-print-hide"
+            onSubmit={compositionSafeFormSubmit(compositionGate, () => {
+              void addValue(value);
+            })}
+          >
+            <Field
+              idPrefix={idPrefix}
+              name="name"
+              label={CHARACTER_DEFENSE_TYPE_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              className="field !mb-0"
+              autoFocus
+              list={`${idPrefix}-vocab`}
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={compositionSafeEscapeHandler(compositionGate, () => {
+                setAdding(false);
+                setValue('');
+              })}
+              {...compositionGate.inputProps}
+              density="xs"
+              help={category.help}
+              placeholder="Damage type…"
+              maxLength={24}
+              style={{ width: '7rem' }}
+            />
+            {adapter.damageTypes && adapter.damageTypes.length > 0 && (
+              <datalist id={`${idPrefix}-vocab`}>
+                {adapter.damageTypes.map((t) => (
+                  <option key={t} value={t} />
+                ))}
+              </datalist>
+            )}
+            <button type="submit" disabled={busy || !value.trim()} className="cf-chip cf-chip-available">
+              Add
+            </button>
+          </form>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="btn btn-ghost cf-density-xs cf-print-hide"
+            aria-label={`Add ${category.label.toLowerCase()}`}
+            style={{ border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+          >
+            + add
+          </button>
         ))}
     </div>
   );

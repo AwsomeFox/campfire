@@ -331,14 +331,54 @@ export class ActionResolverService {
     return null;
   }
 
-  /** Damage-type defences for a target from its statblock/sheet (best-effort; empty when none). */
+  /**
+   * Damage-type defences for a target (issue #2156). Precedence is PER-CATEGORY, non-empty
+   * wins: a linked character's own authored `resistances` overrides the same row's
+   * statblock-derived resistances only when the character actually authored at least one
+   * entry there, and likewise independently for `vulnerabilities`/`immunities` — an empty
+   * authored array falls through to whatever the statblock branch derives for that one
+   * category, rather than the whole triple being replaced together.
+   *
+   * This is NOT "character link wins outright" (that was this method's first version, and it
+   * was wrong): `Character.resistances`/etc. default to `[]`, and the schema has no way to
+   * distinguish "authored an explicitly empty override" from "never touched this field" — so
+   * treating an empty authored array as a real override discarded statblock mitigation a
+   * combatant had before a character was ever linked to it. Concretely, this broke
+   * `encounter-turn-workspace.spec.ts`'s "queues only post-mitigation direct typed damage"
+   * (issue #606): a character-kind combatant with a `ruleEntryId` ALSO set (a shape the
+   * schema permits — see the doc on `linkedCharacter`'s AC-precedence sibling
+   * `targetDefenseValue` above) carried a statblock fire resistance the character had never
+   * authored anything about, and "outright" silently dropped it. Per-category fixes that
+   * without reintroducing a union: authoring ONE category (say, a player adds a resistance)
+   * still doesn't wipe out statblock mitigation in the other two, and a character can still
+   * fully override a category the statblock also claims by authoring a non-empty array for
+   * it — merging within one category (character AND statblock resistances combined) is what
+   * stays rejected, for the same "cannot represent removal" reason a straight union was
+   * rejected everywhere else in this file.
+   *
+   * A character's authored entries carry no vocabulary filtering when they DO apply (a
+   * character is typed directly, not parsed from statblock prose), unlike
+   * `damageDefensesFromStatblock`'s best-effort parse — but the statblock fallback below still
+   * needs `damageTypes`/`categories` (PF2e's #2177 category expansion, e.g. "physical" ->
+   * ["bludgeoning", "piercing", "slashing"]) for whichever categories the character left empty.
+   */
   private targetDefenses(
     row: typeof combatants.$inferSelect,
     damageTypes?: readonly string[],
     categories?: Readonly<Record<string, readonly string[]>>,
   ): TargetDefenses {
+    const character = this.linkedCharacter(row);
     const data = this.statblockData(row);
-    return damageDefensesFromStatblock(data, damageTypes?.length ? damageTypes : undefined, categories);
+    const statblock = damageDefensesFromStatblock(data, damageTypes?.length ? damageTypes : undefined, categories);
+    if (!character) return statblock;
+    const resistances = fromJsonText<string[]>(character.resistances, []);
+    const vulnerabilities = fromJsonText<string[]>(character.vulnerabilities, []);
+    const immunities = fromJsonText<string[]>(character.immunities, []);
+    return {
+      resistances: resistances.length ? resistances : statblock.resistances,
+      vulnerabilities: vulnerabilities.length ? vulnerabilities : statblock.vulnerabilities,
+      immunities: immunities.length ? immunities : statblock.immunities,
+    };
   }
 
   /** A target's saving-throw modifier for one ability (character: mod + prof; monster: statblock mod). */

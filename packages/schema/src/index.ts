@@ -37,6 +37,7 @@ import {
   MAX_PENDING_CONCENTRATION_CHECKS,
   PendingConcentrationCheck,
   RESOLVER_MATH_D20_5E,
+  TargetDefenses,
   type CriticalDamageRule,
   type ResolverDegree,
   type ResolverMathProfile,
@@ -807,6 +808,28 @@ export const Character = z.object({
    * entry.
    */
   weaponProficiencies: z.record(z.string().max(60), SkillRank).default({}),
+  /**
+   * Character-level damage-type defences (issue #2156). `TargetDefenses` (action-resolver.ts)
+   * already modeled resistance/vulnerability/immunity and the resolver already applied them —
+   * but only derived from a monster/NPC statblock (`damageDefensesFromStatblock`); a PC had no
+   * way to author any of the three, so they never fed the resolver for a character-kind
+   * combatant. Reuses `TargetDefenses`'s own field schemas (same `z.array(z.string().max(24))`
+   * shape, matched case-insensitively against a `DamagePart.type` — see
+   * `applyDamageModifiers`) rather than a parallel definition, but keeps them as three flat
+   * top-level fields — like `conditions`/`saveProficiencies` above — rather than one nested
+   * `defenses` object, since there is no existing precedent on any entity for embedding
+   * `TargetDefenses` as a sub-object and every sibling array field on `Character` is flat.
+   * A character is authored directly (no statblock prose to parse), so there is no vocabulary
+   * filtering to apply on read — unlike `damageDefensesFromStatblock`, these are the canonical
+   * list as entered. See `ActionResolverService.targetDefenses` for the full precedence rule
+   * when a combatant is both character-linked AND carries a statblock/rule-entry link — in
+   * short, PER-CATEGORY, non-empty wins: an empty array here (the default, and what every
+   * pre-#2156 character has) falls through to that category's statblock value rather than
+   * suppressing it.
+   */
+  resistances: TargetDefenses.shape.resistances,
+  vulnerabilities: TargetDefenses.shape.vulnerabilities,
+  immunities: TargetDefenses.shape.immunities,
   actions: z.array(CharacterAction).max(100).default([]),
   spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
   resources: z.record(z.string().max(80), CharacterResource).default({}),

@@ -50,6 +50,9 @@ export const CHARACTER_STORY_LABEL = 'Story notes';
 export const CHARACTER_STORY_HELP = 'Optional markdown backstory and roleplay notes for this character.';
 export const CHARACTER_CONDITION_LABEL = 'Condition';
 export const CHARACTER_CONDITION_HELP = 'Add a condition from the rules vocabulary or type a custom name.';
+/** Character sheet damage-defenses editor (issue #2156): resistances/vulnerabilities/immunities. */
+export const CHARACTER_DEFENSE_PREFIX = 'character-defense';
+export const CHARACTER_DEFENSE_TYPE_LABEL = 'Damage type';
 
 export const CHARACTER_ACTION_NAME_LABEL = 'Action name';
 export const CHARACTER_ACTION_KIND_LABEL = 'Kind';
