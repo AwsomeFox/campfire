@@ -755,8 +755,10 @@ CREATE TABLE IF NOT EXISTS comments (
 -- (user, campaign, anchored entity). entity_type/entity_id is the SAME polymorphic soft
 -- reference the comments table uses (no single FK can span every anchorable entity), so
 -- the owning service cleans these rows up on entity removal and campaign_id carries the ON
--- DELETE CASCADE that tears the whole set down with a campaign. user_id FK CASCADE so a
--- deleted account prunes its own subscription/read state. See db/schema.ts for docs.
+-- DELETE CASCADE that tears the whole set down with a campaign. user_id is a PLAIN INTEGER
+-- with no FK->users, matching notifications/api_tokens (the cascade-test seed relies on a
+-- synthetic user id; account-deletion pruning is not enforced on those siblings either).
+-- See db/schema.ts for docs.
 CREATE TABLE IF NOT EXISTS comment_thread_state (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,

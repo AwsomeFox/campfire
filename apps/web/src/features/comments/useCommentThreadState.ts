@@ -27,6 +27,20 @@ function isNumericUserId(id: unknown): id is number {
   return typeof id === 'number' && Number.isInteger(id) && id > 0;
 }
 
+/**
+ * Decoupled signal that a thread was just read (issue #829). `CommentsThread`
+ * dispatches it after a successful mark-read; the unread-summary and inbox hooks
+ * listen so session-card badges and the inbox update immediately instead of
+ * waiting for the next navigation/reload (review #2170).
+ */
+export const COMMENT_THREAD_READ_EVENT = 'campfire:comment-thread-read';
+
+function notifyThreadRead(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(COMMENT_THREAD_READ_EVENT));
+  }
+}
+
 /** Advance the caller's read cursor on one thread (clears unread for that thread). */
 export async function markCommentThreadRead(
   campaignId: number,
@@ -39,6 +53,7 @@ export async function markCommentThreadRead(
     entityId,
     commentId: commentId ?? null,
   });
+  notifyThreadRead();
 }
 
 /** Set the per-thread Watch/Mute controls. */
@@ -96,6 +111,13 @@ export function useCommentUnreadByEntity(
     };
   }, [campaignId, entityType, numeric, tick]);
 
+  // Refresh when any thread is marked read (review #2170).
+  useEffect(() => {
+    const onRead = () => setTick((t) => t + 1);
+    window.addEventListener(COMMENT_THREAD_READ_EVENT, onRead);
+    return () => window.removeEventListener(COMMENT_THREAD_READ_EVENT, onRead);
+  }, []);
+
   return { byEntity, refresh };
 }
 
@@ -140,6 +162,13 @@ export function useCommentInbox(campaignId: number): {
       cancelled = true;
     };
   }, [campaignId, numeric, tick]);
+
+  // Refresh when any thread is marked read (review #2170).
+  useEffect(() => {
+    const onRead = () => setTick((t) => t + 1);
+    window.addEventListener(COMMENT_THREAD_READ_EVENT, onRead);
+    return () => window.removeEventListener(COMMENT_THREAD_READ_EVENT, onRead);
+  }, []);
 
   return { items, loading, refresh };
 }

@@ -960,8 +960,11 @@ export class CommentsService {
       this.upsertWatching(this.db, row.campaignId, authorNumeric, entityType, row.entityId);
     }
 
-    // (2) First post? The anchor had no comments before this one, so the thread's
-    // intended audience has not been subscribed yet.
+    // (2) First LIVE post? The anchor had no live comments before this one (a
+    // thread whose only prior comments are tombstoned still counts as unread-by-
+    // audience, so the intended audience gets subscribed/notified for the
+    // resurrected thread — review #2170). Tombstoned rows are excluded so a thread
+    // that is all-deleted is not silently treated as already-populated.
     const priorRow = await this.db
       .select({ value: count() })
       .from(comments)
@@ -971,6 +974,7 @@ export class CommentsService {
           eq(comments.entityType, row.entityType),
           eq(comments.entityId, row.entityId),
           ne(comments.id, row.id),
+          isNull(comments.deletedAt),
         ),
       );
     const isFirstPost = (priorRow[0]?.value ?? 0) === 0;
@@ -1215,7 +1219,11 @@ export class CommentsService {
       actor: auditActor(user),
       actorRole: role,
       action: 'comment.thread_state',
-      entityType: 'comment',
+      // Record the ANCHOR the thread hangs off (e.g. session:5), not a phantom
+      // comment — the watch/mute change applies to the discussion thread on that
+      // entity, and an audit row claiming entity_type='comment' would point at a
+      // comment id that does not exist (review #2170).
+      entityType,
       entityId,
       campaignId,
       detail,
@@ -1269,6 +1277,13 @@ export class CommentsService {
         .orderBy(desc(comments.id))
         .limit(1);
       cursor = last?.id ?? 0;
+    }
+    // No live comment to mark read (an empty discussion, or commentId pointed only
+    // at tombstoned rows). Don't persist an impossible 0 cursor or create a state
+    // row for a thread that has nothing to read — return the current state as-is
+    // (review #2170).
+    if (cursor < 1) {
+      return this.getThreadState(campaignId, entityType, entityId, user, role);
     }
     // Advance the cursor monotonically: never move it backward, so marking an
     // OLDER comment read cannot un-read newer ones. Computed in JS rather than via
