@@ -49,6 +49,7 @@ describe('ExportService unit coverage tests', () => {
   // as unredacted DM access, the exact gap that let a player's own member export carry the
   // full unredacted dice log.
   let rollsListForCampaignMock: jest.Mock;
+  let auditListForCampaignExportMock: jest.SpyInstance;
 
   beforeEach(async () => {
     previousDataDir = process.env.DATA_DIR;
@@ -57,6 +58,7 @@ describe('ExportService unit coverage tests', () => {
     holder = new DbHolder();
     db = holder.proxy as DrizzleDb;
     const audit = new AuditService(db);
+    auditListForCampaignExportMock = jest.spyOn(audit, 'listForCampaignExport');
     const quests = { listForCampaignWithObjectives: jest.fn().mockResolvedValue([]) } as unknown as QuestsService;
     const npcs = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as NpcsService;
     const locations = { listForCampaign: jest.fn().mockResolvedValue([]) } as unknown as LocationsService;
@@ -166,7 +168,7 @@ describe('ExportService unit coverage tests', () => {
     expect(memberExp).toBeDefined();
   });
 
-  // Issue #1904 review finding: buildMemberExport's whole contract is "never show a caller
+  // Issue #1904/#1511 review finding: buildMemberExport's whole contract is "never show a caller
   // more than the live API already would" (see its own doc comment), which only holds if
   // every composed read is threaded through the caller's ACTUAL role. rolls.listForCampaign
   // was called with no role at all — an omitted role reads as unredacted DM access
@@ -174,18 +176,23 @@ describe('ExportService unit coverage tests', () => {
   // returns") — so a player's own member export carried the full unredacted dice log
   // (hidden-encounter rolls, unmasked hidden-NPC names/ids) the live GET
   // /campaigns/:id/rolls would have redacted for that same player.
-  it('threads the caller role through to RollsService.listForCampaign, not an implicit DM view (#1904)', async () => {
+  it('threads the caller role and identity through to RollsService.listForCampaign (#1904, #1511)', async () => {
     await exportService.buildMemberExport(campaignId, adminActor, 'player');
-    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'player');
+    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'player', adminActor.id);
 
     rollsListForCampaignMock.mockClear();
     await exportService.buildMemberExport(campaignId, adminActor, 'viewer');
-    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'viewer');
+    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'viewer', adminActor.id);
 
     // The full-campaign DM export is legitimately unredacted — explicit role='dm', not an
     // omission that happens to behave the same way today.
     rollsListForCampaignMock.mockClear();
     await exportService.buildExport(campaignId, adminActor);
-    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'dm');
+    expect(rollsListForCampaignMock).toHaveBeenCalledWith(campaignId, expect.any(Number), 'dm', adminActor.id);
+  });
+
+  it('omits raw audit payloads from a non-DM member export', async () => {
+    await exportService.buildMemberExport(campaignId, adminActor, 'player');
+    expect(auditListForCampaignExportMock).toHaveBeenCalledWith(campaignId, false, false);
   });
 });

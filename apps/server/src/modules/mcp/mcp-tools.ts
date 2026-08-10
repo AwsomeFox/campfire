@@ -78,6 +78,7 @@ import {
   RollRequest,
   ActionRollRequest,
   CheckRollRequest,
+  CreatureCheckRollRequest,
   CheckRequestCreate,
   RulePackInstall,
   RuleEntryType,
@@ -113,6 +114,9 @@ import {
   AiMapGenerationRequest,
   AiMapRefineRequest,
   AttachGeneratedMapRequest,
+  AiPortraitGenerationRequest,
+  AiPortraitRefineRequest,
+  AttachGeneratedPortraitRequest,
   CoDmDraftTarget,
   NarrationLanguage,
   CampaignDmRepair,
@@ -158,6 +162,7 @@ import { CampaignLibraryService } from '../campaign-library/campaign-library.ser
 import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MapsService } from '../maps/maps.service';
 import { AiMapService } from '../ai-map/ai-map.service';
+import { AiPortraitService } from '../ai-portrait/ai-portrait.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
@@ -506,6 +511,7 @@ export class McpToolsService {
     private readonly campaignLibrary: CampaignLibraryService,
     private readonly maps: MapsService,
     private readonly aiMap: AiMapService,
+    private readonly aiPortrait: AiPortraitService,
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
     private readonly aiDm: AiDmService,
@@ -2357,9 +2363,17 @@ export class McpToolsService {
       user,
       'create_campaign',
       'Create a new campaign. Any authenticated user may create one; the creator is auto-added as its dm.',
-      { name: z.string().min(1).max(120).describe('Campaign name'), description: z.string().max(10_000).optional().describe('Campaign description') },
-      async ({ name, description }) => {
-        const validated = CampaignCreate.parse({ name, ...(description !== undefined ? { description } : {}) });
+      {
+        name: z.string().min(1).max(120).describe('Campaign name'),
+        description: z.string().max(10_000).optional().describe('Campaign description'),
+        ruleSystem: z.string().optional().describe('Rule system (e.g. dnd5e, archmage)'),
+      },
+      async ({ name, description, ruleSystem }) => {
+        const validated = CampaignCreate.parse({
+          name,
+          ...(description !== undefined ? { description } : {}),
+          ...(ruleSystem !== undefined ? { ruleSystem } : {}),
+        });
         return this.campaigns.create(validated, user);
       },
     );
@@ -4256,12 +4270,20 @@ export class McpToolsService {
         expr: RollRequest.shape.expr.describe('Dice expression: a sum of die terms (NdM) and modifiers, e.g. "1d20+3", "2d20kh1", or "1d20+1d4+3"'),
         label: RollRequest.shape.label.describe('Optional check label, e.g. "DEX save"'),
         dc: RollRequest.shape.dc.describe('Optional difficulty class; success is computed as total >= dc'),
+        characterId: RollRequest.shape.characterId.describe('Optional character whose authority and campaign are verified server-side'),
+        visibility: RollRequest.shape.visibility.describe('party_shared (default), dm_shared, or private'),
       },
-      async ({ campaignId, expr, label, dc }) => {
+      async ({ campaignId, expr, label, dc, characterId, visibility }) => {
         const role = await this.access.requireMemberOnWritableCampaign(user, campaignId as number);
         return this.encounters.rollDiceForCampaign(
           campaignId as number,
-          { expr: expr as string, label: label as string | undefined, dc: dc as number | undefined },
+          {
+            expr: expr as string,
+            label: label as string | undefined,
+            dc: dc as number | undefined,
+            characterId: characterId as number | undefined,
+            visibility: visibility as 'party_shared' | 'dm_shared' | 'private',
+          },
           user,
           role,
         );
@@ -4359,7 +4381,7 @@ export class McpToolsService {
         const label = `${abilityKey} save (${proficient ? 'proficient' : 'unproficient'})`;
         const persisted = await this.encounters.rollDiceForCampaign(
           character.campaignId,
-          { expr: diceExpr, label, dc: dcNum },
+          { expr: diceExpr, label, dc: dcNum, visibility: 'party_shared' },
           user,
           role,
         );
@@ -4440,6 +4462,49 @@ export class McpToolsService {
             dc: dc as number | undefined,
             consequence: consequence as string | undefined,
           },
+          user,
+          role,
+        );
+      },
+    );
+
+    // #1314: creature checks deliberately have distinct tools instead of widening the
+    // character-only list_checks/roll_check contracts. Both routes share the encounter
+    // service with REST, including the DM-only secrecy gate and creature attribution.
+    this.tool(
+      server,
+      'list_creature_checks',
+      'DM only: list adapter-derived rollable ability checks plus explicitly published save/skill modifiers for a monster or NPC combatant. Missing creature mechanics are withheld rather than inferred.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters or get_encounter'),
+        combatantId: Id.describe('Monster or NPC combatant id — from get_encounter'),
+      },
+      async ({ encounterId, combatantId }) => {
+        const encounter = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, encounter.campaignId, 'dm', { allowArchived: true });
+        return this.encounters.listCreatureChecks(encounterId as number, combatantId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'roll_creature_check',
+      'DM only: roll a monster/NPC check from list_creature_checks. The server derives the modifier through the campaign rule adapter, audits it, and records a creature-attributed shared dice-log entry without exposing the private modifier breakdown in the shared label.',
+      {
+        encounterId: Id.describe('Encounter id — from list_encounters or get_encounter'),
+        combatantId: Id.describe('Monster or NPC combatant id — from get_encounter'),
+        checkId: CreatureCheckRollRequest.shape.checkId,
+        mode: CreatureCheckRollRequest.shape.mode,
+        dc: CreatureCheckRollRequest.shape.dc,
+      },
+      async ({ encounterId, combatantId, checkId, mode, dc }) => {
+        const encounter = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, encounter.campaignId, 'dm');
+        return this.encounters.rollCreatureCheck(
+          encounterId as number,
+          combatantId as number,
+          { checkId: checkId as string, mode: mode as 'normal' | 'advantage' | 'disadvantage' | 'crit', dc: dc as number | undefined },
           user,
           role,
         );
@@ -4752,6 +4817,131 @@ export class McpToolsService {
         // A DM invoking this tool directly is authorized to reveal/replace a live map. The
         // driver seat never reaches here: attach_generated_map is absent from its allow-list.
         return this.aiMap.attach(campaignId as number, jobId as string, body, user, role, { allowLiveReplace: true });
+      },
+    );
+
+    // ── AI portrait generation (issue #1321) ──────────────────────────────────
+    // Player-or-above scoped (a player may generate for their own PC, a DM for anything). The
+    // EXPENSIVE step — linking a chosen portrait onto an entity — reuses the domain service's own
+    // dm-or-owner (character) / dm-only (NPC) authority inside attach_generated_portrait, so a
+    // player can only attach to a character they own, exactly like a manual portrait upload.
+    this.tool(
+      server,
+      'get_portrait_readiness',
+      'player: estimate cost + readiness for an AI portrait brief WITHOUT generating (issue #1321). Reports the method ' +
+        'that would be used (image-provider vs external-instructions), provider capabilities, cost estimate, moderation, ' +
+        'and warnings — so a caller can preview the spend before committing to generate_ai_portrait. Non-mutating.',
+      {
+        campaignId: CampaignIdArg,
+        ...AiPortraitGenerationRequest.shape,
+      },
+      async ({ campaignId, ...fields }) => {
+        const request = AiPortraitGenerationRequest.parse(fields);
+        await this.access.requireRole(user, campaignId as number, 'player');
+        return this.aiPortrait.readiness(campaignId as number, request);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'generate_ai_portrait',
+      'player: generate portrait CANDIDATES from a free-form brief using the configured AI provider (issue #1321). ' +
+        'Routes HONESTLY: an image-capable provider (OpenAI-compatible) draws a real square portrait; a text-only ' +
+        'provider (Anthropic) or no provider returns external-generator instructions instead of a fabricated image ' +
+        '(there is NO procedural portrait fallback). Previews live in memory only — NOTHING is persisted until you call ' +
+        'attach_generated_portrait, so cancelling leaves no orphan files. `count` (1–4) previews. Optional `style`: ' +
+        '"realistic" | "painterly" | "illustration". Returns the job { id, status, method, previews[], cost, moderation }; ' +
+        'poll get_portrait_generation and then attach_generated_portrait to keep one.',
+      {
+        campaignId: CampaignIdArg,
+        idempotencyKey: z.string().max(120).optional().describe('Optional idempotency key — a retry with the same key returns the same job'),
+        ...AiPortraitGenerationRequest.shape,
+      },
+      async ({ campaignId, idempotencyKey, ...fields }) => {
+        const request = AiPortraitGenerationRequest.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.aiPortrait.createJob(campaignId as number, request, user, role, {
+          idempotencyKey: idempotencyKey as string | undefined,
+          caller: 'co-dm',
+        });
+      },
+    );
+
+    this.tool(
+      server,
+      'get_portrait_generation',
+      'player: fetch the status/progress/previews of an AI portrait generation job (issue #1321). Pass the campaignId ' +
+        'and the jobId returned by generate_ai_portrait / refine_ai_portrait.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('AI portrait job id from generate_ai_portrait'),
+      },
+      async ({ campaignId, jobId }) => {
+        await this.access.requireRole(user, campaignId as number, 'player');
+        return this.aiPortrait.getJob(jobId as string, campaignId as number, user);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'cancel_portrait_generation',
+      'player: cancel an in-flight AI portrait generation job (issue #1321). Aborts any provider call and marks ' +
+        'the job cancelled. Because nothing is persisted during generation, cancellation leaves no orphan files. ' +
+        'Idempotent: cancelling a finished job is a no-op that returns its final state.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('The running job to cancel (from generate_ai_portrait)'),
+      },
+      async ({ campaignId, jobId }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.aiPortrait.cancelJob(jobId as string, campaignId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'refine_ai_portrait',
+      'player: refine an existing AI portrait job (issue #1321) — tweak the prompt/count (or reuse a chosen preview\'s ' +
+        'seed for continuity) and regenerate a fresh set of candidates. Returns the new job. Like generate_ai_portrait, ' +
+        'nothing is persisted until attach_generated_portrait. Pass idempotencyKey to make a retried refine replay the ' +
+        'same job instead of starting a second paid generation (matching REST\'s Idempotency-Key header).',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('The job to refine (from generate_ai_portrait)'),
+        ...AiPortraitRefineRequest.shape,
+        idempotencyKey: z.string().min(1).max(200).optional().describe(
+          'Optional idempotency key: a retried refine with the same key replays the same job instead of starting a second paid generation.',
+        ),
+      },
+      async ({ campaignId, jobId, idempotencyKey, ...fields }) => {
+        const refine = AiPortraitRefineRequest.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.aiPortrait.refine(campaignId as number, jobId as string, refine, user, role, { idempotencyKey: idempotencyKey as string | undefined });
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'attach_generated_portrait',
+      'player: persist a chosen AI-generated candidate as a `kind="portrait"` attachment (issue #1321) and set it as the ' +
+        'target entity\'s portraitUrl. `entityType` ("character"|"npc") + `entityId` name the target. Linking reuses the ' +
+        'domain service\'s own authority: a player may attach only to a character they OWN (dm-or-owner), and NPC portrait ' +
+        'writes are DM-only — so this call 403s unless the caller owns the target character or is the DM. Prompt, ' +
+        'provider/model, seed/params, dimensions, provenance, moderation, and cost are stamped into the attachment audit ' +
+        'record. Returns { attachment, entity, provenance }.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('The succeeded job to attach a preview from'),
+        ...AttachGeneratedPortraitRequest.shape,
+      },
+      async ({ campaignId, jobId, ...fields }) => {
+        const body = AttachGeneratedPortraitRequest.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.aiPortrait.attach(campaignId as number, jobId as string, body, user, role);
       },
     );
 

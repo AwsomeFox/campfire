@@ -32,6 +32,7 @@ function manualRoll(partial: Partial<DiceRoll> = {}): DiceRoll {
     rolls: [],
     total: 18,
     source: 'manual',
+    visibility: 'party_shared',
     createdAt: '2026-07-23T12:00:00.000Z',
     ...partial,
   };

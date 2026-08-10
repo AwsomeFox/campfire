@@ -61,7 +61,16 @@ export type NarrationLogAddition =
       data?: Record<string, string>;
     }
   /** Tool activity (loot/treasury/encounter chips) — spoken from `text`, not via system/info. */
-  | { id: string; kind: 'tool'; text: string };
+  | {
+      id: string;
+      kind: 'tool';
+      text: string;
+      name?: string;
+      isError?: boolean;
+      proposed?: boolean;
+      encounterId?: number;
+      at?: string;
+    };
 
 export interface NarrationLogAdvance {
   /** Null only for an empty mount snapshot before seed/hydration settles. */
@@ -131,6 +140,11 @@ function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
       id: entry.id,
       kind: 'tool',
       text: narrationToolLabel(entry),
+      name: entry.name,
+      isError: entry.isError,
+      proposed: entry.proposed,
+      encounterId: entry.encounterId,
+      at: entry.at,
     };
   }
   return null;

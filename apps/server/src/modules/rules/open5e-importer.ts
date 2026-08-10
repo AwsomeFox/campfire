@@ -58,7 +58,11 @@ import type { RuleEntryType } from '@campfire/schema';
 
 export const OPEN5E_DEFAULT_BASE_URL = 'https://api.open5e.com/v2';
 /** Importer schema revision. Reinstalling an older pack deterministically refreshes its rows. */
-export const OPEN5E_PACK_VERSION = 'open5e-v2-gear-2';
+// Both sides of the #2144/#2138 merge bumped this, for different reasons (magic items now
+// keep their nested weapon/armor stats; creatures now carry rolls). One combined value, since
+// what matters is only that it DIFFERS from any previously shipped revision — an install
+// holding either predecessor re-imports and picks up both changes.
+export const OPEN5E_PACK_VERSION = 'open5e-v2-creature-rolls-gear-2';
 export const MAX_ENTRIES_PER_SECTION = 2000;
 // Live sections are large: creatures ~3.5k, magicitems ~2.3k, spells ~2k entries
 // (verified against api.open5e.com 2026-07). Open5e's DRF pagination honours large
@@ -455,6 +459,17 @@ export function mapCreature(row: Record<string, unknown>): ImportedEntry {
       damage_vulnerabilities: defenses?.damage_vulnerabilities ?? row.damage_vulnerabilities ?? null,
       damage_immunities: defenses?.damage_immunities ?? row.damage_immunities ?? null,
       abilityScores: row.ability_scores ?? null,
+      // Preserve published final modifiers verbatim. The creature-roll catalog only offers
+      // these explicitly supplied saves/skills; inferring proficiency here would fabricate
+      // mechanics. Keep both current Open5e v2 fields and older compatible aliases.
+      saves: row.saves ?? row.saving_throws ?? row.savingThrows ?? null,
+      strength_save: row.strength_save ?? null,
+      dexterity_save: row.dexterity_save ?? null,
+      constitution_save: row.constitution_save ?? null,
+      intelligence_save: row.intelligence_save ?? null,
+      wisdom_save: row.wisdom_save ?? null,
+      charisma_save: row.charisma_save ?? null,
+      skills: row.skills ?? row.skill_mods ?? row.skillMods ?? null,
       specialAbilities,
       actions: regularActions,
       legendaryActions,

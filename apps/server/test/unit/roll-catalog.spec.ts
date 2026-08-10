@@ -1,10 +1,13 @@
 import {
   Dnd5eAdapter,
   Pf2eAdapter,
+  Pathfinder1eAdapter,
   Sf2eAdapter,
   listRuleSystemAdapters,
   ruleSystemAdapter,
   checkCatalogForAdapter,
+  creatureCheckCatalogForAdapter,
+  CreatureCheckRollRequest,
   findCheckInCatalog,
   neutralCheckCatalog,
   dnd5eProficiencyBonus,
@@ -18,6 +21,90 @@ import {
   type CheckCatalogCharacter,
   type RuleSystemAdapter,
 } from '@campfire/schema';
+
+describe('creature roll catalog — adapter-derived statblocks (issue #1314)', () => {
+  it('uses 5e score mapping for abilities but only publishes supplied save/skill modifiers', () => {
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { abilityScores: { strength: 8, dexterity: 14 }, saves: { dex: 4 }, skills: { stealth: 6 } },
+    });
+    expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(-1);
+    expect(catalog.find((check) => check.id === 'ability:DEX')?.modifier).toBe(2);
+    expect(catalog.find((check) => check.id === 'save:dex')?.modifier).toBe(4);
+    expect(catalog.find((check) => check.id === 'skill:stealth')?.modifier).toBe(6);
+    expect(catalog.some((check) => check.id === 'save:str')).toBe(false);
+  });
+
+  it('accepts Open5e\'s plural skill_mods alias', () => {
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { skill_mods: { stealth: 6 } },
+    });
+    expect(catalog.find((check) => check.id === 'skill:stealth')?.modifier).toBe(6);
+  });
+
+  it('uses PF2e creature modifiers directly and does not offer advantage', () => {
+    const catalog = creatureCheckCatalogForAdapter(Pf2eAdapter, {
+      data: { abilityMods: { strength: 4, dexterity: 2 }, perception: 11, saves: { fortitude: 11 }, skills: { athletics: 12 } },
+    });
+    expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(4);
+    expect(catalog.find((check) => check.id === 'save:fortitude')?.modifier).toBe(11);
+    expect(catalog.find((check) => check.id === 'skill:athletics')?.supportsDegrees).toBe(true);
+    expect(catalog.some((check) => check.id === 'ability:PERCEPTION')).toBe(false);
+    expect(catalog.every((check) => !check.supportsAdvantage)).toBe(true);
+  });
+
+  it('does not turn native Pathfinder initiative metadata into an ability check', () => {
+    const catalog = creatureCheckCatalogForAdapter(Pathfinder1eAdapter, {
+      data: { abilityScores: { strength: 14 }, initiative: 7 },
+    });
+    expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(2);
+    expect(catalog.some((check) => check.id === 'ability:INITIATIVE')).toBe(false);
+  });
+
+  it('keeps inline statblock ability scores as scores and reads flat Open5e save fields', () => {
+    const catalog = creatureCheckCatalogForAdapter(Pf2eAdapter, {
+      data: { abilityScores: { strength: 10 }, dexterity_save: 4 },
+      abilityRepresentation: 'score',
+    });
+    expect(catalog.find((check) => check.id === 'ability:STR')?.modifier).toBe(0);
+    expect(catalog.find((check) => check.id === 'save:dexterity')?.modifier).toBe(4);
+  });
+
+  it('canonicalizes save aliases before preserving nested save precedence over flat fields', () => {
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { saves: { dex: 4 }, dexterity_save: 7 },
+    });
+    expect(catalog.filter((check) => check.category === 'save')).toEqual([
+      expect.objectContaining({ id: 'save:dex', modifier: 4 }),
+    ]);
+  });
+
+  it('bounds generated creature ids so every catalog option is accepted by the roll request', () => {
+    const longSkill = `ancient_${'shadow_'.repeat(12)}lore`;
+    const similarlyPrefixedSkill = `${longSkill}_beyond_the_known_realm`;
+    const longSave = `eldritch_${'will_'.repeat(14)}save`;
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { skills: { [longSkill]: 9, [similarlyPrefixedSkill]: 8 }, saves: { [longSave]: 7 } },
+    });
+
+    const generated = catalog.filter((check) => check.category === 'skill' || check.category === 'save');
+    expect(generated).toHaveLength(3);
+    expect(new Set(generated.map((check) => check.id)).size).toBe(generated.length);
+    for (const check of generated) {
+      expect(check.id).toHaveLength(60);
+      expect(CreatureCheckRollRequest.safeParse({ checkId: check.id }).success).toBe(true);
+    }
+  });
+
+  it('deduplicates skill keys that normalize to the same id', () => {
+    const catalog = creatureCheckCatalogForAdapter(Dnd5eAdapter, {
+      data: { skills: { Stealth: 6, stealth: 2 } },
+    });
+
+    expect(catalog.filter((check) => check.category === 'skill')).toEqual([
+      expect.objectContaining({ id: 'skill:stealth', modifier: 6 }),
+    ]);
+  });
+});
 
 /**
  * Roll catalog (issue #415). The adapter owns an encounter/sheet ROLL CATALOG so an ordinary

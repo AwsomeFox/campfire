@@ -579,6 +579,43 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect((denied.content as TextContent[])[0].text).toContain('403');
   });
 
+  it('generate_ai_portrait (issue #1321): dm generates offline (external-instructions), fetches status; viewer denied', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    // No AI provider is configured, so generation routes HONESTLY to the external-instructions
+    // fallback — no previews (there is no first-party portrait renderer), but concrete steps.
+    const genRes = await dmClient.callTool({
+      name: 'generate_ai_portrait',
+      arguments: { campaignId, prompt: 'a weathered human ranger with a scarred cheek', count: 2 },
+    });
+    expect(genRes.isError).toBeFalsy();
+    const gen = parseResult(genRes) as {
+      id: string;
+      status: string;
+      method: string;
+      previews: unknown[];
+      externalInstructions: string[];
+    };
+    expect(gen.status).toBe('succeeded');
+    expect(gen.method).toBe('external-instructions');
+    expect(gen.previews).toHaveLength(0);
+    expect(gen.externalInstructions.length).toBeGreaterThan(0);
+
+    // get_portrait_generation returns the job status.
+    const statusRes = await dmClient.callTool({ name: 'get_portrait_generation', arguments: { campaignId, jobId: gen.id } });
+    expect(statusRes.isError).toBeFalsy();
+    expect((parseResult(statusRes) as { id: string }).id).toBe(gen.id);
+
+    // A viewer-scoped PAT cannot generate (member role required, not viewer).
+    const denied = await viewerClient.callTool({
+      name: 'generate_ai_portrait',
+      arguments: { campaignId, prompt: 'a hero', count: 1 },
+    });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('403');
+  });
+
   it('timeline (issue #257): dm creates an event with a secret/hidden; viewer reads are redacted', async () => {
     const dmClient = await mcpClient(dmToken);
     const viewerClient = await mcpClient(viewerToken);
@@ -860,6 +897,29 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // characters.service#rollCheck, so an omitted `mode` here is genuinely 'normal' now.
     expect(rolled.mode).toBe('normal');
     expect(typeof rolled.roll.success).toBe('boolean');
+  });
+
+  it('creature check MCP tools share the DM-only encounter catalog and roll path (issue #1314)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const goblin = parseResult(await dmClient.callTool({ name: 'lookup_rule', arguments: { query: 'goblin' } })) as Array<{ id: number }>;
+    const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP creature checks' } })) as { id: number };
+    const combatant = parseResult(await dmClient.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', ruleEntryId: goblin[0].id } })) as { id: number };
+    const checks = parseResult(await dmClient.callTool({ name: 'list_creature_checks', arguments: { encounterId: encounter.id, combatantId: combatant.id } })) as Array<{ id: string; modifier: number }>;
+    expect(checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ability:DEX', modifier: 2 })]));
+    const rolled = parseResult(await dmClient.callTool({ name: 'roll_creature_check', arguments: { encounterId: encounter.id, combatantId: combatant.id, checkId: 'ability:DEX' } })) as { roll: { actor: string; label: string } };
+    expect(rolled.roll).toMatchObject({ actor: 'Goblin', label: 'Goblin · DEX check' });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ status: 'paused' }).where(eq(campaigns.id, campaignId));
+    try {
+      const archivedChecks = parseResult(await dmClient.callTool({ name: 'list_creature_checks', arguments: { encounterId: encounter.id, combatantId: combatant.id } })) as Array<{ id: string }>;
+      expect(archivedChecks).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ability:DEX' })]));
+      const archivedRoll = await dmClient.callTool({ name: 'roll_creature_check', arguments: { encounterId: encounter.id, combatantId: combatant.id, checkId: 'ability:DEX' } });
+      expect(archivedRoll.isError).toBe(true);
+      expect((archivedRoll.content as TextContent[])[0].text).toContain('403');
+    } finally {
+      await db.update(campaigns).set({ status: 'active' }).where(eq(campaigns.id, campaignId));
+    }
   });
 
   it('check requests (issue #415): dm request_check → list_check_requests → resolve_check_request; viewer cannot resolve', async () => {
@@ -2143,14 +2203,15 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(denied.isError).toBe(true);
   });
 
-  it('roll_dice rolls within range via dm PAT', async () => {
+  it('roll_dice preserves the shared roll visibility contract via dm PAT (#1511)', async () => {
     const client = await mcpClient(dmToken);
-    const result = await client.callTool({ name: 'roll_dice', arguments: { campaignId, expr: '1d20+1' } });
+    const result = await client.callTool({ name: 'roll_dice', arguments: { campaignId, expr: '1d20+1', visibility: 'dm_shared' } });
     expect(result.isError).toBeFalsy();
-    const rolled = parseResult(result) as { total: number; rolls: number[] };
+    const rolled = parseResult(result) as { total: number; rolls: number[]; visibility: string };
     expect(rolled.rolls).toHaveLength(1);
     expect(rolled.total).toBeGreaterThanOrEqual(2);
     expect(rolled.total).toBeLessThanOrEqual(21);
+    expect(rolled.visibility).toBe('dm_shared');
   });
 
   it('roll_action_dice rolls Open Legend action dice via dm PAT', async () => {
@@ -3465,19 +3526,25 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
     expect(denied.isError).toBe(true);
 
+    const conditionDefinitions = [{
+      name: 'Frostbite', durationRounds: 3, timing: 'end-of-turn', saveTiming: 'end-of-turn',
+      saveAbility: 'CON', saveDc: 14, isConcentration: false, stacks: 1, notes: 'Save ends',
+    }];
     const updated = await dmClient.callTool({
       name: 'update_campaign',
-      arguments: { campaignId: upCampaign, name: 'Renamed Realm', description: 'A general-field update over MCP.' },
+      arguments: { campaignId: upCampaign, name: 'Renamed Realm', description: 'A general-field update over MCP.', conditionDefinitions },
     });
     expect(updated.isError).toBeFalsy();
-    const result = parseResult(updated) as { name: string; description: string };
+    const result = parseResult(updated) as { name: string; description: string; conditionDefinitions: unknown[] };
     expect(result.name).toBe('Renamed Realm');
     expect(result.description).toBe('A general-field update over MCP.');
+    expect(result.conditionDefinitions).toEqual(conditionDefinitions);
 
     // Verify via REST.
     const restGet = await dmAgent.get(`/api/v1/campaigns/${upCampaign}`);
     expect(restGet.body.name).toBe('Renamed Realm');
     expect(restGet.body.description).toBe('A general-field update over MCP.');
+    expect(restGet.body.conditionDefinitions).toEqual(conditionDefinitions);
 
     // Empty patch is rejected.
     const empty = await dmClient.callTool({ name: 'update_campaign', arguments: { campaignId: upCampaign } });

@@ -151,3 +151,201 @@ test.describe('encounter panel tool confirmations (#1494)', () => {
     }
   });
 });
+
+test.describe('encounter Driver live session (#1318)', () => {
+  test('a player action composes to streamed narration and keeps the encounter link in context', async ({ page }) => {
+    const { campaignId, encounterId } = seed();
+    let submitted = false;
+    const streamWaiters = new Set<() => void>();
+    const seat = {
+      campaignId,
+      mode: 'driver',
+      enabled: true,
+      model: 'test',
+      instructions: '',
+      tokenBudget: 10_000,
+      tokensUsed: 0,
+      turnCount: 0,
+      lastTurnAt: null,
+      createdAt: '2026-08-09T00:00:00.000Z',
+      updatedAt: '2026-08-09T00:00:00.000Z',
+    };
+    const session = {
+      campaignId,
+      status: 'idle',
+      state: 'running',
+      phase: 'active',
+      scene: 'The gatehouse',
+      lastNarration: null,
+      lastTurnAt: null,
+      turnCount: 0,
+      stuck: null,
+      levers: [],
+      actingDm: null,
+      vote: null,
+      takeoverRequestedBy: null,
+    };
+
+    await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      const method = route.request().method();
+      const json = (body: unknown) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+      if (path.endsWith('/events') || path.endsWith('/ai-dm/stream')) {
+        const at = '2026-08-09T12:00:00.000Z';
+        return new Promise<void>((resolve) => {
+          let sent = false;
+          const publish = () => {
+            if (sent) return;
+            sent = true;
+            streamWaiters.delete(publish);
+            void route.fulfill({
+              status: 200,
+              contentType: 'text/event-stream',
+              body: [
+                { type: 'turn.start', campaignId, at },
+                { type: 'narration.delta', campaignId, text: 'The portcullis groans open.', at },
+                { type: 'narration.message', campaignId, text: 'The portcullis groans open.', at },
+                { type: 'tool', campaignId, name: 'next_turn', isError: false, proposed: false, encounterId, at },
+                {
+                  type: 'transcript',
+                  campaignId,
+                  at,
+                  event: {
+                    eventId: 'next-turn-tool',
+                    seq: 1,
+                    campaignId,
+                    kind: 'tool',
+                    actorUserId: null,
+                    actorName: null,
+                    clientRef: null,
+                    turnId: 'turn-1',
+                    payload: { name: 'next_turn', isError: false, proposed: false, encounterId },
+                    at,
+                  },
+                },
+                { type: 'turn.end', campaignId, stopReason: 'complete', steps: 1, tokensUsed: 1, budgetRemaining: 9_999, at },
+              ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+            }).then(resolve);
+          };
+          streamWaiters.add(publish);
+          if (submitted) publish();
+        });
+      }
+      if (path.endsWith('/ai-dm/message') && method === 'POST') {
+        submitted = true;
+        for (const publish of streamWaiters) publish();
+        return route.fulfill({ status: 201, contentType: 'application/json', body: '{}' });
+      }
+      if (path.endsWith('/ai-dm/wrap-up') && method === 'POST') {
+        session.phase = 'ended';
+        return route.fulfill({ status: 201, contentType: 'application/json', body: '{}' });
+      }
+      if (path.endsWith('/ai-dm/session')) return json(session);
+      if (path.endsWith('/ai-dm/seat') || (path.endsWith('/ai-dm') && method === 'GET')) return json(seat);
+      if (path.endsWith('/ai-dm/tool-confirmations')) return json([]);
+      return route.fallback();
+    });
+
+    await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+    await openCockpitTab(page, 'table');
+    await page.getByTestId('encounter-ai-driver-toggle').click();
+    await expect(page.getByRole('button', { name: 'Start Session' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Wrap Up' })).toBeVisible();
+
+    const composer = page.getByTestId('encounter-ai-driver-composer');
+    await composer.getByRole('textbox', { name: 'Your action' }).fill('I lift the gate.');
+    const postPromise = page.waitForRequest((request) => request.url().endsWith('/ai-dm/message') && request.method() === 'POST');
+    await composer.getByRole('button', { name: 'Send' }).click();
+    await postPromise;
+
+    const transcript = page.getByRole('log', { name: 'Driver transcript' });
+    await expect(transcript).toContainText('I lift the gate.');
+    await expect(transcript).toContainText('The portcullis groans open.', { timeout: 15_000 });
+    await expect(transcript.getByRole('link', { name: 'Next turn' })).toHaveAttribute('href', `/c/${campaignId}/encounters/${encounterId}`);
+
+    const wrapRequest = page.waitForRequest(
+      (request) => request.url().endsWith('/ai-dm/wrap-up') && request.method() === 'POST',
+    );
+    await page.getByRole('button', { name: 'Wrap Up' }).click();
+    await wrapRequest;
+    await expect(composer.getByRole('textbox', { name: 'Your action' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Start Session' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Wrap Up' })).toHaveCount(0);
+  });
+
+  test('a player can restart an ended session from the encounter dock', async ({ browser }) => {
+    const context = await browser.newContext({ storageState: stateFor('player') });
+    const page = await context.newPage();
+    try {
+      const { campaignId, encounterId, navigation } = seed();
+      const seat = {
+        campaignId,
+        mode: 'driver',
+        enabled: true,
+        model: 'test',
+        instructions: '',
+        tokenBudget: 10_000,
+        tokensUsed: 0,
+        turnCount: 0,
+        lastTurnAt: null,
+        createdAt: '2026-08-09T00:00:00.000Z',
+        updatedAt: '2026-08-09T00:00:00.000Z',
+      };
+      const session = {
+        campaignId,
+        status: 'idle',
+        state: 'running',
+        phase: 'ended',
+        scene: null,
+        lastNarration: null,
+        lastTurnAt: null,
+        turnCount: 0,
+        stuck: null,
+        levers: [],
+        actingDm: null,
+        vote: null,
+        takeoverRequestedBy: null,
+      };
+
+      await page.route(`**/api/v1/campaigns/${campaignId}/**`, async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        const method = route.request().method();
+        const json = (body: unknown) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+        if (path.endsWith('/events') || path.endsWith('/ai-dm/stream')) {
+          return route.fulfill({
+            status: 200,
+            contentType: 'text/event-stream',
+            body: ': keepalive\n\n',
+          });
+        }
+        if (path.endsWith('/ai-dm/start-session') && method === 'POST') {
+          session.phase = 'active';
+          return route.fulfill({ status: 201, contentType: 'application/json', body: '{}' });
+        }
+        if (path.endsWith('/ai-dm/session')) return json(session);
+        if (path.endsWith('/ai-dm/seat') || (path.endsWith('/ai-dm') && method === 'GET')) return json(seat);
+        if (path.endsWith('/characters')) return json([{ id: navigation.characterId, name: 'Runa' }]);
+        if (path.endsWith('/ai-dm/tool-confirmations')) return json([]);
+        return route.fallback();
+      });
+
+      await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+      await openCockpitTab(page, 'table');
+      await page.getByTestId('encounter-ai-driver-toggle').click();
+
+      const composer = page.getByTestId('encounter-ai-driver-composer');
+      await expect(composer.getByRole('textbox', { name: 'Your action' })).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Start Session' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Wrap Up' })).toHaveCount(0);
+
+      const startRequest = page.waitForRequest(
+        (request) => request.url().endsWith('/ai-dm/start-session') && request.method() === 'POST',
+      );
+      await page.getByRole('button', { name: 'Start Session' }).click();
+      await startRequest;
+      await expect(composer.getByRole('textbox', { name: 'Your action' })).toBeEnabled();
+    } finally {
+      await context.close();
+    }
+  });
+});

@@ -1,5 +1,5 @@
 import { Inject, Injectable, Optional, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, desc, eq, inArray, lte, notExists, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, lte, notExists, or, sql } from 'drizzle-orm';
 import type { DiceRoll, RollResult, RollResultTerm, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { diceRolls, encounters, npcs } from '../../db/schema';
@@ -88,6 +88,9 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
     ...(row.natural20 != null ? { natural20: row.natural20 } : {}),
     ...(row.encounterId != null ? { encounterId: row.encounterId } : {}),
     ...(row.npcId != null ? { npcId: row.npcId } : {}),
+    ...(row.characterId != null ? { characterId: row.characterId } : {}),
+    ...(row.combatantId != null ? { combatantId: row.combatantId } : {}),
+    visibility: row.visibility === 'dm_shared' || row.visibility === 'private' ? row.visibility : 'party_shared',
     createdAt: row.createdAt,
   };
 }
@@ -113,13 +116,19 @@ export class RollsService implements OnApplicationBootstrap {
     @Optional() @Inject(CampaignEventsService) private readonly events?: CampaignEventsService,
   ) {}
 
-  emitDiceRolled(roll: DiceRoll | { id: number; campaignId: number; encounterId?: number | null }): void {
-    this.events?.emit({
+  emitDiceRolled(roll: DiceRoll): void {
+    const audience =
+      roll.visibility === 'private'
+        ? ({ userId }: { userId: string }) => userId === roll.rollerUserId
+        : roll.visibility === 'dm_shared'
+          ? ({ userId, role }: { userId: string; role: Role }) => role === 'dm' || userId === roll.rollerUserId
+          : undefined;
+    this.events?.emitForAudience({
       type: 'dice.rolled',
       campaignId: roll.campaignId,
       rollId: roll.id,
       ...(roll.encounterId != null ? { encounterId: roll.encounterId } : {}),
-    });
+    }, audience);
   }
 
   /**
@@ -170,6 +179,9 @@ export class RollsService implements OnApplicationBootstrap {
         natural20: result.natural20 ?? null,
         encounterId: result.encounterId ?? null,
         npcId: result.npcId ?? null,
+        characterId: result.characterId ?? null,
+        combatantId: result.combatantId ?? null,
+        visibility: result.visibility ?? 'party_shared',
         createdAt: nowIso(),
       })
       .returning()
@@ -188,16 +200,19 @@ export class RollsService implements OnApplicationBootstrap {
    * check alone cannot catch an encounter/NPC that becomes hidden AFTER a roll naming it
    * was already persisted, so a non-DM role re-checks CURRENT visibility on every read.
    */
-  async listForCampaign(campaignId: number, limit = DEFAULT_ROLL_LIST_LIMIT, role?: Role): Promise<DiceRoll[]> {
-    if (role === undefined || role === 'dm') {
-      const rows = await this.db
-        .select()
-        .from(diceRolls)
-        .where(eq(diceRolls.campaignId, campaignId))
-        .orderBy(desc(diceRolls.id))
-        .limit(limit);
-      return rows.map(toDomain);
-    }
+  async listForCampaign(campaignId: number, limit = DEFAULT_ROLL_LIST_LIMIT, role?: Role, viewerUserId?: string): Promise<DiceRoll[]> {
+    // Audience is enforced in SQL before LIMIT so a private or DM-only newest row never
+    // shortens another member's page. A dm_shared row stays readable by its author and by
+    // any current DM; private remains author-only, even to DMs, matching NoteVisibility.
+    // Omitted role is intentionally DM-facing per this method's documented convention
+    // (for example, ScribeService's internal recap source); do not accidentally turn
+    // that established call shape into a player projection.
+    const isDmFacing = role === undefined || role === 'dm';
+    const audience = [eq(diceRolls.visibility, 'party_shared')];
+    if (isDmFacing) audience.push(eq(diceRolls.visibility, 'dm_shared'));
+    if (viewerUserId !== undefined) audience.push(eq(diceRolls.rollerUserId, viewerUserId));
+    const audienceCondition = or(...audience)!;
+
     // Issue #1904 review finding (2 rounds; reconciled with a concurrently-pushed
     // bounded-cursor-loop attempt at the same fix — see the PR thread reply for why this
     // SQL-pushdown approach was kept instead): applying the LIMIT before dropping
@@ -220,19 +235,23 @@ export class RollsService implements OnApplicationBootstrap {
       .select()
       .from(diceRolls)
       .where(
-        and(
-          eq(diceRolls.campaignId, campaignId),
-          notExists(
-            this.db
-              .select({ one: sql`1` })
-              .from(encounters)
-              .where(and(eq(encounters.id, diceRolls.encounterId), eq(encounters.hidden, true))),
-          ),
-        ),
+        isDmFacing
+          ? and(eq(diceRolls.campaignId, campaignId), audienceCondition)
+          : and(
+              eq(diceRolls.campaignId, campaignId),
+              audienceCondition,
+              notExists(
+                this.db
+                  .select({ one: sql`1` })
+                  .from(encounters)
+                  .where(and(eq(encounters.id, diceRolls.encounterId), eq(encounters.hidden, true))),
+              ),
+            ),
       )
       .orderBy(desc(diceRolls.id))
       .limit(limit);
-    return this.maskHiddenNpcLabels(rows.map(toDomain));
+    const rolls = rows.map(toDomain);
+    return isDmFacing ? rolls : this.maskHiddenNpcLabels(rolls);
   }
 
   /**
@@ -247,6 +266,7 @@ export class RollsService implements OnApplicationBootstrap {
    * entirely — the caller falls back to omitting the roll rather than showing a half object.
    */
   async redactRollForRole(roll: DiceRoll, role: Role): Promise<DiceRoll | null> {
+    if (roll.visibility === 'private' || (roll.visibility === 'dm_shared' && role !== 'dm')) return null;
     if (role === 'dm') return roll;
     const [redacted] = await this.redactForRole([roll]);
     return redacted ?? null;
@@ -318,7 +338,7 @@ export class RollsService implements OnApplicationBootstrap {
       // mask was supposed to withhold. Null it out alongside the label, same as the
       // roster-read mask (getWithCombatantsOrThrow: `{ ...c, npcId: null, name:
       // UNKNOWN_COMBATANT_LABEL }`) severs the identity link, not just the display name.
-      const { npcId: _npcId, actor: _actor, ...withoutIdentity } = r;
+      const { npcId: _npcId, combatantId: _combatantId, actor: _actor, ...withoutIdentity } = r;
       return {
         ...withoutIdentity,
         ...(r.actor !== undefined ? { actor: UNKNOWN_COMBATANT_LABEL } : {}),

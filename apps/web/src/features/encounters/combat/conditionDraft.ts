@@ -1,4 +1,4 @@
-import type { ConditionInstance } from '@campfire/schema';
+import type { CampaignConditionDefinition, ConditionInstance } from '@campfire/schema';
 
 export type ConditionSourceOption = { id: number; name: string };
 export type ConditionTiming = ConditionInstance['timing'];
@@ -64,6 +64,25 @@ export function conditionDraftFromInstance(instance: ConditionInstance): Conditi
     syncConcentration: false,
     stacks: String(instance.stacks),
     notes: instance.notes,
+  };
+}
+
+/** Apply a campaign condition template while keeping the per-application source blank. */
+export function conditionDraftFromDefinition(
+  definition: CampaignConditionDefinition,
+  sourceCombatantId: number | null,
+): ConditionDraft {
+  return {
+    ...emptyConditionDraft(sourceCombatantId),
+    name: definition.name,
+    durationRounds: definition.durationRounds == null ? '' : String(definition.durationRounds),
+    timing: definition.timing,
+    saveTiming: definition.saveTiming,
+    saveAbility: definition.saveAbility ?? '',
+    saveDc: definition.saveDc == null ? '' : String(definition.saveDc),
+    isConcentration: definition.isConcentration,
+    stacks: String(definition.stacks),
+    notes: definition.notes,
   };
 }
 

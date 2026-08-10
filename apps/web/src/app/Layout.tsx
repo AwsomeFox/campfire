@@ -23,7 +23,6 @@ import { confirmDiscardUnsavedWork } from '../lib/unsavedWork';
 import { useFormattingLocale, useTimeFormat, formatDateTime, timeAgo } from '../lib/format';
 import type { CampaignStatusTransition } from '@campfire/schema';
 import { initials } from '../lib/avatarText';
-import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, Dialog } from '../components/ui';
 import { PasswordInput } from '../components/PasswordInput';
 import { useDialog } from '../components/useDialog';
@@ -611,11 +610,6 @@ function LayoutContent() {
     ? { switchFrom: location.pathname }
     : undefined;
 
-  // AI-DM seat mode drives the "Table" nav item (issue #339): the player-facing table
-  // only exists when the AI holds the DM seat (Driver mode). The seat read stops on a
-  // 4xx (feature off / not a member), so the item simply stays hidden then — no error.
-  const aiSeatQuery = useAiDmSeat(campaignId);
-  const aiDriverActive = aiSeatQuery.data?.mode === 'driver';
   const roleLabel =
     role === 'dm'
       ? t('nav.roleDm')
@@ -817,13 +811,12 @@ function LayoutContent() {
         ? buildCampaignNavGroups(t, campaignId, {
             isDm,
             canCast: canDmWrite,
-            aiDriverActive,
             inboxCount,
             pendingProposals,
             trashCount,
           })
         : [],
-    [campaignId, t, role, isDm, aiDriverActive, inboxCount, pendingProposals, trashCount],
+    [campaignId, t, role, isDm, canDmWrite, inboxCount, pendingProposals, trashCount],
   );
 
   const moreSheetNavGroups = useMemo(

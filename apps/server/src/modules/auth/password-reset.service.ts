@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { and, eq } from 'drizzle-orm';
 import type { PasswordResetApproval, PasswordResetRequest } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { apiTokens, passwordResetRequests, userSessions, users } from '../../db/schema';
+import { apiTokens, passwordResetRequests, pushSubscriptions, userSessions, users } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateResetCode, hashPassword, hashResetCode } from '../../common/crypto';
 import { UsersService } from '../users/users.service';
@@ -195,7 +195,8 @@ export class PasswordResetService {
           throw new ConflictException('This reset code has already been used');
         }
 
-        // All in the same transaction: password change + session + PAT revocation
+        // All in the same transaction: password change plus session, PAT, and
+        // browser-push capability revocation
         // commit atomically with the code consumption. A failure here rolls back
         // the consume too, leaving the code reusable and the password untouched.
         this.applyPasswordResetTx(tx, user.id, newPassword);
@@ -230,7 +231,8 @@ export class PasswordResetService {
   }
 
   /**
-   * Password change + every-session + every-PAT revocation, run inside the
+   * Password change plus every-session, every-PAT, and every-browser-push
+   * capability revocation, run inside the
    * caller's transaction. Mirrors UsersService.setPassword (#44: a reset is a
    * credential-compromise response, so it cuts off sessions AND PATs too) but
    * inlined so the writes commit with the code consume in one transaction
@@ -241,6 +243,7 @@ export class PasswordResetService {
     tx.update(users).set({ passwordHash: hashPassword(newPassword), updatedAt: ts }).where(eq(users.id, userId)).run();
     tx.delete(userSessions).where(eq(userSessions.userId, userId)).run();
     tx.delete(apiTokens).where(eq(apiTokens.userId, userId)).run();
+    tx.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, userId)).run();
   }
 
   private async expireStaleApprovals(): Promise<void> {

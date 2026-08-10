@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   enabled_pack_slugs TEXT NOT NULL DEFAULT '[]',
   -- Issue #1502: per-campaign homebrew mechanics profile (JSON), or NULL when unset.
   custom_mechanics_profile TEXT,
+  -- Issue #1505: campaign-owned condition templates (JSON array).
+  condition_definitions TEXT NOT NULL DEFAULT '[]',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,
   ics_token_expires_at TEXT,
@@ -794,6 +796,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   entity_type TEXT,
   entity_id INTEGER,
   detail TEXT NOT NULL DEFAULT '',
+  payload_json TEXT,
   request_id TEXT,
   created_at TEXT NOT NULL
 );
@@ -1405,6 +1408,11 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   -- encounter/NPC becomes hidden AFTER the roll was written — null for most rolls.
   encounter_id INTEGER,
   npc_id INTEGER,
+  -- #1511: server-resolved shared-roll context. Existing shared feed behavior is the
+  -- default; nullable identities preserve legacy rows.
+  character_id INTEGER,
+  combatant_id INTEGER,
+  visibility TEXT NOT NULL DEFAULT 'party_shared',
   created_at TEXT NOT NULL
 );
 
@@ -1419,6 +1427,9 @@ CREATE TABLE IF NOT EXISTS notifications (
   entity_id INTEGER,
   comment_id INTEGER,
   data TEXT,
+  -- Issue #2112: private authorization context for hidden encounter status rows.
+  -- This never crosses the notification API boundary.
+  hidden_status_context TEXT,
   actor_name TEXT NOT NULL DEFAULT '',
   -- Issue #597: the actor's note-identity id, so a recipient's block can filter bell
   -- items that already exist. actor_name alone is not an identity.
@@ -1468,6 +1479,8 @@ CREATE TABLE IF NOT EXISTS notification_digest_queue (
   entity_id INTEGER,
   comment_id INTEGER,
   data TEXT,
+  -- Issue #2112: carried through deferral for hidden-status authorization checks.
+  hidden_status_context TEXT,
   actor_name TEXT NOT NULL DEFAULT '',
   -- Issue #597: carried through the deferral so a flushed row keeps its actor identity.
   actor_user_id TEXT,
@@ -1476,6 +1489,23 @@ CREATE TABLE IF NOT EXISTS notification_digest_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_notification_digest_queue_campaign
   ON notification_digest_queue(campaign_id, user_id);
+
+-- Issue #1323: browser Push API subscriptions. Endpoint is globally unique so
+-- one browser subscription cannot remain attached to two Campfire accounts.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  user_agent TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint
+  ON push_subscriptions(endpoint);
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
+  ON push_subscriptions(user_id);
 
 -- Issue #789: dedup ledger for session reminders / unanswered-RSVP nudges.
 CREATE TABLE IF NOT EXISTS notification_reminders (
@@ -2213,6 +2243,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_npc ON combatants(enc
 CREATE INDEX IF NOT EXISTS idx_encounter_events_encounter ON encounter_events(encounter_id);
 -- #617: shared roll feed and retention prune are campaign-scoped, newest-first.
 CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_id_desc ON dice_rolls(campaign_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_visibility_id_desc ON dice_rolls(campaign_id, visibility, id DESC);
+CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_roller_id_desc ON dice_rolls(campaign_id, roller_user_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);

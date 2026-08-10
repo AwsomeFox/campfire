@@ -5,6 +5,14 @@ Protocol](https://modelcontextprotocol.io) client — Claude Desktop, Claude Cod
 or your own agent — can read and write your campaign. Ask it to write the recap,
 prep the next session, or run initiative.
 
+!!! note "MCP is separate from the built-in Driver"
+    This guide connects an **external MCP agent**. It can use Campfire's REST/MCP
+    tools under the token you give it, but it does **not** power Campfire's built-in
+    Driver transcript or composer. For the built-in live-play AI, configure a
+    server-side provider, choose **Driver** in campaign settings, then open the
+    running encounter in **Encounters**. **Co-DM** is a third path: it drafts
+    proposals for a human DM and never runs the live session.
+
 ## 1. Create an API token
 
 In Campfire, open **API tokens** (in the sidebar or your user menu) and create a

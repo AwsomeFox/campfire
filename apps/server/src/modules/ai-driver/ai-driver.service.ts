@@ -560,10 +560,10 @@ export interface AiDmSessionState {
   historyLength?: number;
   /**
    * Active narrowly-scoped approvals letting the seat read ONE secret entity under the DM
-   * principal (issue #557). Keyed `${tool}:${entityId}`; each entry is single-use (consumed
-   * the first time the matching read runs) so a grant for get_npc:42 can't be replayed to
-   * re-leak the same secret across turns. Defaults to {} on a fresh session (omitted from the
-   * literal so existing snapshots deserialize unchanged).
+   * principal (issue #557). Keyed `${tool}:${entityId}`; entries are consumed on use, except a
+   * creature catalog grant which permits one catalog read followed by one roll for the same
+   * combatant (#1314). Defaults to {} on a fresh session (omitted from the literal so existing
+   * snapshots deserialize unchanged).
    */
   secretReadApprovals?: Record<string, AiDmSecretReadApproval>;
   /**
@@ -703,8 +703,9 @@ const MAX_ACTIVE_SECRET_READ_APPROVALS = 50;
 
 /**
  * A DM-granted, narrowly-scoped approval for the autonomous seat to read ONE secret entity
- * under the DM principal during narration (issue #557). Single-use: consumed the first time
- * the matching `{tool, entityId}` call runs, and audited both at grant and at use.
+ * under the DM principal during narration (issue #557). Single-use: consumed by the matching
+ * `{tool, entityId}` call, except the #1314 creature catalog flow which allows one catalog
+ * disclosure followed by one roll for the same combatant. Both grant and use are audited.
  */
 export interface AiDmSecretReadApproval {
   /** The read tool the approval covers (must be in DRIVER_APPROVABLE_ENTITY_READS). */
@@ -719,6 +720,12 @@ export interface AiDmSecretReadApproval {
   note: string | null;
   /** Whether the approval has been consumed by a tool call (a consumed approval is inert). */
   consumed: boolean;
+  /**
+   * #1314: creature mechanics need one approved catalog read before one approved roll. Once the
+   * catalog has been disclosed, a second list call is denied; the same narrow grant remains only
+   * for the roll, which consumes it.
+   */
+  creatureCatalogListed?: boolean;
 }
 
 export interface RunTurnOptions {
@@ -908,7 +915,8 @@ function isStoredSecretApproval(value: unknown): value is AiDmSecretReadApproval
     && typeof rec.grantedBy === 'string'
     && typeof rec.grantedAt === 'string'
     && (rec.note === null || typeof rec.note === 'string')
-    && typeof rec.consumed === 'boolean';
+    && typeof rec.consumed === 'boolean'
+    && (rec.creatureCatalogListed === undefined || typeof rec.creatureCatalogListed === 'boolean');
 }
 
 function isStoredPendingConfirmation(value: unknown): value is AiDmPendingToolConfirmation {
@@ -1461,6 +1469,9 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_death_save',
   'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   'roll_check',
+  // #1314: DM-only creature checks share the encounter service's lifecycle, audit, and
+  // creature-attributed dice-log protections with their REST counterpart.
+  'roll_creature_check',
   'request_check',
   'resolve_check_request',
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
@@ -1635,7 +1646,8 @@ export const DRIVER_GUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
  * Reasons a tool needs no argument-level guard:
  *  - it is a dice/save roll with no persisted effect on its own — nothing has happened until
  *    something else applies the result (roll_dice, roll_action_dice, roll_initiative,
- *    roll_combatant_initiative, roll_death_save, saving_throw);
+ *    roll_combatant_initiative, roll_death_save, saving_throw, roll_check,
+ *    roll_creature_check);
  *  - begin_encounter/end_encounter/remove_combatant are fully bounded by the PER-PROFILE policy
  *    classes already (PROFILE_TOOL_OVERRIDES denies or confirms them outright in every profile
  *    that matters — there is no argument shape to further restrict);
@@ -1659,6 +1671,7 @@ export const DRIVER_UNGUARDED_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_death_save',
   'saving_throw',
   'roll_check',
+  'roll_creature_check',
   'request_check',
   'resolve_check_request',
   'commit_encounter',
@@ -2417,6 +2430,9 @@ const DRIVER_APPROVABLE_ENTITY_READS: ReadonlyMap<string, string> = new Map<stri
   ['get_faction', 'factionId'],
   ['get_session', 'sessionId'],
   ['get_encounter', 'encounterId'],
+  // #1314: creature mechanics expose DM-only modifiers. Approval is bound to the
+  // individual combatant, never the broader encounter, so it cannot unlock a roster.
+  ['list_creature_checks', 'combatantId'],
   ['get_timeline_event', 'eventId'],
   ['get_inventory_item', 'itemId'],
   ['get_attachment', 'attachmentId'],
@@ -6245,11 +6261,47 @@ export class AiDriverService {
           const argName = driverApprovableEntityArg(call.name);
           const entityId = argName && typeof args[argName] === 'number' ? (args[argName] as number) : null;
           const approval = entityId !== null ? this.findApproval(session, call.name, entityId) : null;
-          if (approval) {
+          // A creature catalog grant is a two-step, still-narrow capability: one catalog read
+          // followed by one roll. A second catalog read must not reuse the disclosure grant.
+          if (approval && (call.name !== 'list_creature_checks' || !approval.creatureCatalogListed)) {
             approvedSecret = approval;
             useSeatPrincipal = true;
           }
         }
+      }
+      // #1314: the roll response includes the private catalog modifier/breakdown, so a
+      // guessed check id must not bypass the combatant-scoped approval required to list it.
+      if (tool?.mutating && call.name === 'roll_creature_check') {
+        const combatantId = typeof args.combatantId === 'number' ? args.combatantId : null;
+        const approval = combatantId != null ? this.findApproval(session, 'list_creature_checks', combatantId) : null;
+        if (!approval?.creatureCatalogListed) {
+          appendUntrustedToolResult(
+            messages,
+            call,
+            JSON.stringify({
+              error: {
+                status: 403,
+                code: 'forbidden_secret_read',
+                message: 'roll_creature_check requires a DM approval for this combatant.',
+              },
+            }),
+          );
+          const secretIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+          this.emitToolEvent(campaignId, call.name, true, false, secretIdentity);
+          executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(secretIdentity) });
+          this.logger.warn(`Blocked secret-bearing roll ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
+          await this.audit.log({
+            actor,
+            actorRole: 'dm',
+            action: 'ai-dm.driver.secret.blocked',
+            entityType: 'ai-dm',
+            campaignId,
+            detail: `blocked secret-bearing roll ${call.name} (triggered by ${triggeredBy.id})`,
+          });
+          toolErrored = true;
+          continue;
+        }
+        approvedSecret = approval;
       }
 
       // (3) Guardrail (#377): canon writes can NEVER be made directly by the seat — force EVERY
@@ -6333,13 +6385,22 @@ export class AiDriverService {
         this.persistControlState(session);
       }
 
-      // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,
-      // so a grant for get_npc:42 can't be replayed to re-leak the same secret across turns.
+      // (4) #557 — consume the approval after its DM-scoped use, except the #1314 creature
+      // discovery→roll flow which retains it only for the one subsequent scoped roll.
       if (approvedSecret) {
-        // Single-use: remove the approval the moment its DM-scoped read completes, so it can't be
-        // replayed to re-leak the secret AND so consumed approvals don't accumulate unboundedly in
-        // the in-memory session map over a long campaign (#1059).
-        this.consumeApproval(session, approvedSecret);
+        const holdForCreatureRoll = call.name === 'list_creature_checks' && !res.isError;
+        if (holdForCreatureRoll) {
+          // #1314: discovery is necessary to learn a valid opaque check id. Keep this approval
+          // only for one later roll against the SAME combatant; subsequent list calls fall back
+          // to the player-scoped principal above and cannot re-disclose the catalog.
+          approvedSecret.creatureCatalogListed = true;
+          this.persistControlState(session);
+        } else {
+          // Single-use: remove the approval the moment its DM-scoped read completes, so it can't
+          // be replayed to re-leak the secret AND so consumed approvals don't accumulate
+          // unboundedly in the in-memory session map over a long campaign (#1059).
+          this.consumeApproval(session, approvedSecret);
+        }
         await this.audit.log({
           actor,
           actorRole: 'dm',

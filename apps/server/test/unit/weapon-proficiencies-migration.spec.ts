@@ -60,7 +60,7 @@ describe('weapon_proficiencies migration (#2144)', () => {
     // …and forget only THIS step, leaving `0010_characters_sheet_depth` recorded. That pairing
     // is the whole point: an upgrading installation is in exactly this state, and it is why
     // the column cannot ride along inside 0010.
-    raw.prepare('DELETE FROM __migrations WHERE name = ?').run('0100_characters_weapon_proficiencies');
+    raw.prepare('DELETE FROM __migrations WHERE name = ?').run('0185_characters_weapon_proficiencies_2144');
     const applied = (raw.prepare('SELECT name FROM __migrations').all() as Array<{ name: string }>).map((r) => r.name);
     expect(applied).toContain('0010_characters_sheet_depth');
     raw.close();

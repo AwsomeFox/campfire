@@ -25,6 +25,7 @@ import { AudienceField, audienceToHidden, type AudienceValue } from '../../compo
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { CampaignCover } from '../../components/CampaignCover';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
+import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { useCampaign } from '../../app/CampaignContext';
 import { GameIcon } from '../../components/GameIcon';
 import {
@@ -66,6 +67,7 @@ export default function EncounterListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
   const campaign = useCampaign(id);
+  const liveActivity = useAiDmLiveActivity();
   useRestoreListOriginScroll();
 
   const [encounters, setEncounters] = useState<Encounter[]>([]);
@@ -310,15 +312,29 @@ export default function EncounterListPage() {
                 : t('encounters.empty.hintPlayer')
           }
           action={
-            !filtersActive && canDmWrite ? (
-              <Btn
-                type="button"
-                onClick={handleSampleFight}
-                disabled={sampleFightLoading}
-                data-testid="sample-fight-button"
-              >
-                {sampleFightLoading ? t('encounters.empty.sampleFightLoading') : t('encounters.empty.sampleFight')}
-              </Btn>
+            !filtersActive && (canDmWrite || liveActivity.mode === 'driver') ? (
+              <div className="flex gap-2 flex-wrap justify-center">
+                {liveActivity.mode === 'driver' && (
+                  <Btn
+                    type="button"
+                    ghost
+                    onClick={() => navigate(`/c/${id}/table`)}
+                    data-testid="encounter-list-live-session"
+                  >
+                    {t('encounters.driver.toggle')}
+                  </Btn>
+                )}
+                {canDmWrite && (
+                  <Btn
+                    type="button"
+                    onClick={handleSampleFight}
+                    disabled={sampleFightLoading}
+                    data-testid="sample-fight-button"
+                  >
+                    {sampleFightLoading ? t('encounters.empty.sampleFightLoading') : t('encounters.empty.sampleFight')}
+                  </Btn>
+                )}
+              </div>
             ) : undefined
           }
         />

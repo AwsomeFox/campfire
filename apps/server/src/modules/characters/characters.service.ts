@@ -447,6 +447,10 @@ export class CharactersService {
       result.dc = input.dc;
       result.success = result.total >= input.dc;
     }
+    // #1511: this is server-resolved from the authoritative character row, never
+    // copied from a caller payload. It keeps the shared log linked to the same sheet
+    // that supplied the roll catalog and modifier.
+    result.characterId = row.id;
     const persisted = await this.rolls.record(row.campaignId, result, user);
 
     // Degrees of success: PF2e steps a nat-20 up / nat-1 down. The natural die face is the

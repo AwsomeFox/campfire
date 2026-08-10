@@ -37,22 +37,26 @@ export const MAX_TRANSCRIPT_ENTRIES = 200;
 /**
  * Which surface owns a cached transcript (#572).
  *
- * Two surfaces are mounted at once on the Table route: the page itself, which reads the
- * server's AUTHORITATIVE transcript (`dm:<turnId>` bubble ids, every entry carrying a
- * `seq`), and the Layout-level live-activity provider, which is non-authoritative and folds
- * the legacy signal frames into bubbles with client-minted random ids and no `seq`. Those
- * two formats are not interchangeable: a legacy snapshot loaded by the authoritative page
- * cannot be matched by `eventId` or `dm:<turnId>`, so the same narration would render in
- * two coexisting bubbles.
+ * Two surfaces are mounted at once on the Table route: the page and the Layout-level
+ * live-activity provider. Both read the server's AUTHORITATIVE transcript (`dm:<turnId>`
+ * bubble ids, every entry carrying a `seq`), but each mounts and reconciles independently.
  *
- * They therefore get separate keys. Namespacing is preferred over having either surface
- * detect the other's writes, because it is the only option that does not require the two to
- * know about each other — whichever one is mounted, it reads back exactly what it wrote.
+ * They therefore get separate keys. Namespacing prevents either surface's route transition
+ * from overwriting the other's paint cache before its next server reconciliation.
  *
  * #573 composes a USER namespace over this one rather than replacing it: both axes are
  * real, and a key must separate them both (see {@link transcriptStorageKey}).
  */
 export type TranscriptStorageScope = 'table' | 'activity';
+
+/**
+ * Effective campaign-role projection used by the activity transcript cache.
+ *
+ * The server can redact transcript rows differently for a DM, player, and viewer. The
+ * Layout-level activity surface therefore records which projection produced a cache and
+ * never rehydrates it for another role of the same signed-in user.
+ */
+export type TranscriptCacheProjection = 'dm' | 'player' | 'viewer';
 
 /**
  * localStorage key for one VIEWER's cached transcript of a campaign, or `null` when
@@ -193,9 +197,8 @@ export interface TranscriptState {
    * OPT-IN (#572): this surface reads the server's authoritative transcript, so durable
    * events are the source of truth here. While true the reducer folds `transcript` frames
    * and IGNORES the thin signal frames that now have durable counterparts, so every line
-   * renders exactly once. Surfaces that never fetch the transcript (the dashboard activity
-   * chip, the encounter driver dock) leave it false: they keep folding the signal frames
-   * and ignore `transcript` frames entirely, behaving exactly as they did before #572.
+   * renders exactly once. A surface that deliberately never fetches the transcript leaves it
+   * false: it keeps folding thin signal frames and ignores `transcript` frames entirely.
    * Must be turned on explicitly — inferring it from the first server event would let a
    * non-authoritative surface fold both copies of that turn's narration.
    */
@@ -209,6 +212,17 @@ export const emptyTranscript: TranscriptState = { entries: [] };
 /** The rendered narration for a DM bubble: committed steps + the live (in-progress) step. */
 export function dmEntryText(entry: DmEntry): string {
   return [...entry.committed, entry.live].filter((s) => s.length > 0).join('\n\n');
+}
+
+/**
+ * The durable event id normally becomes the rendered entry id. Narration and its terminal
+ * turn row deliberately fold into one stable DM bubble instead, so callers tracking a live
+ * server row must use this id when they later address the rendered transcript.
+ */
+export function transcriptEntryId(event: Pick<AiDmTranscriptEvent, 'eventId' | 'kind' | 'turnId'>): string {
+  return event.kind === 'narration' || event.kind === 'turn.ended'
+    ? `dm:${event.turnId ?? event.eventId}`
+    : event.eventId;
 }
 
 // ---- Actions --------------------------------------------------------------
@@ -228,6 +242,11 @@ export type TranscriptAction =
    * events are merged by their stable `eventId`, so re-delivery never duplicates a line.
    */
   | { type: 'serverEvents'; events: AiDmTranscriptEvent[] }
+  /**
+   * Replace a hydrated cache with the first authoritative history page, retaining only
+   * SSE rows that won its fetch race.
+   */
+  | { type: 'reconcileInitialAuthoritative'; events: AiDmTranscriptEvent[]; keepEntryIds: ReadonlySet<string> }
   /** Echo this client's own submission immediately (before/independent of the stream). */
   | {
       type: 'localPlayer';
@@ -540,10 +559,10 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       // #598 — a withheld turn joins the stuck ladder, so the server emits `narration.withheld`
       // and then, moments later on this same channel, a `stuck` frame with reason
       // `content_withheld`. Authoritative surfaces early-return on `stuck` above and render the
-      // durable row, so the table view shows one line. These thin surfaces (dashboard activity,
-      // encounter driver dock, player display) fold both — so they printed the withheld line
-      // AND "The AI DM got stuck", and the second sentence blames the table's AI for failing
-      // when it had actually declined. That framing is the thing #598 argues against.
+      // durable row, so an authoritative transcript shows one line. A non-authoritative surface
+      // can fold both, printing the withheld line AND "The AI DM got stuck" and blaming the
+      // table's AI for failing when it had actually declined. That framing is the thing #598
+      // argues against.
       //
       // Fold it under the WITHHELD variant, and only when the retraction did not already put
       // that line up. Suppressing outright would leave a client that connected between the two
@@ -702,8 +721,6 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
     lastSeq: Math.max(state.lastSeq ?? 0, event.seq),
   };
   const entries = state.entries;
-  const bubbleId = event.turnId ? `dm:${event.turnId}` : null;
-
   /** Replace an entry in place (id-keyed merge), or append when it is new. */
   const upsert = (entry: TranscriptEntry): TranscriptState => {
     const idx = indexOfId(entries, entry.id);
@@ -741,7 +758,7 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
     case 'narration': {
       const text = asText(event.payload.text);
       if (!text) return base;
-      const id = bubbleId ?? `dm:${event.eventId}`;
+      const id = transcriptEntryId(event);
       // Adopt the bubble the live token stream already opened, so the typing effect and the
       // authoritative text are the same bubble rather than two stacked ones — but never a
       // bubble that already belongs to another turn (see foldTargetIndex).
@@ -784,7 +801,7 @@ function applyServerEvent(state: TranscriptState, event: AiDmTranscriptEvent): T
     }
 
     case 'turn.ended': {
-      const id = bubbleId ?? `dm:${event.eventId}`;
+      const id = transcriptEntryId(event);
       const idx = foldTargetIndex(entries, id);
       const meta: DmTurnMeta = {
         stopReason: asText(event.payload.stopReason),
@@ -933,6 +950,22 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       return ordered.reduce(applyServerEvent, state);
     }
 
+    case 'reconcileInitialAuthoritative': {
+      // The initial REST page is a snapshot, not an incremental reconnect page: stale cache
+      // rows absent from it must disappear. Preserve only durable stream rows explicitly
+      // observed while that request was in flight; those may be newer than its snapshot.
+      const snapshot = [...action.events]
+        .sort((a, b) => a.seq - b.seq)
+        .reduce<TranscriptState>(applyServerEvent, { entries: [], authoritative: true });
+      const snapshotIds = new Set(snapshot.entries.map((entry) => entry.id));
+      const entries = orderBySeq([
+        ...snapshot.entries,
+        ...state.entries.filter((entry) => action.keepEntryIds.has(entry.id) && !snapshotIds.has(entry.id)),
+      ]);
+      const lastSeq = entries.reduce((max, entry) => Math.max(max, entry.seq ?? 0), 0);
+      return { entries, authoritative: true, ...(lastSeq > 0 ? { lastSeq } : {}) };
+    }
+
     case 'localPlayer': {
       // Dedup the OTHER direction (#572): the authoritative event can beat the POST's own
       // HTTP response back over SSE, in which case the line is already on screen and this
@@ -1050,6 +1083,7 @@ export function loadTranscript(
   viewerId: TranscriptViewerId,
   campaignId: number,
   scope: TranscriptStorageScope = 'table',
+  projection?: TranscriptCacheProjection,
 ): TranscriptState {
   if (!hasStorage()) return emptyTranscript;
   const key = transcriptStorageKey(viewerId, campaignId, scope);
@@ -1062,6 +1096,14 @@ export function loadTranscript(
     if (!raw) return emptyTranscript;
     const parsed: unknown = JSON.parse(raw);
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as TranscriptState).entries)) {
+      // The activity provider's transcript is server-authoritative but role-projected. A
+      // cache made while this viewer was a DM must not repaint before the player/viewer
+      // fetch settles after a demotion. Older activity caches have no projection marker,
+      // so they are treated as untrusted and discarded once rather than guessed at.
+      if (projection !== undefined && (parsed as { projection?: unknown }).projection !== projection) {
+        window.localStorage.removeItem(key);
+        return emptyTranscript;
+      }
       const entries = (parsed as TranscriptState).entries;
       // Defensively re-bound in case an older/hand-edited store exceeded the cap.
       return { entries: entries.length > MAX_TRANSCRIPT_ENTRIES ? entries.slice(entries.length - MAX_TRANSCRIPT_ENTRIES) : entries };
@@ -1094,6 +1136,7 @@ export function saveTranscript(
   campaignId: number,
   state: TranscriptState,
   scope: TranscriptStorageScope = 'table',
+  projection?: TranscriptCacheProjection,
 ): void {
   if (!hasStorage()) return;
   if (state.entries.length === 0) return;
@@ -1104,7 +1147,10 @@ export function saveTranscript(
       state.entries.length > MAX_TRANSCRIPT_ENTRIES
         ? { entries: state.entries.slice(state.entries.length - MAX_TRANSCRIPT_ENTRIES) }
         : state;
-    window.localStorage.setItem(key, JSON.stringify(bounded));
+    window.localStorage.setItem(key, JSON.stringify({
+      ...bounded,
+      ...(projection === undefined ? {} : { projection }),
+    }));
   } catch {
     /* quota / privacy mode — transcript is best-effort, not authoritative */
   }

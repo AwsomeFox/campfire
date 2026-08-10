@@ -1,10 +1,18 @@
 import { createZodDto } from 'nestjs-zod';
-import { NotificationPreferencesUpdate } from '@campfire/schema';
+import {
+  BrowserPushSubscription,
+  BrowserPushUnsubscribe,
+  NotificationPreferencesUpdate,
+} from '@campfire/schema';
 
 // .strict() — an unrecognized top-level body key 400s instead of being silently
 // stripped (see users.dto.ts / issue #131). Nested quietHours stays partial so a
 // caller can PATCH just one field of the window.
 export class NotificationPreferencesUpdateDto extends createZodDto(NotificationPreferencesUpdate.strict()) {}
+
+export class BrowserPushSubscriptionDto extends createZodDto(BrowserPushSubscription.strict()) {}
+
+export class BrowserPushUnsubscribeDto extends createZodDto(BrowserPushUnsubscribe.strict()) {}
 
 import { z } from 'zod';
 
@@ -21,4 +29,3 @@ export const BulkNotificationSchema = z
   );
 
 export class BulkNotificationDto extends createZodDto(BulkNotificationSchema) {}
-

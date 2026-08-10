@@ -162,7 +162,7 @@ export default defineConfig({
           denyPath("/readyz"),
         ],
         cleanupOutdatedCaches: true,
-        importScripts: ["sw-sensitive-purge.js"],
+        importScripts: ["sw-sensitive-purge.js", "sw-push.js"],
         runtimeCaching: [
           {
             urlPattern: matchNetworkOnlyApi,

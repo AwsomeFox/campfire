@@ -60,6 +60,10 @@ import {
   openMembershipSyncChannel,
 } from '../lib/membershipLiveSync';
 import { purgeLocalAiTranscripts } from '../features/ai-dm/transcriptPrivacy';
+import {
+  browserPushEndpointForLogout,
+  detachBrowserPushLocally,
+} from '../lib/browserPush';
 
 /** Translates a thrown /me error into a MeFetchOutcome. */
 function outcomeFromError(err: unknown): MeFetchOutcome {
@@ -103,6 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     applyReadingPreference(document.documentElement, 'default');
     clearAuthStorage();
     clearMeSnapshot();
+    void detachBrowserPushLocally();
     // Issue #573: the AI-DM transcript paint cache is identity-scoped local data that
     // records who said what at the table. Cache Storage is origin-wide so one tab's
     // clearApiCache covers every tab, but localStorage writes are per-key and nobody was
@@ -145,6 +150,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // /auth/logout — the server already rejected the cookie as expired.
       clearAuthStorage();
       clearMeSnapshot();
+      void detachBrowserPushLocally();
       // #573: a provenance-safe 401 is how an ADMIN-DISABLED or deleted account reaches
       // this tab — the server rejects the cookie and every client surfaces it here. There
       // is no push channel for "your account was turned off", and this is the existing
@@ -186,6 +192,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       currentInstance: lastInstanceRef.current,
       snapshot,
     });
+
+    const switchedAccount =
+      outcome.kind === 'live' &&
+      ((lastUserIdRef.current !== null && lastUserIdRef.current !== outcome.me.user.id) ||
+        (snapshot !== null && snapshot.me.user.id !== outcome.me.user.id));
+    if (outcome.kind === 'loggedOut' || switchedAccount) {
+      void detachBrowserPushLocally();
+    }
 
     if (decision.shouldWipeCaches) {
       // Proven identity change (first sign-in, account switch, a dev-auth identity flip)
@@ -306,9 +320,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Fire server invalidation immediately (before/alongside the local clear)
     // so the session-survival window on reload is as short as possible. Errors
     // are swallowed — the local session is over regardless.
-    void api.post(`${API}/auth/logout`).catch(() => {
+    const pushEndpoint = browserPushEndpointForLogout();
+    void api.post(`${API}/auth/logout`, pushEndpoint ? { pushEndpoint } : {}).catch(() => {
       /* Swallowed intentionally — see comment above. */
     });
+    void detachBrowserPushLocally();
 
     // `clearAuthStorage()` also fires the storage event that drives multi-tab
     // sign-out (issue #666), so other tabs clear immediately too.

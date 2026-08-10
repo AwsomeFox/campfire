@@ -1079,6 +1079,30 @@ function migrateDiceRollsTableForEncounterNpcRefs1904(sqlite: Database.Database)
 }
 
 /**
+ * #1511: durable roll audience and server-resolved character/combatant context.
+ * All columns are additive: old shared rows acquire party_shared, and no historical
+ * identity is guessed. The two read-path indexes keep private/DM audience checks bounded.
+ */
+function migrateDiceRollsContext1511(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('character_id')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN character_id INTEGER');
+  if (!has('combatant_id')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN combatant_id INTEGER');
+  if (!has('visibility')) sqlite.exec("ALTER TABLE dice_rolls ADD COLUMN visibility TEXT NOT NULL DEFAULT 'party_shared'");
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_visibility_id_desc
+      ON dice_rolls(campaign_id, visibility, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_roller_id_desc
+      ON dice_rolls(campaign_id, roller_user_id, id DESC);
+  `);
+}
+
+/**
  * Issue #1910: additive nullable `speed` column on `characters` and `combatants` —
  * movement speed in the rule system adapter's movement unit, replacing the hardcoded
  * 30 ft every PC previously got in the turn workspace. NULL on both tables preserves
@@ -1125,6 +1149,22 @@ function migrateCampaignsTableForCustomMechanicsProfile1502(sqlite: Database.Dat
   if (columns.some((c) => c.name === 'custom_mechanics_profile')) return;
 
   sqlite.exec('ALTER TABLE campaigns ADD COLUMN custom_mechanics_profile TEXT');
+}
+
+/**
+ * Migration for campaign-owned condition definitions (issue #1505). Existing
+ * campaigns retain their adapter-only condition vocabulary through the empty array.
+ */
+function migrateCampaignsTableForConditionDefinitions1505(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'condition_definitions')) return;
+
+  sqlite.exec("ALTER TABLE campaigns ADD COLUMN condition_definitions TEXT NOT NULL DEFAULT '[]'");
 }
 
 /**
@@ -3817,6 +3857,20 @@ function migrateAuditLogForRequestId(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #810 — keep the authoritative raw, versioned audit payload beside the
+ * existing human-readable detail. Nullable is essential: historical detail is
+ * evidence in its own right and cannot be reconstructed into a truthful diff.
+ */
+function migrateAuditLogForPayloadJson810(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'payload_json')) {
+    sqlite.exec('ALTER TABLE audit_log ADD COLUMN payload_json TEXT');
+  }
+}
+
+/**
  * Issue #549 — per-user, per-campaign catch-up cursor for the dashboard
  * "since you were last here" panel. Fresh DBs get the table from BOOTSTRAP_SQL;
  * upgraded installs create it here.
@@ -5129,6 +5183,58 @@ function migrateCombatantsTableForControllerUserId(sqlite: Database.Database): v
   }
 }
 
+/**
+ * Issue #2112: hidden encounter status rows must carry private authority context
+ * so bell reads and digest delivery can fail closed after a DM demotion, removal,
+ * ownership transfer, or visibility change. Legacy rows cannot supply the affected
+ * character/audience safely, so every context-less `character_downed`
+ * encounter-status row is removed during the upgrade rather than surviving a
+ * later visibility change.
+ */
+function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Database): void {
+  const campaignsTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'campaigns'").get();
+  for (const table of ['notifications', 'notification_digest_queue']) {
+    const exists = sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    if (!exists) continue;
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'hidden_status_context')) {
+      sqlite.exec(`ALTER TABLE ${table} ADD COLUMN hidden_status_context TEXT`);
+    }
+    // Reduced fixtures may retain notification tables while omitting their
+    // campaign foreign-key parent. The additive column migration is still
+    // safe; only the legacy cleanup requires a complete campaign schema.
+    if (!campaignsTable) continue;
+    // Legacy rows lack the affected character and audience. Retaining even a
+    // currently-visible row would let a subsequent hide bypass revalidation.
+    sqlite.prepare(
+      `DELETE FROM ${table}
+       WHERE hidden_status_context IS NULL
+         AND type = 'character_downed'
+         AND entity_type = 'encounter'`,
+    ).run();
+  }
+}
+
+/** Issue #1323: durable, user-owned browser Push API subscriptions. */
+function migratePushSubscriptions1323(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      endpoint TEXT NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      user_agent TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      last_used_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint
+      ON push_subscriptions(endpoint);
+    CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
+      ON push_subscriptions(user_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -5228,7 +5334,6 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0097_npcs_portrait_url', run: migrateNpcsTableForPortraitUrl },
   { name: '0098_encounters_aftermath_dismissed', run: migrateEncountersTableForAftermathDismissed },
   { name: '0099_encounters_hex_orientation', run: migrateEncountersTableForHexOrientation },
-  { name: '0100_characters_weapon_proficiencies', run: migrateCharactersTableForWeaponProficiencies },
   { name: '0100_factions_portrait_url', run: migrateFactionsTableForPortraitUrl },
   { name: '0101_locations_portrait_url', run: migrateLocationsTableForPortraitUrl },
   { name: '0102_ai_scribe_session_scope_499', run: migrateAiScribeSessionScope499 },
@@ -5496,6 +5601,13 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0178_rule_pack_relationships_1319', run: migrateRulePackRelationships1319 },
   // #1319 claimed 0178 on main before #1941 shipped, so controller delegation uses 0179.
   { name: '0179_combatants_controller_user_id_1941', run: migrateCombatantsTableForControllerUserId },
+  { name: '0180_hidden_status_notification_authorization_2112', run: migrateHiddenStatusNotificationAuthorization2112 },
+  // #2112 claimed 0180 on main before #810 shipped, so the audit payload uses 0181.
+  { name: '0181_audit_payload_json_810', run: migrateAuditLogForPayloadJson810 },
+  { name: '0182_push_subscriptions_1323', run: migratePushSubscriptions1323 },
+  { name: '0183_dice_rolls_context_1511', run: migrateDiceRollsContext1511 },
+  { name: '0184_campaigns_condition_definitions_1505', run: migrateCampaignsTableForConditionDefinitions1505 },
+  { name: '0185_characters_weapon_proficiencies_2144', run: migrateCharactersTableForWeaponProficiencies },
 ];
 
 /**

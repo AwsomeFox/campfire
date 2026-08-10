@@ -14,6 +14,7 @@ function diceRoll(partial: Partial<DiceRoll>): DiceRoll {
     campaignId: 1,
     rollerUserId: 'test',
     rollerName: 'Test',
+    visibility: 'party_shared',
     createdAt: '2026-01-01T00:00:00.000Z',
     expr: '2d6',
     rolls: [3, 4],

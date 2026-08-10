@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import {
   CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
@@ -17,20 +17,29 @@ import {
   type NotificationPreferencesUpdate,
   type NotificationType,
   type QuietHours as QuietHoursType,
+  type Role,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaignMembers,
   campaigns,
+  characters,
+  comments,
+  encounters,
+  memberSafetyControls,
   notificationDigestQueue,
   notificationPreferences,
   notificationQuietHours,
   notifications,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import type { RequestUser } from '../../common/user.types';
+import { minRole, type RequestUser } from '../../common/user.types';
 import { blockedTargetsOf, suppressedRecipients } from '../../common/safety-controls';
 import { decideDelivery, isWithinQuietHours } from './notification-preferences.util';
+import {
+  PushNotificationsService,
+  type BrowserPushDelivery,
+} from './push-notifications.service';
 
 /**
  * What a domain service passes when something notification-worthy happens.
@@ -102,6 +111,11 @@ function toDomain(row: typeof notifications.$inferSelect): Notification {
   };
 }
 
+/** Return the owner-safe projection without changing the durable DM row. */
+function toOwnerSafeDomain(row: typeof notifications.$inferSelect): Notification {
+  return toDomain({ ...row, entityType: null, entityId: null, data: null });
+}
+
 /**
  * Only real users (numeric users.id) can receive notifications — DEV_AUTH
  * `dev:<name>` synthetic users have no users row to hang them on.
@@ -121,8 +135,48 @@ export function excerpt(text: string, max = 200): string {
 const DIGEST_FLUSH_INTERVAL_MS = 60_000;
 /** Max rows drained per flush tick to avoid full-table scans. */
 const DIGEST_BATCH_SIZE = 500;
+/** Keep every SQLite `IN (...)` write comfortably below its bind-variable limit. */
+const SQLITE_ID_BATCH_SIZE = 1_000;
+const BLOCK_FILTER_EXEMPT_TYPES = new Set<string>([
+  ...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
+  'safety_hold',
+]);
+const DEFERRED_MEMBERSHIP_EXEMPT_TYPES = new Set<string>(MEMBERSHIP_NOTIFICATION_TYPES);
 
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+
+type HiddenStatusAudience = 'campaign_member' | 'permanent_dm' | 'character_owner';
+type HiddenStatusDisposition = 'allow' | 'redact' | 'project_redact' | 'deny' | 'filter';
+type HiddenRecipientDelivery = 'delivered' | 'skipped' | 'visible';
+
+/** Private persistence metadata; deliberately separate from public notification `data`. */
+interface HiddenStatusContext {
+  encounterId: number;
+  characterId: number;
+  audience: HiddenStatusAudience;
+}
+
+function parseHiddenStatusContext(raw: string | null | undefined): HiddenStatusContext | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      Number.isInteger((parsed as HiddenStatusContext).encounterId) &&
+      Number.isInteger((parsed as HiddenStatusContext).characterId) &&
+      ((parsed as HiddenStatusContext).audience === 'campaign_member' ||
+        (parsed as HiddenStatusContext).audience === 'permanent_dm' ||
+        (parsed as HiddenStatusContext).audience === 'character_owner')
+    ) {
+      return parsed as HiddenStatusContext;
+    }
+  } catch {
+    // Malformed private context must fail closed at the next read/flush.
+  }
+  return null;
+}
 
 /** Default (never-configured) quiet hours: disabled. */
 function defaultQuietHours(): QuietHoursType {
@@ -131,9 +185,10 @@ function defaultQuietHours(): QuietHoursType {
 
 /**
  * In-app notification store. Deliberately transport-agnostic: rows are written
- * synchronously by domain services and read by polling clients today; a
- * real-time push channel (SSE — issue #4) can later observe the same writes
- * without any change to emitters or the table.
+ * synchronously by domain services and read by polling clients. Browser Web
+ * Push (#1323) mirrors rows only after they have been materialized. It never
+ * re-evaluates preferences or quiet hours, including for the narrow cases where
+ * another domain service writes its notification row atomically.
  *
  * Emission is best-effort by design: callers `await` it inside the same request
  * but a notification failure must never fail the triggering write, so both
@@ -150,7 +205,12 @@ export class NotificationsService implements OnApplicationBootstrap {
   private readonly logger = new Logger(NotificationsService.name);
   private flushingDigests = false;
 
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    @Optional()
+    @Inject(PushNotificationsService)
+    private readonly push?: Pick<PushNotificationsService, 'deliver'>,
+  ) {}
 
   /**
    * Drain deferred notifications on a cadence. No boot-time flush (nothing is
@@ -254,6 +314,120 @@ export class NotificationsService implements OnApplicationBootstrap {
   }
 
   /**
+   * Broadcast only while the encounter is visible at the durable-write
+   * boundary. The visibility predicate and notification/digest inserts share
+   * one SQLite transaction, so a hide that wins before that transaction
+   * commits cannot leave an encounter id in a campaign-wide bell or digest.
+   *
+   * The boolean distinguishes a visible fan-out from a guarded refusal. Its
+   * caller may then select a narrower, secrecy-safe recipient set.
+   */
+  async notifyCampaignIfEncounterVisible(
+    campaignId: number,
+    encounterId: number,
+    characterId: number,
+    actor: RequestUser | null,
+    event: NotificationEvent,
+    excludedRecipientIds: ReadonlySet<number> = new Set(),
+  ): Promise<boolean> {
+    try {
+      const members = await this.db
+        .select({ userId: campaignMembers.userId })
+        .from(campaignMembers)
+        .where(eq(campaignMembers.campaignId, campaignId));
+      const actorId = actor ? numericUserId(actor.id) : null;
+      const recipients = members.map((member) => member.userId)
+        .filter((id) => (actorId === null || id !== actorId) && !excludedRecipientIds.has(id));
+      const hiddenStatusContext: HiddenStatusContext = { encounterId, characterId, audience: 'campaign_member' };
+      return await this.dispatch(
+        recipients,
+        campaignId,
+        event,
+        actor?.id ?? null,
+        actor?.id ?? null,
+        (tx) => {
+          const encounter = tx
+            .select({ hidden: encounters.hidden })
+            .from(encounters)
+            .where(and(eq(encounters.id, encounterId), eq(encounters.campaignId, campaignId)))
+            .get();
+          return encounter?.hidden === false;
+        },
+        hiddenStatusContext,
+      );
+    } catch (err) {
+      this.logger.warn(`notifyCampaignIfEncounterVisible failed for encounter ${encounterId} in campaign ${campaignId}: ${String(err)}`);
+      return false;
+    }
+  }
+
+  /** Persist a hidden-status row only while its recipient retains the authority
+   * that made the row safe to disclose. */
+  async notifyUserIfHiddenEncounterRecipient(
+    userId: number | string,
+    campaignId: number,
+    actor: RequestUser | null,
+    event: NotificationEvent,
+    authority: { kind: 'permanent_dm'; characterId: number } | { kind: 'character_owner'; characterId: number },
+    encounterId: number,
+  ): Promise<HiddenRecipientDelivery> {
+    const recipient = numericUserId(userId);
+    if (recipient === null) return 'skipped';
+    // Actors receive no row, but their skipped narrow path must still observe
+    // a reveal at the same transactional boundary as any durable recipient.
+    if (actor && recipient === numericUserId(actor.id)) {
+      return this.encounterHiddenAtBoundary(campaignId, encounterId) ? 'delivered' : 'visible';
+    }
+    const hiddenStatusContext: HiddenStatusContext = {
+      encounterId,
+      characterId: authority.characterId,
+      audience: authority.kind,
+    };
+    if (!Number.isInteger(hiddenStatusContext.characterId) || hiddenStatusContext.characterId <= 0 || !Number.isInteger(encounterId) || encounterId <= 0) {
+      this.logger.warn(`notifyUserIfHiddenEncounterRecipient refused malformed hidden-status context for user ${recipient} in campaign ${campaignId}`);
+      return 'skipped';
+    }
+    try {
+      let visibilityChanged = false;
+      const delivered = await this.dispatch([recipient], campaignId, event, actor?.id ?? null, actor?.id ?? null, (tx) => {
+        if (!this.encounterHiddenTx(tx, campaignId, encounterId)) {
+          visibilityChanged = true;
+          return false;
+        }
+        if (authority.kind === 'permanent_dm') {
+          return Boolean(
+            tx.select({ userId: campaignMembers.userId })
+              .from(campaignMembers)
+              .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, recipient), eq(campaignMembers.role, 'dm')))
+              .get(),
+          );
+        }
+        return Boolean(
+          tx.select({ id: characters.id })
+            .from(characters)
+            .where(and(eq(characters.id, authority.characterId), eq(characters.campaignId, campaignId), eq(characters.ownerUserId, String(recipient))))
+            .get(),
+        );
+      }, hiddenStatusContext);
+      return delivered ? 'delivered' : visibilityChanged ? 'visible' : 'skipped';
+    } catch (err) {
+      this.logger.warn(`notifyUserIfHiddenEncounterRecipient failed for user ${recipient} in campaign ${campaignId}: ${String(err)}`);
+      return 'skipped';
+    }
+  }
+
+  private encounterHiddenTx(tx: SyncDb, campaignId: number, encounterId: number): boolean {
+    return tx.select({ hidden: encounters.hidden })
+      .from(encounters)
+      .where(and(eq(encounters.id, encounterId), eq(encounters.campaignId, campaignId)))
+      .get()?.hidden === true;
+  }
+
+  private encounterHiddenAtBoundary(campaignId: number, encounterId: number): boolean {
+    return this.db.transaction((tx) => this.encounterHiddenTx(tx, campaignId, encounterId));
+  }
+
+  /**
    * Notify every campaign member, including an attributed actor. This is deliberately
    * narrow: table-safety signals must never reveal an actor by their missing bell item,
    * but attributed signals still need the durable id so later account privacy changes can
@@ -295,8 +469,18 @@ export class NotificationsService implements OnApplicationBootstrap {
     event: NotificationEvent,
     actorUserId: string | null,
     blockActorUserId: string | null = actorUserId,
-  ): Promise<void> {
-    if (recipients.length === 0) return;
+    writeGuard?: (tx: SyncDb) => boolean,
+    hiddenStatusContext?: HiddenStatusContext,
+  ): Promise<boolean> {
+    const guardWithoutWrite = () => {
+      if (!writeGuard) return true;
+      let guardPassed = true;
+      this.db.transaction((tx) => {
+        if (!writeGuard(tx)) guardPassed = false;
+      });
+      return guardPassed;
+    };
+    if (recipients.length === 0) return guardWithoutWrite();
     const category = notificationCategory(event.type);
 
     // ISSUE #597 — THE ONE PLACE A BLOCK STOPS A NOTIFICATION.
@@ -326,19 +510,33 @@ export class NotificationsService implements OnApplicationBootstrap {
     const suppressed = await suppressedRecipients(this.db, recipients.map(String), {
       campaignId,
       actorUserId: blockActorUserId,
-      entityType: event.entityType ?? null,
-      entityId: event.entityId ?? null,
+      // Owner-safe hidden-status payloads intentionally omit the encounter
+      // deep-link, but their private context still anchors a recipient's
+      // existing encounter-thread mute before anything is persisted.
+      entityType: event.entityType ?? (hiddenStatusContext ? 'encounter' : null),
+      entityId: event.entityId ?? hiddenStatusContext?.encounterId ?? null,
     });
     const allowed = suppressed.size === 0 ? recipients : recipients.filter((id) => !suppressed.has(String(id)));
-    if (allowed.length === 0) return;
+    if (allowed.length === 0) return guardWithoutWrite();
 
     // Critical categories are always delivered immediately — no gating. Note that the
     // safety filter above applies even here: `access`/`security` bypass a recipient's
     // *preferences*, which are convenience settings, but a block is a safety decision
     // and an abuser must not be able to reach a blocker by choosing an event type.
     if (isCriticalNotificationCategory(category)) {
-      await this.insertRows(allowed, campaignId, event, actorUserId);
-      return;
+      let guardPassed = true;
+      let createdAt: string | null = null;
+      this.db.transaction((tx) => {
+        if (writeGuard && !writeGuard(tx)) {
+          guardPassed = false;
+          return;
+        }
+        createdAt = this.insertRowsTx(tx, allowed, campaignId, event, actorUserId, hiddenStatusContext);
+      });
+      if (guardPassed && createdAt) {
+        this.schedulePush(this.pushDeliveries(allowed, campaignId, event, createdAt, true));
+      }
+      return guardPassed;
     }
 
     const now = Date.now();
@@ -356,13 +554,26 @@ export class NotificationsService implements OnApplicationBootstrap {
       else quiet.push(userId);
     }
 
+    let immediateCreatedAt: string | null = null;
     if (immediate.length > 0 || digest.length > 0 || quiet.length > 0) {
+      let guardPassed = true;
       this.db.transaction((tx) => {
-        if (immediate.length > 0) this.insertRowsTx(tx, immediate, campaignId, event, actorUserId);
-        if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest', actorUserId);
-        if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours', actorUserId);
+        if (writeGuard && !writeGuard(tx)) {
+          guardPassed = false;
+          return;
+        }
+        if (immediate.length > 0) {
+          immediateCreatedAt = this.insertRowsTx(tx, immediate, campaignId, event, actorUserId, hiddenStatusContext);
+        }
+        if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest', actorUserId, hiddenStatusContext);
+        if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours', actorUserId, hiddenStatusContext);
       });
+      if (guardPassed && immediateCreatedAt) {
+        this.schedulePush(this.pushDeliveries(immediate, campaignId, event, immediateCreatedAt, false));
+      }
+      return guardPassed;
     }
+    return guardWithoutWrite();
   }
 
   /** Stored category mode per recipient (absent => undefined => category default). */
@@ -410,8 +621,9 @@ export class NotificationsService implements OnApplicationBootstrap {
     campaignId: number,
     event: NotificationEvent,
     actorUserId: string | null,
-  ): void {
-    if (recipients.length === 0) return;
+    hiddenStatusContext?: HiddenStatusContext,
+  ): string | null {
+    if (recipients.length === 0) return null;
     const ts = nowIso();
     const dataJson = event.data == null ? null : JSON.stringify(event.data);
     tx.insert(notifications)
@@ -426,6 +638,7 @@ export class NotificationsService implements OnApplicationBootstrap {
           entityId: event.entityId ?? null,
           commentId: event.commentId ?? null,
           data: dataJson,
+          hiddenStatusContext: hiddenStatusContext ? JSON.stringify(hiddenStatusContext) : null,
           actorName: event.actorName ?? '',
           // Issue #597: persist WHO, not just their display name, so a block filed
           // later can filter bell items that already exist.
@@ -435,6 +648,7 @@ export class NotificationsService implements OnApplicationBootstrap {
         })),
       )
       .run();
+    return ts;
   }
 
   private async insertRows(
@@ -442,8 +656,51 @@ export class NotificationsService implements OnApplicationBootstrap {
     campaignId: number,
     event: NotificationEvent,
     actorUserId: string | null,
-  ): Promise<void> {
-    this.insertRowsTx(this.db, recipients, campaignId, event, actorUserId);
+    hiddenStatusContext?: HiddenStatusContext,
+  ): Promise<string | null> {
+    return Promise.resolve(this.insertRowsTx(this.db, recipients, campaignId, event, actorUserId, hiddenStatusContext));
+  }
+
+  private pushDeliveries(
+    recipients: number[],
+    campaignId: number,
+    event: NotificationEvent,
+    createdAt: string,
+    critical: boolean,
+  ): BrowserPushDelivery[] {
+    return recipients.map((userId) => ({
+      userId,
+      campaignId,
+      type: event.type,
+      title: event.title,
+      body: event.body ?? '',
+      entityId: event.entityId ?? null,
+      createdAt,
+      critical,
+    }));
+  }
+
+  /** Fire-and-contain: a vendor outage never delays or rejects the domain write. */
+  private schedulePush(deliveries: BrowserPushDelivery[]): void {
+    if (!this.push || deliveries.length === 0) return;
+    void this.push.deliver(deliveries).catch((error) => {
+      this.logger.warn(`Browser push fan-out failed: ${String(error)}`);
+    });
+  }
+
+  /**
+   * Push a notification row that another service materialized inside its own
+   * atomic domain transaction. This does not write or re-gate the row; it only
+   * keeps the browser transport aligned with that already-committed in-app item.
+   */
+  pushMaterializedNotification(
+    userId: number,
+    campaignId: number,
+    event: NotificationEvent,
+    createdAt: string,
+  ): void {
+    const critical = isCriticalNotificationCategory(notificationCategory(event.type));
+    this.schedulePush(this.pushDeliveries([userId], campaignId, event, createdAt, critical));
   }
 
   /** Persist deferred notifications for later flush (digest cadence / after quiet hours). */
@@ -454,6 +711,7 @@ export class NotificationsService implements OnApplicationBootstrap {
     event: NotificationEvent,
     reason: 'digest' | 'quiet_hours',
     actorUserId: string | null,
+    hiddenStatusContext?: HiddenStatusContext,
   ): void {
     if (recipients.length === 0) return;
     const ts = nowIso();
@@ -470,6 +728,7 @@ export class NotificationsService implements OnApplicationBootstrap {
           entityId: event.entityId ?? null,
           commentId: event.commentId ?? null,
           data: dataJson,
+          hiddenStatusContext: hiddenStatusContext ? JSON.stringify(hiddenStatusContext) : null,
           actorName: event.actorName ?? '',
           actorUserId: actorUserId ?? null,
           reason,
@@ -487,6 +746,321 @@ export class NotificationsService implements OnApplicationBootstrap {
     actorUserId: string | null = null,
   ): Promise<void> {
     this.enqueueDeferredTx(this.db, recipients, campaignId, event, reason, actorUserId);
+  }
+
+  /**
+   * Recheck the authority encoded with a hidden-status row at the exact durable
+   * boundary. A visible encounter is readable by any current campaign member;
+   * while hidden, only a permanent DM or the current affected-character owner
+   * remains entitled. Missing or malformed context fails closed.
+   */
+  private hiddenStatusAuthorizedTx(
+    tx: SyncDb,
+    userId: number,
+    campaignId: number,
+    rawContext: string | null | undefined,
+    user?: RequestUser,
+  ): HiddenStatusDisposition {
+    const context = parseHiddenStatusContext(rawContext);
+    if (!context) return 'deny';
+    // Digest flushing runs without a request principal. Recipient-facing reads
+    // must additionally honour the authenticating PAT's campaign and role cap.
+    const tokenContext = user?.tokenContext;
+    if (tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== campaignId) return 'filter';
+    const member = tx
+      .select({ role: campaignMembers.role })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, userId)))
+      .get();
+    if (!member) return 'deny';
+    const encounter = tx
+      .select({ hidden: encounters.hidden })
+      .from(encounters)
+      .where(and(eq(encounters.id, context.encounterId), eq(encounters.campaignId, campaignId)))
+      .get();
+    if (!encounter) return 'deny';
+    if (!encounter.hidden) return 'allow';
+    const effectiveRole = user?.devRole ?? (tokenContext ? minRole(tokenContext.scope, member.role as Role) : member.role);
+    const isOwner = Boolean(
+      tx.select({ id: characters.id })
+        .from(characters)
+        .where(and(
+          eq(characters.id, context.characterId),
+          eq(characters.campaignId, campaignId),
+          eq(characters.ownerUserId, String(userId)),
+        ))
+        .get(),
+    );
+    if (context.audience === 'permanent_dm') {
+      if (member.role === 'dm') {
+        if (effectiveRole === 'dm') return 'allow';
+        return isOwner ? 'project_redact' : 'filter';
+      }
+      return isOwner ? 'redact' : 'deny';
+    }
+    if (context.audience === 'character_owner') return isOwner ? 'allow' : 'deny';
+    if (member.role === 'dm') {
+      if (effectiveRole === 'dm') return 'allow';
+      return isOwner ? 'project_redact' : 'filter';
+    }
+    return isOwner ? 'redact' : 'deny';
+  }
+
+  /**
+   * Bell reads retain hidden-status rows indefinitely, so evaluate every
+   * candidate from a bounded set of membership, encounter, and ownership
+   * queries rather than repeating the same three lookups per notification.
+   * The caller keeps this evaluation and its exposing query in one SQLite
+   * transaction, preserving the read-boundary authorization guarantee.
+   */
+  private hiddenStatusDispositionsTx(
+    tx: SyncDb,
+    userId: number,
+    rows: Array<{ id: number; campaignId: number; hiddenStatusContext: string | null }>,
+    user: RequestUser,
+  ): Array<{ id: number; disposition: HiddenStatusDisposition }> {
+    const tokenContext = user.tokenContext;
+    const parsed = rows.map((row) => ({ ...row, context: parseHiddenStatusContext(row.hiddenStatusContext) }));
+    const candidates = parsed.filter((row) => (
+      row.context && !(tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== row.campaignId)
+    ));
+    const campaignIds = [...new Set(candidates.map((row) => row.campaignId))];
+    const memberships: Array<{ campaignId: number; role: string }> = [];
+    this.forEachSqliteIdBatch(campaignIds, (batch) => {
+      memberships.push(...tx.select({ campaignId: campaignMembers.campaignId, role: campaignMembers.role })
+        .from(campaignMembers)
+        .where(and(eq(campaignMembers.userId, userId), inArray(campaignMembers.campaignId, batch)))
+        .all());
+    });
+    const membershipsByCampaign = new Map(memberships.map((membership) => [membership.campaignId, membership.role as Role]));
+    const memberCandidates = candidates.filter((row) => membershipsByCampaign.has(row.campaignId));
+    const encounterIds = [...new Set(memberCandidates.map((row) => row.context!.encounterId))];
+    const encounterRows: Array<{ id: number; campaignId: number; hidden: boolean }> = [];
+    this.forEachSqliteIdBatch(encounterIds, (batch) => {
+      encounterRows.push(...tx.select({ id: encounters.id, campaignId: encounters.campaignId, hidden: encounters.hidden })
+        .from(encounters)
+        .where(inArray(encounters.id, batch))
+        .all());
+    });
+    const encountersByKey = new Map(encounterRows.map((encounter) => [`${encounter.campaignId}:${encounter.id}`, encounter]));
+    const characterIds = [...new Set(memberCandidates.map((row) => row.context!.characterId))];
+    const ownedCharacters: Array<{ id: number; campaignId: number }> = [];
+    this.forEachSqliteIdBatch(characterIds, (batch) => {
+      ownedCharacters.push(...tx.select({ id: characters.id, campaignId: characters.campaignId })
+        .from(characters)
+        .where(and(eq(characters.ownerUserId, String(userId)), inArray(characters.id, batch)))
+        .all());
+    });
+    const ownedCharacterKeys = new Set(ownedCharacters.map((character) => `${character.campaignId}:${character.id}`));
+
+    return parsed.map((row) => {
+      const context = row.context;
+      if (!context) return { id: row.id, disposition: 'deny' };
+      if (tokenContext && tokenContext.campaignId !== null && tokenContext.campaignId !== row.campaignId) {
+        return { id: row.id, disposition: 'filter' };
+      }
+      const membershipRole = membershipsByCampaign.get(row.campaignId);
+      if (!membershipRole) return { id: row.id, disposition: 'deny' };
+      const encounter = encountersByKey.get(`${row.campaignId}:${context.encounterId}`);
+      if (!encounter) return { id: row.id, disposition: 'deny' };
+      if (!encounter.hidden) return { id: row.id, disposition: 'allow' };
+      const effectiveRole = user.devRole ?? (tokenContext ? minRole(tokenContext.scope, membershipRole) : membershipRole);
+      const isOwner = ownedCharacterKeys.has(`${row.campaignId}:${context.characterId}`);
+      if (context.audience === 'permanent_dm') {
+        if (membershipRole === 'dm') return { id: row.id, disposition: effectiveRole === 'dm' ? 'allow' : isOwner ? 'project_redact' : 'filter' };
+        return { id: row.id, disposition: isOwner ? 'redact' : 'deny' };
+      }
+      if (context.audience === 'character_owner') return { id: row.id, disposition: isOwner ? 'allow' : 'deny' };
+      if (membershipRole === 'dm') return { id: row.id, disposition: effectiveRole === 'dm' ? 'allow' : isOwner ? 'project_redact' : 'filter' };
+      return { id: row.id, disposition: isOwner ? 'redact' : 'deny' };
+    });
+  }
+
+  /** SQLite caps bind variables at 32,766; retained bells can exceed that after a demotion. */
+  private forEachSqliteIdBatch(ids: readonly number[], action: (batch: number[]) => void): void {
+    for (let start = 0; start < ids.length; start += SQLITE_ID_BATCH_SIZE) {
+      action(ids.slice(start, start + SQLITE_ID_BATCH_SIZE));
+    }
+  }
+
+  private deleteNotificationIdsTx(tx: SyncDb, ids: readonly number[]): void {
+    this.forEachSqliteIdBatch(ids, (batch) => {
+      tx.delete(notifications).where(inArray(notifications.id, batch)).run();
+    });
+  }
+
+  private redactNotificationIdsTx(tx: SyncDb, ids: readonly number[]): void {
+    this.forEachSqliteIdBatch(ids, (batch) => {
+      tx.update(notifications)
+        .set({ entityType: null, entityId: null, data: null })
+        .where(inArray(notifications.id, batch))
+        .run();
+    });
+  }
+
+  private updateNotificationReadStateTx(tx: SyncDb, ids: readonly number[], readAt: string | null): Array<{ id: number }> {
+    const updated: Array<{ id: number }> = [];
+    this.forEachSqliteIdBatch(ids, (batch) => {
+      updated.push(...tx.update(notifications)
+        .set({ readAt })
+        .where(inArray(notifications.id, batch))
+        .returning({ id: notifications.id })
+        .all());
+    });
+    return updated;
+  }
+
+  /** Apply a PAT-scoped bulk mutation without materializing every matching id. */
+  private updateScopedNotificationReadStateTx(
+    tx: SyncDb,
+    user: RequestUser,
+    userId: number,
+    conditions: SQL[],
+    readAt: string | null,
+  ): Array<{ id: number }> {
+    let cursor: number | null = null;
+    const updated: Array<{ id: number }> = [];
+    while (true) {
+      const scanConditions: SQL[] = cursor === null ? conditions : [...conditions, lt(notifications.id, cursor)];
+      const candidates: Array<{ id: number; campaignId: number; hiddenStatusContext: string | null }> = tx
+        .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
+        .from(notifications)
+        .where(and(...scanConditions))
+        .orderBy(desc(notifications.id))
+        .limit(SQLITE_ID_BATCH_SIZE)
+        .all();
+      if (candidates.length === 0) break;
+      const dispositions = this.hiddenStatusDispositionMapTx(tx, user, userId, candidates);
+      const ids = candidates
+        .filter((candidate) => {
+          const disposition = dispositions.get(candidate.id) ?? 'allow';
+          return disposition !== 'deny' && disposition !== 'filter';
+        })
+        .map((candidate) => candidate.id);
+      updated.push(...this.updateNotificationReadStateTx(tx, ids, readAt));
+      if (candidates.length < SQLITE_ID_BATCH_SIZE) break;
+      cursor = candidates[candidates.length - 1].id;
+    }
+    return updated;
+  }
+
+  /**
+   * Reconcile private-context rows before a recipient-facing operation without
+   * retaining every row in memory. PAT-only filter/project dispositions stay
+   * request-local and are re-evaluated by the bounded exposing scan in this
+   * same transaction.
+   */
+  private reconcileUnauthorizedHiddenStatusNotificationsTx(tx: SyncDb, user: RequestUser, userId: number): void {
+    let cursor: number | null = null;
+    while (true) {
+      const conditions = [eq(notifications.userId, userId), isNotNull(notifications.hiddenStatusContext)];
+      if (cursor !== null) conditions.push(lt(notifications.id, cursor));
+      const guarded = tx
+        .select({ id: notifications.id, campaignId: notifications.campaignId, hiddenStatusContext: notifications.hiddenStatusContext })
+        .from(notifications)
+        .where(and(...conditions))
+        .orderBy(desc(notifications.id))
+        .limit(SQLITE_ID_BATCH_SIZE)
+        .all();
+      if (guarded.length === 0) return;
+      const dispositions = this.hiddenStatusDispositionsTx(tx, userId, guarded, user);
+      this.deleteNotificationIdsTx(tx, dispositions.filter((row) => row.disposition === 'deny').map((row) => row.id));
+      this.redactNotificationIdsTx(tx, dispositions.filter((row) => row.disposition === 'redact').map((row) => row.id));
+      if (guarded.length < SQLITE_ID_BATCH_SIZE) return;
+      cursor = guarded[guarded.length - 1].id;
+    }
+  }
+
+  private hiddenStatusDispositionMapTx(
+    tx: SyncDb,
+    user: RequestUser,
+    userId: number,
+    rows: Array<Pick<typeof notifications.$inferSelect, 'id' | 'campaignId' | 'hiddenStatusContext'>>,
+  ): Map<number, HiddenStatusDisposition> {
+    const guarded = rows.filter((row) => row.hiddenStatusContext !== null);
+    return new Map(this.hiddenStatusDispositionsTx(tx, userId, guarded, user).map((row) => [row.id, row.disposition]));
+  }
+
+  /**
+   * Reapply membership plus recipient-facing quarantine/block rules immediately
+   * before a deferred excerpt can become either an in-app row or browser push.
+   * The caller runs this inside the materialization transaction so access or
+   * moderation changes cannot land between these reads and the insert.
+   */
+  private deferredSuppressedIdsTx(
+    tx: SyncDb,
+    rows: Array<typeof notificationDigestQueue.$inferSelect>,
+  ): Set<number> {
+    const suppressed = new Set<number>();
+    const userIds = [...new Set(rows.map((row) => row.userId))];
+    const campaignIds = [...new Set(rows.map((row) => row.campaignId))];
+    const currentMemberships = tx
+      .select({ userId: campaignMembers.userId, campaignId: campaignMembers.campaignId })
+      .from(campaignMembers)
+      .where(
+        and(
+          inArray(campaignMembers.userId, userIds),
+          inArray(campaignMembers.campaignId, campaignIds),
+        ),
+      )
+      .all();
+    const currentMembershipKeys = new Set(
+      currentMemberships.map((row) => `${row.campaignId}:${row.userId}`),
+    );
+    for (const row of rows) {
+      if (
+        !DEFERRED_MEMBERSHIP_EXEMPT_TYPES.has(row.type) &&
+        !currentMembershipKeys.has(`${row.campaignId}:${row.userId}`)
+      ) {
+        suppressed.add(row.id);
+      }
+    }
+
+    const commentIds = [...new Set(rows.flatMap((row) => row.commentId == null ? [] : [row.commentId]))];
+    if (commentIds.length > 0) {
+      const quarantined = tx
+        .select({ id: comments.id })
+        .from(comments)
+        .where(and(inArray(comments.id, commentIds), isNotNull(comments.quarantinedAt)))
+        .all();
+      const quarantinedIds = new Set(quarantined.map((row) => row.id));
+      for (const row of rows) {
+        if (row.commentId != null && quarantinedIds.has(row.commentId)) suppressed.add(row.id);
+      }
+    }
+
+    const recipientIds = [...new Set(rows.map((row) => String(row.userId)))];
+    const blocks = tx
+      .select({
+        ownerUserId: memberSafetyControls.ownerUserId,
+        targetUserId: memberSafetyControls.targetUserId,
+      })
+      .from(memberSafetyControls)
+      .where(
+        and(
+          inArray(memberSafetyControls.ownerUserId, recipientIds),
+          eq(memberSafetyControls.kind, 'block'),
+          isNull(memberSafetyControls.liftedAt),
+        ),
+      )
+      .all();
+    const blockedByOwner = new Map<string, Set<string>>();
+    for (const block of blocks) {
+      if (!block.targetUserId) continue;
+      const targets = blockedByOwner.get(block.ownerUserId) ?? new Set<string>();
+      targets.add(block.targetUserId);
+      blockedByOwner.set(block.ownerUserId, targets);
+    }
+    for (const row of rows) {
+      if (
+        row.actorUserId != null &&
+        !BLOCK_FILTER_EXEMPT_TYPES.has(row.type) &&
+        blockedByOwner.get(String(row.userId))?.has(row.actorUserId)
+      ) {
+        suppressed.add(row.id);
+      }
+    }
+    return suppressed;
   }
 
   /**
@@ -512,40 +1086,97 @@ export class NotificationsService implements OnApplicationBootstrap {
           else byCampaign.set(row.campaignId, [row]);
         }
 
-        const deliverRows: Array<typeof notifications.$inferInsert> = [];
-        const deliveredIds: number[] = [];
-
+        const candidateRows: typeof queued = [];
         for (const [campaignId, rows] of byCampaign) {
           const recipients = [...new Set(rows.map((r) => r.userId))];
           const quietByUser = await this.loadQuietHours(recipients, campaignId);
           for (const row of rows) {
             const quiet = quietByUser.get(row.userId);
             if (quiet && isWithinQuietHours(quiet, nowMs)) continue;
-            deliverRows.push({
-              userId: row.userId,
-              campaignId: row.campaignId,
-              type: row.type,
-              title: row.title,
-              body: row.body,
-              entityType: row.entityType,
-              entityId: row.entityId,
-              commentId: row.commentId,
-              data: row.data,
-              actorName: row.actorName,
-              actorUserId: row.actorUserId,
-              readAt: null,
-              createdAt: row.createdAt,
-            });
-            deliveredIds.push(row.id);
+            candidateRows.push(row);
           }
         }
 
-        if (deliveredIds.length === 0) break;
+        if (candidateRows.length === 0) break;
+
+        const deliverRows: Array<typeof notifications.$inferInsert> = [];
+        const deliveredIds: number[] = [];
+        const removedIds: number[] = [];
 
         this.db.transaction((tx) => {
-          tx.insert(notifications).values(deliverRows).run();
-          tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, deliveredIds)).run();
+          const suppressedIds = this.deferredSuppressedIdsTx(tx, candidateRows);
+          for (const row of candidateRows) {
+            if (suppressedIds.has(row.id)) {
+              removedIds.push(row.id);
+              continue;
+            }
+            const disposition = row.hiddenStatusContext
+              ? this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext)
+              : 'allow';
+            if (disposition === 'deny') {
+              removedIds.push(row.id);
+              continue;
+            }
+            deliverRows.push(
+              disposition === 'redact'
+                ? {
+                    userId: row.userId,
+                    campaignId: row.campaignId,
+                    type: row.type,
+                    title: row.title,
+                    body: row.body,
+                    entityType: null,
+                    entityId: null,
+                    commentId: row.commentId,
+                    data: null,
+                    hiddenStatusContext: row.hiddenStatusContext,
+                    actorName: row.actorName,
+                    actorUserId: row.actorUserId,
+                    readAt: null,
+                    createdAt: row.createdAt,
+                  }
+                : {
+                    userId: row.userId,
+                    campaignId: row.campaignId,
+                    type: row.type,
+                    title: row.title,
+                    body: row.body,
+                    entityType: row.entityType,
+                    entityId: row.entityId,
+                    commentId: row.commentId,
+                    data: row.data,
+                    hiddenStatusContext: row.hiddenStatusContext,
+                    actorName: row.actorName,
+                    actorUserId: row.actorUserId,
+                    readAt: null,
+                    createdAt: row.createdAt,
+                  },
+            );
+            deliveredIds.push(row.id);
+          }
+          if (deliverRows.length > 0) tx.insert(notifications).values(deliverRows).run();
+          const consumedIds = [...deliveredIds, ...removedIds];
+          if (consumedIds.length > 0) {
+            tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, consumedIds)).run();
+          }
         });
+
+        if (deliveredIds.length === 0 && removedIds.length === 0) break;
+
+        if (deliverRows.length > 0) {
+          this.schedulePush(
+            deliverRows.map((row) => ({
+              userId: row.userId,
+              campaignId: row.campaignId,
+              type: row.type as NotificationType,
+              title: row.title,
+              body: row.body ?? '',
+              entityId: row.entityId ?? null,
+              createdAt: row.createdAt,
+              critical: isCriticalNotificationCategory(notificationCategory(row.type as NotificationType)),
+            })),
+          );
+        }
         delivered += deliveredIds.length;
 
         if (queued.length < DIGEST_BATCH_SIZE) break;
@@ -769,7 +1400,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   private static blockedActorFilter(blockedActorIds: string[]): SQL {
     return or(
       isNull(notifications.actorUserId),
-      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold']),
+      inArray(notifications.type, [...BLOCK_FILTER_EXEMPT_TYPES]),
       notInArray(notifications.actorUserId, blockedActorIds),
     )!;
   }
@@ -822,28 +1453,74 @@ export class NotificationsService implements OnApplicationBootstrap {
       conditions.push(lte(notifications.createdAt, endIso));
     }
 
-    const [countRow] = await this.db
-      .select({ value: count() })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(...conditions));
-    const total = countRow?.value ?? 0;
+    const { total, rows } = this.db.transaction((tx) => {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      if (!user.tokenContext) {
+        const [countRow] = tx
+          .select({ value: count() })
+          .from(notifications)
+          .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+          .where(and(...conditions))
+          .all();
+        const total = countRow?.value ?? 0;
+        const pageConditions = opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0
+          ? [...conditions, lt(notifications.id, opts.cursor)]
+          : conditions;
+        const rows = tx
+          .select({ notification: notifications })
+          .from(notifications)
+          .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+          .where(and(...pageConditions))
+          .orderBy(desc(notifications.id))
+          .limit(limit + 1)
+          .all();
+        return { total, rows: rows.map((row) => ({ ...row, projectedRedact: false })) };
+      }
 
-    if (opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0) {
-      conditions.push(lt(notifications.id, opts.cursor));
-    }
-
-    const rows = await this.db
-      .select({ notification: notifications })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(...conditions))
-      .orderBy(desc(notifications.id))
-      .limit(limit + 1);
+      // A scope-capped PAT can transiently filter retained rows. Scan in
+      // fixed-size pages rather than constructing an oversized NOT IN list or
+      // materializing the account's whole notification history. The scan and
+      // its authorization decisions remain inside this transaction.
+      const pageCursor = opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0 ? opts.cursor : null;
+      let scanCursor: number | null = null;
+      let total = 0;
+      const rows: Array<{ notification: typeof notifications.$inferSelect; projectedRedact: boolean }> = [];
+      while (true) {
+        const scanConditions: SQL[] = scanCursor === null ? conditions : [...conditions, lt(notifications.id, scanCursor)];
+        const candidates: Array<{ notification: typeof notifications.$inferSelect }> = tx
+          .select({ notification: notifications })
+          .from(notifications)
+          .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+          .where(and(...scanConditions))
+          .orderBy(desc(notifications.id))
+          .limit(SQLITE_ID_BATCH_SIZE)
+          .all();
+        if (candidates.length === 0) break;
+        const dispositions = this.hiddenStatusDispositionMapTx(
+          tx,
+          user,
+          userId,
+          candidates.map((candidate) => candidate.notification),
+        );
+        for (const candidate of candidates) {
+          const disposition = dispositions.get(candidate.notification.id) ?? 'allow';
+          if (disposition === 'deny' || disposition === 'filter') continue;
+          total += 1;
+          if ((pageCursor === null || candidate.notification.id < pageCursor) && rows.length < limit + 1) {
+            rows.push({ notification: candidate.notification, projectedRedact: disposition === 'project_redact' });
+          }
+        }
+        if (candidates.length < SQLITE_ID_BATCH_SIZE) break;
+        scanCursor = candidates[candidates.length - 1].notification.id;
+      }
+      return { total, rows };
+    });
 
     const hasMore = rows.length > limit;
     const pagedRows = hasMore ? rows.slice(0, limit) : rows;
-    const items = pagedRows.map((row) => toDomain(row.notification));
+    const items = pagedRows.map((row) => (
+      row.projectedRedact ? toOwnerSafeDomain(row.notification) : toDomain(row.notification)
+    ));
     const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].id : null;
 
     return {
@@ -885,58 +1562,99 @@ export class NotificationsService implements OnApplicationBootstrap {
       MEMBERSHIP_NOTIFICATION_TYPES.map((type) => sql`${notifications.type} = ${type}`),
       sql` OR `,
     );
-    const [row] = await this.db
-      .select({
-        value: count(),
-        membershipSignal: sql<number>`max(case when ${membershipTypeMatch} then 1 else 0 end)`,
-      })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(...conditions));
+    const row = this.db.transaction((tx) => {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      if (user.tokenContext) {
+        let scanCursor: number | null = null;
+        let value = 0;
+        let membershipSignal = 0;
+        while (true) {
+          const scanConditions: SQL[] = scanCursor === null ? conditions : [...conditions, lt(notifications.id, scanCursor)];
+          const candidates: Array<Pick<typeof notifications.$inferSelect, 'id' | 'campaignId' | 'type' | 'hiddenStatusContext'>> = tx
+            .select({ id: notifications.id, campaignId: notifications.campaignId, type: notifications.type, hiddenStatusContext: notifications.hiddenStatusContext })
+            .from(notifications)
+            .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+            .where(and(...scanConditions))
+            .orderBy(desc(notifications.id))
+            .limit(SQLITE_ID_BATCH_SIZE)
+            .all();
+          if (candidates.length === 0) break;
+          const dispositions = this.hiddenStatusDispositionMapTx(tx, user, userId, candidates);
+          for (const candidate of candidates) {
+            const disposition = dispositions.get(candidate.id) ?? 'allow';
+            if (disposition === 'deny' || disposition === 'filter') continue;
+            value += 1;
+            if (MEMBERSHIP_NOTIFICATION_TYPES.includes(candidate.type as typeof MEMBERSHIP_NOTIFICATION_TYPES[number])) membershipSignal = 1;
+          }
+          if (candidates.length < SQLITE_ID_BATCH_SIZE) break;
+          scanCursor = candidates[candidates.length - 1].id;
+        }
+        return { value, membershipSignal };
+      }
+      return tx
+        .select({
+          value: count(),
+          membershipSignal: sql<number>`max(case when ${membershipTypeMatch} then 1 else 0 end)`,
+        })
+        .from(notifications)
+        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+        .where(and(...conditions))
+        .get();
+    });
     return { count: row?.value ?? 0, membershipChanged: (row?.membershipSignal ?? 0) === 1 };
   }
 
   /** Recipient-only; someone else's notification 404s (not 403) so ids don't leak. */
   async markRead(id: number, user: RequestUser): Promise<Notification> {
     const userId = numericUserId(user.id);
-    const [joined] = await this.db
-      .select({ notification: notifications })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
-      .limit(1);
-    const row = joined?.notification;
-    if (!row || userId === null || row.userId !== userId) {
-      throw new NotFoundException(`Notification ${id} not found`);
-    }
-    if (row.readAt) return toDomain(row);
-    const [updated] = await this.db
-      .update(notifications)
-      .set({ readAt: nowIso() })
-      .where(eq(notifications.id, id))
-      .returning();
-    return toDomain(updated);
+    if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
+    return this.db.transaction((tx) => {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const joined = tx
+        .select({ notification: notifications })
+        .from(notifications)
+        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+        .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
+        .get();
+      const row = joined?.notification;
+      if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
+      const disposition = this.hiddenStatusDispositionMapTx(tx, user, userId, [row]).get(id) ?? 'allow';
+      if (disposition === 'deny' || disposition === 'filter') throw new NotFoundException(`Notification ${id} not found`);
+      if (row.readAt) return disposition === 'project_redact' ? toOwnerSafeDomain(row) : toDomain(row);
+      const updated = tx
+        .update(notifications)
+        .set({ readAt: nowIso() })
+        .where(eq(notifications.id, id))
+        .returning()
+        .get();
+      return disposition === 'project_redact' ? toOwnerSafeDomain(updated) : toDomain(updated);
+    });
   }
 
   async markUnread(id: number, user: RequestUser): Promise<Notification> {
     const userId = numericUserId(user.id);
-    const [joined] = await this.db
-      .select({ notification: notifications })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
-      .limit(1);
-    const row = joined?.notification;
-    if (!row || userId === null || row.userId !== userId) {
-      throw new NotFoundException(`Notification ${id} not found`);
-    }
-    if (!row.readAt) return toDomain(row);
-    const [updated] = await this.db
-      .update(notifications)
-      .set({ readAt: null })
-      .where(eq(notifications.id, id))
-      .returning();
-    return toDomain(updated);
+    if (userId === null) throw new NotFoundException(`Notification ${id} not found`);
+    return this.db.transaction((tx) => {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      const joined = tx
+        .select({ notification: notifications })
+        .from(notifications)
+        .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+        .where(and(eq(notifications.id, id), NotificationsService.campaignVisibleForNotifications()))
+        .get();
+      const row = joined?.notification;
+      if (!row || row.userId !== userId) throw new NotFoundException(`Notification ${id} not found`);
+      const disposition = this.hiddenStatusDispositionMapTx(tx, user, userId, [row]).get(id) ?? 'allow';
+      if (disposition === 'deny' || disposition === 'filter') throw new NotFoundException(`Notification ${id} not found`);
+      if (!row.readAt) return disposition === 'project_redact' ? toOwnerSafeDomain(row) : toDomain(row);
+      const updated = tx
+        .update(notifications)
+        .set({ readAt: null })
+        .where(eq(notifications.id, id))
+        .returning()
+        .get();
+      return disposition === 'project_redact' ? toOwnerSafeDomain(updated) : toDomain(updated);
+    });
   }
 
   async markReadBulk(
@@ -971,11 +1689,18 @@ export class NotificationsService implements OnApplicationBootstrap {
       conditions.push(eq(notifications.campaignId, opts.campaignId));
     }
 
-    const updated = await this.db
-      .update(notifications)
-      .set({ readAt: nowIso() })
-      .where(and(...conditions))
-      .returning({ id: notifications.id });
+    const updated = this.db.transaction((tx) => {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      if (!user.tokenContext) {
+        return tx
+          .update(notifications)
+          .set({ readAt: nowIso() })
+          .where(and(...conditions))
+          .returning({ id: notifications.id })
+          .all();
+      }
+      return this.updateScopedNotificationReadStateTx(tx, user, userId, conditions, nowIso());
+    });
 
     const updatedIds = updated.map((r) => r.id);
     return { updated: updatedIds.length, updatedIds };
@@ -1013,11 +1738,18 @@ export class NotificationsService implements OnApplicationBootstrap {
       conditions.push(eq(notifications.campaignId, opts.campaignId));
     }
 
-    const updated = await this.db
-      .update(notifications)
-      .set({ readAt: null })
-      .where(and(...conditions))
-      .returning({ id: notifications.id });
+    const updated = this.db.transaction((tx) => {
+      this.reconcileUnauthorizedHiddenStatusNotificationsTx(tx, user, userId);
+      if (!user.tokenContext) {
+        return tx
+          .update(notifications)
+          .set({ readAt: null })
+          .where(and(...conditions))
+          .returning({ id: notifications.id })
+          .all();
+      }
+      return this.updateScopedNotificationReadStateTx(tx, user, userId, conditions, null);
+    });
 
     const updatedIds = updated.map((r) => r.id);
     return { updated: updatedIds.length, updatedIds };

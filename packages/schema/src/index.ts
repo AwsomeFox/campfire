@@ -236,6 +236,56 @@ export type MapAlignment = z.infer<typeof MapAlignment>;
 export const CampaignStatus = z.enum(['active', 'paused', 'completed']);
 export type CampaignStatus = z.infer<typeof CampaignStatus>;
 
+/**
+ * When a repeating effect prompts a save or applies its tick. 5e "save ends"
+ * effects repeat at the END of the affected creature's turn; ongoing damage / regeneration
+ * conventionally apply at the START. `none` = no timed prompt (a static condition/buff).
+ */
+export const EffectTiming = z.enum(['start-of-turn', 'end-of-turn', 'none']);
+export type EffectTiming = z.infer<typeof EffectTiming>;
+
+/**
+ * A DM-authored, campaign-scoped condition template (issue #1505). It deliberately
+ * excludes an instance id and source/provenance: those belong to each application,
+ * while these fields prefill the encounter condition picker consistently for every
+ * campaign member.
+ */
+export const CampaignConditionDefinition = z.object({
+  // Keep this aligned with the legacy derived `combatant.conditions` projection,
+  // whose strings are capped at 40 characters.
+  name: z.string().trim().min(1).max(40),
+  // A duration of zero has no meaningful application: the picker treats a duration
+  // as a positive number of rounds and otherwise uses null for "until removed".
+  durationRounds: z.number().int().positive().nullable().default(null),
+  timing: EffectTiming.default('none'),
+  saveTiming: EffectTiming.default('none'),
+  saveDc: z.number().int().positive().nullable().default(null),
+  saveAbility: z.string().max(24).nullable().default(null),
+  isConcentration: z.boolean().default(false),
+  stacks: z.number().int().min(1).max(99).default(1),
+  notes: z.string().max(300).default(''),
+});
+export type CampaignConditionDefinition = z.infer<typeof CampaignConditionDefinition>;
+
+export const CampaignConditionDefinitions = z
+  .array(CampaignConditionDefinition)
+  .max(50)
+  .superRefine((definitions, ctx) => {
+    const names = new Set<string>();
+    for (const [index, definition] of definitions.entries()) {
+      const canonical = definition.name.trim().toLowerCase();
+      if (names.has(canonical)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index, 'name'],
+          message: 'Condition definitions must have unique names (case-insensitive)',
+        });
+      }
+      names.add(canonical);
+    }
+  })
+  .default([]);
+
 export const Campaign = z.object({
   id: Id,
   name: z.string().min(1).max(120),
@@ -298,6 +348,10 @@ export const Campaign = z.object({
   // `ruleSystemAdapter(ruleSystem, customMechanicsProfile)`. null (default) — no homebrew
   // profile stored, and every existing campaign has this column NULL after migration.
   customMechanicsProfile: HomebrewMechanicsProfile.nullable().default(null),
+  // Campaign-owned condition vocabulary (issue #1505). These definitions are shared with
+  // every member through the campaign read surface, and let players apply only the
+  // DM-approved homebrew conditions alongside the active adapter's built-in vocabulary.
+  conditionDefinitions: CampaignConditionDefinitions,
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
   // Per-campaign upload quota in bytes, or null for no limit (issue #24). Set by a
   // server admin via the storage console — NOT part of CampaignCreate/Update, so a
@@ -337,7 +391,7 @@ export const CampaignStatusTransition = z.object({
 });
 export type CampaignStatusTransition = z.infer<typeof CampaignStatusTransition>;
 
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, enabledPackSlugs: true, mapAttachmentId: true, customMechanicsProfile: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, latestSessionNumber: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, aiExternalContentPolicy: true, ruleSystem: true, enabledPackSlugs: true, conditionDefinitions: true, mapAttachmentId: true, customMechanicsProfile: true });
 export const CampaignUpdate = CampaignCreate.partial().extend({
   // Map replacement lifecycle (issue #870). 'reset' clears location pin coordinates
   // in the same transaction as the mapAttachmentId change; 'preserve' (default) keeps them.
@@ -3345,8 +3399,9 @@ export type CommentReplyPage = z.infer<typeof CommentReplyPage>;
 // (quest_updated), a member submits a proposal to the DM (proposal_submitted) or
 // the DM approves/rejects it (proposal_resolved), or a member posts to the DM
 // scribe inbox (inbox_submitted, issue #832). Read via
-// GET /notifications (own rows only); real-time push can layer on later — the
-// store is plain rows, transport-agnostic.
+// GET /notifications (own rows only). Browser Web Push (#1323) mirrors rows
+// only after they have been materialized in this store; it does not re-evaluate
+// preferences or quiet hours. The store remains transport-agnostic and authoritative.
 export const NotificationType = z.enum([
   'recap_posted',
   'recap_share_enabled',
@@ -3629,6 +3684,48 @@ export const NotificationPreferencesUpdate = z.object({
   quietHours: QuietHours.partial().optional(),
 });
 export type NotificationPreferencesUpdate = z.infer<typeof NotificationPreferencesUpdate>;
+
+// ---------- browser push notifications (issue #1323) ----------
+// A Push API subscription is browser/device-scoped and user-owned. The endpoint
+// and encryption keys are opaque capabilities supplied by PushManager; the
+// server stores them only so it can fan out an already-authorized in-app
+// notification through the browser vendor's Web Push service.
+export const BrowserPushSubscription = z.object({
+  endpoint: z
+    .string()
+    .url()
+    .max(2048)
+    .refine((value) => {
+      try {
+        return new URL(value).protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }, 'Push endpoint must use HTTPS'),
+  keys: z.object({
+    p256dh: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+={0,2}$/, 'Invalid p256dh key'),
+    auth: z.string().min(1).max(256).regex(/^[A-Za-z0-9_-]+={0,2}$/, 'Invalid auth key'),
+  }),
+  userAgent: z.string().max(500).default(''),
+});
+export type BrowserPushSubscription = z.infer<typeof BrowserPushSubscription>;
+
+/** Public, non-secret server capability returned to an authenticated browser. */
+export const BrowserPushStatus = z.object({
+  configured: z.boolean(),
+  publicKey: z.string().nullable(),
+});
+export type BrowserPushStatus = z.infer<typeof BrowserPushStatus>;
+
+export const BrowserPushUnsubscribe = z.object({
+  endpoint: BrowserPushSubscription.shape.endpoint,
+});
+export type BrowserPushUnsubscribe = z.infer<typeof BrowserPushUnsubscribe>;
+
+export const BrowserPushUnsubscribeResult = z.object({
+  removed: z.boolean(),
+});
+export type BrowserPushUnsubscribeResult = z.infer<typeof BrowserPushUnsubscribeResult>;
 
 // ---------- rule packs (Compendium backend) ----------
 // Installed, server-wide rules content (spells/monsters/items/…) imported from
@@ -6049,6 +6146,201 @@ export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: Ch
   return catalog.filter((c) => c.category !== 'initiative');
 }
 
+/**
+ * A creature's check source is intentionally smaller than a character sheet: ability values
+ * come through the adapter's statblock mapping, while saves and skills are emitted only when
+ * the imported/manual statblock explicitly supplies their final modifier. This keeps the
+ * catalog honest for creatures, whose proficiency/rank details are often not available.
+ */
+export interface CreatureCheckCatalogInput {
+  readonly data: Record<string, unknown>;
+  /** Inline encounter statblocks store raw scores even in campaigns whose imported creatures use modifiers. */
+  readonly abilityRepresentation?: AbilityRepresentation;
+}
+
+function creatureCheckModifierMap(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+    if (Number.isFinite(n)) out[key] = Math.trunc(n);
+  }
+  return out;
+}
+
+function creatureSaveModifierMap(data: Record<string, unknown>): Record<string, number> {
+  const saves: Record<string, number> = {};
+  const canonicalKeys = new Set<string>();
+  for (const [key, modifier] of Object.entries(creatureCheckModifierMap(data.saves ?? data.savingThrows ?? data.saving_throws))) {
+    const normalized = key.trim().toLowerCase();
+    const canonical = creatureAbilityLabel(key).toLowerCase();
+    if (normalized && canonical && !canonicalKeys.has(canonical)) {
+      saves[normalized] = modifier;
+      canonicalKeys.add(canonical);
+    }
+  }
+  // Open5e and existing homebrew entries may instead carry final modifiers as `dexterity_save`.
+  // The nested map wins when both are present, which preserves an explicit statblock override.
+  for (const [key, value] of Object.entries(data)) {
+    if (!/_save$/i.test(key)) continue;
+    const modifier = creatureCheckModifierMap({ value }).value;
+    const normalized = key.replace(/_save$/i, '').trim().toLowerCase();
+    const canonical = creatureAbilityLabel(normalized).toLowerCase();
+    if (modifier !== undefined && normalized && canonical && !canonicalKeys.has(canonical)) {
+      saves[normalized] = modifier;
+      canonicalKeys.add(canonical);
+    }
+  }
+  return saves;
+}
+
+function creatureAbilityLabel(key: string): string {
+  const normalized = key.trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    strength: 'STR', str: 'STR', dexterity: 'DEX', dex: 'DEX', constitution: 'CON', con: 'CON',
+    intelligence: 'INT', int: 'INT', wisdom: 'WIS', wis: 'WIS', charisma: 'CHA', cha: 'CHA',
+  };
+  return aliases[normalized] ?? key.trim().toUpperCase();
+}
+
+function creatureCheckLabel(key: string): string {
+  return key
+    .trim()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+const MAX_CHECK_ID_LENGTH = 60;
+
+/**
+ * Keep catalog ids consumable by {@link CheckRollRequest}. Short, established ids
+ * retain their exact spelling; only an imported/homebrew key that would overflow the
+ * request contract gains a deterministic suffix. Repeated normalized keys reuse their
+ * established id so the catalog's existing deduplication remains intact; distinct
+ * mechanics that collide after bounding receive a unique fallback suffix.
+ */
+function boundedCreatureCheckId(
+  prefix: 'save' | 'skill',
+  rawKey: string,
+  usedIds: ReadonlySet<string>,
+  canonicalIds: Map<string, string>,
+): string {
+  const full = `${prefix}:${rawKey.trim().toLowerCase()}`;
+  const existing = canonicalIds.get(full);
+  if (existing) return existing;
+
+  if (full.length <= MAX_CHECK_ID_LENGTH && !usedIds.has(full)) {
+    canonicalIds.set(full, full);
+    return full;
+  }
+
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < full.length; index += 1) {
+    hash = Math.imul(hash ^ full.charCodeAt(index), 0x01000193);
+  }
+  const suffix = (hash >>> 0).toString(36);
+  const stemLength = MAX_CHECK_ID_LENGTH - suffix.length - 1;
+  const stem = full.slice(0, stemLength);
+  let candidate = `${stem}-${suffix}`;
+  for (let collision = 2; usedIds.has(candidate); collision += 1) {
+    const collisionSuffix = `-${collision}`;
+    candidate = `${full.slice(0, MAX_CHECK_ID_LENGTH - suffix.length - collisionSuffix.length - 1)}-${suffix}${collisionSuffix}`;
+  }
+  canonicalIds.set(full, candidate);
+  return candidate;
+}
+
+/**
+ * Build the roll catalog for a creature statblock (issue #1314). Unlike characters, a
+ * creature's saves/skills are already-published final modifiers, so this function NEVER
+ * invents a proficiency value from incomplete source data. Ability checks always flow through
+ * `mapStatblock` plus the adapter's representation-aware modifier seam.
+ */
+export function creatureCheckCatalogForAdapter(
+  adapter: RuleSystemAdapter,
+  creature: CreatureCheckCatalogInput,
+): RollCheckDefinition[] {
+  // A neutral d20 catalog would be a lie for pool/non-d20 systems. An adapter can add a
+  // dedicated creature catalog in a later focused change; until then withholding is honest.
+  if (!hasNeutralD20ChecksForAdapter(adapter)) return [];
+
+  const mapped = adapter.mapStatblock(creature.data);
+  const supportsDegrees = typeof adapter.degreeOfSuccess === 'function';
+  const abilityRepresentation = creature.abilityRepresentation ?? mapped.abilityRepresentation;
+  // Advantage is a 5e mechanic; do not present it for PF2e merely because both use a d20.
+  const supportsAdvantage = adapter.id === DND5E_ADAPTER_ID;
+  const out: RollCheckDefinition[] = [];
+  const ids = new Set<string>();
+  const canonicalCreatureIds = new Map<string, string>();
+  const add = (def: RollCheckDefinition) => {
+    if (!ids.has(def.id)) {
+      ids.add(def.id);
+      out.push(def);
+    }
+  };
+
+  for (const [rawKey, rawValue] of Object.entries(mapped.abilityScores ?? {})) {
+    if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) continue;
+    const ability = creatureAbilityLabel(rawKey);
+    // `mapStatblock` may fold a native initiative/Perception bonus into this map for the
+    // encounter initiative seam. Only the adapter's declared character abilities are
+    // creature ability checks; exposing that metadata would invent a bogus check.
+    if (!(adapter.characterSheet?.abilityFields ?? []).some((field) => field.key.toUpperCase() === ability)) continue;
+    const modifier = resolveAbilityModifier(adapter, rawValue, abilityRepresentation);
+    add({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier,
+      breakdown: [{ label: ability, value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  const saves = creatureSaveModifierMap(creature.data);
+  for (const [rawKey, modifier] of Object.entries(saves)) {
+    const label = creatureCheckLabel(rawKey);
+    add({
+      id: boundedCreatureCheckId('save', rawKey, ids, canonicalCreatureIds),
+      label: `${label} save`,
+      category: 'save',
+      ability: null,
+      proficiency: 'statblock',
+      favorite: true,
+      modifier,
+      breakdown: [{ label: 'statblock', value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  const skills = creatureCheckModifierMap(creature.data.skills ?? creature.data.skillMods ?? creature.data.skill_mod ?? creature.data.skill_mods);
+  for (const [rawKey, modifier] of Object.entries(skills)) {
+    const label = creatureCheckLabel(rawKey);
+    add({
+      id: boundedCreatureCheckId('skill', rawKey, ids, canonicalCreatureIds),
+      label,
+      category: 'skill',
+      ability: null,
+      proficiency: 'statblock',
+      favorite: true,
+      modifier,
+      breakdown: [{ label: 'statblock', value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  return sortCheckCatalog(out);
+}
+
 /** Find a single check by its stable id within a character's catalog, or null. */
 export function findCheckInCatalog(adapter: RuleSystemAdapter, character: CheckCatalogCharacter, checkId: string): RollCheckDefinition | null {
   return checkCatalogForAdapter(adapter, character).find((c) => c.id === checkId) ?? null;
@@ -7127,6 +7419,11 @@ export const SetupRequest = z.object({ username: User.shape.username, password: 
 // UNauthenticated path would let a caller force the server to run scrypt (CPU-heavy)
 // against an arbitrarily large input before verifyPassword() even gets to reject it.
 export const LoginRequest = z.object({ username: z.string().min(1), password: z.string().min(1).max(200) });
+/** Optional browser capability detached atomically with the current cookie session. */
+export const LogoutRequest = z.object({
+  pushEndpoint: BrowserPushSubscription.shape.endpoint.optional(),
+});
+export type LogoutRequest = z.infer<typeof LogoutRequest>;
 export const UserCreate = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional(), serverRole: ServerRole.optional() });
 // Self-service signup (POST /auth/signup) — same shape as SetupRequest, but the created
 // account is always serverRole 'user' (never admin) and the route is gated on allowSignup.
@@ -10649,6 +10946,165 @@ export const AttachGeneratedMapRequest = z.object({
 });
 export type AttachGeneratedMapRequest = z.infer<typeof AttachGeneratedMapRequest>;
 
+// ---------- AI portrait generation (issue #1321) ----------
+// Mirrors the ai-map (#410) job model, portrait-flavored: a DM or owning player composes a
+// brief from character/NPC fields, the configured image provider renders square portrait
+// candidates (or, with no capable provider, returns concrete external steps), and a chosen
+// candidate is persisted as a `kind='portrait'` attachment whose resolved URL becomes the
+// entity `portraitUrl`. Previews live only in memory until the explicit attach step.
+
+/**
+ * How a portrait candidate was actually produced (issue #1321). `image-provider` means a
+ * real text-to-image provider rendered it; `external-instructions` means no capable provider
+ * was configured so Campfire returned steps for a client-side generator rather than a fake.
+ * Unlike maps there is NO procedural fallback — Campfire has no first-party portrait renderer.
+ */
+export const AiPortraitGenerationMethod = z.enum(['image-provider', 'external-instructions']);
+export type AiPortraitGenerationMethod = z.infer<typeof AiPortraitGenerationMethod>;
+
+/** Reuses the ai-map job-status lifecycle (issue #410). */
+export const AiPortraitJobStatus = AiMapJobStatus;
+export type AiPortraitJobStatus = AiMapJobStatus;
+
+/** Style presets the UI offers so a brief is composable rather than a blank box. */
+export const AiPortraitStyle = z.enum(['realistic', 'painterly', 'illustration']);
+export type AiPortraitStyle = z.infer<typeof AiPortraitStyle>;
+
+/** Pixel dimensions for a portrait render (bounded; square by default). */
+export const AiPortraitDimensions = z.object({
+  width: z.number().int().min(256).max(4096),
+  height: z.number().int().min(256).max(4096),
+});
+export type AiPortraitDimensions = z.infer<typeof AiPortraitDimensions>;
+
+/** The kind of entity a portrait will be attached to (issue #1321). */
+export const AiPortraitEntityType = z.enum(['character', 'npc']);
+export type AiPortraitEntityType = z.infer<typeof AiPortraitEntityType>;
+
+/**
+ * The request to generate portrait candidates (issue #1321). `count` bounds the number of
+ * previews (1–4, default 2). `entityType`/`entityId` are informational only at generate time —
+ * they prefill the attach target but attach re-validates ownership — and are stamped into the
+ * audit trail. Square dimensions are the default because portrait avatars are circular.
+ */
+export const AiPortraitGenerationRequest = z.object({
+  prompt: z.string().min(1).max(2000),
+  count: z.number().int().min(1).max(4).default(2),
+  dimensions: AiPortraitDimensions.optional(),
+  style: AiPortraitStyle.optional(),
+  seed: z.string().min(1).max(64).optional(),
+  /** Override the image model for this request (else the provider's configured default). */
+  imageModel: z.string().min(1).max(120).optional(),
+  /** Informational: the entity the caller intends to attach to (re-validated on attach). */
+  entityType: AiPortraitEntityType.optional(),
+  entityId: Id.optional(),
+});
+export type AiPortraitGenerationRequest = z.infer<typeof AiPortraitGenerationRequest>;
+
+/** Deterministic content-moderation gate run on the portrait prompt before spending. */
+export const AiPortraitModeration = z.object({
+  flagged: z.boolean(),
+  categories: z.array(z.string().max(40)).default([]),
+  note: z.string().max(400).nullable().default(null),
+});
+export type AiPortraitModeration = z.infer<typeof AiPortraitModeration>;
+
+/** Honest provenance recorded for every candidate + persisted with the attachment audit. */
+export const AiPortraitProvenance = z.object({
+  method: AiPortraitGenerationMethod,
+  providerType: z.string().nullable(),
+  model: z.string().nullable(),
+  label: z.string().max(300),
+  seed: z.string().nullable().default(null),
+});
+export type AiPortraitProvenance = z.infer<typeof AiPortraitProvenance>;
+
+/** Rough cost/usage surfaced BEFORE and after generation so the caller can decide to spend. */
+export const AiPortraitCost = z.object({
+  imageCount: z.number().int().nonnegative(),
+  tokensUsed: z.number().int().nonnegative().default(0),
+  estimatedUsd: z.number().nonnegative().nullable().default(null),
+});
+export type AiPortraitCost = z.infer<typeof AiPortraitCost>;
+
+/** A single generated portrait candidate the caller can select / refine / attach. */
+export const AiPortraitPreview = z.object({
+  id: z.string(),
+  method: AiPortraitGenerationMethod,
+  /** Base64-encoded raster bytes (image-provider renders). */
+  imageBase64: z.string().nullable().default(null),
+  mime: z.string().max(60),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  seed: z.string(),
+  provenance: AiPortraitProvenance,
+  warnings: z.array(z.string().max(200)).default([]),
+});
+export type AiPortraitPreview = z.infer<typeof AiPortraitPreview>;
+
+/**
+ * Readiness hints shown BEFORE generating (issue #1321): the method that would be used, cost,
+ * moderation, and warnings. With no image-capable provider, the UI shows the external-steps
+ * fallback so the caller still has a concrete next step.
+ */
+export const AiPortraitReadiness = z.object({
+  method: AiPortraitGenerationMethod,
+  warnings: z.array(z.string().max(200)).default([]),
+  cost: AiPortraitCost,
+  moderation: AiPortraitModeration,
+  capabilities: AiProviderCapabilities.nullable().default(null),
+});
+export type AiPortraitReadiness = z.infer<typeof AiPortraitReadiness>;
+
+/**
+ * The full job view returned by create/status/refine (issue #1321). Previews are in-memory
+ * only until attached; `externalInstructions` is populated for the external-instructions
+ * fallback so a caller without a capable provider still has a concrete next step.
+ */
+export const AiPortraitGenerationJob = z.object({
+  id: z.string(),
+  campaignId: Id,
+  status: AiPortraitJobStatus,
+  progress: z.number().int().min(0).max(100),
+  method: AiPortraitGenerationMethod,
+  prompt: z.string(),
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  dimensions: AiPortraitDimensions.nullable().default(null),
+  moderation: AiPortraitModeration,
+  cost: AiPortraitCost,
+  previews: z.array(AiPortraitPreview).default([]),
+  externalInstructions: z.array(z.string().max(400)).default([]),
+  warnings: z.array(z.string().max(200)).default([]),
+  error: z.string().max(400).nullable().default(null),
+  createdBy: z.string(),
+  ...timestamps,
+});
+export type AiPortraitGenerationJob = z.infer<typeof AiPortraitGenerationJob>;
+
+/** Refine an existing job: tweak the prompt/count and regenerate (issue #1321). */
+export const AiPortraitRefineRequest = z.object({
+  prompt: z.string().min(1).max(2000).optional(),
+  count: z.number().int().min(1).max(4).optional(),
+  /** Reuse this preview's seed as the base for the refined render (keeps continuity). */
+  fromPreviewId: z.string().optional(),
+});
+export type AiPortraitRefineRequest = z.infer<typeof AiPortraitRefineRequest>;
+
+/**
+ * Attach a chosen candidate as a real `kind='portrait'` attachment (issue #1321) and set it as
+ * the target entity's `portraitUrl`. `entityType` + `entityId` name the target; the attach
+ * service re-validates write authority through the domain service (dm-or-owner for a character,
+ * dm-only for an NPC), so a player can only attach to a character they own.
+ */
+export const AttachGeneratedPortraitRequest = z.object({
+  previewId: z.string().min(1),
+  entityType: AiPortraitEntityType,
+  entityId: Id,
+  filename: z.string().max(160).optional(),
+});
+export type AttachGeneratedPortraitRequest = z.infer<typeof AttachGeneratedPortraitRequest>;
+
 // Encounter difficulty schemas + 5e math live in ./encounter-difficulty (issues #58 + #429).
 
 // ---------- encounter generator (issue #304) ----------
@@ -11012,14 +11468,6 @@ export type HpBand = z.infer<typeof HpBand>;
 // persistent Character echo can reference it; see its full docblock there.
 
 // ---------- current-turn workspace: effects + per-turn action economy (issue #413) ----------
-
-/**
- * When a repeating effect prompts a save or applies its tick (issue #413). 5e "save ends"
- * effects repeat at the END of the affected creature's turn; ongoing damage / regeneration
- * conventionally apply at the START. `none` = no timed prompt (a static condition/buff).
- */
-export const EffectTiming = z.enum(['start-of-turn', 'end-of-turn', 'none']);
-export type EffectTiming = z.infer<typeof EffectTiming>;
 
 /** What an active effect does, so the workspace can raise the right start/end-turn prompt. */
 export const ActiveEffectKind = z.enum(['ongoing-damage', 'regeneration', 'condition', 'buff', 'other']);
@@ -12180,12 +12628,25 @@ export type TreasuryPatch = z.infer<typeof TreasuryPatch>;
 // the same normalization before relying on this pattern.
 export const DiceExprPattern =
   /^\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))(?:\s*[+-]\s*(?:(?:\d{1,2})?d\d{1,3}(?:\s*(?:kh|kl|dh|dl)\s*\d{1,2})?|\d{1,3}))*\s*$/i;
+
+/** Audience for a durable dice-log row. Mirrors the existing note visibility names. */
+export const DiceRollVisibility = z.enum(['party_shared', 'dm_shared', 'private']);
+export type DiceRollVisibility = z.infer<typeof DiceRollVisibility>;
+
 export const RollRequest = z.object({
   expr: z.string().min(1).max(40).regex(DiceExprPattern, 'expected a sum of die terms (NdM) and modifiers, e.g. "1d20+3", "2d20kh1", or "1d20+1d4+3"'),
   // Optional check context (issue #130): a human label ("DEX save") and a difficulty
   // class. When dc is present the server computes success (total >= dc) into the result.
   label: z.string().max(120).optional(),
   dc: z.number().int().min(1).max(99).optional(),
+  // A caller may name a character only to ask the server to bind the roll to an
+  // already-authorized sheet. The server resolves campaign membership and dm-or-owner
+  // authority before persisting it; encounter/combatant ids are never client supplied.
+  characterId: Id.optional(),
+  // Match the established note-sharing vocabulary. Existing rolls default to the
+  // historical shared-table behavior, while dm_shared and private are enforced on
+  // every later read and SSE delivery.
+  visibility: DiceRollVisibility.default('party_shared'),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
 
@@ -12271,6 +12732,13 @@ export const RollResult = z.object({
    */
   encounterId: z.number().int().positive().optional(),
   npcId: z.number().int().positive().optional(),
+  // #1511: server-resolved roll identity. These are nullable in storage so existing
+  // history remains valid, and never accept a combatant/encounter id from a client.
+  characterId: z.number().int().positive().optional(),
+  combatantId: z.number().int().positive().optional(),
+  // Producer-side result context stays optional so existing trusted roll builders do
+  // not need to manufacture a field; persistence applies party_shared by default.
+  visibility: DiceRollVisibility.optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 
@@ -12310,6 +12778,9 @@ export const CampaignEventType = z.enum([
   // Issue #1899: shared dice roll feed tick. Thin id-only variant so connected clients can
   // refetch the roll log and trigger spectator animations without carrying faces on wire.
   'dice.rolled',
+  // Campaign metadata changed. Deliberately id-only: subscribers refetch the
+  // permission-checked campaign projection rather than receiving its contents.
+  'campaign.updated',
   // Issue #867: campaign moved to Trash. SSE controllers tear down EVERY open
   // stream on the campaign (control signal — filtered from the data path like
   // membership.revoked). A reconnect hits requireMember and 404s.
@@ -12364,6 +12835,14 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     // HP/condition/spell-slot mirror, `adjustCombatantResource`), so the client can
     // invalidate `campaignCharacters` precisely instead of on every encounter update.
     sheetMirrored: z.boolean().optional(),
+    at: IsoDate,
+  }),
+  z.object({
+    // Thin invalidation for an open campaign context (including the run-session
+    // condition picker). Campaign data is always re-read through the normal
+    // role-scoped endpoint.
+    type: z.literal('campaign.updated'),
+    campaignId: Id,
     at: IsoDate,
   }),
   z.object({
@@ -12650,6 +13129,7 @@ export const DiceRoll = RollResult.extend({
   campaignId: Id,
   rollerUserId: z.string().max(200), // RequestUser.id — String(users.id) or 'dev:<name>' / 'token:<name>' actors
   rollerName: z.string().max(200).default(''),
+  visibility: DiceRollVisibility.default('party_shared'),
   createdAt: IsoDate,
 });
 export type DiceRoll = z.infer<typeof DiceRoll>;
@@ -12665,6 +13145,13 @@ export const CheckRollRequest = z.object({
   consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text recorded with the roll label'),
 });
 export type CheckRollRequest = z.infer<typeof CheckRollRequest>;
+
+/**
+ * DM-only encounter creature-check input (issue #1314). Creature rolls do not have the
+ * character check flow's consequence record, so reject it instead of accepting and dropping it.
+ */
+export const CreatureCheckRollRequest = CheckRollRequest.omit({ consequence: true });
+export type CreatureCheckRollRequest = z.infer<typeof CreatureCheckRollRequest>;
 
 /** The resolved check + persisted roll returned by the check-roll endpoint / MCP tool (issue #415). */
 export const CheckRollResponse = z.object({
@@ -12785,6 +13272,82 @@ export type AttachmentKind = z.infer<typeof AttachmentKind>;
 export const AuditActorRole = z.enum(['dm', 'player', 'viewer', 'admin']);
 export type AuditActorRole = z.infer<typeof AuditActorRole>;
 
+/**
+ * A primitive preserved in an audit field change. Audit payloads deliberately
+ * record values, rather than a patch request, so a later reader can see the
+ * state that actually committed (including defaults and concurrent writes).
+ */
+export const AuditFieldValue = z.union([z.string().max(50_000), z.number(), z.boolean(), z.null()]);
+export type AuditFieldValue = z.infer<typeof AuditFieldValue>;
+
+/** Visibility is attached to each changed field, not inferred from its name. */
+export const AuditFieldChange = z.object({
+  field: z.string().min(1).max(80),
+  before: AuditFieldValue,
+  after: AuditFieldValue,
+  visibility: z.enum(['member', 'dm']).default('member'),
+});
+export type AuditFieldChange = z.infer<typeof AuditFieldChange>;
+
+const TimelineEventAuditSnapshot = z.object({
+  title: z.string().max(200),
+  inWorldDate: z.string().max(200),
+  body: z.string().max(50_000),
+  era: z.string().max(120),
+  sortIndex: z.number().int(),
+  dmSecret: z.string().max(20_000),
+  hidden: z.boolean(),
+});
+
+/**
+ * First versioned structured audit payload. The union intentionally contains
+ * only delivered action families; adding a domain means adding its explicit
+ * member here rather than treating opaque JSON as a shared extension surface.
+ */
+export const TimelineEventAuditPayload = z.object({
+  version: z.literal(1),
+  kind: z.literal('timeline_event'),
+  action: z.enum([
+    'timeline.event.create',
+    'timeline.event.update',
+    'timeline.event.delete',
+    'timeline.event.restore',
+  ]),
+  actor: z.object({ id: z.string().max(200), role: AuditActorRole }),
+  source: z.object({
+    transport: z.enum(['rest', 'mcp', 'system']),
+    requestId: z.string().max(128).nullable(),
+  }),
+  entity: z.object({
+    type: z.literal('timeline_event'),
+    id: Id,
+    label: z.string().min(1).max(200),
+    navigation: z.object({ route: z.literal('timeline'), query: z.literal('event') }),
+  }),
+  changes: z.array(AuditFieldChange).min(1).max(8),
+  // Delete/restore need a durable state reference in addition to the visibility
+  // transition; create/update can be understood entirely from `changes`.
+  snapshot: TimelineEventAuditSnapshot.nullable(),
+  reason: z.string().max(500).nullable(),
+});
+export type TimelineEventAuditPayload = z.infer<typeof TimelineEventAuditPayload>;
+
+export const InventoryItemAuditPayload = z.object({
+  version: z.literal(1),
+  kind: z.literal('inventory_item'),
+  action: z.enum(['item.create', 'item.update', 'item.delete', 'item.restore']),
+  actor: z.object({ id: z.string().max(200), role: AuditActorRole }),
+  source: z.object({ transport: z.enum(['rest', 'mcp', 'system']), requestId: z.string().max(128).nullable() }),
+  entity: z.object({ type: z.literal('inventory_item'), id: Id, label: z.string().min(1).max(200), navigation: z.object({ route: z.literal('inventory'), query: z.literal('item') }) }),
+  changes: z.array(AuditFieldChange).min(1).max(12),
+  snapshot: z.object({ name: z.string().max(200), qty: z.number().int().min(0), notes: z.string().max(5_000), iconSlug: z.string().max(80), ownerType: z.enum(['party', 'character']), characterId: Id.nullable(), equipped: z.boolean(), equipSlot: z.string().max(60).nullable() }).nullable(),
+  reason: z.string().max(500).nullable(),
+});
+export type InventoryItemAuditPayload = z.infer<typeof InventoryItemAuditPayload>;
+
+export const AuditPayload = z.discriminatedUnion('kind', [TimelineEventAuditPayload, InventoryItemAuditPayload]);
+export type AuditPayload = z.infer<typeof AuditPayload>;
+
 export const AuditEntry = z.object({
   id: Id,
   campaignId: Id.nullable(),
@@ -12794,6 +13357,8 @@ export const AuditEntry = z.object({
   entityType: z.string().max(40).nullable(),
   entityId: Id.nullable(),
   detail: z.string().max(2000).default(''),
+  // Null for legacy rows written before issue #810's structured payload column.
+  payload: AuditPayload.nullable().default(null),
   requestId: z.string().max(128).nullable().optional(),
   createdAt: IsoDate,
 });

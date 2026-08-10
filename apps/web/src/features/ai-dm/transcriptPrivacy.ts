@@ -10,10 +10,10 @@
  * WHY NOT JUST DELETE THE CACHE. #572 made the SERVER transcript authoritative and
  * refetched on mount, and its PR noted #573 "can now delete it outright". That is true
  * for the `table` scope — but only for it. The `activity` scope backs
- * `useAiDmLiveActivity`, which never fetches the server transcript (it folds live signal
- * frames only); deleting its cache outright would leave the encounter driver dock (#427)
- * blank after every reload with nothing to reconcile from. So the cache stays, and the
- * privacy work is done in three layers instead:
+ * `useAiDmLiveActivity`; it also reconciles server history, but retains a separately scoped
+ * paint cache while that request is in flight. Deleting it outright would leave the encounter
+ * driver dock (#427) blank after every reload or temporary transcript-read failure. So the
+ * cache stays, and the privacy work is done in three layers instead:
  *
  *   1. NARROW — nothing is written at all unless the viewer has explicitly opted in on
  *      this device ({@link isTranscriptRememberEnabled}, default false). This is the

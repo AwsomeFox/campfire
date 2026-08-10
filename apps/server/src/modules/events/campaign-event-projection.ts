@@ -32,7 +32,8 @@ export const CAMPAIGN_BROADCAST_SAFE_FRAMES: Record<BroadcastSafeFrameType, stri
   'check.resolved': 'Thin signal indicating a check request was resolved.',
   'campaign.trashed': 'Filtered server-side, never sent as data.',
   'safety.hold': 'Active state only, contains no actor or user identity.',
-  'dice.rolled': 'Thin id-only signal, refetches feed.',
+  'dice.rolled': "Thin id-only signal, routed by RollsService to the row's audience before this projection; refetches the permission-checked feed.",
+  'campaign.updated': 'Thin invalidation signal, refetches the permission-checked campaign projection.',
 
   // AI-DM stream types
   'turn.start': 'Carries only the campaign id and a timestamp; the table needs to know a turn began.',

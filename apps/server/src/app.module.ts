@@ -54,6 +54,7 @@ import { TableSafetyModule } from './modules/safety/table-safety.module';
 import { MapsModule } from './modules/maps/maps.module';
 import { SampleEncounterModule } from './modules/sample-encounter/sample-encounter.module';
 import { AiMapModule } from './modules/ai-map/ai-map.module';
+import { AiPortraitModule } from './modules/ai-portrait/ai-portrait.module';
 import { EventsModule } from './modules/events/events.module';
 import { RollsModule } from './modules/rolls/rolls.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -190,6 +191,7 @@ function serveStaticImports(): DynamicModule[] {
     MapsModule,
     SampleEncounterModule,
     AiMapModule,
+    AiPortraitModule,
     EventsModule,
     RollsModule,
     NotificationsModule,

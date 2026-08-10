@@ -111,6 +111,9 @@ export function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (v.type === 'dice.rolled') {
     return typeof v.rollId === 'number' && (v.encounterId === undefined || typeof v.encounterId === 'number');
   }
+  if (v.type === 'campaign.updated') {
+    return true;
+  }
   if (v.type === 'campaign.trashed') {
     // Issue #867: control signal — server filters it from the data path; accept
     // the shape so the guard stays honest if filtering ever changes.
@@ -139,7 +142,18 @@ export function isCampaignEvent(value: unknown): value is CampaignEvent {
   return false;
 }
 
-export function useCampaignEvents(campaignId: number | undefined, handlers: CampaignEventsHandlers): void {
+/**
+ * Subscribe to one campaign's event stream.
+ *
+ * `reconnectKey` is for a caller whose server-side event projection can change without a
+ * campaign or account change (for example, an in-place membership role update). Changing it
+ * disposes the old request and opens a new one under the current server authorization.
+ */
+export function useCampaignEvents(
+  campaignId: number | undefined,
+  handlers: CampaignEventsHandlers,
+  reconnectKey?: unknown,
+): void {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
@@ -155,8 +169,12 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
   // it. Clearing a page-local status variable (RunSessionPage's `eventStatus`) cannot fix
   // this; the underlying stream itself has to tear down and re-establish under the new
   // credentials, which only this hook's own effect can do.
-  const { me } = useAuth();
+  const { me, roleIn } = useAuth();
   const userId = me?.user.id ?? null;
+  // #1511: audience-routed dice events depend on the current effective campaign
+  // role. A membership refresh may retain the same account id while promoting or
+  // demoting it, so role must also restart the authenticated stream.
+  const viewerRole = campaignId === undefined ? null : roleIn(campaignId);
 
   useEffect(() => {
     if (campaignId === undefined || !Number.isFinite(campaignId)) return;
@@ -183,5 +201,5 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
     });
 
     return () => loop.dispose();
-  }, [campaignId, resumeEpoch, userId]);
+  }, [campaignId, resumeEpoch, userId, viewerRole, reconnectKey]);
 }

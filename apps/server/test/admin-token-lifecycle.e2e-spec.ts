@@ -1,4 +1,8 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { pushSubscriptions } from '../src/db/schema';
+import { nowIso } from '../src/common/time';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 /**
@@ -6,7 +10,7 @@ import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './tes
  *  - GET    /users/:id/tokens          — admin lists another user's PATs (metadata only)
  *  - DELETE /users/:id/tokens/:tokenId — admin revokes one PAT
  *  - DELETE /users/:id/tokens          — admin revokes ALL of a user's PATs
- *  - POST   /users/:id/password        — admin reset now revokes ALL sessions AND PATs
+ *  - POST   /users/:id/password        — admin reset revokes sessions, PATs, and browser push
  * Plus a pin on the deliberate asymmetry: self-service POST /me/password keeps
  * the current session and leaves PATs alone (the user proves the old password
  * and manages their own tokens via /tokens).
@@ -133,7 +137,7 @@ describe('admin PAT lifecycle: list/revoke + password-reset revocation (e2e)', (
     });
   });
 
-  describe('POST /users/:id/password — admin reset revokes sessions AND PATs', () => {
+  describe('POST /users/:id/password — admin reset revokes sessions, PATs, and browser push', () => {
     it('after an admin reset, the user\'s PAT and existing session are dead; only the new password works', async () => {
       const server = ctx.app.getHttpServer();
 
@@ -142,6 +146,16 @@ describe('admin PAT lifecycle: list/revoke + password-reset revocation (e2e)', (
       const loginRes = await victimAgent.post('/api/v1/auth/login').send({ username: 'reset-victim', password: 'victim-password-1' });
       expect(loginRes.status).toBe(201);
       const victimId = loginRes.body.user.id;
+      const db = ctx.app.get<DrizzleDb>(DB);
+      db.insert(pushSubscriptions).values({
+        userId: victimId,
+        endpoint: 'https://fcm.googleapis.com/fcm/send/admin-reset-victim',
+        p256dh: 'public-key',
+        auth: 'auth-secret',
+        userAgent: 'Compromised browser',
+        createdAt: nowIso(),
+        lastUsedAt: null,
+      }).run();
 
       const pat = await mintOwn(victimAgent, 'leaked-laptop-token');
       expect((await bearerMe(pat.raw)).status).toBe(200);
@@ -154,6 +168,8 @@ describe('admin PAT lifecycle: list/revoke + password-reset revocation (e2e)', (
       expect((await bearerMe(pat.raw)).status).toBe(401);
       // The pre-reset cookie session is revoked too.
       expect((await victimAgent.get('/api/v1/me')).status).toBe(401);
+      expect(db.select({ id: pushSubscriptions.id }).from(pushSubscriptions)
+        .where(eq(pushSubscriptions.userId, victimId)).all()).toEqual([]);
       // Old password is gone, new one works.
       const oldLogin = await request(server).post('/api/v1/auth/login').send({ username: 'reset-victim', password: 'victim-password-1' });
       expect(oldLogin.status).toBe(401);

@@ -234,6 +234,7 @@ export default function PreferencesPage() {
         total: val,
         rolls: [val],
         label: t('dice.testRollLabel', 'Test Roll (1d20)'),
+        visibility: 'party_shared',
       });
     }, 700);
   }

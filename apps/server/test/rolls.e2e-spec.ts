@@ -2,7 +2,7 @@ import request from 'supertest';
 import { eq } from 'drizzle-orm';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
-import { campaigns, diceRolls } from '../src/db/schema';
+import { campaigns, characters, diceRolls } from '../src/db/schema';
 import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../src/modules/rolls/rolls.service';
 import { OPEN_LEGEND_PACK_SLUG } from '@campfire/schema';
 
@@ -125,6 +125,85 @@ describe('shared dice log (e2e)', () => {
     // Ids strictly descending.
     const ids = res.body.map((r: { id: number }) => r.id);
     expect([...ids].sort((a, b) => b - a)).toEqual(ids);
+  });
+
+  it('#1511 enforces private and DM-shared roll visibility on the feed without changing the public default', async () => {
+    const server = ctx.app.getHttpServer();
+    const [privateRoll, dmSharedRoll, publicRoll] = await Promise.all([
+      request(server)
+        .post(`/api/v1/campaigns/${campaignId}/roll`)
+        .set(player)
+        .send({ expr: '1d20', label: 'private roll sentinel', visibility: 'private' }),
+      request(server)
+        .post(`/api/v1/campaigns/${campaignId}/roll`)
+        .set(player)
+        .send({ expr: '1d20', label: 'DM roll sentinel', visibility: 'dm_shared' }),
+      request(server)
+        .post(`/api/v1/campaigns/${campaignId}/roll`)
+        .set(player)
+        .send({ expr: '1d20', label: 'public roll sentinel' }),
+    ]);
+    expect(privateRoll.status).toBe(201);
+    expect(dmSharedRoll.status).toBe(201);
+    expect(publicRoll.status).toBe(201);
+    expect(publicRoll.body.visibility).toBe('party_shared');
+
+    const [ownFeed, dmFeed, viewerFeed] = await Promise.all([
+      request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=100`).set(player),
+      request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=100`).set(dm),
+      request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=100`).set(viewer),
+    ]);
+    const labels = (res: { body: Array<{ label?: string }> }) => res.body.map((roll) => roll.label);
+    expect(labels(ownFeed)).toEqual(expect.arrayContaining(['private roll sentinel', 'DM roll sentinel', 'public roll sentinel']));
+    expect(labels(dmFeed)).toEqual(expect.arrayContaining(['DM roll sentinel', 'public roll sentinel']));
+    expect(labels(dmFeed)).not.toContain('private roll sentinel');
+    expect(labels(viewerFeed)).toContain('public roll sentinel');
+    expect(labels(viewerFeed)).not.toEqual(expect.arrayContaining(['private roll sentinel', 'DM roll sentinel']));
+
+    const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+    expect(audit.status).toBe(200);
+    const privateAudit = (audit.body as Array<{ action: string; detail: string }>).find(
+      (entry) => entry.action === 'dice.roll' && entry.detail === 'private roll',
+    );
+    expect(privateAudit).toBeDefined();
+    expect(JSON.stringify(audit.body)).not.toContain('private roll sentinel');
+  });
+
+  it('#1511 accepts only server-validated character identity on a generic roll', async () => {
+    const server = ctx.app.getHttpServer();
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(player)
+      .send({ name: 'Roll Context Hero', level: 1, hpMax: 10, hpCurrent: 10 });
+    expect(character.status).toBe(201);
+
+    const own = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .set(player)
+      .send({ expr: '1d20', characterId: character.body.id });
+    expect(own.status).toBe(201);
+    expect(own.body.characterId).toBe(character.body.id);
+
+    const otherPlayer = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .set({ 'x-dev-role': 'player', 'x-dev-user': 'p-2' })
+      .send({ expr: '1d20', characterId: character.body.id });
+    expect(otherPlayer.status).toBe(403);
+
+    const dmRoll = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .set(dm)
+      .send({ expr: '1d20', characterId: character.body.id });
+    expect(dmRoll.status).toBe(201);
+    expect(dmRoll.body.characterId).toBe(character.body.id);
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(characters).set({ deletedAt: new Date().toISOString() }).where(eq(characters.id, character.body.id));
+    const trashedCharacter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/roll`)
+      .set(dm)
+      .send({ expr: '1d20', characterId: character.body.id });
+    expect(trashedCharacter.status).toBe(404);
   });
 
   it('viewer may roll too — any member, not gated by role', async () => {

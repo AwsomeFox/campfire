@@ -15,11 +15,26 @@
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, test, expect, vi, afterEach, beforeAll } from 'vitest';
-import { Character, defaultCombatantStatblock } from '@campfire/schema';
+import { Character, defaultCombatantStatblock, type RollCheckDefinition } from '@campfire/schema';
 import type { Combatant } from '@campfire/schema';
 import { MemoryRouter } from 'react-router-dom';
 import '../../src/i18n';
 import { CombatantRow, type CombatantRowProps } from '../../src/features/encounters/combat/CombatantRow';
+
+const { getMock } = vi.hoisted(() => ({
+  getMock: vi.fn(async (_path: string) => [] as unknown),
+}));
+
+vi.mock('../../src/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/api')>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      get: getMock,
+    },
+  };
+});
 
 // jsdom has no ResizeObserver; RulesHintPopover (issue #1939) only uses it to re-run its
 // viewport-clamped positioning math, which these tests do not assert on.
@@ -31,7 +46,11 @@ beforeAll(() => {
   };
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  getMock.mockReset();
+  getMock.mockResolvedValue([]);
+});
 
 function baseCombatant(overrides: Partial<Combatant> = {}): Combatant {
   return {
@@ -200,6 +219,38 @@ describe('CombatantRow statblock template HP visibility (issue #2093)', () => {
   });
 });
 
+describe('CombatantRow creature mechanics read/roll gates (issue #1314)', () => {
+  test('keeps the DM catalog mounted from the route campaign id while read-only and disables its rolls', async () => {
+    const strength: RollCheckDefinition = {
+      id: 'str',
+      label: 'Strength',
+      category: 'ability',
+      ability: 'STR',
+      proficiency: null,
+      favorite: false,
+      modifier: 2,
+      breakdown: [{ label: 'STR', value: 2 }],
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    };
+    getMock.mockResolvedValue([strength]);
+
+    renderRow({
+      campaignId: undefined,
+      routeCampaignId: 1,
+      canViewCreatureChecks: true,
+      canRollCreatureChecks: false,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: "Expand Goblin's creature mechanics" }));
+    const roll = await screen.findByTestId('creature-check-roll-str');
+    expect(roll).toBeInstanceOf(HTMLButtonElement);
+    expect((roll as HTMLButtonElement).disabled).toBe(true);
+    expect((roll as HTMLButtonElement).title).toContain('read-only');
+  });
+});
+
 describe('CombatantRow condition-tag rules hints (issue #1939)', () => {
   test('a 5e campaign shows a rules-hint affordance on a condition tag, and it opens the mechanical summary', () => {
     renderRow({ ruleSystem: 'dnd5e', combatant: baseCombatant({ conditions: ['Restrained'] }) });
@@ -244,6 +295,33 @@ describe('CombatantRow condition-tag rules hints (issue #1939)', () => {
     fireEvent.click(screen.getByTestId('rules-hint-trigger-Restrained'));
     const link = screen.getByRole('link');
     expect(link.getAttribute('href')).toBe('/c/7/compendium?q=Restrained');
+  });
+});
+
+describe('CombatantRow campaign condition definitions (issue #1505)', () => {
+  test('a campaign definition is offered as a quick condition and prefills its structured instance', () => {
+    const onPatchCombatant = vi.fn();
+    renderRow({
+      canEditPermission: true,
+      conditionSuggestions: ['Frostbite'],
+      conditionDefinitions: [{
+        name: 'Frostbite', durationRounds: 3, timing: 'end-of-turn', saveTiming: 'end-of-turn',
+        saveAbility: 'CON', saveDc: 14, isConcentration: false, stacks: 1, notes: 'Save ends',
+      }],
+      onPatchCombatant,
+    });
+
+    fireEvent.click(screen.getByTestId('add-condition-toggle-101'));
+    fireEvent.click(screen.getByRole('button', { name: 'Frostbite' }));
+
+    expect(onPatchCombatant).toHaveBeenCalledWith(
+      expect.objectContaining({
+        addConditionInstance: expect.objectContaining({
+          name: 'Frostbite', durationRounds: 3, roundsRemaining: 3, saveTiming: 'end-of-turn', saveAbility: 'CON', saveDc: 14, notes: 'Save ends', custom: false,
+        }),
+      }),
+      1,
+    );
   });
 });
 

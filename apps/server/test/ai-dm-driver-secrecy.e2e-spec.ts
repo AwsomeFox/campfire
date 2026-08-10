@@ -1,5 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { ruleEntries, rulePacks } from '../src/db/schema';
 
 /**
  * Issue #557 — AI Driver secrecy: prevent DM-scoped read tools from feeding secrets into
@@ -46,6 +48,52 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
   afterAll(async () => {
     await h.close();
   });
+
+  async function startCreatureCheckEncounter(campaignId: number): Promise<{ encounterId: number; combatantId: number }> {
+    const db = h.ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    const [pack] = await db
+      .insert(rulePacks)
+      .values({
+        slug: `driver-secret-roll-${campaignId}`,
+        name: 'Driver secret-roll fixture',
+        version: '1',
+        license: '',
+        sourceUrl: '',
+        installedAt: ts,
+        entryCount: 1,
+      })
+      .returning();
+    const [entry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: `driver-secret-goblin-${campaignId}`,
+        name: 'Secret Goblin',
+        type: 'monster',
+        summary: 'CR 0.25',
+        body: '',
+        dataJson: JSON.stringify({ hitPoints: 7, abilityScores: { dexterity: 14 }, skills: { stealth: 6 } }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+    const encounter = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Secret creature check' });
+    expect(encounter.status).toBe(201);
+    const combatant = await request(h.server)
+      .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: entry.id });
+    expect(combatant.status).toBe(201);
+    expect((await request(h.server).post(`/api/v1/encounters/${encounter.body.id}/roll-initiative`).set(dm)).status).toBe(
+      201,
+    );
+    expect((await request(h.server).post(`/api/v1/encounters/${encounter.body.id}/start`).set(dm)).status).toBe(201);
+    return { encounterId: encounter.body.id as number, combatantId: combatant.body.id as number };
+  }
 
   it('#877 includes only explicitly AI-consented supports and applies revocation on the next turn', async () => {
     const campaignId = await h.createCampaign('Support Consent Driver');
@@ -150,6 +198,94 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
     const result = toolResultFor(h, 'q1') ?? '';
     expect(result).toContain('The Heir Apparent');
     expect(result).not.toContain('THE_INNKEEPER_IS_THE_HEIR');
+  });
+
+  it('a guessed creature check id cannot reveal its modifier without the combatant-scoped list approval', async () => {
+    const campaignId = await h.createCampaign('Secrecy Creature Roll');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+    const { encounterId, combatantId } = await startCreatureCheckEncounter(campaignId);
+    const rollArgs = { encounterId, combatantId, checkId: 'skill:stealth' };
+
+    h.script({
+      text: 'Rolling secretly…',
+      toolCalls: [{ id: 'roll-without-grant', name: 'roll_creature_check', arguments: rollArgs }],
+    });
+    const blocked = await h.sendMessage(campaignId, { input: 'roll the monster stealth check' });
+    expect(blocked.status).toBe(201);
+    expect(blocked.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: true, proposed: false, encounterId }]);
+    const blockedResult = toolResultFor(h, 'roll-without-grant') ?? '';
+    expect(blockedResult).toContain('forbidden_secret_read');
+    expect(blockedResult).not.toContain('"modifier":6');
+    expect(blockedResult).not.toContain('statblock');
+    expect((await h.getAudit(campaignId)).body.some((entry: { action: string }) => entry.action === 'ai-dm.driver.secret.blocked')).toBe(
+      true,
+    );
+
+    const grant = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approval`)
+      .set(dm)
+      .send({ action: 'grant', tool: 'list_creature_checks', entityId: combatantId });
+    expect(grant.status).toBe(201);
+
+    // The read approval is not itself permission to make a guessed roll: discovery must
+    // succeed first so the one bounded capability cannot become a write authorization.
+    h.script({
+      text: 'Skipping discovery…',
+      toolCalls: [{ id: 'roll-before-list', name: 'roll_creature_check', arguments: rollArgs }],
+    });
+    const blockedBeforeList = await h.sendMessage(campaignId, { input: 'roll the guessed stealth check' });
+    expect(blockedBeforeList.status).toBe(201);
+    expect(blockedBeforeList.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: true, proposed: false, encounterId }]);
+    const blockedBeforeListResult = toolResultFor(h, 'roll-before-list') ?? '';
+    expect(blockedBeforeListResult).toContain('forbidden_secret_read');
+    expect(blockedBeforeListResult).not.toMatch(/"modifier":\s*6/);
+    expect((await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approvals`).set(dm)).body).toHaveLength(1);
+
+    // The same combatant-scoped grant permits exactly one catalog discovery, so the model learns
+    // a valid check id before its one allowed private roll.
+    h.script(
+      {
+        text: 'Looking up the approved catalog…',
+        toolCalls: [{ id: 'list-with-grant', name: 'list_creature_checks', arguments: { encounterId, combatantId } }],
+      },
+      { text: 'The catalog has a stealth check.' },
+    );
+    const listed = await h.sendMessage(campaignId, { input: 'show the approved creature checks' });
+    expect(listed.status).toBe(201);
+    expect(listed.body.toolCalls).toEqual([{ name: 'list_creature_checks', isError: false, proposed: false, encounterId }]);
+    expect(toolResultFor(h, 'list-with-grant')).toMatch(/"modifier":\s*6/);
+    expect(toolResultFor(h, 'list-with-grant')).toContain('DM-ONLY');
+    expect((await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approvals`).set(dm)).body).toHaveLength(1);
+
+    // The retained capability cannot disclose the catalog again; it is reserved solely for the
+    // pending roll against this combatant.
+    h.script({
+      text: 'Listing again…',
+      toolCalls: [{ id: 'repeat-list', name: 'list_creature_checks', arguments: { encounterId, combatantId } }],
+    });
+    const repeatedList = await h.sendMessage(campaignId, { input: 'show those creature checks again' });
+    expect(repeatedList.status).toBe(201);
+    expect(repeatedList.body.toolCalls).toEqual([{ name: 'list_creature_checks', isError: true, proposed: false, encounterId }]);
+    expect(toolResultFor(h, 'repeat-list')).not.toMatch(/"modifier":\s*6/);
+
+    h.script(
+      {
+        text: 'Rolling with DM approval…',
+        toolCalls: [{ id: 'roll-with-grant', name: 'roll_creature_check', arguments: rollArgs }],
+      },
+      { text: 'The creature moves unseen.' },
+    );
+    const approved = await h.sendMessage(campaignId, { input: 'use the approved creature check' });
+    expect(approved.status).toBe(201);
+    expect(approved.body.toolCalls).toEqual([{ name: 'roll_creature_check', isError: false, proposed: false, encounterId }]);
+    const approvedResult = toolResultFor(h, 'roll-with-grant') ?? '';
+    expect(approvedResult).toMatch(/"modifier":\s*6/);
+    expect(approvedResult).toContain('DM-ONLY');
+    const approvals = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/secret-approvals`).set(dm);
+    expect(approvals.body).toHaveLength(0);
+    expect((await h.getAudit(campaignId)).body.some((entry: { action: string }) => entry.action === 'ai-dm.driver.secret.approved')).toBe(
+      true,
+    );
   });
 
   // ── unexplored location ─────────────────────────────────────────────────────

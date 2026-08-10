@@ -37,6 +37,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const fresh = openDatabase(dataDir);
     try {
       expect(columnNames(fresh.sqlite, 'combatants')).toContain('npc_identity_source_id');
+      expect(columnNames(fresh.sqlite, 'push_subscriptions')).toEqual(
+        expect.arrayContaining(['user_id', 'endpoint', 'p256dh', 'auth', 'user_agent', 'last_used_at']),
+      );
     } finally { fresh.sqlite.close(); }
   });
 
@@ -181,6 +184,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(columnNames(sqlite, 'schedule_templates')).toEqual(expect.arrayContaining(['name', 'timezone', 'slots_json']));
       expect(MIGRATION_NAMES).toContain('0161_character_combatant_speed_1910');
+      expect(MIGRATION_NAMES).toContain('0182_push_subscriptions_1323');
+      expect(columnNames(sqlite, 'push_subscriptions')).toEqual(
+        expect.arrayContaining(['user_id', 'endpoint', 'p256dh', 'auth', 'user_agent', 'last_used_at']),
+      );
     } finally {
       sqlite.close();
     }
@@ -528,7 +535,17 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       ).toContain('idx_timeline_events_campaign_sort');
       expect(
         (sqlite.pragma('index_list(dice_rolls)') as Array<{ name: string }>).map((index) => index.name),
-      ).toContain('idx_dice_rolls_campaign_id_desc');
+      ).toEqual(
+        expect.arrayContaining([
+          'idx_dice_rolls_campaign_id_desc',
+          'idx_dice_rolls_campaign_visibility_id_desc',
+          'idx_dice_rolls_campaign_roller_id_desc',
+        ]),
+      );
+      expect(MIGRATION_NAMES).toContain('0183_dice_rolls_context_1511');
+      expect(columnNames(sqlite, 'dice_rolls')).toEqual(
+        expect.arrayContaining(['character_id', 'combatant_id', 'visibility']),
+      );
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_purge_tombstones'").get(),
       ).toBeTruthy();
@@ -2925,6 +2942,86 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // A(20) first, then the tie group ordered by initMod desc: X(3), W(1), Y(0) — the
       // adapter's answer, NOT the legacy stamp's add order (W, X, Y).
       expect(sorted.map((c) => c.name)).toEqual(['A', 'X', 'W', 'Y']);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('0180 purges every legacy context-less encounter-status row before a later hide can expose it (#2112)', () => {
+    expect(MIGRATION_NAMES).toContain('0180_hidden_status_notification_authorization_2112');
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    try {
+      const ts = '2026-08-09T00:00:00.000Z';
+      // The deferred queue has real campaign and recipient foreign keys even
+      // in this legacy-shaped fixture, so establish both parents explicitly.
+      seeded.sqlite.prepare(
+        "INSERT INTO users (id, username, display_name, password_hash, server_role, disabled, created_at, updated_at) VALUES (1, 'legacy-hidden-status-recipient', 'Legacy hidden status recipient', 'hash', 'user', 0, ?, ?)",
+      ).run(ts, ts);
+      seeded.sqlite.prepare('INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, ?, ?, ?)').run('Legacy hidden status', ts, ts);
+      seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 1, ?, ?)').run('Now hidden', ts, ts);
+      seeded.sqlite.prepare('INSERT INTO encounters (campaign_id, name, hidden, created_at, updated_at) VALUES (1, ?, 0, ?, ?)').run('Visible at upgrade', ts, ts);
+      const notification = seeded.sqlite.prepare(
+        `INSERT INTO notifications (user_id, campaign_id, type, title, entity_type, entity_id, created_at)
+         VALUES (1, 1, 'character_downed', ?, 'encounter', ?, ?)`,
+      );
+      const deferred = seeded.sqlite.prepare(
+        `INSERT INTO notification_digest_queue (user_id, campaign_id, type, title, entity_type, entity_id, reason, created_at)
+         VALUES (1, 1, 'character_downed', ?, 'encounter', ?, 'digest', ?)`,
+      );
+      notification.run('hidden legacy row', 1, ts);
+      notification.run('visible legacy downed row', 2, ts);
+      deferred.run('hidden legacy queue', 1, ts);
+      deferred.run('visible legacy downed queue', 2, ts);
+      seeded.sqlite.prepare("DELETE FROM __migrations WHERE name = '0180_hidden_status_notification_authorization_2112'").run();
+    } finally {
+      seeded.sqlite.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      // A row visible during migration still lacks the owner/audience required
+      // for a safe later recheck, so changing the encounter to hidden cannot
+      // revive a durable disclosure after the upgrade.
+      upgraded.sqlite.prepare('UPDATE encounters SET hidden = 1 WHERE id = 2').run();
+      expect(upgraded.sqlite.prepare('SELECT title FROM notifications ORDER BY id').all()).toEqual([]);
+      expect(upgraded.sqlite.prepare('SELECT title FROM notification_digest_queue ORDER BY id').all()).toEqual([]);
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('0180 keeps the additive notification migration safe for reduced fixtures without encounters (#2112)', () => {
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    const reduced = new Database(dbFilePath(dataDir));
+    try {
+      reduced.pragma('foreign_keys = OFF');
+      reduced.exec('DROP TABLE encounters');
+      reduced.exec('DROP TABLE campaigns');
+      reduced.prepare("DELETE FROM __migrations WHERE name = '0180_hidden_status_notification_authorization_2112'").run();
+    } finally {
+      reduced.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'notifications')).toContain('hidden_status_context');
+      expect(columnNames(upgraded.sqlite, 'notification_digest_queue')).toContain('hidden_status_context');
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
+  it('0183 adds durable roll audience and character/combatant context columns (#1511)', () => {
+    expect(MIGRATION_NAMES).toContain('0183_dice_rolls_context_1511');
+    dataDir = makeTempDataDir();
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const cols = columnNames(sqlite, 'dice_rolls');
+      expect(cols).toEqual(expect.arrayContaining(['character_id', 'combatant_id', 'visibility']));
     } finally {
       sqlite.close();
     }

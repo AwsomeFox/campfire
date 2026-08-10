@@ -958,6 +958,17 @@ describe('per-campaign trash: GET /campaigns/:id/trash (e2e, issue #269)', () =>
     expect(res.status).toBe(403);
   });
 
+  it('remains readable to the DM while the campaign is archived', async () => {
+    const server = ctx.app.getHttpServer();
+    await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' }).expect(200);
+
+    const trash = await request(server).get(`/api/v1/campaigns/${campaignId}/trash`).set(dm);
+    expect(trash.status).toBe(200);
+    expect(trash.body.some((t: { type: string; id: number }) => t.type === 'character' && t.id === characterId)).toBe(true);
+
+    await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' }).expect(200);
+  });
+
   it('restore round-trips: the restored entity leaves the trash and returns to its list', async () => {
     const server = ctx.app.getHttpServer();
 

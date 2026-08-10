@@ -52,6 +52,9 @@ export const campaigns = sqliteTable('campaigns', {
   // that is NOT a built-in registered adapter — enforced in CampaignsService, not here. NULL in
   // every campaign that predates this column; see db/db.module.ts ALTER TABLE note.
   customMechanicsProfile: text('custom_mechanics_profile'),
+  // Issue #1505: JSON campaign-owned condition templates. A definition is not an
+  // applied condition; it supplies the member-visible vocabulary and picker defaults.
+  conditionDefinitions: text('condition_definitions').notNull().default('[]'),
   // Attachment (kind='map') rendered as the campaign map background on Dashboard/Location detail.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   mapAttachmentId: integer('map_attachment_id'),
@@ -883,6 +886,8 @@ export const auditLog = sqliteTable('audit_log', {
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
   detail: text('detail').notNull().default(''),
+  // Versioned, structured audit payload. Null preserves legacy rows unchanged.
+  payloadJson: text('payload_json'),
   requestId: text('request_id'),
   createdAt: text('created_at').notNull(),
 });
@@ -1691,8 +1696,15 @@ export const diceRolls = sqliteTable('dice_rolls', {
   // packages/schema for the full rationale) — null for the vast majority of rolls.
   encounterId: integer('encounter_id'),
   npcId: integer('npc_id'),
+  // #1511: additive shared-roll context. Legacy rows keep the table-wide default.
+  characterId: integer('character_id'),
+  combatantId: integer('combatant_id'),
+  visibility: text('visibility').notNull().default('party_shared'),
   createdAt: text('created_at').notNull(),
-});
+}, (table) => ({
+  campaignVisibility: index('idx_dice_rolls_campaign_visibility_id_desc').on(table.campaignId, table.visibility, table.id),
+  campaignRoller: index('idx_dice_rolls_campaign_roller_id_desc').on(table.campaignId, table.rollerUserId, table.id),
+}));
 
 // In-app notifications — one row per recipient per event (see modules/notifications).
 // Written by domain services (sessions/notes/membership) on the triggering event;
@@ -1709,6 +1721,9 @@ export const notifications = sqliteTable('notifications', {
   commentId: integer('comment_id'), // optional comment focus inside the entity thread (#446)
   // Issue #820: optional JSON blob (ScheduleNotificationData for session_scheduled).
   data: text('data'),
+  // Issue #2112: private, server-only authority context for hidden encounter
+  // status rows. Never returned in the public Notification shape.
+  hiddenStatusContext: text('hidden_status_context'),
   actorName: text('actor_name').notNull().default(''),
   // Issue #597: WHO caused this row, as a note-identity id (String(users.id) or
   // `dev:<name>`). Until now only the display NAME was kept, so a recipient who later
@@ -1780,6 +1795,8 @@ export const notificationDigestQueue = sqliteTable('notification_digest_queue', 
   entityId: integer('entity_id'),
   commentId: integer('comment_id'),
   data: text('data'),
+  // Mirrors notifications.hidden_status_context while a row is deferred.
+  hiddenStatusContext: text('hidden_status_context'),
   actorName: text('actor_name').notNull().default(''),
   // Issue #597: carried through the deferral so a flushed digest row lands in
   // `notifications` with the same actor identity an immediate row would have had.
@@ -1787,6 +1804,29 @@ export const notificationDigestQueue = sqliteTable('notification_digest_queue', 
   reason: text('reason').notNull().default('digest'), // 'digest' | 'quiet_hours'
   createdAt: text('created_at').notNull(),
 });
+
+// Issue #1323 — one browser Push API subscription per opaque endpoint. The
+// endpoint is globally unique so signing into a different Campfire account in
+// the same browser transfers that browser subscription instead of notifying two
+// accounts. Encryption keys are the public subscription material produced by
+// PushManager; the VAPID private key remains environment-only.
+export const pushSubscriptions = sqliteTable(
+  'push_subscriptions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull(),
+    endpoint: text('endpoint').notNull(),
+    p256dh: text('p256dh').notNull(),
+    auth: text('auth').notNull(),
+    userAgent: text('user_agent').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    lastUsedAt: text('last_used_at'),
+  },
+  (t) => ({
+    endpoint: uniqueIndex('idx_push_subscriptions_endpoint').on(t.endpoint),
+    user: index('idx_push_subscriptions_user').on(t.userId),
+  }),
+);
 
 // Issue #789 — dedup ledger for scheduled-session reminders and unanswered-RSVP
 // nudges. One row per (schedule, user, kind) guarantees a reminder/nudge is sent

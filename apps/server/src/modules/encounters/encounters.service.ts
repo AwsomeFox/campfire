@@ -3,14 +3,14 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CampaignConditionDefinitions, CheckRollRequest, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, creatureCheckCatalogForAdapter, checkRollExpr, formatCheckBreakdown, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
   // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
   // the turn tick, the same pure math the resolver uses so this service can never decide a
   // pool recharges differently than an apply/reject message described it.
   parseRechargeRange,
   effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, CheckRollResponse, CreatureCheckCatalogInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollCheckDefinition, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaignMembers, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -34,7 +34,7 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor, roleAtLeast } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationsService, type NotificationEvent } from '../notifications/notifications.service';
 import { ActionResolverService } from './action-resolver.service';
 import {
   actionEconomySlotMax,
@@ -2044,6 +2044,135 @@ export class EncountersService {
       .limit(1);
     if (!row) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
     return row;
+  }
+
+  /**
+   * Returns the mechanics source for a monster/NPC combatant without widening the stored
+   * combatant contract. Inline statblocks are the live DM-authored snapshot; otherwise the
+   * linked, campaign-scoped compendium entry is authoritative. Missing/corrupt data is an
+   * empty catalog, never guessed 5e math.
+   */
+  private async creatureCheckData(
+    row: typeof combatants.$inferSelect,
+    campaignId: number,
+  ): Promise<CreatureCheckCatalogInput | null> {
+    if (row.statblockJson) {
+      const inline = CombatantStatblock.safeParse(fromJsonText(row.statblockJson, null));
+      if (inline.success) return { data: { abilityScores: inline.data.abilityScores }, abilityRepresentation: 'score' };
+    }
+    if (row.ruleEntryId == null) return null;
+    const [entry] = await this.db
+      .select({ dataJson: ruleEntries.dataJson })
+      .from(ruleEntries)
+      .where(and(eq(ruleEntries.id, row.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))))
+      .limit(1);
+    return entry?.dataJson ? { data: fromJsonText<Record<string, unknown>>(entry.dataJson, {}) } : null;
+  }
+
+  /** DM-only adapter-backed catalog for a creature combatant (issue #1314). */
+  async listCreatureChecks(
+    encounterId: number,
+    combatantId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<RollCheckDefinition[]> {
+    if (role !== 'dm') throw new ForbiddenException('Only the DM may view creature mechanics.');
+    const encounter = await this.getRowOrThrow(encounterId);
+    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+    if (combatant.kind === 'character') throw new BadRequestException('Creature checks require a monster or NPC combatant.');
+    const data = await this.creatureCheckData(combatant, encounter.campaignId);
+    if (!data) return [];
+    return creatureCheckCatalogForAdapter(await this.adapterForCampaign(encounter.campaignId), data);
+  }
+
+  /**
+   * Rolls an encounter creature check from its server-derived catalog. The persisted shared-log
+   * label deliberately identifies the creature and check but omits modifier breakdowns: players
+   * may see an allowed roll outcome without learning the DM-only statblock mechanics.
+   */
+  async rollCreatureCheck(
+    encounterId: number,
+    combatantId: number,
+    input: CheckRollRequest,
+    user: RequestUser,
+    role: Role,
+  ): Promise<CheckRollResponse> {
+    if (role !== 'dm') throw new ForbiddenException('Only the DM may roll creature mechanics.');
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+    if (combatant.kind === 'character') throw new BadRequestException('Creature checks require a monster or NPC combatant.');
+    const data = await this.creatureCheckData(combatant, encounter.campaignId);
+    const adapter = await this.adapterForCampaign(encounter.campaignId);
+    const def = data
+      ? creatureCheckCatalogForAdapter(adapter, data).find((check) => check.id === input.checkId) ?? null
+      : null;
+    if (!def) throw new NotFoundException(`No rollable creature check "${input.checkId}" for combatant ${combatantId}`);
+
+    const mode = input.mode ?? 'normal';
+    const result = rollDice(checkRollExpr(def, mode));
+    result.label = `${combatant.name} · ${def.label}`.slice(0, 120);
+    result.actor = combatant.name;
+    result.encounterId = encounterId;
+    const npcIdentityId = combatant.npcIdentitySourceId ?? combatant.npcId;
+    if (npcIdentityId != null) result.npcId = npcIdentityId;
+    if (typeof input.dc === 'number') {
+      result.dc = input.dc;
+      result.success = result.total >= input.dc;
+    }
+    // The shared dice feed must show that this creature rolled, but it cannot carry the
+    // statblock's private modifier in its expression, total, or term breakdown. Return the
+    // full result only to this DM request; persist a natural-die projection for everyone else.
+    const sharedResult: RollResult = {
+      expr: result.kept ? `2d${def.die}${mode === 'advantage' ? 'kh1' : 'kl1'}` : `1d${def.die}`,
+      rolls: result.rolls,
+      ...(result.kept ? { kept: result.kept } : {}),
+      total: result.kept?.[0] ?? result.rolls[0] ?? result.total,
+      ...(result.label ? { label: result.label } : {}),
+      ...(result.actor ? { actor: result.actor } : {}),
+      encounterId,
+      ...(npcIdentityId != null ? { npcId: npcIdentityId } : {}),
+    };
+    const persistedRoll = await this.rolls.record(encounter.campaignId, sharedResult, user);
+    const roll: DiceRoll = {
+      ...persistedRoll,
+      ...result,
+      id: persistedRoll.id,
+      campaignId: persistedRoll.campaignId,
+      rollerUserId: persistedRoll.rollerUserId,
+      rollerName: persistedRoll.rollerName,
+      createdAt: persistedRoll.createdAt,
+    };
+    const breakdownText = formatCheckBreakdown(def);
+    let degree: CheckRollResponse['degree'];
+    if (def.supportsDegrees && typeof input.dc === 'number') {
+      const naturalRoll = result.kept?.[0] ?? result.rolls[0];
+      degree = adapter.degreeOfSuccess?.(result.total, input.dc, naturalRoll);
+    }
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'dice.roll',
+      entityType: 'combatant',
+      entityId: combatantId,
+      campaignId: encounter.campaignId,
+      detail: `${combatant.name} · ${def.label} (${breakdownText}): ${result.expr} = ${result.total}`,
+    });
+    return {
+      check: {
+        id: def.id,
+        label: def.label,
+        category: def.category,
+        ability: def.ability,
+        proficiency: def.proficiency,
+        modifier: def.modifier,
+        breakdown: def.breakdown.map((term) => ({ label: term.label, value: term.value })),
+        breakdownText,
+      },
+      mode,
+      roll,
+      ...(degree ? { degree } : {}),
+    };
   }
 
   /**
@@ -4827,6 +4956,8 @@ export class EncountersService {
             // covering the row when an encounter is hidden AFTER the roll was persisted,
             // which a write-time check cannot.
             result.encounterId = encounterId;
+            result.combatantId = fresh.id;
+            result.characterId = fresh.characterId!;
             roll = this.rolls.recordInTransaction(tx, encounter.campaignId, result, user);
             // `updateCombatant` applies this server-only face after the hook returns.
             deathSavePatch.deathSaveRoll = result.total;
@@ -5135,13 +5266,39 @@ export class EncountersService {
     if (patch.isCrit && patch.damageDice === undefined) {
       throw new BadRequestException('Critical damage requires the dice-only damage subtotal');
     }
-    if (!isDm && patch.addConditions !== undefined && patch.addConditions.length > 0) {
-      const unknown = patch.addConditions.filter((c) => !isKnownCondition(adapter.conditions, c));
-      if (unknown.length > 0) {
-        throw new BadRequestException(
-          `Unknown condition(s) for this rule system: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
-            'Players may only add conditions from the active rule vocabulary; the DM may mint custom entries.',
-        );
+    if (!isDm) {
+      const updateRetainsExistingConditionName = patch.updateConditionInstance !== undefined &&
+        parseConditionInstances(existing.conditionInstances, fromJsonText<string[]>(existing.conditions, []))
+          .some((instance) =>
+            instance.id === patch.updateConditionInstance!.id &&
+            instance.name.trim().toLowerCase() === patch.updateConditionInstance!.name.trim().toLowerCase(),
+          );
+      const conditionNames = [
+        ...(patch.addConditions ?? []),
+        ...(patch.addConditionInstance ? [patch.addConditionInstance.name] : []),
+        ...(patch.updateConditionInstance && !updateRetainsExistingConditionName ? [patch.updateConditionInstance.name] : []),
+        ...(patch.conditionInstances?.map((instance) => instance.name) ?? []),
+      ];
+      // Most player patches (HP, token movement, or condition removal) do not
+      // introduce a condition name. Avoid a campaign read unless this patch needs
+      // the homebrew vocabulary to authorize a new or replacement condition.
+      if (conditionNames.length > 0) {
+        const [campaign] = await this.db
+          .select({ conditionDefinitions: campaigns.conditionDefinitions })
+          .from(campaigns)
+          .where(eq(campaigns.id, encounterRow.campaignId))
+          .limit(1);
+        const campaignConditionNames = CampaignConditionDefinitions.catch([])
+          .parse(fromJsonText<unknown>(campaign?.conditionDefinitions ?? null, []))
+          .map((definition) => definition.name);
+        const vocabulary = [...adapter.conditions, ...campaignConditionNames];
+        const unknown = conditionNames.filter((c) => !isKnownCondition(vocabulary, c));
+        if (unknown.length > 0) {
+          throw new BadRequestException(
+            `Unknown condition(s) for this campaign: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
+              'Players may only add conditions from the active rule vocabulary or the campaign definitions; the DM may mint custom entries.',
+          );
+        }
       }
     }
 
@@ -5501,7 +5658,31 @@ export class EncountersService {
               // Update a single instance by id; ignore if not present (no-op).
               const upd = patch.updateConditionInstance;
               const updIdx = instances.findIndex((i) => i.id === upd.id);
-              if (updIdx >= 0) instances[updIdx] = upd;
+              if (updIdx >= 0) {
+                if (!isDm) {
+                  const existingNameMatch =
+                    instances[updIdx].name.trim().toLowerCase() === upd.name.trim().toLowerCase();
+                  if (!existingNameMatch) {
+                    const [campaign] = tx
+                      .select({ conditionDefinitions: campaigns.conditionDefinitions })
+                      .from(campaigns)
+                      .where(eq(campaigns.id, freshEncounter.campaignId))
+                      .limit(1)
+                      .all();
+                    const campaignConditionNames = CampaignConditionDefinitions.catch([])
+                      .parse(fromJsonText<unknown>(campaign?.conditionDefinitions ?? null, []))
+                      .map((definition) => definition.name);
+                    const vocabulary = [...adapter.conditions, ...campaignConditionNames];
+                    if (!isKnownCondition(vocabulary, upd.name)) {
+                      throw new BadRequestException(
+                        `Unknown condition for this campaign: ${JSON.stringify(upd.name)}. ` +
+                          'Players may only add conditions from the active rule vocabulary or the campaign definitions; the DM may mint custom entries.',
+                      );
+                    }
+                  }
+                }
+                instances[updIdx] = upd;
+              }
             }
             if (patch.removeConditionInstanceId !== undefined) {
               // Remove only the targeted instance — not all instances with the same name.
@@ -6101,7 +6282,7 @@ export class EncountersService {
 
     if (row.kind === 'character' && row.characterId) {
       if (beforeDeath !== 'dead' && afterDeath === 'dead') {
-        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+        this.notifyCharacterStatusChange(encounterRow, row.characterId, user, {
           type: 'character_downed',
           title: 'Character died!',
           body: `${row.name} has died in combat.`,
@@ -6109,7 +6290,7 @@ export class EncountersService {
           entityId: encounterId,
         }).catch(() => {});
       } else if (beforeHp > 0 && afterHp === 0 && afterDeath !== 'dead') {
-        this.notifications.notifyCampaign(encounterRow.campaignId, user, {
+        this.notifyCharacterStatusChange(encounterRow, row.characterId, user, {
           type: 'character_downed',
           title: 'Character downed!',
           body: `${row.name} was downed in combat.`,
@@ -6121,6 +6302,108 @@ export class EncountersService {
 
     const domain = combatantToDomain(row);
     return isDm ? domain : redactMonsterHp(domain, encounterRow.monsterHpDisplay as MonsterHpDisplay, user.id);
+  }
+
+  /**
+   * Hidden encounters are wholesale DM-only to non-DMs, so a notification with
+   * their id or a character's status is itself secret. The character owner is
+   * the sole non-DM recipient entitled to that personal status, but receives no
+   * encounter deep-link or id; permanent DM members retain their normal
+   * campaign-management payload. A temporary guest/co-DM grant deliberately
+   * does not receive a durable hidden-status row: notifications and digests
+   * can outlive a grant's revocation, handback, or expiry, while the guest can
+   * inspect the hidden encounter directly for the grant's active lifetime.
+   * A visible fan-out is guarded at its durable-write boundary, so a
+   * concurrent hide cannot turn it into an id leak. Visible encounters keep
+   * the established whole-campaign fan-out.
+   */
+  private async notifyCharacterStatusChange(
+    encounterRow: Pick<typeof encounters.$inferSelect, 'id' | 'campaignId'>,
+    characterId: number,
+    user: RequestUser,
+    event: NotificationEvent,
+  ): Promise<void> {
+    if (await this.notifications.notifyCampaignIfEncounterVisible(encounterRow.campaignId, encounterRow.id, characterId, user, event)) {
+      return;
+    }
+
+    const [character] = await this.db
+      .select({ ownerUserId: characters.ownerUserId })
+      .from(characters)
+      .where(and(eq(characters.id, characterId), eq(characters.campaignId, encounterRow.campaignId)))
+      .limit(1);
+    const roles = await this.notifications.memberRoles(encounterRow.campaignId);
+    const narrowlyDelivered = new Set<number>();
+    let retriedVisibleFanout = false;
+    const deliverNarrow = async (send: () => ReturnType<NotificationsService['notifyUserIfHiddenEncounterRecipient']>) => {
+      let outcome = await send();
+      if (outcome === 'visible' && !retriedVisibleFanout) {
+        retriedVisibleFanout = true;
+        if (await this.notifications.notifyCampaignIfEncounterVisible(
+          encounterRow.campaignId,
+          encounterRow.id,
+          characterId,
+          user,
+          event,
+          narrowlyDelivered,
+        )) return { outcome, broadDelivered: true };
+        // One terminal narrow recheck after the one-shot broad retry; never
+        // recurse or attempt another broad fan-out if visibility flips again.
+        outcome = await send();
+      }
+      return { outcome, broadDelivered: false };
+    };
+    const deliverRecipient = async (memberId: number, memberRole: string, isOwner: boolean): Promise<boolean> => {
+      const isDm = memberRole === 'dm';
+      if ((!isDm && !isOwner) || narrowlyDelivered.has(memberId)) return false;
+      // The player may learn their character's state, but a hidden encounter
+      // remains a DM-only entity and must not become a notification deep-link.
+      const recipientEvent = isDm ? event : { ...event, entityType: null, entityId: null };
+      const primary = await deliverNarrow(() => this.notifications.notifyUserIfHiddenEncounterRecipient(
+        memberId,
+        encounterRow.campaignId,
+        user,
+        recipientEvent,
+        isDm ? { kind: 'permanent_dm', characterId } : { kind: 'character_owner', characterId },
+        encounterRow.id,
+      ));
+      if (primary.broadDelivered) return true;
+      if (primary.outcome === 'delivered') narrowlyDelivered.add(memberId);
+      // A recipient can legitimately hold both authorities. If their DM
+      // membership changed after discovery, retry only their personal-status
+      // payload under the independently revalidated ownership authority.
+      if (primary.outcome === 'skipped' && isDm && isOwner) {
+        const owner = await deliverNarrow(() => this.notifications.notifyUserIfHiddenEncounterRecipient(
+          memberId,
+          encounterRow.campaignId,
+          user,
+          { ...event, entityType: null, entityId: null },
+          { kind: 'character_owner', characterId },
+          encounterRow.id,
+        ));
+        if (owner.broadDelivered) return true;
+        if (owner.outcome === 'delivered') narrowlyDelivered.add(memberId);
+      }
+      return false;
+    };
+    for (const [memberId, memberRole] of roles) {
+      if (await deliverRecipient(memberId, memberRole, String(memberId) === character?.ownerUserId)) return;
+    }
+
+    // Membership and ownership can both change between the initial recipient
+    // discovery and an awaited guarded write. Re-resolve them once after the
+    // first pass so a newly appointed permanent DM or current character owner
+    // gets the same transaction-bound delivery attempt. `narrowlyDelivered`
+    // prevents duplicate rows, and this bounded second pass never recurses.
+    const [currentCharacter] = await this.db
+      .select({ ownerUserId: characters.ownerUserId })
+      .from(characters)
+      .where(and(eq(characters.id, characterId), eq(characters.campaignId, encounterRow.campaignId)))
+      .limit(1);
+    const currentRoles = await this.notifications.memberRoles(encounterRow.campaignId);
+    for (const [memberId, memberRole] of currentRoles) {
+      if (await deliverRecipient(memberId, memberRole, String(memberId) === currentCharacter?.ownerUserId)) return;
+    }
   }
 
   async removeCombatant(encounterId: number, combatantId: number, user: RequestUser, role: Role, idempotencyKey?: string): Promise<CombatantRemoveResult> {
@@ -6747,7 +7030,15 @@ export class EncountersService {
       // (both modes) lets the same read path drop the whole row if the ENCOUNTER itself is
       // later hidden — mirroring the write-time rule right below that a hidden encounter's
       // roll must never reach the campaign-wide log in the first place.
-      const diceLogEntries: Array<{ label: string; expr: string; rolls: number[]; total: number; npcId?: number }> = [];
+      const diceLogEntries: Array<{
+        label: string;
+        expr: string;
+        rolls: number[];
+        total: number;
+        npcId?: number;
+        characterId?: number;
+        combatantId?: number;
+      }> = [];
 
       if (initModel.mode === 'group') {
         // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
@@ -6802,6 +7093,8 @@ export class EncountersService {
             expr: initiativeRollExpr(adapter.initiativeDie, row.initMod),
             rolls: [natural],
             total: initiative,
+            combatantId: row.id,
+            ...(row.characterId != null ? { characterId: row.characterId } : {}),
             ...(row.kind === 'npc' && diceLogNpcId !== null ? { npcId: diceLogNpcId } : {}),
           });
           return { id: row.id, initiative, breakdown, name: row.name };
@@ -6824,6 +7117,8 @@ export class EncountersService {
               label: entry.label,
               source: 'rolled',
               encounterId,
+              ...(entry.combatantId !== undefined ? { combatantId: entry.combatantId } : {}),
+              ...(entry.characterId !== undefined ? { characterId: entry.characterId } : {}),
               ...(entry.npcId !== undefined ? { npcId: entry.npcId } : {}),
             },
             user,
@@ -7214,6 +7509,8 @@ export class EncountersService {
               label,
               source: 'rolled',
               encounterId,
+              combatantId: freshCombatant.id,
+              ...(freshCombatant.characterId != null ? { characterId: freshCombatant.characterId } : {}),
               ...(freshCombatant.kind === 'npc' && npcIdentityId !== null ? { npcId: npcIdentityId } : {}),
             },
             user,
@@ -9926,6 +10223,25 @@ export class EncountersService {
    * clients keep working unchanged.
    */
   async rollDiceForCampaign(campaignId: number, input: RollRequestInput, user: RequestUser, role: Role): Promise<DiceRoll> {
+    let characterId: number | undefined;
+    if (input.characterId !== undefined) {
+      // The public request may identify a sheet, but identity is trusted only after
+      // re-resolving it in this campaign and applying the same dm-or-owner rule as a
+      // catalog check. Encounter/combatant context remains server-only.
+      const [character] = await this.db
+        .select({ id: characters.id, campaignId: characters.campaignId, ownerUserId: characters.ownerUserId })
+        .from(characters)
+        .where(and(eq(characters.id, input.characterId), notDeleted(characters.deletedAt)))
+        .limit(1);
+      if (!character || character.campaignId !== campaignId) {
+        throw new NotFoundException(`Character ${input.characterId} not found`);
+      }
+      if (role === 'viewer' || (role !== 'dm' && character.ownerUserId !== user.id)) {
+        throw new ForbiddenException('Only dm or the owning player may roll for this character');
+      }
+      characterId = character.id;
+    }
+
     const result = rollDice(input.expr);
     // Optional check context (issue #130): echo the label and compute success server-side
     // so every member's feed shows the same pass/fail, not a client's interpretation.
@@ -9935,6 +10251,8 @@ export class EncountersService {
       result.dc = input.dc;
       result.success = result.total >= input.dc;
     }
+    if (characterId !== undefined) result.characterId = characterId;
+    result.visibility = input.visibility ?? 'party_shared';
     const persisted = await this.rolls.record(campaignId, result, user);
 
     await this.audit.log({
@@ -9944,9 +10262,13 @@ export class EncountersService {
       entityType: null,
       entityId: null,
       campaignId,
+      // #1511: a private roll remains attributable (actor/action/campaign), but its
+      // contents must not enter the DM-visible audit/export surface.
       detail:
-        `${result.label ? `${result.label}: ` : ''}${result.expr} = ${result.total}` +
-        (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'})` : ''),
+        result.visibility === 'private'
+          ? 'private roll'
+          : `${result.label ? `${result.label}: ` : ''}${result.expr} = ${result.total}` +
+            (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'})` : ''),
     });
 
     return persisted;
@@ -10093,6 +10415,8 @@ export class EncountersService {
         actor: diceActor,
         natural20: isNat20 ? 1 : 0,
         encounterId,
+        ...(combatantRow ? { combatantId: combatantRow.id } : {}),
+        ...(combatantRow?.characterId != null ? { characterId: combatantRow.characterId } : {}),
         ...(combatantRow?.kind === 'npc' && npcIdentityId !== null
           ? { npcId: npcIdentityId }
           : {}),
