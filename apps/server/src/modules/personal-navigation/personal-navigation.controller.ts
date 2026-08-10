@@ -19,6 +19,20 @@ function numericUserId(id: string | number): number {
   return n;
 }
 
+/**
+ * Parse the optional `?campaignId=` scope. Absent → undefined (no scope). A
+ * present-but-invalid value is a 400 rather than silently behaving like "no
+ * scope" (which would hide client bugs behind an empty list / no-op clear).
+ */
+function optionalCampaignId(raw: string | undefined): number | undefined {
+  if (raw == null || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new BadRequestException('campaignId must be a positive integer.');
+  }
+  return n;
+}
+
 @ApiTags('personal-navigation')
 @Controller('me/bookmarks')
 export class BookmarksController {
@@ -35,8 +49,7 @@ export class BookmarksController {
   @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Scope to one campaign.' })
   @ApiResponse({ status: 200, description: 'Filtered bookmark list.' })
   async list(@Query('campaignId') campaignId: string | undefined, @CurrentUser() user: RequestUser): Promise<BookmarksResponse> {
-    const cid = campaignId != null && campaignId !== '' ? Number(campaignId) : undefined;
-    return this.nav.listBookmarks(numericUserId(user.id), user, cid);
+    return this.nav.listBookmarks(numericUserId(user.id), user, optionalCampaignId(campaignId));
   }
 
   @Post()
@@ -81,8 +94,7 @@ export class RecentHistoryController {
   @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Scope to one campaign.' })
   @ApiResponse({ status: 200, description: 'Filtered, bounded recent-history list.' })
   async list(@Query('campaignId') campaignId: string | undefined, @CurrentUser() user: RequestUser): Promise<RecentHistoryResponse> {
-    const cid = campaignId != null && campaignId !== '' ? Number(campaignId) : undefined;
-    return this.nav.listRecent(numericUserId(user.id), user, cid);
+    return this.nav.listRecent(numericUserId(user.id), user, optionalCampaignId(campaignId));
   }
 
   @Post()
@@ -112,7 +124,6 @@ export class RecentHistoryController {
   @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Scope the clear to one campaign.' })
   @ApiResponse({ status: 204, description: 'Recent history cleared.' })
   async clear(@Query('campaignId') campaignId: string | undefined, @CurrentUser() user: RequestUser): Promise<void> {
-    const cid = campaignId != null && campaignId !== '' ? Number(campaignId) : undefined;
-    await this.nav.clearRecent(numericUserId(user.id), user, cid);
+    await this.nav.clearRecent(numericUserId(user.id), user, optionalCampaignId(campaignId));
   }
 }

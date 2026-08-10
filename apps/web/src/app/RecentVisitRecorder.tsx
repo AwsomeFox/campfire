@@ -7,7 +7,7 @@
  * the UI (recent history is best-effort personal read-state).
  */
 import { useEffect, useRef } from 'react';
-import { useLocation, useParams } from 'react-router-dom';
+import { useLocation, useParams, useSearchParams } from 'react-router-dom';
 import type { BookmarkEntityType } from '@campfire/schema';
 import { recordVisit } from '../lib/personalNavigation';
 
@@ -24,24 +24,39 @@ const SEGMENT_TO_TYPE: Record<string, BookmarkEntityType> = {
 export function RecentVisitRecorder() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const { pathname } = useLocation();
+  const [searchParams] = useSearchParams();
   const lastKey = useRef<string>('');
 
   useEffect(() => {
     const cid = Number(campaignId);
     if (!Number.isInteger(cid) || cid <= 0) return;
+
     // Detail pages follow /c/:campaignId/<segment>/<id>; 'new' and non-numeric ids
     // are create forms, not views, and are skipped.
     const match = pathname.match(/^\/c\/\d+\/(quests|npcs|factions|locations|characters|encounters)\/(\d+)$/);
-    if (!match) return;
-    const entityType = SEGMENT_TO_TYPE[match[1]];
-    const entityId = Number(match[2]);
+    // Sessions are viewed inside the sessions list page via ?session=<id> (there is
+    // no /sessions/:id route), so they are matched off the query string instead.
+    const sessionId = pathname.match(/^\/c\/\d+\/sessions$/) ? searchParams.get('session') : null;
+    const sessionIdN = sessionId != null && /^\d+$/.test(sessionId) ? Number(sessionId) : null;
+
+    let entityType: BookmarkEntityType | null = null;
+    let entityId: number | null = null;
+    if (match) {
+      entityType = SEGMENT_TO_TYPE[match[1]];
+      entityId = Number(match[2]);
+    } else if (sessionIdN != null) {
+      entityType = 'session';
+      entityId = sessionIdN;
+    }
+    if (!entityType || !entityId) return;
+
     const key = `${cid}:${entityType}:${entityId}`;
     if (key === lastKey.current) return;
     lastKey.current = key;
     void recordVisit({ campaignId: cid, entityType, entityId }).catch(() => {
       /* best-effort: an inaccessible/failed visit is silently dropped */
     });
-  }, [campaignId, pathname]);
+  }, [campaignId, pathname, searchParams]);
 
   return null;
 }

@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, notInArray } from 'drizzle-orm';
 import {
   type Bookmark,
   type BookmarkEntityType,
@@ -141,7 +141,9 @@ export class PersonalNavigationService {
           ? and(eq(userBookmarks.userId, userId), eq(userBookmarks.campaignId, campaignId))
           : eq(userBookmarks.userId, userId),
       )
-      .orderBy(asc(userBookmarks.createdAt), asc(userBookmarks.id));
+      // Newest first so the display cap below keeps the most-recently-saved bookmarks
+      // rather than silently dropping them in favor of older ones.
+      .orderBy(desc(userBookmarks.createdAt), desc(userBookmarks.id));
     const targets = rows.map((r) => ({
       row: r,
       target: { campaignId: r.campaignId, entityType: r.entityType as BookmarkEntityType, entityId: r.entityId },
@@ -153,9 +155,15 @@ export class PersonalNavigationService {
   // ---------- recent history ----------
 
   async recordVisit(userId: number, target: Target, user: RequestUser): Promise<void> {
-    // Throws 403/404 if the caller is not a member or cannot currently see the
-    // target — never logs a visit to an inaccessible entity.
-    await this.requireVisibleTarget(target, user);
+    // Membership gate only (cheap): a visit is high-frequency, best-effort personal
+    // read-state. It does NOT pre-resolve target visibility the way addBookmark does
+    // — instead the read path (listRecent) drops any target the caller can't
+    // currently see, so a visit to a hidden/just-inaccessible entity is recorded
+    // privately but never returned. That keeps the hot path off the entity lists
+    // (see requireVisibleTarget) without weakening secrecy: nothing inaccessible is
+    // ever surfaced, and the per-(user,campaign) row cap bounds storage.
+    const role = await this.access.effectiveRole(user, target.campaignId);
+    if (!role) throw new ForbiddenException('Not a member of this campaign');
     const now = nowIso();
     await this.db
       .insert(userRecentViews)
@@ -347,18 +355,30 @@ export class PersonalNavigationService {
     return row;
   }
 
-  /** Keep recent views bounded per (user, campaign), dropping the oldest beyond the cap. */
+  /**
+   * Keep recent views bounded per (user, campaign) in a single statement: delete
+   * every row for this scope whose id is NOT among the newest
+   * MAX_RECENT_PER_CAMPAIGN (by visitedAt, then id). Self-correcting — when the
+   * scope already fits the cap the subquery returns every id and nothing is
+   * deleted — and the table is bounded at the cap, so the subquery scans a small,
+   * indexed range.
+   */
   private async trimRecent(userId: number, campaignId: number): Promise<void> {
-    const ordered = await this.db
+    const keep = this.db
       .select({ id: userRecentViews.id })
       .from(userRecentViews)
       .where(and(eq(userRecentViews.userId, userId), eq(userRecentViews.campaignId, campaignId)))
       .orderBy(desc(userRecentViews.visitedAt), desc(userRecentViews.id))
-      .all();
-    if (ordered.length <= MAX_RECENT_PER_CAMPAIGN) return;
-    const toDelete = ordered.slice(MAX_RECENT_PER_CAMPAIGN).map((r) => r.id);
-    for (const id of toDelete) {
-      await this.db.delete(userRecentViews).where(eq(userRecentViews.id, id)).run();
-    }
+      .limit(MAX_RECENT_PER_CAMPAIGN);
+    await this.db
+      .delete(userRecentViews)
+      .where(
+        and(
+          eq(userRecentViews.userId, userId),
+          eq(userRecentViews.campaignId, campaignId),
+          notInArray(userRecentViews.id, keep),
+        ),
+      )
+      .run();
   }
 }

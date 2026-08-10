@@ -179,11 +179,21 @@ describe('personal navigation: bookmarks + recent history (#840, e2e)', () => {
     expect(after.body.items.length).toBe(0);
   });
 
-  it('never records a visit to an inaccessible entity', async () => {
+  it('records a visit to a now-hidden target but never lists it (read-time secrecy)', async () => {
+    // recordVisit is membership-only by design (best-effort, hot path): a visit to
+    // a hidden entity is recorded privately, then dropped by the read-time filter.
     const hidden = await playerAgent
       .post('/api/v1/me/recent')
       .send({ campaignId, entityType: 'quest', entityId: hiddenQuestId });
-    expect(hidden.status).toBe(404);
+    expect(hidden.status).toBe(204);
+    const list = await playerAgent.get(`/api/v1/me/recent?campaignId=${campaignId}`);
+    expect(list.body.items.some((i: { entityId: number }) => i.entityId === hiddenQuestId)).toBe(false);
+  });
+
+  it('rejects an invalid campaignId scope with 400 rather than silently empty-listing', async () => {
+    expect((await playerAgent.get(`/api/v1/me/bookmarks?campaignId=not-a-number`)).status).toBe(400);
+    expect((await playerAgent.get(`/api/v1/me/recent?campaignId=-3`)).status).toBe(400);
+    expect((await playerAgent.delete(`/api/v1/me/recent?campaignId=1.5`)).status).toBe(400);
   });
 });
 
