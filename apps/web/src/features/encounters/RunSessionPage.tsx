@@ -4414,6 +4414,7 @@ export default function RunSessionPage() {
       {isViewer && (
         <div
           role="status"
+          aria-live="polite"
           data-testid="viewer-read-only-banner"
           className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
         >
