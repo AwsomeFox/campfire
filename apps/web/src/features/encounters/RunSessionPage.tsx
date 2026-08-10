@@ -868,7 +868,15 @@ export default function RunSessionPage() {
   const activeAdapter = useMemo(() => ruleSystemAdapter(ruleSystem, campaign?.customMechanicsProfile), [ruleSystem, campaign?.customMechanicsProfile]);
   const isStarfinder = activeAdapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const isArchmage = activeAdapter.id === ARCHMAGE_ADAPTER_ID;
-  const conditionSuggestions = useMemo(() => [...activeAdapter.conditions], [activeAdapter]);
+  const conditionSuggestions = useMemo(() => {
+    const seen = new Set<string>();
+    return [...activeAdapter.conditions, ...(campaign?.conditionDefinitions ?? []).map((definition) => definition.name)].filter((name) => {
+      const canonical = name.toLowerCase();
+      if (seen.has(canonical)) return false;
+      seen.add(canonical);
+      return true;
+    });
+  }, [activeAdapter, campaign?.conditionDefinitions]);
   // Issue #1910 review: the vitals header's speed fallback must read the ACTIVE
   // campaign's own adapter default, not a hardcoded 30 — a system without a
   // movement slot at all (e.g. PF2e) has no adapter default to fall back to.
@@ -5223,6 +5231,7 @@ export default function RunSessionPage() {
                       }
                       busy={pendingCombatantIds.has(c.id) || reconcileBlocks}
                       conditionSuggestions={conditionSuggestions}
+                      conditionDefinitions={campaign?.conditionDefinitions}
                       conditionSourceOptions={canDmWrite ? orderedCombatants.map((source) => ({ id: source.id, name: source.name })) : [{ id: c.id, name: c.name }]}
                       defaultConditionSourceCombatantId={currentCombatantId ?? c.id}
                       ruleSystem={ruleSystem}

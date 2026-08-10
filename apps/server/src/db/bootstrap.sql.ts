@@ -141,6 +141,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   enabled_pack_slugs TEXT NOT NULL DEFAULT '[]',
   -- Issue #1502: per-campaign homebrew mechanics profile (JSON), or NULL when unset.
   custom_mechanics_profile TEXT,
+  -- Issue #1505: campaign-owned condition templates (JSON array).
+  condition_definitions TEXT NOT NULL DEFAULT '[]',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,
   ics_token_expires_at TEXT,

@@ -298,6 +298,33 @@ describe('CombatantRow condition-tag rules hints (issue #1939)', () => {
   });
 });
 
+describe('CombatantRow campaign condition definitions (issue #1505)', () => {
+  test('a campaign definition is offered as a quick condition and prefills its structured instance', () => {
+    const onPatchCombatant = vi.fn();
+    renderRow({
+      canEditPermission: true,
+      conditionSuggestions: ['Frostbite'],
+      conditionDefinitions: [{
+        name: 'Frostbite', durationRounds: 3, timing: 'end-of-turn', saveTiming: 'end-of-turn',
+        saveAbility: 'CON', saveDc: 14, isConcentration: false, stacks: 1, notes: 'Save ends',
+      }],
+      onPatchCombatant,
+    });
+
+    fireEvent.click(screen.getByTestId('add-condition-toggle-101'));
+    fireEvent.click(screen.getByRole('button', { name: 'Frostbite' }));
+
+    expect(onPatchCombatant).toHaveBeenCalledWith(
+      expect.objectContaining({
+        addConditionInstance: expect.objectContaining({
+          name: 'Frostbite', durationRounds: 3, roundsRemaining: 3, saveTiming: 'end-of-turn', saveAbility: 'CON', saveDc: 14, notes: 'Save ends', custom: false,
+        }),
+      }),
+      1,
+    );
+  });
+});
+
 /**
  * Mount-gate coverage for the DM Award control (issue #1944).
  *

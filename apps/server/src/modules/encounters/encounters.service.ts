@@ -3,7 +3,7 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CheckRollRequest, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, creatureCheckCatalogForAdapter, checkRollExpr, formatCheckBreakdown, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CampaignConditionDefinitions, CheckRollRequest, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, creatureCheckCatalogForAdapter, checkRollExpr, formatCheckBreakdown, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
   // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
   // the turn tick, the same pure math the resolver uses so this service can never decide a
   // pool recharges differently than an apply/reject message described it.
@@ -5225,6 +5225,14 @@ export class EncountersService {
       }
     }
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const [campaign] = await this.db
+      .select({ conditionDefinitions: campaigns.conditionDefinitions })
+      .from(campaigns)
+      .where(eq(campaigns.id, encounterRow.campaignId))
+      .limit(1);
+    const campaignConditionNames = CampaignConditionDefinitions.catch([])
+      .parse(fromJsonText<unknown>(campaign?.conditionDefinitions ?? null, []))
+      .map((definition) => definition.name);
     // Issue #1670: the SAME lookup the character sheet's adjustConditionLevel uses
     // (characters.service.ts), not a second constant or a duplicated cap — that
     // duplication is exactly what let this drift in the first place. `undefined` for
@@ -5266,12 +5274,19 @@ export class EncountersService {
     if (patch.isCrit && patch.damageDice === undefined) {
       throw new BadRequestException('Critical damage requires the dice-only damage subtotal');
     }
-    if (!isDm && patch.addConditions !== undefined && patch.addConditions.length > 0) {
-      const unknown = patch.addConditions.filter((c) => !isKnownCondition(adapter.conditions, c));
+    if (!isDm) {
+      const conditionNames = [
+        ...(patch.addConditions ?? []),
+        ...(patch.addConditionInstance ? [patch.addConditionInstance.name] : []),
+        ...(patch.updateConditionInstance ? [patch.updateConditionInstance.name] : []),
+        ...(patch.conditionInstances?.map((instance) => instance.name) ?? []),
+      ];
+      const vocabulary = [...adapter.conditions, ...campaignConditionNames];
+      const unknown = conditionNames.filter((c) => !isKnownCondition(vocabulary, c));
       if (unknown.length > 0) {
         throw new BadRequestException(
-          `Unknown condition(s) for this rule system: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
-            'Players may only add conditions from the active rule vocabulary; the DM may mint custom entries.',
+          `Unknown condition(s) for this campaign: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
+            'Players may only add conditions from the active rule vocabulary or the campaign definitions; the DM may mint custom entries.',
         );
       }
     }

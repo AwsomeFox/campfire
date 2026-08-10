@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useReducer, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { ActionSpec, Character, Combatant, TokenSize, CustomMechanicsProfile, UsableAction } from '@campfire/schema';
+import type { ActionSpec, CampaignConditionDefinition, Character, Combatant, TokenSize, CustomMechanicsProfile, UsableAction } from '@campfire/schema';
 import { defaultCombatantStatblock, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, ruleSystemAdapter, STARFINDER_ADAPTER_ID } from '@campfire/schema';
 import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
@@ -22,7 +22,7 @@ import { FloatingNumbers } from '../FloatingNumbers';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { DEATH_STATE_LABEL, DeathSaveTracker } from './DeathSaves';
 import type { DeathSaveOutcome } from './deathSaveOutcome';
-import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, conditionDraftFromInstance, conditionSourceLabel, emptyConditionDraft, type ConditionDraft, type ConditionSourceOption, type ConditionTiming } from './conditionDraft';
+import { CONDITION_TIMING_OPTIONS, SAVE_TIMING_OPTIONS, buildConditionInstance, conditionDraftFromDefinition, conditionDraftFromInstance, conditionSourceLabel, emptyConditionDraft, type ConditionDraft, type ConditionSourceOption, type ConditionTiming } from './conditionDraft';
 import { initialStatblockDraftState, statblockDraftReducer, statblockPatchForCommit } from './combatantStatblockDraft';
 import { RulesHintPopover } from '../../../components/RulesHintPopover';
 import { conditionHintKey, rulesHintCompendiumHref } from '../../../lib/rulesHints';
@@ -119,8 +119,10 @@ export type CombatantRowProps = {
    *  gating as `onUseMonsterAction`, plus the fetched `UsableAction` row itself. */
   onUseGroupAction?: (actionIndex: number, actionName: string, spec: ActionSpec, action: UsableAction) => void;
   busy: boolean;
-  /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
+  /** Condition chips offered by the adapter and campaign-owned definitions (issue #1505). */
   conditionSuggestions: readonly string[];
+  /** Campaign-owned templates used to prefill a selected custom-condition instance. */
+  conditionDefinitions?: readonly CampaignConditionDefinition[];
   /** Visible combatants that may be recorded as the source/caster of a condition (issue #423). */
   conditionSourceOptions: readonly ConditionSourceOption[];
   /** Best default source for new conditions: usually the current turn actor. */
@@ -266,6 +268,7 @@ export const CombatantRow = memo(function CombatantRow({
   onUseGroupAction,
   busy,
   conditionSuggestions,
+  conditionDefinitions = [],
   conditionSourceOptions,
   defaultConditionSourceCombatantId,
   ruleSystem,
@@ -430,6 +433,11 @@ export const CombatantRow = memo(function CombatantRow({
     setEditingConditionId(null);
     setShowFullCondition(false);
     setAddingCondition(false);
+  }
+
+  function draftForConditionName(name: string, sourceCombatantId = defaultConditionSourceCombatantId): ConditionDraft {
+    const definition = conditionDefinitions.find((candidate) => candidate.name.toLowerCase() === name.trim().toLowerCase());
+    return definition ? conditionDraftFromDefinition(definition, sourceCombatantId) : { ...emptyConditionDraft(sourceCombatantId), name };
   }
   // Draft of the initiative field (DM only). Kept local so typing doesn't fire a
   // PATCH per keystroke — committed on blur / Enter.
@@ -1321,7 +1329,7 @@ export const CombatantRow = memo(function CombatantRow({
                       disabled={busy || syncBlocked}
                       style={{ fontSize: 'var(--type-label)' }}
                       onClick={() => {
-                        const instance = buildConditionInstance({ ...emptyConditionDraft(defaultConditionSourceCombatantId), name: s }, conditionSuggestions, combatant.conditionInstances ?? [], undefined);
+                        const instance = buildConditionInstance(draftForConditionName(s), conditionSuggestions, combatant.conditionInstances ?? [], undefined);
                         if (!instance) return;
                         if (onPatchCombatant) {
                           onPatchCombatant({ addConditionInstance: instance }, encounterId);
@@ -1364,7 +1372,16 @@ export const CombatantRow = memo(function CombatantRow({
                     disabled={busy}
                     autoFocus
                     placeholder="Known or custom condition"
-                    onChange={(e) => setConditionDraft((prev) => ({ ...prev, name: e.target.value }))}
+                    onChange={(e) => {
+                      const definition = conditionDefinitions.find(
+                        (candidate) => candidate.name.toLowerCase() === e.target.value.trim().toLowerCase(),
+                      );
+                      setConditionDraft((prev) =>
+                        definition
+                          ? { ...conditionDraftFromDefinition(definition, prev.sourceCombatantId ? Number(prev.sourceCombatantId) : null), source: prev.source, ruleEntryId: prev.ruleEntryId }
+                          : { ...prev, name: e.target.value },
+                      );
+                    }}
                   />
                   <datalist id={`condition-vocab-${combatant.id}`}>
                     {conditionSuggestions.map((s) => (
@@ -1536,7 +1553,7 @@ export const CombatantRow = memo(function CombatantRow({
                       className="btn btn-ghost"
                       disabled={busy}
                       style={{ fontSize: 'var(--type-label)' }}
-                      onClick={() => setConditionDraft((prev) => ({ ...prev, name: s }))}
+                      onClick={() => setConditionDraft((prev) => ({ ...draftForConditionName(s, prev.sourceCombatantId ? Number(prev.sourceCombatantId) : null), source: prev.source, ruleEntryId: prev.ruleEntryId }))}
                     >
                       {s}
                     </button>

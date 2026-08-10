@@ -52,6 +52,9 @@ export const campaigns = sqliteTable('campaigns', {
   // that is NOT a built-in registered adapter — enforced in CampaignsService, not here. NULL in
   // every campaign that predates this column; see db/db.module.ts ALTER TABLE note.
   customMechanicsProfile: text('custom_mechanics_profile'),
+  // Issue #1505: JSON campaign-owned condition templates. A definition is not an
+  // applied condition; it supplies the member-visible vocabulary and picker defaults.
+  conditionDefinitions: text('condition_definitions').notNull().default('[]'),
   // Attachment (kind='map') rendered as the campaign map background on Dashboard/Location detail.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   mapAttachmentId: integer('map_attachment_id'),

@@ -51,6 +51,8 @@ describe('encounters (e2e)', () => {
 
     const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Encounter Campaign' });
     campaignId = campRes.body.id;
+    // Omitted campaign definitions preserve the adapter-only vocabulary for existing callers.
+    expect(campRes.body.conditionDefinitions).toEqual([]);
 
     // Party member with DEX 16 (mod +3), owned by "dev:p-1" (see character ownership
     // convention: dev-header players carry serverRole admin but ownerUserId is still set
@@ -679,6 +681,56 @@ describe('encounters (e2e)', () => {
         .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
         .set(player)
         .send({ removeConditions: ['prone'] });
+    });
+
+    it('a DM-defined campaign condition can be applied by its owning player with structured defaults (issue #1505)', async () => {
+      const server = ctx.app.getHttpServer();
+      const definition = {
+        name: 'Frostbite',
+        durationRounds: 3,
+        timing: 'end-of-turn',
+        saveTiming: 'end-of-turn',
+        saveAbility: 'CON',
+        saveDc: 14,
+        isConcentration: false,
+        stacks: 1,
+        notes: 'Save ends',
+      };
+      const campaign = await request(server)
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .set(dm)
+        .send({ conditionDefinitions: [definition] });
+      expect(campaign.status).toBe(200);
+      expect(campaign.body.conditionDefinitions).toEqual([definition]);
+
+      const added = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({
+          addConditionInstance: {
+            id: 'frostbite-player',
+            name: 'Frostbite',
+            durationRounds: 3,
+            roundsRemaining: 3,
+            timing: 'end-of-turn',
+            saveTiming: 'end-of-turn',
+            saveAbility: 'CON',
+            saveDc: 14,
+            isConcentration: false,
+            stacks: 1,
+            notes: 'Save ends',
+            custom: false,
+          },
+        });
+      expect(added.status).toBe(200);
+      expect(added.body.conditionInstances).toContainEqual(expect.objectContaining({
+        id: 'frostbite-player', name: 'Frostbite', roundsRemaining: 3, saveAbility: 'CON', saveDc: 14, custom: false,
+      }));
+
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ removeConditionInstanceId: 'frostbite-player' });
     });
 
     it('DM may mint a custom condition label outside the vocabulary (issue #495)', async () => {
