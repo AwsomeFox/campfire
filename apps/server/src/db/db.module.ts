@@ -5735,7 +5735,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // migration has never shipped on any real database either, so renumbering to 0187
   // is safe by the identical argument.
   { name: '0187_encounters_map_objects_1308', run: migrateEncountersTableForMapObjects1308 },
-  { name: '0188_dice_rolls_kind_2155', run: migrateDiceRollsTableForKind2155 },
+  // 0188 was claimed by #2179 (inventory weight, same day) while this branch's own PR was
+  // still in flight — verified against the live PR list immediately before landing this
+  // number, not assumed from the local ceiling alone.
+  { name: '0189_dice_rolls_kind_2155', run: migrateDiceRollsTableForKind2155 },
 ];
 
 /**

@@ -3027,8 +3027,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
-  it('0188 adds dice_rolls.kind on a fresh database (#2155)', () => {
-    expect(MIGRATION_NAMES).toContain('0188_dice_rolls_kind_2155');
+  it('0189 adds dice_rolls.kind on a fresh database (#2155)', () => {
+    expect(MIGRATION_NAMES).toContain('0189_dice_rolls_kind_2155');
     dataDir = makeTempDataDir();
     const { sqlite } = openDatabase(dataDir);
     try {
@@ -3043,12 +3043,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
    * migration entry rather than being folded into `0183_dice_rolls_context_1511` (the same
    * table, which would have been the obvious-but-wrong home). `runMigrations` skips any step
    * whose name is already recorded, and 0183 is recorded on every database that has ever
-   * booted — so this boots a real DB, takes `kind` away, forgets ONLY the 0188 step (leaving
+   * booted — so this boots a real DB, takes `kind` away, forgets ONLY the 0189 step (leaving
    * 0183 recorded, exactly the state a database upgrading from an earlier release is in), and
    * proves the next boot restores the column. Modeled on the equivalent
    * weapon_proficiencies-migration.spec.ts coverage for issue #2144's own-entry migration.
    */
-  it('0188 restores dice_rolls.kind on an database that predates it, without re-running 0183 (#2155)', () => {
+  it('0189 restores dice_rolls.kind on an database that predates it, without re-running 0183 (#2155)', () => {
     dataDir = makeTempDataDir();
     const first = openDatabase(dataDir);
     first.sqlite.close();
@@ -3065,7 +3065,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       raw.exec('DROP TABLE dice_rolls');
       raw.exec('ALTER TABLE dice_rolls_old RENAME TO dice_rolls');
       // Forget only THIS step, leaving 0183 (and every other dice_rolls migration) recorded.
-      raw.prepare('DELETE FROM __migrations WHERE name = ?').run('0188_dice_rolls_kind_2155');
+      raw.prepare('DELETE FROM __migrations WHERE name = ?').run('0189_dice_rolls_kind_2155');
       const applied = (raw.prepare('SELECT name FROM __migrations').all() as Array<{ name: string }>).map((r) => r.name);
       expect(applied).toContain('0183_dice_rolls_context_1511');
       expect(columnNames(raw, 'dice_rolls')).not.toContain('kind');
