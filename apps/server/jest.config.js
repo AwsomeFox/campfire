@@ -19,7 +19,10 @@ module.exports = {
     '^@campfire/schema$': '<rootDir>/../../packages/schema/src/index.ts',
   },
   testTimeout: 30000,
-  maxWorkers: '50%',
+  // `scripts/with-test-lock.sh` lowers this for local runs, where several agent
+  // sessions share one machine and 50% of the cores each is not 50% of the
+  // machine. Unset (CI, a plain `npx jest`) keeps the original sizing.
+  maxWorkers: process.env.JEST_MAX_WORKERS || '50%',
   // The integration-heavy suite creates a fresh Nest application and SQLite
   // database for many files. Recycle Jest workers between files once memory
   // grows past this bound instead of letting retained module state accumulate
