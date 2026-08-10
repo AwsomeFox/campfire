@@ -336,6 +336,19 @@
   --color-danger-disabled-foreground: #d6bdc2;
   --color-danger-disabled-border: #8c5d68;
 
+  /* Warning semantic (issue #1533 §3 — "no warning token"). Four call sites
+     (GroupActionRunner.tsx x2, ActionUseFlow.tsx, BattleMap.tsx) already
+     wrote `var(--color-warning, #d97706)` — reaching for this exact token
+     name and silently falling back to the hardcoded hex on every render
+     because nothing ever defined it. Defined here at the literal value
+     those call sites already fell back to, so this is a zero-visual-change
+     formalization (same shape as issue #882's --color-divider fix), not a
+     redesign. The broader migration this token would enable — hundreds of
+     raw amber, slate, and rose Tailwind color utilities used for semantic
+     state elsewhere in the app — is explicitly out of scope here; see the
+     tracking issue linked from #1533 for that staged codemod. */
+  --color-warning: #d97706;
+
   --font-heading: "Inter", system-ui, sans-serif;
   --font-heading-weight: 500;
   /* Restrained fantasy display voice for page titles + cover monograms (#676). */
