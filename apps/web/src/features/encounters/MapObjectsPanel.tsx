@@ -182,7 +182,10 @@ export function MapObjectsPanel({
               disabled={busyId === obj.id}
               style={{ width: 64 }}
               onBlur={(e) => {
-                const next = clampPercent(e.currentTarget.value, obj.size);
+                // size is bounded [1,100] server-side; clampPercent can yield 0
+                // (or stay at a stale 0), so enforce the schema minimum of 1 to
+                // avoid a 400 on an empty/zero input.
+                const next = Math.max(1, clampPercent(e.currentTarget.value, obj.size));
                 if (next !== obj.size) void update(obj.id, { size: next });
               }}
             />

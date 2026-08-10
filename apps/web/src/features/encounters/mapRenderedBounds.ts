@@ -7,6 +7,8 @@
  * bands must reject new interactions.
  */
 
+import { DEFAULT_MAP_OBJECT_SIZE } from '@campfire/schema';
+
 export type Size = { w: number; h: number };
 
 export type Rect = {
@@ -285,14 +287,14 @@ export function snapMapPercentCalibrated(
  * a resize-grip drag: twice the pointer's distance from the object's fixed centre, in the same
  * isotropic layer-px space the grid uses. Clamped to the schema's [1, 100] bounds and rounded to
  * one decimal so the live preview and the committed PATCH read identically. Returns the schema
- * default (5) when the map rect is degenerate rather than a NaN.
+ * default (`DEFAULT_MAP_OBJECT_SIZE`) when the map rect is degenerate rather than a NaN.
  */
 export function mapObjectSizeFromDrag(center: MapPercent, pointer: MapPercent, mapRect: Rect | null): number {
-  if (!mapRect || !(mapRect.width > 0)) return 5;
+  if (!mapRect || !(mapRect.width > 0)) return DEFAULT_MAP_OBJECT_SIZE;
   const c = mapPercentToLayerPx(center, mapRect);
   const p = mapPercentToLayerPx(pointer, mapRect);
   const radiusPx = Math.hypot(p.x - c.x, p.y - c.y);
   const sizePercent = ((2 * radiusPx) / mapRect.width) * 100;
-  if (!Number.isFinite(sizePercent)) return 5;
+  if (!Number.isFinite(sizePercent)) return DEFAULT_MAP_OBJECT_SIZE;
   return Math.max(1, Math.min(100, Math.round(sizePercent * 10) / 10));
 }
