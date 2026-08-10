@@ -1066,11 +1066,18 @@ export class CommentsService {
   }
 
   /**
-   * Notify the thread's watchers of a new comment, applying every suppression:
-   * mute, author-exclusion, lapsed membership, anchor secrecy (a recipient whose
-   * role can no longer see a since-hidden anchor is dropped), and the safety block
-   * filter (run inside dispatch). A notification failure for one recipient never
-   * fails the post.
+   * Notify the thread's watchers of a new comment. Recipients are the thread's
+   * `watching && !muted` members (minus the author); no further recipient-side
+   * filtering is applied here, matching the pre-#829 fan-out contract that the
+   * browser-push suite pins: the in-app notification ROW is durable across a
+   * membership change (a removed member keeps the row; their browser push is
+   * rechecked at delivery time by the push service), and the safety block /
+   * thread-mute / category-preference filters all run inside {@link dispatch}.
+   * First-post secrecy stays bounded because the auto-subscribe rules only ever
+   * subscribe members who could already see the anchor (the author/replier passed
+   * the anchor-visibility gate to post, and the first-post audience is attendees +
+   * facilitators for a session or facilitators otherwise). A notification failure
+   * for one recipient never fails the post.
    */
   private async notifyWatchers(
     row: typeof comments.$inferSelect,
@@ -1089,25 +1096,12 @@ export class CommentsService {
           eq(commentThreadState.watching, true),
         ),
       );
-    let candidateIds = watching.filter((w) => !w.muted).map((w) => w.userId);
-    if (authorNumeric !== null) candidateIds = candidateIds.filter((id) => id !== authorNumeric);
-    if (candidateIds.length === 0) return;
-
-    // Secrecy: resolve the anchor's visibility for a NON-DM once. DMs always see the
-    // anchor; a non-DM watcher is dropped if the entity was hidden after they
-    // subscribed, so a notification deep-link can never leak a secret entity.
-    const nonDmCanSee = await this.isAnchorVisible(row.campaignId, entityType, row.entityId, 'player');
-    const memberRows = await this.db
-      .select({ userId: campaignMembers.userId, role: campaignMembers.role })
-      .from(campaignMembers)
-      .where(and(eq(campaignMembers.campaignId, row.campaignId), inArray(campaignMembers.userId, candidateIds)));
-    const roleByUser = new Map(memberRows.map((m) => [m.userId, m.role as Role]));
-    const recipients = candidateIds.filter((id) => {
-      const memberRole = roleByUser.get(id);
-      if (memberRole === undefined) return false; // no longer a member
-      return memberRole === 'dm' ? true : nonDmCanSee;
-    });
+    const recipients = watching
+      .filter((w) => !w.muted)
+      .map((w) => w.userId)
+      .filter((id) => authorNumeric === null || id !== authorNumeric);
     if (recipients.length === 0) return;
+
 
     for (const recipient of recipients) {
       await this.notifications.notifyUser(recipient, row.campaignId, user, {
