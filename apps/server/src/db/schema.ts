@@ -168,6 +168,9 @@ export const characters = sqliteTable('characters', {
   conditionInstances: text('condition_instances'),
   saveProficiencies: text('save_proficiencies').notNull().default('[]'),
   skills: text('skills').notNull().default('{}'),
+  // Issue #2144: weapon-or-category -> proficiency rank. Absent key = untrained. The term an
+  // equipped weapon's derived attack bonus needs and the sheet never recorded.
+  weaponProficiencies: text('weapon_proficiencies').notNull().default('{}'),
   actions: text('actions').notNull().default('[]'),
   spellSlots: text('spell_slots').notNull().default('{}'),
   resources: text('resources').notNull().default('{}'),

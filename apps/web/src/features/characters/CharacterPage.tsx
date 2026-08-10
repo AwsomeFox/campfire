@@ -48,6 +48,7 @@ import type {
   InventoryItem,
   CharacterStatus,
   SkillRank,
+  ProficiencyRank,
   LeveledConditionTrack,
   AdapterResourceDef,
   CriticalDamageRule,
@@ -57,6 +58,8 @@ import {
   abilityLabelForAdapter,
   xpProgressForCharacter,
   ruleSystemAdapter,
+  PROFICIENCY_RANKS,
+  normalizeProficiencyRank,
   type RuleSystemAdapter,
   type RollCheckDefinition,
   checkCatalogForAdapter,
@@ -588,6 +591,7 @@ export default function CharacterPage() {
                 className="cf-sheet-section"
               >
                 <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
+                <WeaponTrainingCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
               </section>
             )}
 
@@ -2196,6 +2200,136 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
           );
         })}
       </div>
+    </Card>
+  );
+}
+
+/**
+ * Weapon training (issue #2144) — the term an equipped weapon's derived attack needs and the
+ * sheet had nowhere to record.
+ *
+ * The rank vocabulary is DERIVED FROM THE ADAPTER rather than branched on the rule system:
+ * a rank is offered only when it prices differently from the one below it at this character's
+ * level. 5e's weapon proficiency is binary, so its sheet shows one rung; PF2e's runs +2 to +8,
+ * so its sheet shows all four. Nothing here knows which system it is looking at, which is the
+ * point — a future adapter that declares its own curve gets the right controls for free.
+ *
+ * Rendered only for a system that HAS a curve. Starfinder 1e and Pathfinder 1e compute to-hit
+ * from a per-class BAB table with nothing on the sheet to look up, so their weapons carry an
+ * editable blank to-hit instead and a training control would promise something it cannot pay.
+ */
+function WeaponTrainingCard({ character, canEdit, onChange, onError, adapter }: SheetCardProps & { adapter: RuleSystemAdapter }) {
+  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState('');
+  const price = adapter.weaponProficiencyBonus;
+
+  // One entry per DISTINCT bonus, so a 5e sheet does not offer four rungs that all pay +3.
+  const ranks = useMemo(() => {
+    if (!price) return [];
+    const seen = new Set<number>();
+    return PROFICIENCY_RANKS.filter((rank) => {
+      if (rank === 'untrained') return false;
+      const bonus = price(character.level, rank);
+      if (seen.has(bonus)) return false;
+      seen.add(bonus);
+      return true;
+    });
+  }, [price, character.level]);
+
+  const entries = useMemo(
+    () => Object.entries(character.weaponProficiencies).sort(([a], [b]) => a.localeCompare(b)),
+    [character.weaponProficiencies],
+  );
+
+  if (!price) return null;
+
+  async function save(next: Record<string, ProficiencyRank>) {
+    if (!canEdit || busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.patch(`${API}/characters/${character.id}`, { weaponProficiencies: next });
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't update weapon training.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function setRank(key: string, rank: ProficiencyRank | 'remove') {
+    const next: Record<string, ProficiencyRank> = {};
+    for (const [k, v] of Object.entries(character.weaponProficiencies)) next[k] = normalizeProficiencyRank(v);
+    if (rank === 'remove') delete next[key];
+    else next[key] = rank;
+    void save(next);
+  }
+
+  return (
+    <Card className="space-y-2" data-testid="character-weapon-training">
+      <div className="flex items-center gap-2 flex-wrap">
+        <h2 className="card-kicker mb-0">Weapon training</h2>
+        <span className="text-[11px] text-secondary">
+          a weapon or a category (simple, martial{ranks.length > 1 ? ', advanced' : ''}); an equipped weapon with no entry here attacks untrained
+        </span>
+      </div>
+      {entries.length === 0 && <p className="text-[12px] text-secondary">Nothing recorded — equipped weapons add no proficiency to their attack.</p>}
+      <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+        {entries.map(([key, raw]) => {
+          const rank = normalizeProficiencyRank(raw);
+          return (
+            <div key={key} className="flex items-center gap-1.5 text-[13px] min-h-11" data-testid={`weapon-training-${key}`}>
+              <span className="flex-1 truncate" title={key}>{key}</span>
+              {canEdit ? (
+                <select
+                  value={rank}
+                  disabled={busy}
+                  aria-label={`${key} training`}
+                  onChange={(e) => setRank(key, e.target.value as ProficiencyRank | 'remove')}
+                  className="cf-input text-[12px] py-0.5"
+                >
+                  {ranks.map((r) => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
+                  <option value="remove">remove</option>
+                </select>
+              ) : (
+                <span className="tag tag-neutral">{rank}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {canEdit && (
+        <form
+          className="flex items-center gap-1.5 cf-print-hide"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const key = adding.trim();
+            if (!key) return;
+            setAdding('');
+            setRank(key, ranks[0] ?? 'trained');
+          }}
+        >
+          <input
+            value={adding}
+            onChange={(e) => setAdding(e.target.value)}
+            placeholder="longsword, martial, …"
+            aria-label="Weapon or category to add"
+            maxLength={60}
+            list="cf-weapon-training-suggestions"
+            className="cf-input flex-1 text-[13px]"
+          />
+          <datalist id="cf-weapon-training-suggestions">
+            {['simple', 'martial', 'advanced', 'unarmed'].map((c) => (
+              <option key={c} value={c} />
+            ))}
+          </datalist>
+          <button type="submit" className="btn btn-ghost text-[12px]" disabled={busy || adding.trim().length === 0}>
+            Add
+          </button>
+        </form>
+      )}
     </Card>
   );
 }

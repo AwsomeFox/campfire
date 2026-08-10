@@ -9019,7 +9019,15 @@ export class EncountersService {
     };
     if (c.kind === 'character' && c.characterId !== null) {
       const [character] = await this.db
-        .select({ id: characters.id, campaignId: characters.campaignId, actions: characters.actions, stats: characters.stats, level: characters.level })
+        .select({
+          id: characters.id,
+          campaignId: characters.campaignId,
+          actions: characters.actions,
+          stats: characters.stats,
+          level: characters.level,
+          // Issue #2144: the derivation prices an equipped weapon's proficiency from this.
+          weaponProficiencies: characters.weaponProficiencies,
+        })
         .from(characters)
         .where(eq(characters.id, c.characterId))
         .limit(1);

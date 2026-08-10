@@ -1188,9 +1188,11 @@ export async function fetchPf2eSection(
   }
 
   const entries = [...byName.values()];
+  const inherited = resolveBaseItemWeaponStats(entries);
   logger.info(
     `${logPrefix} section "${section}": imported ${entries.length} entries across ${pagesFetched} page(s)` +
-      (dedupedCount > 0 ? ` (de-duped ${dedupedCount} same-name row(s))` : ''),
+      (dedupedCount > 0 ? ` (de-duped ${dedupedCount} same-name row(s))` : '') +
+      (inherited > 0 ? ` (filled ${inherited} magic weapon(s) from their base item)` : ''),
   );
   if (skippedCount > 0) {
     logger.warn(`${logPrefix} section "${section}": imported ${entries.length} entries, skipped ${skippedCount} row(s)`);
@@ -1201,6 +1203,72 @@ export async function fetchPf2eSection(
 
 export function entryTypeForSection(section: Pf2eSection): RuleEntryType {
   return SECTION_TO_ENTRY_TYPE[section];
+}
+
+/** The weapon fields a magic weapon inherits wholesale from the base weapon it is built on. */
+const BASE_ITEM_WEAPON_FIELDS = ['damage', 'damageType', 'weaponCategory', 'weaponGroup', 'weaponType', 'range', 'reload'] as const;
+
+/**
+ * Fill a magic weapon's missing stats from the base weapon it names (issue #2144).
+ *
+ * AoN states a weapon's damage on the BASE item only. A Longsword is `damage: "1d8 S"`,
+ * `damage_type: ["Slashing"]`; a Smoking Sword — a +1 magic longsword — carries none of that
+ * and instead names its origin: `item_category: "Weapons"`, `base_item: ["Longsword"]`. Live
+ * counts, 2026-08-09: of the 1230 PF2e rows shelved under Weapons, 579 state their damage and
+ * 651 do not — and 424 of those name a base item that does. So the majority of the weapons a
+ * PF2e character actually acquires reached Campfire with no damage at all, and equipping one
+ * derived nothing. (SF2e barely has the pattern — one row — but shares this code path, and
+ * Open5e solves the same problem by nesting the base item's stats inline instead.)
+ *
+ * Resolution is by name within the section that was just scanned, which is where the base
+ * always is: both rows are AoN `type:Item`, so one scan sees both. A base that is missing —
+ * a truncated scan, a name that matches nothing — simply leaves the row as it was, and the
+ * equipped-action derivation falls back to the text-only "fill it in" row it already produces
+ * for a weapon with no numbers. Nothing here invents a stat.
+ *
+ * Only ABSENT fields are filled, so a row that states its own damage is never overwritten, and
+ * `damageFromBaseItem` records where the numbers came from rather than passing them off as the
+ * magic item's own. Returns how many rows were filled, for the import log.
+ */
+export function resolveBaseItemWeaponStats(entries: ImportedEntry[]): number {
+  const statsByName = new Map<string, Record<string, unknown>>();
+  const parsed = new Map<ImportedEntry, Record<string, unknown>>();
+  for (const entry of entries) {
+    if (entry.type !== 'item' || !entry.dataJson) continue;
+    let data: unknown;
+    try {
+      data = JSON.parse(entry.dataJson);
+    } catch {
+      continue;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+    const record = data as Record<string, unknown>;
+    parsed.set(entry, record);
+    if (asString(record.damage)) statsByName.set(entry.name.trim().toLowerCase(), record);
+  }
+
+  let filled = 0;
+  for (const [entry, record] of parsed) {
+    const baseName = asScalarString(record.baseItem).trim().toLowerCase();
+    if (!baseName || asString(record.damage)) continue;
+    const base = statsByName.get(baseName);
+    // A weapon must not inherit from itself: AoN's own `base_item` is self-referential on a
+    // few rows, and copying a row's absent fields onto itself would only add a misleading
+    // `damageFromBaseItem`.
+    if (!base || base === record) continue;
+    let changed = false;
+    for (const field of BASE_ITEM_WEAPON_FIELDS) {
+      if (record[field] === undefined && base[field] !== undefined) {
+        record[field] = base[field];
+        changed = true;
+      }
+    }
+    if (!changed) continue;
+    record.damageFromBaseItem = asScalarString(record.baseItem);
+    entry.dataJson = JSON.stringify(record);
+    filled += 1;
+  }
+  return filled;
 }
 
 export async function fetchSf2eSection(

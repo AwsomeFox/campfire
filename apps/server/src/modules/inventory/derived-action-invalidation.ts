@@ -22,6 +22,12 @@ import type { DrizzleDb } from '../../db/db.module';
  * Only items with NO stored action are counted: a stored action is a human's, it is returned
  * verbatim, and a mechanics change does not alter it. Trashed items are excluded — they grant
  * nothing to invalidate.
+ *
+ * The SQL null test is deliberately narrower than the read path's, which also treats a stored
+ * action carrying no mechanics as absent (issue #2144) and so derives over it. Such a row can
+ * only predate that fix — no write creates one now, and the next PATCH of the item clears it —
+ * and the cost of missing it here is one stale open encounter card until a reload, which is
+ * not worth a JSON predicate in a hot query.
  */
 export function charactersWithDerivedActions(db: Pick<DrizzleDb, 'select'>, campaignId: number): number[] {
   const rows = db

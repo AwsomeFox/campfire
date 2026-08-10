@@ -108,7 +108,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(job.status).toBe('completed');
     expect(job.outcome).toBe('created');
     expect(job.pack.slug).toBe('open5e-srd');
-    expect(job.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2); // spells + creatures + magicitems + conditions + classes + species + feats + weapons + armor from the fake server
+    expect(job.pack.entryCount).toBe(2 + 2 + 2 + 4 + 2 + 2 + 1 + 4 + 2); // spells + creatures + magicitems + conditions + classes + species + feats + weapons + armor from the fake server
     expect(job.pack.license).toContain('Creative Commons');
     // per-section progress was reported (issue #20): one row per section, all done.
     expect(job.progress.length).toBe(9);
@@ -152,7 +152,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(reJob.status).toBe('completed');
     expect(reJob.outcome).toBe('updated');
     expect(reJob.added).toBe(0);
-    expect(reJob.skippedExisting).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2);
+    expect(reJob.skippedExisting).toBe(2 + 2 + 2 + 4 + 2 + 2 + 1 + 4 + 2);
     expect(reJob.changed).toBe(1);
     expect(reJob.removed).toBe(0);
     expect(reJob.pack.version).toBe(OPEN5E_PACK_VERSION);
@@ -160,10 +160,10 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       added: 0,
       changed: 1,
       removed: 0,
-      unchanged: (2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2) - 1,
+      unchanged: (2 + 2 + 2 + 4 + 2 + 2 + 1 + 4 + 2) - 1,
     });
     expect(reJob.preview.sourceHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(reJob.pack.entryCount).toBe(2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2); // unchanged
+    expect(reJob.pack.entryCount).toBe(2 + 2 + 2 + 4 + 2 + 2 + 1 + 4 + 2); // unchanged
 
     // search: free text finds the fireball spell
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
@@ -181,7 +181,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       // 1 magic item + 4 weapons + 2 armor — the weapons/armor sections (issue #2096) are
       // ruleEntry.type 'item' too, so they land in the SAME facet as magic items rather
       // than adding facets of their own.
-      expect.objectContaining({ type: 'item', label: 'Items', count: 1 + 4 + 2 }),
+      expect.objectContaining({ type: 'item', label: 'Items', count: 2 + 4 + 2 }),
     ]));
     expect(searchFacets(facetRes.body).some((f: { type: string }) => f.type === 'section' || f.type === 'other')).toBe(false);
     // The chip row must add up to the list it labels: with no type filter, the facet
@@ -379,7 +379,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
   // Authorising removal off that length would wipe every other section out of the pack.
   it('a repeated-section install never removes the sections it did not fetch (issue #500)', async () => {
     const server = ctx.app.getHttpServer();
-    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2;
+    const total = 2 + 2 + 2 + 4 + 2 + 2 + 1 + 4 + 2;
 
     const full = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(full.status).toBe('completed');
@@ -414,7 +414,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
   it('a complete upstream manifest removes entries upstream no longer has (issue #500)', async () => {
     const server = ctx.app.getHttpServer();
     const db = ctx.app.get<DrizzleDb>(DB);
-    const total = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2;
+    const total = 2 + 2 + 2 + 4 + 2 + 2 + 1 + 4 + 2;
 
     const first = await installOpen5e(server, dm, { source: 'open5e', url: fake.baseUrl });
     expect(first.status).toBe('completed');
@@ -2822,7 +2822,7 @@ describe('rules / rule packs — identical re-import short-circuit (#1518)', () 
   });
 
   const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'sc-1518-dm' };
-  const TOTAL = 2 + 2 + 1 + 4 + 2 + 2 + 1 + 4 + 2; // spells + creatures + magicitems + conditions + classes + species + feats + weapons + armor
+  const TOTAL = 2 + 2 + 2 + 4 + 2 + 2 + 1 + 4 + 2; // spells + creatures + magicitems + conditions + classes + species + feats + weapons + armor
 
   it('stamps the manifest hash on install and short-circuits a byte-identical re-import to a no-op', async () => {
     const server = ctx.app.getHttpServer();

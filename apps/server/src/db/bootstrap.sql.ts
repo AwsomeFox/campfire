@@ -213,6 +213,8 @@ CREATE TABLE IF NOT EXISTS characters (
   condition_instances TEXT,
   save_proficiencies TEXT NOT NULL DEFAULT '[]',
   skills TEXT NOT NULL DEFAULT '{}',
+  -- Issue #2144: weapon-or-category -> proficiency rank JSON; absent key = untrained.
+  weapon_proficiencies TEXT NOT NULL DEFAULT '{}',
   actions TEXT NOT NULL DEFAULT '[]',
   spell_slots TEXT NOT NULL DEFAULT '{}',
   resources TEXT NOT NULL DEFAULT '{}',

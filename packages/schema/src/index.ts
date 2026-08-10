@@ -62,8 +62,9 @@ import type { RestModel, RestOptionDef } from './rest';
 export { type RestOptionDef, DEFAULT_GENERIC_REST_OPTIONS, DEFAULT_STARFINDER_REST_OPTIONS, restOptionsForAdapter } from './rest';
 import { CharacterAction } from './character-action';
 import { CombatantStatblock } from './combatant-statblock';
-import { EquippedActionSource } from './equipped-item-action';
+import { EquippedActionSource, type WeaponDamageModifierInput } from './equipped-item-action';
 import { NarrationLanguage } from './narration-language';
+import { normalizeProficiencyRank, PROFICIENCY_RANKS, type ProficiencyRank } from './proficiency';
 import {
   MAX_SERIES_OCCURRENCES,
   RECURRENCE_FREQS,
@@ -82,6 +83,7 @@ export * from './combatant-statblock';
 export * from './canonical-json';
 export * from './dice-bounds';
 export * from './equipped-item-action';
+export * from './proficiency';
 export * from './osr-adapter';
 export * from './character-creation';
 export * from './narration-language';
@@ -582,8 +584,15 @@ export function normalizeStats(stats: Record<string, number> | null | undefined)
   return out;
 }
 
-/** Skill proficiency rank; a skill absent from the record is unproficient. */
-export const SkillRank = z.enum(['proficient', 'expertise']);
+/**
+ * Skill proficiency rank; a skill absent from the record is unproficient.
+ *
+ * Widened onto the shared ladder (issue #2144) while keeping the original 5e spellings valid —
+ * see `LEGACY_RANK_ALIASES` in proficiency.ts. Before this a PF2e character could not record a
+ * Master or Legendary skill at all: the enum stopped at two rungs, and `pf2eCheckCatalog` had
+ * to cap every sheet at expert.
+ */
+export const SkillRank = z.enum([...PROFICIENCY_RANKS, 'proficient', 'expertise']);
 export type SkillRank = z.infer<typeof SkillRank>;
 
 /**
@@ -726,6 +735,24 @@ export const Character = z.object({
   conditionInstances: z.lazy(() => z.array(ConditionInstance).max(50).default([])),
   saveProficiencies: z.array(AbilityKey).default([]), // abilities with saving-throw proficiency
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
+  /**
+   * Weapon training, as `weapon or category -> rank` (issue #2144). Absent = untrained.
+   *
+   * The gap this closes: an equipped weapon's attack bonus is ability modifier plus a
+   * PROFICIENCY term, and the sheet recorded proficiency for saves and skills but never for
+   * weapons. So the derived attack on an equipped weapon had to ASSUME the wielder was
+   * proficient — stated in the action's own notes, but still a guess — and for PF2e, whose
+   * bonus is level plus a rank that ranges from +2 to +8, the guess was too wide to make at
+   * all, which is why a Pathfinder weapon showed a damage line and a blank to-hit.
+   *
+   * One flat record rather than separate category and weapon maps, because both systems let a
+   * character be trained in a CATEGORY ("martial", PF2e's "advanced") and separately in a named
+   * weapon their ancestry or class singles out, and the lookup is the same either way:
+   * {@link weaponProficiencyRank} takes the best of the specific weapon and the categories it
+   * belongs to. Keys are matched case-insensitively so "Longsword" and "longsword" are one
+   * entry.
+   */
+  weaponProficiencies: z.record(z.string().max(60), SkillRank).default({}),
   actions: z.array(CharacterAction).max(100).default([]),
   spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
   resources: z.record(z.string().max(80), CharacterResource).default({}),
@@ -867,6 +894,7 @@ export const DND5E_DAMAGE_TYPES = [
   'acid', 'bludgeoning', 'cold', 'fire', 'force', 'lightning', 'necrotic',
   'piercing', 'poison', 'psychic', 'radiant', 'slashing', 'thunder',
 ] as const;
+
 
 /**
  * Case-insensitive membership check against a rule-system condition vocabulary
@@ -4649,6 +4677,36 @@ export interface RuleSystemAdapter {
    * relying on that default; `Pf2eAdapter` (inherited by SF2e) declares its own.
    */
   checkProficiencyBonus?(level: number): number;
+  /**
+   * OPTIONAL, OPT-IN — this system's proficiency term for an attack with a weapon the wielder
+   * holds at `rank` (issue #2144).
+   *
+   * Distinct from {@link checkProficiencyBonus}, which takes only a level because the resolver
+   * knows only a boolean "is this character proficient". A weapon's rank is recorded on the
+   * sheet (`Character.weaponProficiencies`), so this hook can be given it — which is what makes
+   * the difference between 5e (a fixed bonus, the same at every rank it can express) and PF2e
+   * (level plus a rank bonus running +2 to +8) representable through one seam.
+   *
+   * Declaring it is what opts a system into a DERIVED attack bonus on an equipped weapon.
+   * Omitting it means the equipped-item derivation still produces the action and its damage
+   * line but leaves the to-hit blank for a human to fill in, which is the honest outcome for a
+   * system whose attack math this codebase has not modelled — Starfinder 1e and Pathfinder 1e
+   * compute from a per-class BAB table, and `Character.className` is free text, so there is
+   * nothing here to read.
+   *
+   * Return the WHOLE proficiency term, level included where the system adds one. `untrained`
+   * must return whatever the system charges for being untrained — 0 for both 5e and PF2e, and
+   * NOT the trained value, since an untrained wielder is the case a derived number most needs
+   * to get right.
+   */
+  weaponProficiencyBonus?(level: number, rank: ProficiencyRank): number;
+  /**
+   * OPTIONAL — how much of the wielder's ability modifier reaches weapon DAMAGE (issue #2144).
+   * Omit for 5e's rule, which is the default everywhere: the same modifier that hit adds to the
+   * damage. Declared by a system whose damage modifier is a different question from its attack
+   * modifier — PF2e's melee-only Strength, notably.
+   */
+  weaponDamageModifier?(input: WeaponDamageModifierInput): number;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -4921,6 +4979,16 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // exactly this formula, so 5e declares it explicitly rather than relying on a default that
   // exists precisely so nobody ELSE has to make this claim by accident.
   checkProficiencyBonus: dnd5eProficiencyBonus,
+  // #2144 — 5e's weapon proficiency is BINARY: you either add your full proficiency bonus or
+  // you add nothing, and the sheet's upper rungs have no meaning here. Expertise doubles the
+  // bonus for SKILLS ("Expertise" applies to skill and tool checks, PHB), never for weapon
+  // attacks, and 5e prints no weapon rank above proficient at all — so every trained rung
+  // prices the same. Modelling that as "anything above untrained" is exact for 5e rather than
+  // a degrade: a sheet that records Master with a longsword (because the campaign switched
+  // systems, or an importer wrote it) still gets 5e's one correct answer.
+  weaponProficiencyBonus(level: number, rank: ProficiencyRank): number {
+    return rank === 'untrained' ? 0 : dnd5eProficiencyBonus(level);
+  },
   presentation: DND5E_STATBLOCK_PRESENTATION,
   characterSheet: {
     abilityFields: STANDARD_D20_ABILITY_FIELDS,
@@ -5694,14 +5762,15 @@ export function dnd5eCheckCatalog(adapter: Pick<RuleSystemAdapter, 'abilityModif
 }
 
 /**
- * Map the app's stored 5e-shaped skill rank onto the closest PF2e rank so a PF2e character
- * (whose sheet stores `proficient`/`expertise`) gets honest level-based math. `proficient`
- * → trained, `expertise` → expert; absent → untrained.
+ * Read a stored skill rank as a PF2e rank.
+ *
+ * Now a plain fold to the canonical ladder (issue #2144): the two vocabularies were unified,
+ * so this no longer CAPS a PF2e sheet at expert. A character marked Master or Legendary in
+ * Athletics used to be indistinguishable from an Expert one, because the enum those ranks
+ * would have been stored in did not have the rungs.
  */
 function pf2eRankFromSkillRank(rank: SkillRank | undefined): Pf2eProficiencyRank {
-  if (rank === 'expertise') return 'expert';
-  if (rank === 'proficient') return 'trained';
-  return 'untrained';
+  return normalizeProficiencyRank(rank);
 }
 
 /**
@@ -6004,8 +6073,12 @@ export const PF2E_ADAPTER_ID = 'pf2e';
 export const PF2E_PACK_SLUG = 'pf2e-srd';
 
 /** PF2e proficiency ranks, lowest to highest. */
-export const PF2E_PROFICIENCY_RANKS = ['untrained', 'trained', 'expert', 'master', 'legendary'] as const;
-export type Pf2eProficiencyRank = (typeof PF2E_PROFICIENCY_RANKS)[number];
+// Aliases of the canonical ladder rather than a second copy of it (issue #2144). The five rungs
+// ARE PF2e's, so `PROFICIENCY_RANKS` is defined up beside `SkillRank` where the sheet's own
+// rank vocabulary lives; these names stay for the PF2e-facing call sites that read better with
+// them, and cannot drift because there is only one array.
+export const PF2E_PROFICIENCY_RANKS = PROFICIENCY_RANKS;
+export type Pf2eProficiencyRank = ProficiencyRank;
 
 /** Rank bonus added on top of level when trained or better. */
 const PF2E_RANK_BONUS: Record<Pf2eProficiencyRank, number> = {
@@ -6274,6 +6347,36 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   checkProficiencyBonus(level: number): number {
     return pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
   },
+  // #2144 — the weapon-attack counterpart, and unlike `checkProficiencyBonus` directly above it
+  // does NOT have to assume Trained: the rank is recorded per weapon on the sheet, so the exact
+  // one is passed in. This is the whole reason `Character.weaponProficiencies` exists — PF2e's
+  // term spans level+2 to level+8, a spread far too wide to paper over with a floor the way the
+  // save path does.
+  weaponProficiencyBonus: pf2eProficiencyBonus,
+  // #2144 — PF2e's damage rule is NOT 5e's "the modifier that hit also hits harder". Player
+  // Core, "Damage": a melee Strike adds your Strength modifier; a ranged Strike adds nothing
+  // unless the weapon is Thrown (full Strength) or Propulsive (half your Strength if positive,
+  // and nothing if negative — a Propulsive bow does not punish a weak archer). Without this
+  // every PF2e bow in the game would silently deal its wielder's Dexterity in extra damage on
+  // every hit.
+  weaponDamageModifier({ strMod, ranged, traits }: WeaponDamageModifierInput): number {
+    if (!ranged) return strMod;
+    if (traits.includes('thrown')) return strMod;
+    if (traits.includes('propulsive')) return strMod > 0 ? Math.floor(strMod / 2) : 0;
+    return 0;
+  },
+  // NOT declaring `damageTypes`, deliberately (issue #2144). It would have given the
+  // equipped-action derivation the same defense-bypass guard 5e has — but `damageTypes` is
+  // read by three other callers, and for two of them (`damageDefensesFromStatblock` via
+  // `targetDamageDefenses`, and the direct-damage type check) declaring a closed vocabulary
+  // switches PF2e monster defenses from best-effort parsing to filtered-to-the-list. That
+  // would fix a real bug — an AoN dragon's `immunity: ['fire','paralyzed','sleep']` currently
+  // registers two CONDITIONS as damage immunities — and would also silently drop the
+  // category-shaped resistance entries PF2e prints ("resistance 5 physical", "all damage")
+  // that are not damage types but are real defenses. That is a change to encounter damage
+  // resolution, not to this issue's equipment loop, and it deserves its own change with its
+  // own coverage — tracked as its own issue (#2150). The derivation keeps the length bound it
+  // has always used here.
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,

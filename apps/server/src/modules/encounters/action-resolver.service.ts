@@ -61,6 +61,7 @@ import {
   type ActionEconomySlotKind,
   type ActionRollFn,
   CharacterAction,
+  equippedActionHasContent,
   type OutcomeBranch,
   type OutcomeKey,
   type PendingConcentrationCheck,
@@ -405,7 +406,7 @@ export class ActionResolverService {
    * unrepresentable rather than merely unlikely.
    */
   private equippedItemActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'stats' | 'level'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'stats' | 'level' | 'weaponProficiencies'>,
   ): Array<{ action: CharacterAction; itemName: string }> {
     const rows = this.db
       .select({
@@ -427,12 +428,24 @@ export class ActionResolverService {
       .all();
     const actions: Array<{ action: CharacterAction; itemName: string }> = [];
     let adapter: RuleSystemAdapter | null = null;
-    const wielder = { stats: fromJsonText<Record<string, number>>(character.stats, {}), level: character.level };
+    const wielder = {
+      stats: fromJsonText<Record<string, number>>(character.stats, {}),
+      level: character.level,
+      // Issue #2144 — the wielder's recorded weapon training. Read here as well as in
+      // `InventoryService` so the encounter card and the inventory sheet keep deriving the
+      // same numbers; passing it in only one of the two is how they would drift.
+      weaponProficiencies: fromJsonText<Record<string, string>>(character.weaponProficiencies, {}),
+    };
     for (const row of rows) {
       if (row.equippedAction) {
         const parsed = CharacterAction.safeParse(fromJsonText(row.equippedAction, null));
-        if (parsed.success) actions.push({ action: parsed.data, itemName: row.name });
-        continue;
+        // A stored action with no mechanics beyond its name is read as absent here too
+        // (issue #2144), so the encounter card and the inventory sheet keep agreeing about
+        // which items have an authored action and which fall through to derivation.
+        if (parsed.success && equippedActionHasContent(parsed.data)) {
+          actions.push({ action: parsed.data, itemName: row.name });
+          continue;
+        }
       }
       const data = this.equippedItemCompendiumData(row.compendiumSnapshot, row.ruleEntryId);
       if (!data) continue;
@@ -472,7 +485,7 @@ export class ActionResolverService {
    * of the merge for a caller that wants to label the source (issue #1901).
    */
   characterUsableActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level' | 'weaponProficiencies'>,
   ): Array<{ row: Record<string, unknown>; itemName: string | null }> {
     const manual = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
     const equipped = this.equippedItemActionRows(character);
@@ -491,7 +504,7 @@ export class ActionResolverService {
   }
 
   private characterActionRows(
-    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level'>,
+    character: Pick<typeof characters.$inferSelect, 'id' | 'campaignId' | 'actions' | 'stats' | 'level' | 'weaponProficiencies'>,
   ): Array<Record<string, unknown>> {
     return this.characterUsableActionRows(character).map((x) => x.row);
   }

@@ -14,9 +14,9 @@
  *    attack/damage/spec construction has exactly one implementation, shared with monster
  *    statblocks and the D&D Beyond importer.
  *
- *  - **System-aware, never system-assuming.** Attack math runs only for an adapter that has
- *    5e's ability-modifier and level-based proficiency shape. Every other system still gets
- *    an action — its name and damage line are real data — but with no invented to-hit.
+ *  - **System-aware, never system-assuming.** Attack math runs for an adapter that declares
+ *    `weaponProficiencyBonus`, and only for one. Every other system still gets an action — its
+ *    name and damage line are real data — but with no invented to-hit.
  *
  *  - **Degrade to text, never to wrong numbers.** When damage dice are not a dice expression
  *    (Open5e serves the SRD Net's as the string `"0"`) or the damage type is missing, the
@@ -24,21 +24,25 @@
  *    action still appears in the list and can still be edited into a correct one; a fabricated
  *    +7 to hit is a lie the table will not notice.
  *
- * One deliberate, documented assumption: **proficiency**. 5e's to-hit is ability modifier plus
- * proficiency bonus *if the character is proficient with the weapon*, and Campfire's `Character`
- * has no weapon-proficiency data at all — `saveProficiencies` covers saves and `skills` covers
- * skills, and neither says whether this fighter trained with a halberd. The D&D Beyond importer
- * faces the same gap and resolves it by leaving such weapons text-only, because an import is a
- * one-shot with no visible provenance and no edit affordance. This path is different in exactly
- * those two respects: the derived row is labelled as derived, states the assumption in its own
- * notes, and sits behind an editor. So it assumes proficiency (true for the overwhelming
- * majority of weapons a character chooses to equip), shows its work, and lets anyone correct it.
- * That is an explicit default, not silent math.
+ * **Proficiency is read, not assumed** (issue #2144). This module used to have one deliberate
+ * guess in it: 5e's to-hit includes a proficiency bonus *if the character is proficient with
+ * the weapon*, the sheet recorded proficiency for saves and skills but never for weapons, so
+ * the derivation assumed proficiency and said so in the action's own notes. That was defensible
+ * for 5e, where the term is a single fixed number and most equipped weapons are ones the
+ * character trained in. It was not defensible for PF2e, whose term is level plus a rank bonus
+ * running +2 to +8 — a spread far too wide to guess — which is why a Pathfinder weapon showed a
+ * damage line and a blank to-hit at all.
+ *
+ * `Character.weaponProficiencies` closed that gap, so the rank is now looked up (by the
+ * weapon's name, then the categories it belongs to) and priced by the adapter. An UNTRAINED
+ * wielder gets no proficiency term and is told so in the notes, which is the case the old
+ * assumption was silently wrong about.
  */
 import { z } from 'zod';
 import { CharacterAction } from './character-action';
 import { expandRawStatblockAction } from './combatant-statblock';
 import { isRollableDamageExpression } from './dice-bounds';
+import { weaponProficiencyRank, type ProficiencyRank } from './proficiency';
 
 /**
  * The 5e-shaped subset of a rule-system adapter this module needs. Declared structurally (the
@@ -58,6 +62,37 @@ export interface ItemActionAdapter {
    * the length bound remains the only gate there.
    */
   readonly damageTypes?: readonly string[];
+  /**
+   * This system's proficiency term for an attack at `rank` (issue #2144). DECLARING IT IS WHAT
+   * OPTS A SYSTEM INTO A DERIVED TO-HIT — see `RuleSystemAdapter.weaponProficiencyBonus`.
+   *
+   * Replaces the `adapter.id !== 'dnd5e'` gate this module used to open with. That check was a
+   * stand-in for "does the resolver know this system's attack math", written before any hook
+   * existed to ask; asking directly is both more honest and how PF2e — which has published its
+   * own proficiency curve all along — stops being excluded by a name comparison.
+   */
+  weaponProficiencyBonus?(level: number, rank: ProficiencyRank): number;
+  /**
+   * How this system turns the wielder's ability modifier into weapon DAMAGE (issue #2144).
+   * Omit for 5e's rule, which is the default: the same modifier that hit adds to the damage.
+   *
+   * PF2e does not work that way — a melee Strike adds STR to damage, a ranged one adds nothing
+   * unless the weapon is Propulsive or Thrown (Player Core, "Damage"). Getting this wrong is
+   * not cosmetic: every bow in the game would deal its wielder's DEX in extra damage on every
+   * hit, forever, and the number looks perfectly plausible on the card.
+   */
+  weaponDamageModifier?(input: WeaponDamageModifierInput): number;
+}
+
+/** What an adapter needs to decide how much of the wielder's modifier reaches damage. */
+export interface WeaponDamageModifierInput {
+  /** The ability the ATTACK used, and its modifier. */
+  abilityKey: 'STR' | 'DEX';
+  abilityMod: number;
+  strMod: number;
+  ranged: boolean;
+  /** Lowercased weapon traits/properties, e.g. `['finesse', 'thrown', 'propulsive']`. */
+  traits: readonly string[];
 }
 
 /** The character fields the attack math reads. */
@@ -65,6 +100,11 @@ export interface ItemActionCharacter {
   /** Canonical ability scores, e.g. `{ STR: 16, DEX: 12 }`. */
   stats: Record<string, number>;
   level: number;
+  /**
+   * Weapon training as `weapon or category -> rank` (issue #2144). Omitted or empty means the
+   * wielder is untrained with everything, which is what an unfilled sheet honestly says.
+   */
+  weaponProficiencies?: Record<string, string> | null;
 }
 
 export interface DeriveEquippedItemActionInput {
@@ -110,6 +150,15 @@ interface WeaponProfile {
    * silently right-most-of-the-time.
    */
   abilityAmbiguous: boolean;
+  /**
+   * The proficiency keys this weapon answers to, besides its own name (issue #2144): its
+   * category ("simple", "martial", PF2e's "advanced"/"unarmed") and, for PF2e, its weapon group
+   * ("sword"). Lowercased. A character trained in a category is trained with every weapon in
+   * it, so these are what {@link weaponProficiencyRank} matches the sheet against.
+   */
+  categories: string[];
+  /** Lowercased traits/properties, for the system's damage rule (PF2e Propulsive/Thrown). */
+  traits: string[];
 }
 
 // Review (chatgpt-codex-connector P2): this used to be a local regex, which accepted shapes
@@ -166,11 +215,6 @@ function abilityScore(stats: Record<string, number>, ability: string): number {
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : 10;
 }
 
-/** 5e proficiency bonus by level. Duplicated from index.ts's `dnd5eProficiencyBonus` only to avoid an import cycle. */
-function proficiencyBonus(level: number): number {
-  return 2 + Math.floor((Math.max(1, level) - 1) / 4);
-}
-
 function hasProperty(properties: unknown, name: string): boolean {
   if (!Array.isArray(properties)) return false;
   return (properties as unknown[]).some((p) => {
@@ -180,11 +224,45 @@ function hasProperty(properties: unknown, name: string): boolean {
 }
 
 /**
+ * Whether the item's own compendium data CLASSIFIES it as a weapon, independently of whether
+ * it carries usable numbers (issue #2144).
+ *
+ * Every importer records this, in its own vocabulary. Two kinds of evidence, both taken:
+ *
+ *  - a shelf that NAMES weapons — Open5e magic items publish `category: "Weapon"` (550 of the
+ *    SRD's 2.3k of them), PF2e/SF2e publish the coarse `category: "weapon"` beside the printed
+ *    `itemCategory: "Weapons"`, Pathfinder 1e and Starfinder 1e publish a `category` from the
+ *    same shelf;
+ *  - a field only a weapon HAS — PF2e/SF2e's `weaponCategory` ("Simple"), `weaponGroup`
+ *    ("Shock") and `weaponType` ("Ranged") are absent from every other kind of item, so their
+ *    presence is the classification even though none of their values is the word "weapon".
+ *
+ * None of this is a damage die, and this function makes no claim that it is — it answers only
+ * "is this thing a weapon", which is what decides whether an equipped item deserves an attack
+ * row at all.
+ */
+function declaresWeapon(d: Record<string, unknown>): boolean {
+  for (const key of ['category', 'itemCategory'] as const) {
+    const v = str(d[key]).toLowerCase();
+    if (v === 'weapon' || v === 'weapons') return true;
+  }
+  return (['weaponCategory', 'weaponGroup', 'weaponType'] as const).some((key) => str(d[key]) !== '');
+}
+
+/**
  * Recognize a weapon and reduce it to {@link WeaponProfile}, or return null for anything that
  * isn't one. Returning null is the "this item grants no action" answer — a bedroll, a potion,
  * a magic item whose effect is prose rather than an attack. That is the common case and it
  * must stay silent: deriving a bogus action for every backpack would be worse than deriving
  * nothing at all.
+ *
+ * A weapon with NO readable damage is still a weapon (issue #2144). It comes back with an
+ * empty `damageDice`, which every branch downstream already treats as "not derivable" and
+ * turns into a text-only row saying so. That is the difference between a character sheet that
+ * shows "Longsword (+1) — fill in its attack" and one that shows nothing at all, and the
+ * second is indistinguishable from the feature being broken. Some magic weapons genuinely
+ * have no base weapon to read (the SRD's generic "+1 Weapon"), and an inventory acquired
+ * before its importer learned to keep the stats has none either.
  */
 function weaponProfileFrom(data: unknown): WeaponProfile | null {
   const d = asRecord(data);
@@ -206,22 +284,69 @@ function weaponProfileFrom(data: unknown): WeaponProfile | null {
       // See {@link WeaponProfile.abilityAmbiguous}: a thrown finesse weapon with no Ammunition
       // is either a melee weapon (Dagger) or a ranged one (Dart), and this data cannot say.
       abilityAmbiguous: !ranged && thrown && finesse,
+      // Open5e's one weapon-category bit. A row that omits it (`isSimple: null` — homebrew, or
+      // a magic item whose base weapon the SRD does not name) contributes no category, so the
+      // wielder's category training cannot be claimed for it and only a by-name entry counts.
+      categories: typeof d.isSimple === 'boolean' ? [d.isSimple ? 'simple' : 'martial'] : [],
+      traits: propertyNames(d.properties),
     };
   }
 
-  // Starfinder items (starfinder-importer.ts) and homebrew entries using the same flat keys.
-  const damageDice = str(d.damageDice) || str(d.damage);
+  // An itemKind that names something else — Open5e's `armor` (issue #2096) — is a definite
+  // "not a weapon", and must not fall through to the tolerant flat-key reading below.
+  const itemKind = str(d.itemKind).toLowerCase();
+  if (itemKind) return null;
+
+  // PF2e/SF2e/Starfinder items and homebrew entries using the same flat keys.
+  const rawDamage = str(d.damageDice) || str(d.damage);
   const damageType = damageTypeOf(d.damageType);
-  if (!damageDice) return null;
+  if (!rawDamage && !declaresWeapon(d)) return null;
   const range = typeof d.range === 'number' ? d.range : null;
+  const traits = [...stringList(d.traits), ...propertyNames(d.properties)];
+  // AoN packs the damage type's abbreviation into the dice string — a PF2e Longsword is
+  // `damage: "1d8 S"`, a Pulsecaster Pistol `"1d6 E"` (issue #2144). The letters duplicate
+  // `damage_type`, which this profile already reads properly, and they make the string fail
+  // every rollable-dice check, so the weapon degraded to a text-only row even once the
+  // importer kept its stats. Only a trailing ALPHABETIC token is dropped, so a homebrew
+  // `1d8+1` keeps its modifier.
+  const damageDice = rawDamage.replace(/\s+[A-Za-z]{1,3}$/, '').trim();
+  // PF2e states melee/ranged outright, which is strictly better data than Open5e's (see
+  // `abilityAmbiguous` — that source cannot tell a Dagger from a Dart). Fall back to "reports a
+  // positive range" for the flat-keyed sources that publish no such field.
+  const weaponType = str(d.weaponType).toLowerCase();
+  const ranged = weaponType ? weaponType === 'ranged' : range !== null && range > 0;
   return {
     damageDice,
     damageType,
-    ranged: range !== null && range > 0,
-    finesse: hasProperty(d.properties, 'Finesse'),
-    // A flat-keyed source states its range outright, so there is no melee/ranged ambiguity.
+    ranged,
+    finesse: traits.includes('finesse'),
+    // A flat-keyed source states its range or its weapon type outright, so there is no
+    // melee/ranged ambiguity to warn about.
     abilityAmbiguous: false,
+    // PF2e trains by category ("Simple"/"Martial"/"Advanced") and a character can also be
+    // trained in a weapon GROUP ("Sword"); Starfinder 1e and PF1e publish a bare `category`.
+    categories: [str(d.weaponCategory), str(d.weaponGroup), str(d.category)]
+      .map((v) => v.toLowerCase())
+      .filter((v) => v && v !== 'weapon' && v !== 'weapons' && v !== 'equipment'),
+    traits,
   };
+}
+
+/** Lowercased names from an Open5e-shaped `properties` array. */
+function propertyNames(properties: unknown): string[] {
+  if (!Array.isArray(properties)) return [];
+  return (properties as unknown[])
+    .map((p) => {
+      const o = asRecord(p);
+      return o ? str(o.name).toLowerCase() : str(p).toLowerCase();
+    })
+    .filter(Boolean);
+}
+
+/** Lowercased entries from a plain string array (`traits: ['Finesse', 'Propulsive']`). */
+function stringList(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return (v as unknown[]).map((e) => str(e).toLowerCase()).filter(Boolean);
 }
 
 /**
@@ -268,12 +393,14 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
     (!vocabulary || vocabulary.some((t) => t.toLowerCase() === normalizedType));
 
   try {
-    // Only a 5e-shaped adapter gets attack math. Another system's weapon still becomes an
-    // action — the damage line is real, sourced data — but with no to-hit this module has no
-    // business computing. `resolveAttack`/`checkProficiencyBonus`-style hooks are how a
-    // system would opt in later; until one does, borrowing 5e's numbers would be exactly the
-    // "silent PF2e math on a 5e fight" the resolver refuses to do, in the other direction.
-    if (adapter.id !== 'dnd5e') {
+    // A system gets attack math when its ADAPTER declares the proficiency curve, not when its
+    // id matches a string (issue #2144). The old `adapter.id !== 'dnd5e'` gate was a stand-in
+    // written before any hook existed to ask — and it excluded PF2e, which has published
+    // `pf2eProficiencyBonus` all along. A system that declares nothing still gets an action
+    // with its real, sourced damage line and no to-hit, because borrowing 5e's numbers would
+    // be exactly the "silent 5e math on a PF2e fight" the resolver refuses to do.
+    const proficiencyFor = adapter.weaponProficiencyBonus;
+    if (!proficiencyFor) {
       const line = [profile.damageDice, profile.damageType.toLowerCase()].filter(Boolean).join(' ');
       return textOnlyAction(
         name,
@@ -304,8 +431,18 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
     // the plain STR attack; a ranged weapon is DEX outright.
     const abilityKey = profile.ranged ? 'DEX' : profile.finesse && dexMod > strMod ? 'DEX' : 'STR';
     const abilityMod = abilityKey === 'DEX' ? dexMod : strMod;
-    const prof = proficiencyBonus(character.level);
+    // The wielder's ACTUAL training with this weapon (issue #2144), replacing the assumption
+    // this module used to make and state in its own notes. It is read from the sheet — by the
+    // weapon's name first, then the categories it belongs to — so an untrained character now
+    // correctly gets no proficiency term instead of a silent grant of one.
+    const rank = weaponProficiencyRank(character.weaponProficiencies, name, profile.categories);
+    const prof = proficiencyFor(character.level, rank);
     const toHit = abilityMod + prof;
+    // How much of the modifier reaches DAMAGE is a separate, system-owned question — 5e's "the
+    // same modifier that hit" is the default, PF2e's melee-only rule is not.
+    const damageMod = adapter.weaponDamageModifier
+      ? adapter.weaponDamageModifier({ abilityKey, abilityMod, strMod, ranged: profile.ranged, traits: profile.traits })
+      : abilityMod;
 
     // Review (chatgpt-codex-connector P2): a weapon whose accepted dice ALREADY carry a flat
     // modifier — a homebrew `1d8+1` — must have it folded into the ability modifier, not
@@ -324,7 +461,7 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
     // then re-roll the +3. Accept the shorthand on the way in, emit the canonical form.
     const baseDice = diceMatch[1].replace(/^d/i, '1d');
     const weaponFlat = diceMatch[2] ? (diceMatch[2] === '-' ? -1 : 1) * Number(diceMatch[3]) : 0;
-    const totalFlat = weaponFlat + abilityMod;
+    const totalFlat = weaponFlat + damageMod;
     const damageExpression =
       totalFlat === 0 ? baseDice : `${baseDice}${totalFlat > 0 ? '+' : '-'}${Math.abs(totalFlat)}`;
     // Combining can push the modifier past what the roller accepts even though each half was
@@ -344,9 +481,15 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
         name,
         attackBonus: toHit,
         damage: [{ expression: damageExpression, type: profile.damageType.toLowerCase() }],
+        // The breakdown now reports the rank it READ rather than the one it assumed
+        // (issue #2144). An untrained wielder is called out explicitly: a to-hit with no
+        // proficiency term in it looks like a bug on the card unless the card says why, and
+        // "you have not recorded training with this" is a fixable thing to be told.
         desc:
-          `Derived from the equipped ${name}: ${abilityKey} ${signed(abilityMod)}, proficiency ${signed(prof)}. ` +
-          'Assumes proficiency with this weapon — edit the action if that is wrong, or to add a magic bonus.' +
+          `Derived from the equipped ${name}: ${abilityKey} ${signed(abilityMod)}, ${rank} ${signed(prof)}. ` +
+          (rank === 'untrained'
+            ? 'No training with this weapon is recorded on the sheet, so no proficiency is added — set it under Weapon training, or edit this action.'
+            : 'Edit the action to add a magic bonus or any other modifier.') +
           // Only when the choice actually differed: a thrown finesse weapon whose wielder is
           // stronger than they are dexterous. If DEX won anyway, both readings agree and
           // there is nothing to warn about.
@@ -355,7 +498,7 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
             : ''),
       },
       'attack',
-      'dnd5e',
+      adapter.id,
     );
   } catch {
     // A shape that still slips past the guards above (an implausible score making the spec
@@ -371,6 +514,26 @@ export function deriveEquippedItemAction(input: DeriveEquippedItemActionInput): 
  */
 export const EquippedActionSource = z.enum(['derived', 'manual']);
 export type EquippedActionSource = z.infer<typeof EquippedActionSource>;
+
+/**
+ * Whether an authored action says anything beyond its own name (issue #2144).
+ *
+ * `CharacterAction` requires a `name` and defaults every other field to `''`, so the editor's
+ * initial draft — prefilled with the item's name and nothing else — is a VALID action. Saving
+ * it unchanged stored a row that shows no attack, rolls nothing, and, because derivation only
+ * runs where no authored action exists, permanently suppressed the derived attack the item
+ * would otherwise have granted. A player who opened the editor to see what it did came away
+ * with strictly less than they started with, and no way back except the Remove button they had
+ * no reason to suspect.
+ *
+ * A name alone is therefore treated as "no action": it is exactly what the blank draft is, and
+ * an action carrying no mechanics is not something anyone means to author.
+ */
+export function equippedActionHasContent(action: CharacterAction | null | undefined): boolean {
+  if (!action) return false;
+  if (action.spec) return true;
+  return [action.kind, action.toHit, action.damage, action.targetAc, action.notes].some((field) => field.trim() !== '');
+}
 
 /**
  * Parse the human-facing damage line ("1d8+3 slashing") into the structured part the resolver
