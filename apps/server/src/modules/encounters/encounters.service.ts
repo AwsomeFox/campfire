@@ -3,14 +3,14 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lt, lte, or, sql, 
 import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
-import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
+import { ActionSpec, ActiveEffect, AoeTemplate, AoeTemplateDeclare, AoeTemplateUpdate, ARCHMAGE_ADAPTER_ID, CheckRollRequest, CombatantCreate, CombatantInitiativeBreakdown, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, DND5E_ADAPTER_ID, EncounterCommit, EncounterCreate, EncounterEscalationUpdate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, EscalationDieHistoryEntry, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, ActionRollRequest, QuickRollRequest, STARFINDER_ADAPTER_ID, applyDamageModifiers, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, creatureCheckCatalogForAdapter, checkRollExpr, formatCheckBreakdown, damageDefensesFromStatblock, defaultCombatantStatblock, deriveConditionNames, deriveTurnSpells, encounterDifficultySupported, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, hasDeathSavesForAdapter, hasInitiativeRollForAdapter, hpModelForAdapter, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, leveledConditionTrackFor, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries, EncounterAftermathLoot, EncounterAftermathLootItem, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, EncounterAftermathOutcome, EncounterAftermathCombatant,
   // Issue #1921 — limited-use/recharge action pools: the recharge-condition parser used by
   // the turn tick, the same pure math the resolver uses so this service can never decide a
   // pool recharges differently than an apply/reject message described it.
   parseRechargeRange,
   effectiveActionUsesMax } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, CampaignLibraryMonster, Combatant, CombatantRemoveResult, CombatantReorderRequest, CombatantTurnStatePatch as CombatantTurnStatePatchInput, CheckRollResponse, CreatureCheckCatalogInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterNextTurn as EncounterNextTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HomebrewMechanicsProfile, HpSyncConflict, MapPing, MonsterHpDisplay, Role, RollCheckDefinition, RollResult, RuleSystemAdapter, SpellSlotLevel, StarfinderStatblockData, TargetDefenses, TokenSize, TurnActor, TurnSpellEntry, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaignMembers, campaigns, characters, combatants, combatantRemovalUndos, encounterEvents, encounters, inventoryItems, locations, npcs, quests, questObjectives, ruleEntries, rulePacks, sessions, encounterTokenBatches, campaignTokenFormations } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -2044,6 +2044,135 @@ export class EncountersService {
       .limit(1);
     if (!row) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
     return row;
+  }
+
+  /**
+   * Returns the mechanics source for a monster/NPC combatant without widening the stored
+   * combatant contract. Inline statblocks are the live DM-authored snapshot; otherwise the
+   * linked, campaign-scoped compendium entry is authoritative. Missing/corrupt data is an
+   * empty catalog, never guessed 5e math.
+   */
+  private async creatureCheckData(
+    row: typeof combatants.$inferSelect,
+    campaignId: number,
+  ): Promise<CreatureCheckCatalogInput | null> {
+    if (row.statblockJson) {
+      const inline = CombatantStatblock.safeParse(fromJsonText(row.statblockJson, null));
+      if (inline.success) return { data: { abilityScores: inline.data.abilityScores }, abilityRepresentation: 'score' };
+    }
+    if (row.ruleEntryId == null) return null;
+    const [entry] = await this.db
+      .select({ dataJson: ruleEntries.dataJson })
+      .from(ruleEntries)
+      .where(and(eq(ruleEntries.id, row.ruleEntryId), or(isNull(ruleEntries.campaignId), eq(ruleEntries.campaignId, campaignId))))
+      .limit(1);
+    return entry?.dataJson ? { data: fromJsonText<Record<string, unknown>>(entry.dataJson, {}) } : null;
+  }
+
+  /** DM-only adapter-backed catalog for a creature combatant (issue #1314). */
+  async listCreatureChecks(
+    encounterId: number,
+    combatantId: number,
+    user: RequestUser,
+    role: Role,
+  ): Promise<RollCheckDefinition[]> {
+    if (role !== 'dm') throw new ForbiddenException('Only the DM may view creature mechanics.');
+    const encounter = await this.getRowOrThrow(encounterId);
+    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+    if (combatant.kind === 'character') throw new BadRequestException('Creature checks require a monster or NPC combatant.');
+    const data = await this.creatureCheckData(combatant, encounter.campaignId);
+    if (!data) return [];
+    return creatureCheckCatalogForAdapter(await this.adapterForCampaign(encounter.campaignId), data);
+  }
+
+  /**
+   * Rolls an encounter creature check from its server-derived catalog. The persisted shared-log
+   * label deliberately identifies the creature and check but omits modifier breakdowns: players
+   * may see an allowed roll outcome without learning the DM-only statblock mechanics.
+   */
+  async rollCreatureCheck(
+    encounterId: number,
+    combatantId: number,
+    input: CheckRollRequest,
+    user: RequestUser,
+    role: Role,
+  ): Promise<CheckRollResponse> {
+    if (role !== 'dm') throw new ForbiddenException('Only the DM may roll creature mechanics.');
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+    const combatant = await this.getCombatantRowOrThrow(encounterId, combatantId);
+    if (combatant.kind === 'character') throw new BadRequestException('Creature checks require a monster or NPC combatant.');
+    const data = await this.creatureCheckData(combatant, encounter.campaignId);
+    const adapter = await this.adapterForCampaign(encounter.campaignId);
+    const def = data
+      ? creatureCheckCatalogForAdapter(adapter, data).find((check) => check.id === input.checkId) ?? null
+      : null;
+    if (!def) throw new NotFoundException(`No rollable creature check "${input.checkId}" for combatant ${combatantId}`);
+
+    const mode = input.mode ?? 'normal';
+    const result = rollDice(checkRollExpr(def, mode));
+    result.label = `${combatant.name} · ${def.label}`.slice(0, 120);
+    result.actor = combatant.name;
+    result.encounterId = encounterId;
+    const npcIdentityId = combatant.npcIdentitySourceId ?? combatant.npcId;
+    if (npcIdentityId != null) result.npcId = npcIdentityId;
+    if (typeof input.dc === 'number') {
+      result.dc = input.dc;
+      result.success = result.total >= input.dc;
+    }
+    // The shared dice feed must show that this creature rolled, but it cannot carry the
+    // statblock's private modifier in its expression, total, or term breakdown. Return the
+    // full result only to this DM request; persist a natural-die projection for everyone else.
+    const sharedResult: RollResult = {
+      expr: result.kept ? `2d${def.die}${mode === 'advantage' ? 'kh1' : 'kl1'}` : `1d${def.die}`,
+      rolls: result.rolls,
+      ...(result.kept ? { kept: result.kept } : {}),
+      total: result.kept?.[0] ?? result.rolls[0] ?? result.total,
+      ...(result.label ? { label: result.label } : {}),
+      ...(result.actor ? { actor: result.actor } : {}),
+      encounterId,
+      ...(npcIdentityId != null ? { npcId: npcIdentityId } : {}),
+    };
+    const persistedRoll = await this.rolls.record(encounter.campaignId, sharedResult, user);
+    const roll: DiceRoll = {
+      ...persistedRoll,
+      ...result,
+      id: persistedRoll.id,
+      campaignId: persistedRoll.campaignId,
+      rollerUserId: persistedRoll.rollerUserId,
+      rollerName: persistedRoll.rollerName,
+      createdAt: persistedRoll.createdAt,
+    };
+    const breakdownText = formatCheckBreakdown(def);
+    let degree: CheckRollResponse['degree'];
+    if (def.supportsDegrees && typeof input.dc === 'number') {
+      const naturalRoll = result.kept?.[0] ?? result.rolls[0];
+      degree = adapter.degreeOfSuccess?.(result.total, input.dc, naturalRoll);
+    }
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'dice.roll',
+      entityType: 'combatant',
+      entityId: combatantId,
+      campaignId: encounter.campaignId,
+      detail: `${combatant.name} · ${def.label} (${breakdownText}): ${result.expr} = ${result.total}`,
+    });
+    return {
+      check: {
+        id: def.id,
+        label: def.label,
+        category: def.category,
+        ability: def.ability,
+        proficiency: def.proficiency,
+        modifier: def.modifier,
+        breakdown: def.breakdown.map((term) => ({ label: term.label, value: term.value })),
+        breakdownText,
+      },
+      mode,
+      roll,
+      ...(degree ? { degree } : {}),
+    };
   }
 
   /**

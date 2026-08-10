@@ -5,6 +5,7 @@ import { defaultCombatantStatblock, hasDeathSavesForAdapter, hasInitiativeRollFo
 import { UIIcon } from '../../../components/UIIcon';
 import { GameIcon } from '../../../components/GameIcon';
 import { CharacterStatCard } from '../../../components/CharacterStatCard';
+import { CreatureStatCard } from '../../../components/CreatureStatCard';
 import { Btn, HpBar, TextInput } from '../../../components/ui';
 import { GatedControl } from '../../../components/GatedControl';
 import { useAnnounce } from '../../../components/Announcer';
@@ -84,6 +85,10 @@ export type CombatantRowProps = {
    * shows no affordance regardless of this flag.
    */
   canAwardSpecialResource?: boolean;
+  /** DM-only mount gate for the readable creature-mechanics catalog (issue #1314). */
+  canViewCreatureChecks?: boolean;
+  /** Whether creature-check roll controls may mutate this encounter (issue #1314). */
+  canRollCreatureChecks?: boolean;
   canSetInitiative: boolean;
   /** Encounter is running — clearing initiative re-sorts the live turn order (issue #715). */
   running: boolean;
@@ -245,6 +250,8 @@ export const CombatantRow = memo(function CombatantRow({
   statblock,
   canRemove,
   canAwardSpecialResource = false,
+  canViewCreatureChecks = false,
+  canRollCreatureChecks = false,
   canSetInitiative,
   running,
   character,
@@ -1647,6 +1654,15 @@ export const CombatantRow = memo(function CombatantRow({
             answer "does a 17 hit?" without leaving the tracker. Collapsible so the row
             stays scannable; lazily fetched on first expand. */}
         {statblock && <div data-combatant-statblock>{statblock}</div>}
+        {combatant.kind !== 'character' && routeCampaignId != null && canViewCreatureChecks && (
+          <CreatureStatCard
+            encounterId={encounterId}
+            combatantId={combatant.id}
+            creatureName={combatant.name}
+            canRoll={canRollCreatureChecks && !syncBlocked}
+            onError={onRollError}
+          />
+        )}
         {onUseMonsterAction && (
           <div data-combatant-detail>
             <CombatantActionsList

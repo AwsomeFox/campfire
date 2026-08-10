@@ -6023,6 +6023,201 @@ export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: Ch
   return catalog.filter((c) => c.category !== 'initiative');
 }
 
+/**
+ * A creature's check source is intentionally smaller than a character sheet: ability values
+ * come through the adapter's statblock mapping, while saves and skills are emitted only when
+ * the imported/manual statblock explicitly supplies their final modifier. This keeps the
+ * catalog honest for creatures, whose proficiency/rank details are often not available.
+ */
+export interface CreatureCheckCatalogInput {
+  readonly data: Record<string, unknown>;
+  /** Inline encounter statblocks store raw scores even in campaigns whose imported creatures use modifiers. */
+  readonly abilityRepresentation?: AbilityRepresentation;
+}
+
+function creatureCheckModifierMap(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+    if (Number.isFinite(n)) out[key] = Math.trunc(n);
+  }
+  return out;
+}
+
+function creatureSaveModifierMap(data: Record<string, unknown>): Record<string, number> {
+  const saves: Record<string, number> = {};
+  const canonicalKeys = new Set<string>();
+  for (const [key, modifier] of Object.entries(creatureCheckModifierMap(data.saves ?? data.savingThrows ?? data.saving_throws))) {
+    const normalized = key.trim().toLowerCase();
+    const canonical = creatureAbilityLabel(key).toLowerCase();
+    if (normalized && canonical && !canonicalKeys.has(canonical)) {
+      saves[normalized] = modifier;
+      canonicalKeys.add(canonical);
+    }
+  }
+  // Open5e and existing homebrew entries may instead carry final modifiers as `dexterity_save`.
+  // The nested map wins when both are present, which preserves an explicit statblock override.
+  for (const [key, value] of Object.entries(data)) {
+    if (!/_save$/i.test(key)) continue;
+    const modifier = creatureCheckModifierMap({ value }).value;
+    const normalized = key.replace(/_save$/i, '').trim().toLowerCase();
+    const canonical = creatureAbilityLabel(normalized).toLowerCase();
+    if (modifier !== undefined && normalized && canonical && !canonicalKeys.has(canonical)) {
+      saves[normalized] = modifier;
+      canonicalKeys.add(canonical);
+    }
+  }
+  return saves;
+}
+
+function creatureAbilityLabel(key: string): string {
+  const normalized = key.trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    strength: 'STR', str: 'STR', dexterity: 'DEX', dex: 'DEX', constitution: 'CON', con: 'CON',
+    intelligence: 'INT', int: 'INT', wisdom: 'WIS', wis: 'WIS', charisma: 'CHA', cha: 'CHA',
+  };
+  return aliases[normalized] ?? key.trim().toUpperCase();
+}
+
+function creatureCheckLabel(key: string): string {
+  return key
+    .trim()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+const MAX_CHECK_ID_LENGTH = 60;
+
+/**
+ * Keep catalog ids consumable by {@link CheckRollRequest}. Short, established ids
+ * retain their exact spelling; only an imported/homebrew key that would overflow the
+ * request contract gains a deterministic suffix. Repeated normalized keys reuse their
+ * established id so the catalog's existing deduplication remains intact; distinct
+ * mechanics that collide after bounding receive a unique fallback suffix.
+ */
+function boundedCreatureCheckId(
+  prefix: 'save' | 'skill',
+  rawKey: string,
+  usedIds: ReadonlySet<string>,
+  canonicalIds: Map<string, string>,
+): string {
+  const full = `${prefix}:${rawKey.trim().toLowerCase()}`;
+  const existing = canonicalIds.get(full);
+  if (existing) return existing;
+
+  if (full.length <= MAX_CHECK_ID_LENGTH && !usedIds.has(full)) {
+    canonicalIds.set(full, full);
+    return full;
+  }
+
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < full.length; index += 1) {
+    hash = Math.imul(hash ^ full.charCodeAt(index), 0x01000193);
+  }
+  const suffix = (hash >>> 0).toString(36);
+  const stemLength = MAX_CHECK_ID_LENGTH - suffix.length - 1;
+  const stem = full.slice(0, stemLength);
+  let candidate = `${stem}-${suffix}`;
+  for (let collision = 2; usedIds.has(candidate); collision += 1) {
+    const collisionSuffix = `-${collision}`;
+    candidate = `${full.slice(0, MAX_CHECK_ID_LENGTH - suffix.length - collisionSuffix.length - 1)}-${suffix}${collisionSuffix}`;
+  }
+  canonicalIds.set(full, candidate);
+  return candidate;
+}
+
+/**
+ * Build the roll catalog for a creature statblock (issue #1314). Unlike characters, a
+ * creature's saves/skills are already-published final modifiers, so this function NEVER
+ * invents a proficiency value from incomplete source data. Ability checks always flow through
+ * `mapStatblock` plus the adapter's representation-aware modifier seam.
+ */
+export function creatureCheckCatalogForAdapter(
+  adapter: RuleSystemAdapter,
+  creature: CreatureCheckCatalogInput,
+): RollCheckDefinition[] {
+  // A neutral d20 catalog would be a lie for pool/non-d20 systems. An adapter can add a
+  // dedicated creature catalog in a later focused change; until then withholding is honest.
+  if (!hasNeutralD20ChecksForAdapter(adapter)) return [];
+
+  const mapped = adapter.mapStatblock(creature.data);
+  const supportsDegrees = typeof adapter.degreeOfSuccess === 'function';
+  const abilityRepresentation = creature.abilityRepresentation ?? mapped.abilityRepresentation;
+  // Advantage is a 5e mechanic; do not present it for PF2e merely because both use a d20.
+  const supportsAdvantage = adapter.id === DND5E_ADAPTER_ID;
+  const out: RollCheckDefinition[] = [];
+  const ids = new Set<string>();
+  const canonicalCreatureIds = new Map<string, string>();
+  const add = (def: RollCheckDefinition) => {
+    if (!ids.has(def.id)) {
+      ids.add(def.id);
+      out.push(def);
+    }
+  };
+
+  for (const [rawKey, rawValue] of Object.entries(mapped.abilityScores ?? {})) {
+    if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) continue;
+    const ability = creatureAbilityLabel(rawKey);
+    // `mapStatblock` may fold a native initiative/Perception bonus into this map for the
+    // encounter initiative seam. Only the adapter's declared character abilities are
+    // creature ability checks; exposing that metadata would invent a bogus check.
+    if (!(adapter.characterSheet?.abilityFields ?? []).some((field) => field.key.toUpperCase() === ability)) continue;
+    const modifier = resolveAbilityModifier(adapter, rawValue, abilityRepresentation);
+    add({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier,
+      breakdown: [{ label: ability, value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  const saves = creatureSaveModifierMap(creature.data);
+  for (const [rawKey, modifier] of Object.entries(saves)) {
+    const label = creatureCheckLabel(rawKey);
+    add({
+      id: boundedCreatureCheckId('save', rawKey, ids, canonicalCreatureIds),
+      label: `${label} save`,
+      category: 'save',
+      ability: null,
+      proficiency: 'statblock',
+      favorite: true,
+      modifier,
+      breakdown: [{ label: 'statblock', value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  const skills = creatureCheckModifierMap(creature.data.skills ?? creature.data.skillMods ?? creature.data.skill_mod ?? creature.data.skill_mods);
+  for (const [rawKey, modifier] of Object.entries(skills)) {
+    const label = creatureCheckLabel(rawKey);
+    add({
+      id: boundedCreatureCheckId('skill', rawKey, ids, canonicalCreatureIds),
+      label,
+      category: 'skill',
+      ability: null,
+      proficiency: 'statblock',
+      favorite: true,
+      modifier,
+      breakdown: [{ label: 'statblock', value: modifier }],
+      die: 20,
+      supportsAdvantage,
+      supportsDegrees,
+    });
+  }
+
+  return sortCheckCatalog(out);
+}
+
 /** Find a single check by its stable id within a character's catalog, or null. */
 export function findCheckInCatalog(adapter: RuleSystemAdapter, character: CheckCatalogCharacter, checkId: string): RollCheckDefinition | null {
   return checkCatalogForAdapter(adapter, character).find((c) => c.id === checkId) ?? null;
@@ -12769,6 +12964,13 @@ export const CheckRollRequest = z.object({
   consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text recorded with the roll label'),
 });
 export type CheckRollRequest = z.infer<typeof CheckRollRequest>;
+
+/**
+ * DM-only encounter creature-check input (issue #1314). Creature rolls do not have the
+ * character check flow's consequence record, so reject it instead of accepting and dropping it.
+ */
+export const CreatureCheckRollRequest = CheckRollRequest.omit({ consequence: true });
+export type CreatureCheckRollRequest = z.infer<typeof CreatureCheckRollRequest>;
 
 /** The resolved check + persisted roll returned by the check-roll endpoint / MCP tool (issue #415). */
 export const CheckRollResponse = z.object({

@@ -3,6 +3,7 @@ import {
   DRIVER_LIVE_PLAY_TOOL_NAMES,
   DRIVER_PLAYER_SAFE_READ_TOOLS,
   classifyDriverRead,
+  driverApprovableEntityArg,
   guardDriverLivePlayArgs,
   isDriverToolAllowed,
   type AiDmSessionState,
@@ -59,6 +60,13 @@ describe('Issue #1498 AI DM Live Play Tool Surface & Turn Economy', () => {
       expect(DRIVER_PLAYER_SAFE_READ_TOOLS.has('list_check_requests')).toBe(true);
       expect(classifyDriverRead('list_checks')).toBe('player_safe');
       expect(classifyDriverRead('list_check_requests')).toBe('player_safe');
+    });
+
+    it('allows creature rolls in live play but requires combatant-scoped approval to read their DM-only catalog', () => {
+      expect(DRIVER_LIVE_PLAY_TOOL_NAMES).toContain('roll_creature_check');
+      expect(isDriverToolAllowed(writeTool('roll_creature_check'))).toBe(true);
+      expect(classifyDriverRead('list_creature_checks')).toBe('secret');
+      expect(driverApprovableEntityArg('list_creature_checks')).toBe('combatantId');
     });
   });
 

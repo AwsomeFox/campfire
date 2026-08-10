@@ -899,6 +899,29 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(typeof rolled.roll.success).toBe('boolean');
   });
 
+  it('creature check MCP tools share the DM-only encounter catalog and roll path (issue #1314)', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const goblin = parseResult(await dmClient.callTool({ name: 'lookup_rule', arguments: { query: 'goblin' } })) as Array<{ id: number }>;
+    const encounter = parseResult(await dmClient.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'MCP creature checks' } })) as { id: number };
+    const combatant = parseResult(await dmClient.callTool({ name: 'add_combatant', arguments: { encounterId: encounter.id, kind: 'monster', ruleEntryId: goblin[0].id } })) as { id: number };
+    const checks = parseResult(await dmClient.callTool({ name: 'list_creature_checks', arguments: { encounterId: encounter.id, combatantId: combatant.id } })) as Array<{ id: string; modifier: number }>;
+    expect(checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ability:DEX', modifier: 2 })]));
+    const rolled = parseResult(await dmClient.callTool({ name: 'roll_creature_check', arguments: { encounterId: encounter.id, combatantId: combatant.id, checkId: 'ability:DEX' } })) as { roll: { actor: string; label: string } };
+    expect(rolled.roll).toMatchObject({ actor: 'Goblin', label: 'Goblin · DEX check' });
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.update(campaigns).set({ status: 'paused' }).where(eq(campaigns.id, campaignId));
+    try {
+      const archivedChecks = parseResult(await dmClient.callTool({ name: 'list_creature_checks', arguments: { encounterId: encounter.id, combatantId: combatant.id } })) as Array<{ id: string }>;
+      expect(archivedChecks).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'ability:DEX' })]));
+      const archivedRoll = await dmClient.callTool({ name: 'roll_creature_check', arguments: { encounterId: encounter.id, combatantId: combatant.id, checkId: 'ability:DEX' } });
+      expect(archivedRoll.isError).toBe(true);
+      expect((archivedRoll.content as TextContent[])[0].text).toContain('403');
+    } finally {
+      await db.update(campaigns).set({ status: 'active' }).where(eq(campaigns.id, campaignId));
+    }
+  });
+
   it('check requests (issue #415): dm request_check → list_check_requests → resolve_check_request; viewer cannot resolve', async () => {
     const dmClient = await mcpClient(dmToken);
     const viewerClient = await mcpClient(viewerToken);

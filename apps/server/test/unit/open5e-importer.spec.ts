@@ -2,6 +2,22 @@ import { damageDefensesFromStatblock, DND5E_DAMAGE_TYPES } from '@campfire/schem
 import { mapArmor, mapCreature, mapWeapon } from '../../src/modules/rules/open5e-importer';
 
 describe('Open5e creature importer', () => {
+  it('preserves explicitly published creature save and skill modifiers for encounter rolls (issue #1314)', () => {
+    const entry = mapCreature({
+      key: 'rollable-target',
+      name: 'Rollable target',
+      dexterity_save: 4,
+      saves: { wisdom: 3 },
+      skills: { stealth: 6 },
+    });
+
+    expect(JSON.parse(entry.dataJson!)).toMatchObject({
+      dexterity_save: 4,
+      saves: { wisdom: 3 },
+      skills: { stealth: 6 },
+    });
+  });
+
   it('preserves damage defences for encounter damage resolution (issue #605)', () => {
     const entry = mapCreature({
       key: 'defended-target',

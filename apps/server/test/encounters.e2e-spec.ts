@@ -80,7 +80,7 @@ describe('encounters (e2e)', () => {
         type: 'monster',
         summary: 'CR 0.25',
         body: '',
-        dataJson: JSON.stringify({ hitPoints: 7 }),
+        dataJson: JSON.stringify({ hitPoints: 7, abilityScores: { strength: 8, dexterity: 14 }, saves: { dex: 4 }, skills: { stealth: 6 } }),
         createdAt: ts,
         updatedAt: ts,
       })
@@ -107,6 +107,74 @@ describe('encounters (e2e)', () => {
     expect(aria.hpCurrent).toBe(20);
     expect(aria.hpMax).toBe(20);
     expect(aria.initiative).toBeNull();
+  });
+
+  it('DM-only creature checks use the adapter catalog and persist an attributed, non-leaking shared roll', async () => {
+    const server = ctx.app.getHttpServer();
+    // The player-facing dice-log assertion below needs an encounter visible to the player;
+    // encounter creation otherwise defaults to hidden DM prep and the secrecy filter correctly
+    // omits its rolls from the shared feed.
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Creature checks', hidden: false });
+    const added = await request(server)
+      .post(`/api/v1/encounters/${created.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId });
+    expect(added.status).toBe(201);
+    const checks = await request(server).get(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks`).set(dm);
+    expect(checks.status).toBe(200);
+    expect(checks.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'ability:DEX', modifier: 2 }),
+      expect.objectContaining({ id: 'save:dex', modifier: 4 }),
+      expect.objectContaining({ id: 'skill:stealth', modifier: 6 }),
+    ]));
+    expect((await request(server).get(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks`).set(player)).status).toBe(403);
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
+          .set(dm)
+          .send({ checkId: 'skill:stealth', consequence: 'This is not supported for creature checks.' })
+      ).status,
+    ).toBe(400);
+    const rolled = await request(server)
+      .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
+      .set(dm)
+      .send({ checkId: 'skill:stealth' });
+    expect(rolled.status).toBe(201);
+    expect(rolled.body.check.modifier).toBe(6);
+    expect(rolled.body.roll).toMatchObject({ actor: 'Test Goblin', encounterId: created.body.id, label: 'Test Goblin · Stealth' });
+    expect(rolled.body.roll.expr).toBe('1d20+6');
+    expect(rolled.body.roll.label).not.toContain('+6');
+    const shared = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=10`).set(player);
+    const publicRoll = shared.body.find((entry: { id: number }) => entry.id === rolled.body.roll.id);
+    expect(publicRoll).toMatchObject({ expr: '1d20', total: publicRoll.rolls[0], label: 'Test Goblin · Stealth' });
+    expect(publicRoll.terms).toBeUndefined();
+
+    expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'paused' })).status).toBe(200);
+    try {
+      expect((await request(server).get(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks`).set(dm)).status).toBe(200);
+      expect(
+        (
+          await request(server)
+            .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
+            .set(dm)
+            .send({ checkId: 'skill:stealth' })
+        ).status,
+      ).toBe(403);
+    } finally {
+      expect((await request(server).patch(`/api/v1/campaigns/${campaignId}`).set(dm).send({ status: 'active' })).status).toBe(200);
+    }
+    expect((await request(server).post(`/api/v1/encounters/${created.body.id}/roll-initiative`).set(dm)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${created.body.id}/start`).set(dm)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${created.body.id}/end`).set(dm)).status).toBe(201);
+    expect(
+      (
+        await request(server)
+          .post(`/api/v1/encounters/${created.body.id}/combatants/${added.body.id}/checks/roll`)
+          .set(dm)
+          .send({ checkId: 'skill:stealth' })
+      ).status,
+    ).toBe(409);
   });
 
   // Issue #491: PF2e initiative is Perception = WIS mod + trained proficiency (level+2),
@@ -3773,7 +3841,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       await request(server)
         .post(`/api/v1/encounters/${encounterId}/combatants`)
         .set(dm)
-        .send({ kind: 'npc', npcId, name: 'The Traitor', hpMax: 50 })
+        .send({ kind: 'npc', npcId, name: 'The Traitor', hpMax: 50, statblock: { abilityScores: { STR: 12 } } })
     ).body.id;
     const duplicateId = (
       await request(server)
@@ -3781,6 +3849,14 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
         .set(dm)
         .send({ kind: 'npc', name: 'The Traitor 2', hpMax: 50, duplicateOfCombatantId: combatantId })
     ).body.id;
+    const hiddenCreatureRoll = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${duplicateId}/checks/roll`)
+      .set(dm)
+      .send({ checkId: 'ability:STR' });
+    expect(hiddenCreatureRoll.status).toBe(201);
+    const hiddenCreatureRolls = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls`).set(player);
+    expect(JSON.stringify(hiddenCreatureRolls.body)).not.toMatch(/Traitor/);
+    expect(hiddenCreatureRolls.body).toEqual(expect.arrayContaining([expect.objectContaining({ label: UNKNOWN_COMBATANT_LABEL })]));
     // The DM still sees the real identity link + name.
     const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     const dmC = (
