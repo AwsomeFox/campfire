@@ -1,10 +1,10 @@
 import { useTranslation } from 'react-i18next';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { UIIcon } from '../../../components/UIIcon';
 import { GatedControl } from '../../../components/GatedControl';
 import { revealCockpitPanel } from '../vtt/revealCockpitPanel';
-import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridType, TokenSize } from '@campfire/schema';
+import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridDistanceRule, GridType, HexOrientation, TokenSize } from '@campfire/schema';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { FloatingNumbers } from '../FloatingNumbers';
 import { FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, eraseFogRegion, filterAoeTemplatesForViewer, fogRectFromCorners, gridDistanceForAdapter, hitTestFogRegion, moveFogRegion, ruleSystemAdapter, type CustomMechanicsProfile } from '@campfire/schema';
@@ -29,7 +29,7 @@ import { planFormationPlacement, planCollisionFreePlacement, resolveDesiredForma
 import { gridCellRevealRect } from '../fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from '../aoeHitTest';
 import { buildAoeDamageApplications, normalizeDirectDamageType, type DamageSaveOutcome, type DirectDamageMetadata, type TargetDamageApplication } from '../directDamage';
-import { calibrationToPx, clampPercent, computeContainedRect, DEFAULT_GRID_OPACITY, layerPxToMapPercent, mapPercentToLayerPx, pointerToMapPercent, resolveGridCalibration, snapMapPercentCalibrated, type GridCalibration } from '../mapRenderedBounds';
+import { calibrationToPx, clampPercent, computeContainedRect, DEFAULT_GRID_OPACITY, layerPxToMapPercent, mapPercentToLayerPx, pointerToMapPercent, resolveGridCalibration, snapMapPercentCalibrated, type GridCalibration, type Rect } from '../mapRenderedBounds';
 import { formatRulerReadout, gridCellUnitPlural, measureToolHelp, rulerDistanceFeet } from '../rulerReadout';
 import { hexAoeCirclePolygons, hexPolygons, hexKeyboardStepPx, mapPercentGridDistance, snapFogRectToHexGrid, snapMapPercentToHex, tokenFootprintDiameterPx } from '../hexGeometry';
 import { dragBudget, dragMoveFt, isCurrentActorDrag, type DragBudget } from '../dragDistance';
@@ -84,6 +84,10 @@ type MapTool = 'move' | 'token-select' | 'measure' | 'reveal' | 'erase' | 'selec
 
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
+
+// Issue #1917 stage 3: hoisted from a type local to `BattleMap` so the module-scope
+// `MapTokenSlot` / `DragDistanceOverlay` components below can reference it too.
+type MapPoint = { x: number; y: number };
 
 /**
  * Ping intents (issue #1937) — a fixed, small set (not an extensible taxonomy), matching
@@ -272,6 +276,259 @@ export type BattleMapProps = {
   layout?: 'card' | 'vtt';
 };
 
+// Issue #1917 stage 3: `dragPos` used to be `BattleMap`'s own `useState`, set on every
+// `pointermove` of a token drag. Since a component's OWN state update re-runs its OWN render
+// function regardless of `memo()` (memo only guards re-renders triggered by a parent), that
+// re-ran BattleMap's entire ~4,000-line render body once per pointer-move frame — recomputing
+// and reconciling every token, AoE shape, and fog rect on the map, not just the dragged token.
+// (`GridOverlay`'s own memo boundary, stage 2, already stopped ITS render function from being
+// re-invoked when BattleMap re-rendered — but BattleMap re-rendering at all, every frame, was
+// never contained.)
+//
+// This tiny external store (subscribe/getSnapshot, the shape `useSyncExternalStore` expects)
+// replaces that `useState`. BattleMap writes to it via `.set()` without ever reading from it in
+// its own render, so a drag frame no longer touches BattleMap's render function at all. Only
+// `MapTokenSlot` (for the dragged token) and `DragDistanceOverlay` (the live distance readout)
+// call `useSyncExternalStore` on it, so a drag frame re-renders exactly those two components —
+// `useSyncExternalStore`'s `Object.is` check on `getSnapshot()`'s result additionally means a
+// non-dragged `MapTokenSlot` (whose selector always returns the same `null`) never re-renders.
+type DragPositionState = { combatantId: number; x: number; y: number } | null;
+
+interface DragPositionStore {
+  getSnapshot: () => DragPositionState;
+  subscribe: (listener: () => void) => () => void;
+  set: (next: DragPositionState) => void;
+}
+
+function createDragPositionStore(): DragPositionStore {
+  let state: DragPositionState = null;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => state,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    set(next) {
+      state = next;
+      listeners.forEach((listener) => listener());
+    },
+  };
+}
+
+/**
+ * Positions one token disc (issue #1917 stage 3). The token's visual content — badges, HP arc,
+ * condition controls, the "Remove" button — is unchanged and still computed by `BattleMap`'s own
+ * render, passed through unmodified as `children`; only `left`/`top`/`opacity`/`zIndex` are owned
+ * here, sourced from `dragPosStore` while this is the dragged token. React bails out of
+ * reconciling `children` whenever this wrapper re-renders on its own (the `children` element
+ * reference is unchanged from BattleMap's last real render), so a drag frame's DOM work is just
+ * this one wrapper's four style properties.
+ */
+function MapTokenSlot({
+  combatantId,
+  isDragging,
+  restLeft,
+  restTop,
+  restOpacity,
+  dragPosStore,
+  role,
+  tabIndex,
+  ariaLabel,
+  ariaPressed,
+  ariaDisabled,
+  ariaDescribedby,
+  ariaKeyshortcuts,
+  dataTestId,
+  className,
+  pointerEvents,
+  cursor,
+  outline,
+  onPointerDown,
+  onClick,
+  onKeyDown,
+  onFocus,
+  children,
+}: {
+  combatantId: number;
+  isDragging: boolean;
+  restLeft: number;
+  restTop: number;
+  restOpacity: number;
+  dragPosStore: DragPositionStore;
+  role?: string;
+  tabIndex: number;
+  ariaLabel: string;
+  ariaPressed?: boolean;
+  ariaDisabled?: true;
+  ariaDescribedby: string;
+  ariaKeyshortcuts?: string;
+  dataTestId: string;
+  className: string;
+  pointerEvents: 'auto' | 'none';
+  cursor: string;
+  outline?: string;
+  onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onClick: (e: ReactMouseEvent<HTMLDivElement>) => void;
+  onKeyDown: (e: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onFocus: (e: ReactFocusEvent<HTMLDivElement>) => void;
+  children: ReactNode;
+}) {
+  const live = useSyncExternalStore(
+    dragPosStore.subscribe,
+    () => (isDragging ? dragPosStore.getSnapshot() : null),
+  );
+  const dragging = isDragging && live != null && live.combatantId === combatantId;
+  const left = dragging ? live!.x : restLeft;
+  const top = dragging ? live!.y : restTop;
+  return (
+    <div
+      data-testid={dataTestId}
+      role={role}
+      tabIndex={tabIndex}
+      aria-label={ariaLabel}
+      aria-pressed={ariaPressed}
+      aria-disabled={ariaDisabled}
+      aria-describedby={ariaDescribedby}
+      aria-keyshortcuts={ariaKeyshortcuts}
+      className={className}
+      style={{
+        left: `${left}%`,
+        top: `${top}%`,
+        pointerEvents,
+        touchAction: 'none',
+        cursor,
+        opacity: dragging ? 0.85 : restOpacity,
+        outline,
+        zIndex: dragging ? 10 : 2,
+      }}
+      onPointerDown={onPointerDown}
+      onClick={onClick}
+      onKeyDown={onKeyDown}
+      onFocus={onFocus}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Live token-drag / keyboard-nudge distance readout (issue #1911), lifted out of BattleMap's own
+ * render (issue #1917 stage 3) into its own `useSyncExternalStore` subscriber so a pointer-move
+ * frame re-renders only this overlay, never BattleMap. Keyboard-nudge bursts are unaffected —
+ * `keyboardDrag` stays an ordinary (much lower frequency) prop.
+ */
+function DragDistanceOverlay({
+  dragPosStore,
+  draggingId,
+  keyboardDrag,
+  combatants,
+  canMeasure,
+  mapRect,
+  cellPx,
+  gridType,
+  calibration,
+  hexOrientation,
+  gridDistanceRule,
+  gridScale,
+  gridUnit,
+  currentTurnMovementMaxFt,
+  encounterStatus,
+  currentTurnCombatantId,
+}: {
+  dragPosStore: DragPositionStore;
+  draggingId: number | null;
+  keyboardDrag: { combatantId: number; origin: MapPoint; current: MapPoint } | null;
+  combatants: readonly Combatant[];
+  canMeasure: boolean;
+  mapRect: Rect | null;
+  cellPx: number;
+  gridType: GridType;
+  calibration: GridCalibration | null;
+  hexOrientation: HexOrientation;
+  gridDistanceRule: GridDistanceRule;
+  gridScale: number | null | undefined;
+  gridUnit: string;
+  currentTurnMovementMaxFt: number | null | undefined;
+  encounterStatus: string;
+  currentTurnCombatantId: number | null | undefined;
+}) {
+  const live = useSyncExternalStore(dragPosStore.subscribe, dragPosStore.getSnapshot);
+  const { t } = useTranslation();
+  if (!canMeasure || !mapRect) return null;
+
+  let combatantId: number | null = null;
+  let origin: MapPoint | null = null;
+  let current: MapPoint | null = null;
+  if (draggingId != null && live != null && live.combatantId === draggingId) {
+    const dragged = combatants.find((c) => c.id === draggingId);
+    if (dragged) {
+      combatantId = dragged.id;
+      origin = { x: dragged.tokenX ?? 0, y: dragged.tokenY ?? 0 };
+      current = { x: live.x, y: live.y };
+    }
+  } else if (keyboardDrag) {
+    combatantId = keyboardDrag.combatantId;
+    origin = keyboardDrag.origin;
+    current = keyboardDrag.current;
+  }
+  if (combatantId == null || !origin || !current) return null;
+
+  const cells = mapPercentGridDistance(origin, current, mapRect, cellPx, gridType, calibration, hexOrientation, gridDistanceRule);
+  let budget: DragBudget | null = null;
+  if (currentTurnMovementMaxFt != null && isCurrentActorDrag(encounterStatus, currentTurnCombatantId, combatantId)) {
+    const draggedCombatant = combatants.find((c) => c.id === combatantId);
+    if (draggedCombatant) {
+      budget = dragBudget(draggedCombatant.turnState.movementUsedFt, rulerDistanceFeet(cells, gridScale ?? 0), currentTurnMovementMaxFt);
+    }
+  }
+
+  return (
+    <>
+      <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 7 }}>
+        <line
+          data-testid="map-drag-distance-line"
+          x1={`${origin.x}%`}
+          y1={`${origin.y}%`}
+          x2={`${current.x}%`}
+          y2={`${current.y}%`}
+          stroke="var(--color-accent)"
+          strokeWidth={1.5}
+          strokeDasharray="3 4"
+          opacity={0.65}
+        />
+      </svg>
+      <div
+        data-testid="map-drag-distance-readout"
+        className="absolute"
+        style={{
+          left: `${current.x}%`,
+          top: `${current.y}%`,
+          transform: 'translate(10px, -100%)',
+          background: budget?.overBudget ? 'var(--color-warning, #d97706)' : 'rgba(15,23,42,.9)',
+          color: '#fff',
+          fontSize: 11,
+          fontWeight: 600,
+          padding: '2px 6px',
+          borderRadius: 4,
+          whiteSpace: 'nowrap',
+          zIndex: 9,
+        }}
+      >
+        <div>
+          {formatRulerReadout({ cells, scale: gridScale ?? 0, gridUnit, gridType }, 'display')}
+        </div>
+        {budget && (
+          <div data-testid="map-drag-distance-budget">
+            {t('encounters.map.dragDistance.budget', { used: budget.usedFt, max: budget.maxFt, unit: gridUnit })}
+            {budget.overBudget ? ` · ${t('encounters.map.dragDistance.overSpeed')}` : ''}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 export const BattleMap = memo(function BattleMap({
   encounter,
   campaignId,
@@ -351,7 +608,6 @@ export const BattleMap = memo(function BattleMap({
     setDmTokenDetailMode(mode);
     writeTokenDetailMode(mode, typeof localStorage === 'undefined' ? null : localStorage);
   };
-  type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null; start: MapPoint; clientX: number; clientY: number; moved: boolean; targetable: boolean }
     | { kind: 'token-select'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint; additive: boolean }
@@ -382,7 +638,11 @@ export const BattleMap = memo(function BattleMap({
   }, [mapDialog?.previewUrl]);
 
   const [draggingId, setDraggingId] = useState<number | null>(null);
-  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  // Issue #1917 stage 3: `dragPos` itself lives outside React state now — see
+  // `createDragPositionStore` above. `draggingId` stays ordinary state; it only changes twice per
+  // drag (start/end), so it never re-renders BattleMap at pointer-move frequency.
+  const dragPosStoreRef = useRef(createDragPositionStore());
+  const dragPosStore = dragPosStoreRef.current;
   // Issue #1911: a keyboard-nudge "burst" — arrow-key repeats on a focused token — tracked the
   // same way a pointer drag tracks `dragPos`, so the live distance readout renders for both. The
   // ref is the source of truth read by the burst-end timeout (a closure over state can be stale
@@ -492,7 +752,7 @@ export const BattleMap = memo(function BattleMap({
   const clearGesturePreview = useCallback((kind: ActiveMapGesture['kind']) => {
     if (kind === 'token') {
       setDraggingId(null);
-      setDragPos(null);
+      dragPosStore.set(null);
     } else if (kind === 'aoe') {
       setAoeDrag(null);
     } else if (kind === 'fog') {
@@ -508,7 +768,10 @@ export const BattleMap = memo(function BattleMap({
     }
     if (kind === 'token-select') setTokenSelectionRect(null);
     if (kind === 'token-lasso') setTokenLasso(null);
-  }, []);
+    // `dragPosStore` is a ref's `.current` (see `dragPosStoreRef` above) — its identity never
+    // changes across renders, so listing it here satisfies exhaustive-deps without changing
+    // when this callback is recreated.
+  }, [dragPosStore]);
 
   const cancelActiveGesture = useCallback(
     (pointerId?: number, clearPreview = true) => {
@@ -1146,7 +1409,7 @@ export const BattleMap = memo(function BattleMap({
     successfulPointerUpRef.current = null;
     activeGestureRef.current = { kind: 'token', pointerId: e.pointerId, captureTarget, tokenId: c.id, point, start: point, clientX: e.clientX, clientY: e.clientY, moved: false, targetable };
     setDraggingId(c.id);
-    setDragPos(point);
+    dragPosStore.set({ combatantId: c.id, x: point.x, y: point.y });
   }
 
   function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
@@ -1305,7 +1568,7 @@ export const BattleMap = memo(function BattleMap({
       if (gesture.targetable
         ? mapPingTapExceededSlop(gesture, e.clientX, e.clientY)
         : Math.hypot(pct.x - gesture.start.x, pct.y - gesture.start.y) >= 0.25) gesture.moved = true;
-      setDragPos(pct);
+      dragPosStore.set({ combatantId: gesture.tokenId, x: pct.x, y: pct.y });
     } else if (gesture.kind === 'token-select') {
       gesture.end = pct;
       setTokenSelectionRect({ start: gesture.start, end: pct });
@@ -1753,40 +2016,10 @@ export const BattleMap = memo(function BattleMap({
     return { cells };
   })();
 
-  // Issue #1911: live distance readout for an in-progress token drag or keyboard-nudge burst —
-  // the SAME mapPercentGridDistance path the Measure tool's `rulerReadout` above uses, so a
-  // dragged token and a ruler drawn between the same two points read identically. `budget` is
-  // additionally gated on the dragged combatant being the current actor AND
-  // `currentTurnMovementMaxFt` being present — that prop is already redacted server-side to the
-  // DM and that combatant's owner, so its presence alone keeps this secrecy-safe by construction.
-  const dragDistancePreview = (() => {
-    if (!canMeasure || !mapRect) return null;
-    let combatantId: number | null = null;
-    let origin: MapPoint | null = null;
-    let current: MapPoint | null = null;
-    if (draggingId != null && dragPos != null) {
-      const dragged = encounter.combatants.find((c) => c.id === draggingId);
-      if (dragged) {
-        combatantId = dragged.id;
-        origin = { x: dragged.tokenX ?? 0, y: dragged.tokenY ?? 0 };
-        current = dragPos;
-      }
-    } else if (keyboardDrag) {
-      combatantId = keyboardDrag.combatantId;
-      origin = keyboardDrag.origin;
-      current = keyboardDrag.current;
-    }
-    if (combatantId == null || !origin || !current) return null;
-    const cells = mapPercentGridDistance(origin, current, mapRect, cellPx, gridType, calibration, hexOrientation, gridDistanceRule);
-    let budget: DragBudget | null = null;
-    if (currentTurnMovementMaxFt != null && isCurrentActorDrag(encounter.status, currentTurnCombatantId, combatantId)) {
-      const draggedCombatant = encounter.combatants.find((c) => c.id === combatantId);
-      if (draggedCombatant) {
-        budget = dragBudget(draggedCombatant.turnState.movementUsedFt, rulerDistanceFeet(cells, gridScale ?? 0), currentTurnMovementMaxFt);
-      }
-    }
-    return { origin, current, cells, budget };
-  })();
+  // Issue #1911's live token-drag / keyboard-nudge distance readout now lives in
+  // `DragDistanceOverlay` above (issue #1917 stage 3) — it derives the same thing from
+  // `dragPosStore` directly via its own `useSyncExternalStore` subscription, so this component's
+  // OWN render never needs to depend on the live drag position.
 
   const revealPreview = revealCorners ? fogRectFromCorners(revealCorners.start, revealCorners.end) : null;
   const fogBrushMode = tool === 'erase' ? 'erase' : 'reveal';
@@ -2941,9 +3174,12 @@ export const BattleMap = memo(function BattleMap({
                       : feedback.some((event) => event.crit)
                         ? ' cf-hp-feedback-anchor--crit'
                         : '';
-                  const isDragging = draggingId === c.id && dragPos != null;
-                  const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
-                  const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
+                  // Issue #1917 stage 3: `draggingId` and the live drag position are always set
+                  // and cleared together in the same state update (see `onTokenPointerDown` /
+                  // `clearGesturePreview`), so this stays exactly equivalent to the old
+                  // `draggingId === c.id && dragPos != null` — but no longer reads the removed
+                  // `dragPos` React state, which is what let it move into `MapTokenSlot` below.
+                  const isDragging = draggingId === c.id;
                   const movable = tool === 'move' && !viewportPan && effectiveCanMoveToken(c);
                   const isCharacter = c.kind === 'character';
                   const sizePx =
@@ -2983,28 +3219,27 @@ export const BattleMap = memo(function BattleMap({
                   const hasConcentration = showExtendedTokenState && !!c.turnState?.concentration;
                   const isCurrentTurn = showTokenState && encounter.status === 'running' && encounter.currentCombatantId === c.id;
                   return (
-                    <div
+                    <MapTokenSlot
                       key={c.id}
-                      data-testid={`map-token-${c.id}`}
+                      combatantId={c.id}
+                      isDragging={isDragging}
+                      restLeft={c.tokenX ?? 0}
+                      restTop={c.tokenY ?? 0}
+                      restOpacity={targeting && (!legalTarget || !targetAvailable) ? 0.6 : 1}
+                      dragPosStore={dragPosStore}
+                      dataTestId={`map-token-${c.id}`}
                       role="button"
                       tabIndex={movable || targetClickable ? 0 : -1}
-                      aria-label={tokenLabel}
-                      aria-pressed={legalTarget ? selectedTarget : undefined}
-                      aria-disabled={legalTarget && !targetAvailable ? true : undefined}
-                      aria-describedby="map-keyboard-help"
-                      aria-keyshortcuts={movable ? 'ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace' : undefined}
+                      ariaLabel={tokenLabel}
+                      ariaPressed={legalTarget ? selectedTarget : undefined}
+                      ariaDisabled={legalTarget && !targetAvailable ? true : undefined}
+                      ariaDescribedby="map-keyboard-help"
+                      ariaKeyshortcuts={movable ? 'ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace' : undefined}
                       className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
-                      style={{
-                        left: `${left}%`,
-                        top: `${top}%`,
-                        // In measure/reveal mode tokens must not eat the surface drag.
-                        pointerEvents: movable || targetClickable ? 'auto' : 'none',
-                        touchAction: 'none',
-                        cursor: movable ? 'grab' : 'default',
-                        opacity: isDragging ? 0.85 : targeting && (!legalTarget || !targetAvailable) ? 0.6 : 1,
-                        outline: selectedTarget ? '3px solid var(--color-accent)' : legalTarget && targetAvailable && !targeting?.declared ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined,
-                        zIndex: isDragging ? 10 : 2,
-                      }}
+                      // In measure/reveal mode tokens must not eat the surface drag.
+                      pointerEvents={movable || targetClickable ? 'auto' : 'none'}
+                      cursor={movable ? 'grab' : 'default'}
+                      outline={selectedTarget ? '3px solid var(--color-accent)' : legalTarget && targetAvailable && !targeting?.declared ? '2px solid white' : selectedForBatch ? '3px solid var(--color-accent)' : undefined}
                       onPointerDown={(e) => {
                         if (targetClickable && e.isPrimary) {
                           e.stopPropagation();
@@ -3198,7 +3433,7 @@ export const BattleMap = memo(function BattleMap({
                           <UIIcon name="close" size="xs" />
                         </button>
                       )}
-                    </div>
+                    </MapTokenSlot>
                   );
                 })}
 
@@ -3393,58 +3628,27 @@ export const BattleMap = memo(function BattleMap({
                 )}
 
                 {/* Live token-drag distance readout (issue #1911): same measurement path as the
-                    ruler above, plus the current actor's movement budget when the viewer may see it. */}
-                {dragDistancePreview && (
-                  <>
-                    <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 7 }}>
-                      <line
-                        data-testid="map-drag-distance-line"
-                        x1={`${dragDistancePreview.origin.x}%`}
-                        y1={`${dragDistancePreview.origin.y}%`}
-                        x2={`${dragDistancePreview.current.x}%`}
-                        y2={`${dragDistancePreview.current.y}%`}
-                        stroke="var(--color-accent)"
-                        strokeWidth={1.5}
-                        strokeDasharray="3 4"
-                        opacity={0.65}
-                      />
-                    </svg>
-                    <div
-                      data-testid="map-drag-distance-readout"
-                      className="absolute"
-                      style={{
-                        left: `${dragDistancePreview.current.x}%`,
-                        top: `${dragDistancePreview.current.y}%`,
-                        transform: 'translate(10px, -100%)',
-                        background: dragDistancePreview.budget?.overBudget ? 'var(--color-warning, #d97706)' : 'rgba(15,23,42,.9)',
-                        color: '#fff',
-                        fontSize: 11,
-                        fontWeight: 600,
-                        padding: '2px 6px',
-                        borderRadius: 4,
-                        whiteSpace: 'nowrap',
-                        zIndex: 9,
-                      }}
-                    >
-                      <div>
-                        {formatRulerReadout(
-                          { cells: dragDistancePreview.cells, scale: gridScale ?? 0, gridUnit, gridType },
-                          'display',
-                        )}
-                      </div>
-                      {dragDistancePreview.budget && (
-                        <div data-testid="map-drag-distance-budget">
-                          {t('encounters.map.dragDistance.budget', {
-                            used: dragDistancePreview.budget.usedFt,
-                            max: dragDistancePreview.budget.maxFt,
-                            unit: gridUnit,
-                          })}
-                          {dragDistancePreview.budget.overBudget ? ` · ${t('encounters.map.dragDistance.overSpeed')}` : ''}
-                        </div>
-                      )}
-                    </div>
-                  </>
-                )}
+                    ruler above, plus the current actor's movement budget when the viewer may see
+                    it. Extracted (issue #1917 stage 3) so its own `useSyncExternalStore`
+                    subscription to `dragPosStore` re-renders only this overlay per drag frame. */}
+                <DragDistanceOverlay
+                  dragPosStore={dragPosStore}
+                  draggingId={draggingId}
+                  keyboardDrag={keyboardDrag}
+                  combatants={encounter.combatants}
+                  canMeasure={canMeasure}
+                  mapRect={mapRect}
+                  cellPx={cellPx}
+                  gridType={gridType}
+                  calibration={calibration}
+                  hexOrientation={hexOrientation}
+                  gridDistanceRule={gridDistanceRule}
+                  gridScale={gridScale}
+                  gridUnit={gridUnit}
+                  currentTurnMovementMaxFt={currentTurnMovementMaxFt}
+                  encounterStatus={encounter.status}
+                  currentTurnCombatantId={currentTurnCombatantId}
+                />
 
                 {/* Live pings (issue #238) — a short expanding pulse everyone at the table sees. */}
                 {pings.map((p) => {
