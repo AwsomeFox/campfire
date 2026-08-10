@@ -146,13 +146,21 @@ test.describe('control surface goldens (#1694)', () => {
     await page.evaluate(() => (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts?.ready ?? Promise.resolve());
 
     // `.cf-vtt-header` is `padding: var(--space-2) var(--space-4); gap: var(--space-3)`
-    // (index.css) — a direct consumer that would move under #1688's retokening path
-    // (5.6px -> 8px here). This is the check that actually matters for #1688's purposes:
-    // it reads a CSS value, not pixels, so it is unaffected by the browser-build issue
-    // above and would still catch the retokening even if a screenshot's tolerance had
-    // absorbed it.
+    // (index.css). 5.6px below is NOT an arbitrary geometry snapshot to "fix" if it ever
+    // goes red — it is --space-2 on the app's current 2.8px-per-unit scale
+    // (`--space-1..8: 2.8/5.6/8.4/.../22.4px`, index.css:384-389), Tailwind's own scale
+    // times 0.7. Issue #2169 (the retokening PR this pin exists to guard) proposes
+    // redefining that scale to Tailwind's own 4/8/12/16/24/32px, at which point --space-2
+    // becomes 8px. This assertion is a deliberate tripwire for exactly that change — if it
+    // ever fails outside of #2169 actually landing the retokening, that is real,
+    // unintentional drift in the token scale, not a stale test to loosen. It reads a CSS
+    // value, not pixels, so it is also unaffected by the browser-build issue above and
+    // would still catch the retokening even if a screenshot's tolerance had absorbed it.
     const headerBox = await measureBox(header);
-    expect(headerBox.paddingTop, '.cf-vtt-header padding-top must equal --space-2 (5.6px) today').toBe('5.6px');
+    expect(
+      headerBox.paddingTop,
+      '.cf-vtt-header padding-top must equal --space-2 (5.6px on the current 2.8px scale) today — see the comment above before changing this value',
+    ).toBe('5.6px');
   });
 
   test('character sheet control column (desktop)', async ({ page }) => {
