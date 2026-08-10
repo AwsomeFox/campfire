@@ -83,6 +83,9 @@ describe('#587 catalog projection', () => {
       // only part a catalog browser needs to know; the profile itself is read by the adapter
       // factory on the campaign's own paths.
       'customMechanicsProfile',
+      // Homebrew condition definitions (issue #1505): campaign-custom condition rules blob
+      // the catalog has no use for.
+      'conditionDefinitions',
     ];
     const all = Object.keys(getTableColumns(campaigns));
     const unclassified = all.filter(
