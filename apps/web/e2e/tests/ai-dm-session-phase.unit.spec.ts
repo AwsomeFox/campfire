@@ -25,6 +25,7 @@ import {
 } from '../../src/features/ai-dm/transcript';
 
 const TABLE = resolve(__dirname, '../../src/features/ai-dm/AiTablePage.tsx');
+const ENCOUNTER_PANEL = resolve(__dirname, '../../src/features/ai-dm/EncounterAiDriverPanel.tsx');
 const ACTIVITY = resolve(__dirname, '../../src/features/ai-dm/useAiDmLiveActivity.tsx');
 const TRANSCRIPT_UI = resolve(__dirname, '../../src/features/ai-dm/AiDmTranscriptUi.tsx');
 
@@ -95,15 +96,19 @@ test.describe('session lifecycle phase — client wiring (#1043)', () => {
     // an enabled composer is an input that CANNOT succeed — for every up-to-date client, not just
     // one that missed a phase frame. The lock has to state its cause and leave the one-click cure
     // in reach, or it just trades a confusing error for a confusing dead box.
-    const src = readFileSync(TABLE, 'utf8');
-    expect(src).toMatch(/const ended = phase === 'ended'/);
-    expect(src).toMatch(/locked = streaming \|\| paused \|\| humanControl \|\| awaiting \|\| ended/);
-    expect(src).toMatch(/composerLockedEnded/);
-    // Start Session is still rendered while `ended`, so the lock is never a dead end...
-    expect(src).toMatch(/canCompose && phase !== 'greeting' && phase !== 'wrap_up'/);
-    // ...but only for roles the server would actually accept. A viewer shown a button that
-    // always 403s is the same "control that cannot succeed" defect as the unlocked composer.
-    expect(src).toMatch(/const canCompose = role === 'dm' \|\| role === 'player'/);
+    for (const file of [TABLE, ENCOUNTER_PANEL]) {
+      const src = readFileSync(file, 'utf8');
+      expect(src).toMatch(/const ended = phase === 'ended'/);
+      expect(src).toMatch(/locked = streaming \|\| paused \|\| humanControl \|\| awaiting \|\| ended/);
+      expect(src).toMatch(/composerLockedEnded/);
+      // Start Session is still rendered while `ended`, so the lock is never a dead end...
+      expect(src).toMatch(/canCompose && phase !== 'greeting' && phase !== 'wrap_up'/);
+    }
+    // Both consumers admit only roles that the server accepts for player actions. A viewer shown
+    // a button that always 403s is the same "control that cannot succeed" defect as the unlocked
+    // composer.
+    const tableSource = readFileSync(TABLE, 'utf8');
+    expect(tableSource).toMatch(/const canCompose = role === 'dm' \|\| role === 'player'/);
 
     for (const lng of ['en', 'ar']) {
       expect(catalog(lng).composerLockedEnded).toBeTruthy();

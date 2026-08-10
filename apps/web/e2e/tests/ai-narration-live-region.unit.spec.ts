@@ -18,6 +18,7 @@ import {
 import {
   dmEntryText,
   emptyTranscript,
+  transcriptEntryId,
   transcriptReducer,
   type DmEntry,
   type TranscriptEntry,
@@ -340,6 +341,75 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     expect(advanceNarrationLog(earlyTurn, silencedAway).additions).toEqual([]);
   });
 
+  test('pre-hydration authoritative narration keeps its folded DM bubble pending', () => {
+    const narration = {
+      eventId: 'narration-row', seq: 1, campaignId: 1, kind: 'narration' as const,
+      actorUserId: null, actorName: null, clientRef: null, turnId: 'turn-1',
+      payload: { text: 'The gate opens.' }, at,
+    };
+    const ended = {
+      eventId: 'turn-end-row', seq: 2, campaignId: 1, kind: 'turn.ended' as const,
+      actorUserId: null, actorName: null, clientRef: null, turnId: 'turn-1',
+      payload: { stopReason: 'end_turn', steps: 1, tokensUsed: 2, budgetRemaining: 98 }, at,
+    };
+    const transcript = transcriptReducer(
+      transcriptReducer(emptyTranscript, { type: 'authoritative' }),
+      { type: 'serverEvents', events: [narration, ended] },
+    );
+
+    // The streamed server rows fold into `dm:<turnId>`; raw event ids would silence this
+    // completed addition when hydration releases the live region.
+    const pending = new Set([transcriptEntryId(narration), transcriptEntryId(ended)]);
+    expect(pending).toEqual(new Set(['dm:turn-1']));
+    expect(beginNarrationLogLive(transcript.entries, pending).additions).toMatchObject([
+      { id: 'dm:turn-1', kind: 'dm', text: 'The gate opens.' },
+    ]);
+  });
+
+  test('an initial authoritative snapshot replaces cached rows but keeps concurrent SSE rows', () => {
+    const cached = transcriptReducer(emptyTranscript, {
+      type: 'localPlayer',
+      id: 'cached-player',
+      memberName: 'Runa',
+      text: 'Cached before the history read.',
+      at,
+    });
+    const streamed = {
+      eventId: 'live-player', seq: 2, campaignId: 1, kind: 'player.action' as const,
+      actorUserId: 'user-1', actorName: 'Runa', clientRef: null, turnId: null,
+      payload: { text: 'Arrived through SSE during the history read.' }, at,
+    };
+    const snapshot = {
+      eventId: 'snapshot-player', seq: 1, campaignId: 1, kind: 'player.action' as const,
+      actorUserId: 'user-2', actorName: 'Mira', clientRef: null, turnId: null,
+      payload: { text: 'Returned by the initial history snapshot.' }, at,
+    };
+    const withLiveRow = transcriptReducer(cached, { type: 'serverEvents', events: [streamed] });
+
+    const reconciled = transcriptReducer(withLiveRow, {
+      type: 'reconcileInitialAuthoritative',
+      events: [snapshot],
+      keepEntryIds: new Set([transcriptEntryId(streamed)]),
+    });
+
+    expect(reconciled.entries).toMatchObject([
+      { id: 'snapshot-player', kind: 'player', text: 'Returned by the initial history snapshot.' },
+      { id: 'live-player', kind: 'player', text: 'Arrived through SSE during the history read.' },
+    ]);
+    expect(reconciled.entries).not.toContainEqual(expect.objectContaining({ id: 'cached-player' }));
+    expect(reconciled.lastSeq).toBe(2);
+
+    const emptySnapshot = transcriptReducer(withLiveRow, {
+      type: 'reconcileInitialAuthoritative',
+      events: [],
+      keepEntryIds: new Set([transcriptEntryId(streamed)]),
+    });
+    expect(emptySnapshot.entries).toMatchObject([
+      { id: 'live-player', kind: 'player', text: 'Arrived through SSE during the history read.' },
+    ]);
+    expect(emptySnapshot.entries).not.toContainEqual(expect.objectContaining({ id: 'cached-player' }));
+  });
+
   test('go-live still silences hydrated history and batched session seed', () => {
     const hydrated = fold(
       { type: 'turn.start', campaignId: 1, at },
@@ -395,7 +465,11 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
       at,
     });
     const advanced = advanceNarrationLog(entries, silenceNarrationLogBaseline([]));
-    expect(advanced.additions).toEqual([{ id: expect.any(String), kind: 'tool', text: 'Adjust treasury' }]);
+    expect(advanced.additions).toEqual([expect.objectContaining({
+      id: expect.any(String),
+      kind: 'tool',
+      text: 'Adjust treasury',
+    })]);
     expect(formatNarrationLogAddition(advanced.additions[0]!)).toBe('Adjust treasury');
     // formatSystem must not swallow tool text the way system/info does.
     expect(

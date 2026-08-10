@@ -182,10 +182,9 @@
       "xpManual": "XP guidance: {{label}} — award manually for this ruleset."
     },
     "driver": {
-      "toggle": "AI Driver",
-      "panelLabel": "AI Driver controls",
-      "transcriptLabel": "Driver transcript",
-      "openTable": "Open full table"
+      "toggle": "Live session chat",
+      "panelLabel": "Live session chat controls",
+      "transcriptLabel": "Driver transcript"
     },
     "turnBeat": {
       "takeover": "YOU'RE UP — {{name}}",

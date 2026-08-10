@@ -6,26 +6,41 @@
  * context so supervising a Driver DM does not require leaving the combat tracker.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Character, Combatant, EncounterWithCombatants } from '@campfire/schema';
-import { api, API, translateApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { queryKeys, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { aiDmPauseRequest } from './aiDmPause';
-import { speakerPrefix } from './transcript';
+import { newClientRef, speakerPrefix } from './transcript';
+import { resolveUndoPostError } from './aiDmUndoLever';
 import { StuckLadder } from './StuckLadder';
+import { AiPathGuide } from './AiSetupChecklist';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
-import { TranscriptRow } from './AiDmTranscriptUi';
+import { GroundingPanel } from './GroundingPanel';
+import { systemText, TranscriptRow } from './AiDmTranscriptUi';
 import { useAiDmLiveActivity } from './useAiDmLiveActivity';
+import { resolveToolActivity } from './toolActivity';
 import {
   followLatestAfterUserScroll,
   isFeedNearBottom,
   shouldScrollTranscriptToTailOnMount,
   unreadAfterFeedGrowth,
 } from './feedScrollFollow';
-import { NARRATION_VISUAL_TRANSCRIPT } from './narrationAccessibility';
+import {
+  NARRATION_LOG_LIVE_REGION,
+  NARRATION_STATUS_LIVE_REGION,
+  NARRATION_VISUAL_TRANSCRIPT,
+  advanceNarrationLog,
+  beginNarrationLogLive,
+  formatNarrationLogAddition,
+  nextComposerStatusAnnouncement,
+  resolveComposerA11ySnapshot,
+  type ComposerA11ySnapshot,
+  type NarrationLogAddition,
+  type NarrationLogCursor,
+} from './narrationAccessibility';
 import { useDisclosure } from '../../components/useDisclosure';
 import { Btn, Card, Chip, EmptyState } from '../../components/ui';
 import { Field } from '../../components/Field';
@@ -70,6 +85,37 @@ export function EncounterAiDriverPanel({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [pauseError, setPauseError] = useState<string | null>(null);
   const [pauseBusy, setPauseBusy] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [undoBusy, setUndoBusy] = useState(false);
+  const [undoError, setUndoError] = useState<string | null>(null);
+  const [narrationStatus, setNarrationStatus] = useState('');
+  const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
+  const narrationOwnerRef = useRef('');
+  const composerOwnerRef = useRef('');
+  const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
+  const [narrationAnnouncements, setNarrationAnnouncements] = useState<NarrationLogAddition[]>([]);
+  const displayNarrationAdditions = useCallback(
+    (additions: NarrationLogAddition[]) => additions.map((addition) => {
+      if (addition.kind !== 'tool' || !addition.name) return addition;
+      return {
+        ...addition,
+        text: resolveToolActivity(
+          {
+            type: 'tool',
+            campaignId,
+            name: addition.name,
+            isError: addition.isError === true,
+            proposed: addition.proposed === true,
+            ...(addition.encounterId !== undefined ? { encounterId: addition.encounterId } : {}),
+            at: addition.at ?? '',
+          },
+          { campaignId, encounterId },
+        ).label,
+      };
+    }),
+    [campaignId, encounterId],
+  );
 
   const charactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(campaignId),
@@ -81,6 +127,59 @@ export function EncounterAiDriverPanel({
   const myCharacter = charactersQuery.data?.find((c) => c.id === myMembership?.characterId);
   const memberName = me?.user.displayName || me?.user.username || t('table.you');
   const characterName = myCharacter?.name;
+  // A player without a linked character can still speak as their member name. Only defer
+  // attribution while resolving a real linked id, where sending early would lose the name.
+  const playerAttributionPending = !isDm && myMembership?.characterId != null && (!charactersQuery.isFetched || charactersQuery.isError || !myCharacter);
+
+  useLayoutEffect(() => {
+    // Clear before paint: a role-projected transcript may change between renders, and the
+    // live region must never briefly expose announcements from its prior owner.
+    const owner = `${me?.user.id ?? ''}:${campaignId}:${liveActivity.mode ?? ''}:${isDm}:${myMembership?.role ?? ''}:${liveActivity.transcriptGeneration}`;
+    if (narrationOwnerRef.current === owner) return;
+    narrationOwnerRef.current = owner;
+    narrationLogCursorRef.current = null;
+    setNarrationAnnouncements([]);
+    setNarrationStatus('');
+    composerA11yRef.current = null;
+    // A successful message POST can settle after this dock unmounts. Clearing this
+    // owner marker makes that old continuation discard its local echo instead of
+    // dispatching it into the Layout provider for the next campaign/viewer.
+    return () => { narrationOwnerRef.current = ''; };
+  }, [campaignId, isDm, liveActivity.mode, liveActivity.transcriptGeneration, me?.user.id, myMembership?.role]);
+
+  useLayoutEffect(() => {
+    // Transcript generation changes clear only narration mirrors. The composer is owned by
+    // the campaign/viewer/role instead, so a same-owner transcript purge preserves a draft.
+    const owner = `${me?.user.id ?? ''}:${campaignId}:${liveActivity.mode ?? ''}:${isDm}:${myMembership?.role ?? ''}`;
+    if (composerOwnerRef.current === owner) return;
+    composerOwnerRef.current = owner;
+    setInput('');
+    setSceneField('');
+    setSubmitting(false);
+    setSubmitError(null);
+    setPauseBusy(false);
+    setPauseError(null);
+    setLifecycleBusy(false);
+    setLifecycleError(null);
+    setUndoBusy(false);
+    setUndoError(null);
+    return () => { composerOwnerRef.current = ''; };
+  }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role]);
+
+  useEffect(() => {
+    if (!liveActivity.transcriptFetched) {
+      return;
+    }
+    if (narrationLogCursorRef.current === null) {
+      const started = beginNarrationLogLive(transcript.entries, liveActivity.preHydrationLiveEntryIds);
+      narrationLogCursorRef.current = started.cursor;
+      if (started.additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...displayNarrationAdditions(started.additions)]);
+      return;
+    }
+    const advanced = advanceNarrationLog(transcript.entries, narrationLogCursorRef.current);
+    narrationLogCursorRef.current = advanced.cursor;
+    if (advanced.additions.length > 0) setNarrationAnnouncements((prev) => [...prev, ...displayNarrationAdditions(advanced.additions)]);
+  }, [displayNarrationAdditions, liveActivity.preHydrationLiveEntryIds, liveActivity.transcriptFetched, transcript.entries]);
 
   const currentCombatantName = useMemo(() => {
     if (!encounter.currentCombatantId) return undefined;
@@ -95,9 +194,11 @@ export function EncounterAiDriverPanel({
   );
 
   const paused = session?.state === 'paused';
+  const phase = session?.phase ?? 'active';
   const humanControl = session?.state === 'human_control';
   const awaiting = session?.state === 'awaiting_players';
-  const locked = streaming || paused || humanControl || awaiting;
+  const ended = phase === 'ended';
+  const locked = streaming || paused || humanControl || awaiting || ended;
   const lockReason = streaming
     ? t('table.composerLockedStreaming')
     : paused
@@ -106,7 +207,19 @@ export function EncounterAiDriverPanel({
         ? t('table.composerLockedHuman')
         : awaiting
           ? t('table.composerLockedAwaiting')
-          : null;
+          : ended
+            ? t('table.composerLockedEnded')
+            : null;
+
+  useEffect(() => {
+    const next = resolveComposerA11ySnapshot(streaming, lockReason);
+    const message = nextComposerStatusAnnouncement(composerA11yRef.current, next, {
+      streaming: t('table.composerLockedStreaming'),
+      ready: canCompose ? t('table.composerUnlocked') : t('table.narrationReady'),
+    });
+    composerA11yRef.current = next;
+    if (message) setNarrationStatus(message);
+  }, [canCompose, lockReason, streaming, t]);
 
   const placeholder =
     encounter.status === 'running'
@@ -132,23 +245,42 @@ export function EncounterAiDriverPanel({
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || locked || submitting) return;
+    if (!text || locked || submitting || playerAttributionPending) return;
     setSubmitting(true);
     setSubmitError(null);
-    const body: { input: string; scene?: string; characterId?: number } = {
+    const clientRef = newClientRef();
+    const submissionOwner = composerOwnerRef.current;
+    const submissionGeneration = liveActivity.getTranscriptGeneration();
+    const body: {
+      input: string;
+      scene?: string;
+      characterId?: number;
+      clientRef: string;
+      characterName?: string;
+      displayText: string;
+    } = {
       input: `${speakerPrefix(memberName, characterName)} ${text}`,
       characterId: myMembership?.characterId ?? undefined,
+      clientRef,
+      characterName,
+      displayText: text,
     };
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
-      dispatchTranscript({ type: 'localPlayer', memberName, characterName, text });
+      if (
+        composerOwnerRef.current !== submissionOwner
+        || liveActivity.getTranscriptGeneration() !== submissionGeneration
+      ) return;
+      dispatchTranscript({ type: 'localPlayer', memberName, characterName, text, clientRef });
       setInput('');
       setSceneField('');
     } catch (err) {
-      setSubmitError(translateApiError(err, t));
+      if (composerOwnerRef.current === submissionOwner) {
+        setSubmitError(translateApiError(err, t));
+      }
     } finally {
-      setSubmitting(false);
+      if (composerOwnerRef.current === submissionOwner) setSubmitting(false);
     }
   }
 
@@ -157,13 +289,49 @@ export function EncounterAiDriverPanel({
     const { action, body } = aiDmPauseRequest(paused);
     setPauseBusy(true);
     setPauseError(null);
+    const owner = composerOwnerRef.current;
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`, body);
-      invalidateAiDm(queryClient, campaignId);
+      if (composerOwnerRef.current === owner) invalidateAiDm(queryClient, campaignId);
     } catch {
-      setPauseError(t('table.pauseFailed'));
+      if (composerOwnerRef.current === owner) setPauseError(t('table.pauseFailed'));
     } finally {
-      setPauseBusy(false);
+      if (composerOwnerRef.current === owner) setPauseBusy(false);
+    }
+  }
+
+  async function onLifecycle(action: 'start-session' | 'wrap-up') {
+    setLifecycleBusy(true);
+    setLifecycleError(null);
+    const owner = composerOwnerRef.current;
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
+      if (composerOwnerRef.current === owner) invalidateAiDm(queryClient, campaignId);
+    } catch (err) {
+      if (composerOwnerRef.current === owner) setLifecycleError(
+        err instanceof ApiError && err.message ? err.message : t('table.lifecycleFailed'),
+      );
+    } finally {
+      if (composerOwnerRef.current === owner) setLifecycleBusy(false);
+    }
+  }
+
+  async function onUndoAiAction() {
+    setUndoBusy(true);
+    setUndoError(null);
+    const owner = composerOwnerRef.current;
+    try {
+      await api.post(`${API}/campaigns/${campaignId}/ai-dm/undo`);
+      if (composerOwnerRef.current === owner) invalidateAiDm(queryClient, campaignId);
+    } catch (err) {
+      const outcome = resolveUndoPostError(
+        err instanceof ApiError ? err.status : undefined,
+        translateApiError(err, t) || t('table.undoAiFailed'),
+      );
+      if (composerOwnerRef.current === owner && outcome.invalidateSession) invalidateAiDm(queryClient, campaignId);
+      if (composerOwnerRef.current === owner && outcome.errorMessage) setUndoError(outcome.errorMessage);
+    } finally {
+      if (composerOwnerRef.current === owner) setUndoBusy(false);
     }
   }
 
@@ -300,13 +468,47 @@ export function EncounterAiDriverPanel({
           </Chip>
         </Btn>
         <div className="flex-1" />
-        <Link
-          to={`/c/${campaignId}/table`}
-          className="text-xs text-[var(--color-accent)] no-underline hover:underline"
-        >
-          {t('encounters.driver.openTable')} →
-        </Link>
+        {canCompose && phase !== 'greeting' && phase !== 'wrap_up' && (
+          <div className="flex gap-1.5">
+            <Btn
+              density="xs"
+              ghost
+              onClick={() => void onLifecycle('start-session')}
+              disabled={lifecycleBusy}
+            >
+              {t('table.startSession')}
+            </Btn>
+            {isDm && phase !== 'ended' && (
+              <Btn
+                density="xs"
+                ghost
+                onClick={() => void onLifecycle('wrap-up')}
+                disabled={lifecycleBusy}
+              >
+                {t('table.wrapUp')}
+              </Btn>
+            )}
+            {isDm && session?.lastUndoableCommit && (
+              <Btn
+                density="xs"
+                ghost
+                onClick={() => void onUndoAiAction()}
+                disabled={undoBusy}
+                title={t('table.undoAiAction')}
+              >
+                {t('table.undoAiAction')}
+              </Btn>
+            )}
+          </div>
+        )}
       </div>
+
+      {(lifecycleError || undoError) && (
+        <div className="px-3 pb-2" role="alert">
+          {lifecycleError && <p className="text-xs text-rose-400 m-0">{lifecycleError}</p>}
+          {undoError && <p className="text-xs text-rose-400 m-0">{undoError}</p>}
+        </div>
+      )}
 
       {open && (
         <div {...regionProps} className="flex flex-col gap-3 px-3 pb-3 min-h-0 border-t border-[var(--color-divider)] pt-3">
@@ -320,6 +522,9 @@ export function EncounterAiDriverPanel({
             the transcript scrolls it out of view.
           */}
           <ToolConfirmationsPanel campaignId={campaignId} isDm={isDm} knownEntities={confirmationEntities} />
+          <GroundingPanel campaignId={campaignId} isDm={isDm} />
+
+          <AiPathGuide compact />
 
           <div className="flex flex-wrap items-center gap-2 justify-between">
             <p className="text-xs text-secondary m-0 truncate flex-1 min-w-0">
@@ -339,7 +544,11 @@ export function EncounterAiDriverPanel({
             )}
           </div>
           {pauseError && <p className="text-xs text-rose-400 m-0">{pauseError}</p>}
-
+          {phase !== 'active' && (
+            <p className="text-xs text-secondary m-0" data-testid="encounter-ai-phase-note">
+              {t(`table.phaseNote.${phase}`)}
+            </p>
+          )}
           {session && (
             <StuckLadder
               campaignId={campaignId}
@@ -420,13 +629,13 @@ export function EncounterAiDriverPanel({
                   }}
                   help={locked && lockReason ? lockReason : t('table.composerHelp')}
                   placeholder={locked && lockReason ? lockReason : placeholder}
-                  disabled={locked || submitting}
+                  disabled={locked || submitting || playerAttributionPending}
                   rows={2}
                   minHeight={48}
                   error={submitError}
                   style={{ resize: 'none' }}
                 />
-                <Btn type="submit" disabled={locked || submitting || !input.trim()} className="w-full sm:w-auto">
+                <Btn type="submit" disabled={locked || submitting || playerAttributionPending || !input.trim()} className="w-full sm:w-auto">
                   {submitting ? t('table.sending') : t('table.send')}
                 </Btn>
               </div>
@@ -436,7 +645,19 @@ export function EncounterAiDriverPanel({
           )}
         </div>
       )}
+      <div {...NARRATION_STATUS_LIVE_REGION} className="sr-only">{narrationStatus}</div>
+      <div {...NARRATION_LOG_LIVE_REGION} aria-label={t('table.narrationLogLabel')} className="sr-only">
+        {narrationAnnouncements.map((addition) => <p key={addition.id}>{formatNarrationLogAddition(addition, {
+          formatSystem: (systemAddition) => systemText({
+            id: systemAddition.id,
+            kind: 'system',
+            variant: systemAddition.variant,
+            text: systemAddition.text,
+            data: systemAddition.data,
+            at: '',
+          }, t),
+        })}</p>)}
+      </div>
     </Card>
   );
 }
-

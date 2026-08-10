@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const RUN_SESSION = resolve(__dirname, '../../src/features/encounters/RunSessionPage.tsx');
+const ENCOUNTER_LIST = resolve(__dirname, '../../src/features/encounters/EncounterListPage.tsx');
 const PANEL = resolve(__dirname, '../../src/features/ai-dm/EncounterAiDriverPanel.tsx');
 const LIVE_ACTIVITY = resolve(__dirname, '../../src/features/ai-dm/useAiDmLiveActivity.tsx');
 
@@ -25,14 +26,78 @@ test.describe('encounter AI driver panel (issue #427)', () => {
     expect(panel).toMatch(/StuckLadder/);
     expect(panel).toMatch(/useAiDmLiveActivity/);
     expect(panel).toMatch(/onTogglePause/);
-    expect(panel).toMatch(/openTable/);
+    expect(panel).toMatch(/AiPathGuide/);
+    expect(panel).toMatch(/onLifecycle\('start-session'\)/);
+    expect(panel).toMatch(/onLifecycle\('wrap-up'\)/);
+    expect(panel).toMatch(/composerLockedEnded/);
+    expect(panel).toMatch(/newClientRef/);
+    expect(panel).toMatch(/onUndoAiAction/);
+    expect(panel).toMatch(/lastUndoableCommit/);
+    expect(panel).toMatch(/characterName,/);
+    expect(panel).toMatch(/displayText: text/);
+    expect(panel).toMatch(/role="alert"/);
+    expect(panel).toMatch(/narrationOwnerRef/);
+    expect(panel).toMatch(/return \(\) => \{ narrationOwnerRef\.current = ''; \}/);
+    expect(panel).toMatch(/composerOwnerRef/);
+    expect(panel).toMatch(/return \(\) => \{ composerOwnerRef\.current = ''; \}/);
+    expect(panel).toMatch(/const submissionOwner = composerOwnerRef\.current/);
+    expect(panel).toMatch(/const submissionGeneration = liveActivity\.getTranscriptGeneration\(\)/);
+    expect(panel).toMatch(/composerOwnerRef\.current !== submissionOwner/);
+    expect(panel).toMatch(/liveActivity\.getTranscriptGeneration\(\) !== submissionGeneration/);
+    expect(panel).toMatch(/composerOwnerRef\.current === submissionOwner/);
+    expect(panel).toMatch(/composerOwnerRef\.current = owner;[\s\S]{0,500}\}, \[campaignId, isDm, liveActivity\.mode, me\?\.user\.id, myMembership\?\.role\]\);/);
+    expect(panel).toMatch(/catch \(err\) \{\s*if \(composerOwnerRef\.current === submissionOwner\)/);
+    expect(panel).toMatch(/finally \{\s*if \(composerOwnerRef\.current === submissionOwner\) setSubmitting\(false\);/);
+    expect(panel).toMatch(/setInput\(''\);[\s\S]{0,120}setSceneField\(''\);[\s\S]{0,120}setSubmitting\(false\);[\s\S]{0,120}setSubmitError\(null\);[\s\S]{0,120}setPauseBusy\(false\);[\s\S]{0,120}setPauseError\(null\);[\s\S]{0,120}setLifecycleBusy\(false\);[\s\S]{0,120}setLifecycleError\(null\);[\s\S]{0,120}setUndoBusy\(false\);[\s\S]{0,120}setUndoError\(null\);/);
+    expect(panel).toMatch(/const owner = composerOwnerRef\.current/);
+    expect(panel).toMatch(/if \(composerOwnerRef\.current === owner\) invalidateAiDm/);
+    expect(panel).toMatch(/liveActivity\.transcriptFetched/);
+    expect(panel).toMatch(/beginNarrationLogLive/);
+    expect(panel).toMatch(/preHydrationLiveEntryIds/);
+    expect(panel).toMatch(/transcriptGeneration/);
+    expect(panel).toMatch(/resolveToolActivity/);
+    expect(panel).toMatch(/formatSystem: \(systemAddition\) => systemText/);
+    expect(panel).toMatch(/setNarrationStatus\(''\)/);
+    expect(panel).toMatch(/charactersQuery\.isError/);
+    expect(panel).toMatch(/myMembership\?\.characterId != null/);
+    expect(panel).toMatch(/disabled=\{locked \|\| submitting \|\| playerAttributionPending\}/);
   });
 
   test('shared live activity carries transcript for the dock', () => {
     const hook = readFileSync(LIVE_ACTIVITY, 'utf8');
     expect(hook).toMatch(/transcript/);
+    expect(hook).toMatch(/transcriptFetched/);
     expect(hook).toMatch(/dispatchTranscript/);
     expect(hook).toMatch(/transcriptReducer/);
+    expect(hook).toMatch(/type: 'authoritative'/);
+    expect(hook).toMatch(/ai-dm\/transcript\?limit=/);
+    expect(hook).toMatch(/transcriptOwnerRef\.current !== ownerKey/);
+    expect(hook).toMatch(/fetchTranscript\(key, lastSeqRef\.current \|\| undefined\)/);
+    expect(hook).toMatch(/const effectiveRole = campaignId === undefined \? null : roleIn\(campaignId\)/);
+    expect(hook).toMatch(/loadTranscript\(viewerId, campaignId, 'activity', effectiveRole\)/);
+    expect(hook).toMatch(/clearTranscript\(viewerId, campaignId, 'activity'\)/);
+    expect(hook).toMatch(/transcriptRequestGenerationRef/);
+    expect(hook).toMatch(/transcriptOwnerRef\.current === key \? transcript : emptyTranscript/);
+    expect(hook).toMatch(/transcriptEntryId\(event\.event\)/);
+    expect(hook).toMatch(/preHydrationLiveEntryIdsRef/);
+    expect(hook).toMatch(/type: 'reconcileInitialAuthoritative'/);
+    expect(hook).toMatch(/if \(watermark === undefined\) \{[\s\S]{0,700}clearTranscript\(viewerId, campaignId, 'activity'\);[\s\S]{0,400}type: 'reconcileInitialAuthoritative'/);
+    expect(hook).toMatch(/const getTranscriptGeneration = useCallback\(\(\) => transcriptGenerationRef\.current, \[\]\)/);
+    expect(hook).toMatch(/event\.type === 'transcript\.reset'[\s\S]{0,700}advanceTranscriptGeneration\(\);/);
+    expect(hook).toMatch(/err instanceof ApiError/);
+    expect(hook).toMatch(/err\.status === 403 \|\| err\.status === 404/);
+    expect(hook).toMatch(/clearTranscript\(viewerId, campaignId\);/);
+    expect(hook).toMatch(/clearTranscript\(viewerId, campaignId, 'activity'\);/);
+    expect(hook).toMatch(/\+\+transcriptRequestGenerationRef\.current/);
+    expect(hook).toMatch(/event\.type === 'transcript\.reset'[\s\S]{0,700}clearTranscript\(viewerId, campaignId\);[\s\S]{0,200}clearTranscript\(viewerId, campaignId, 'activity'\);/);
+    expect(hook).toMatch(/\},\s*effectiveRole,/);
+  });
+
+  test('the empty encounter list retains a Driver session entry', () => {
+    const list = readFileSync(ENCOUNTER_LIST, 'utf8');
+    expect(list).toMatch(/liveActivity\.mode === 'driver'/);
+    expect(list).toMatch(/encounter-list-live-session/);
+    expect(list).toMatch(/navigate\(`\/c\/\$\{id\}\/table`\)/);
   });
 });
 

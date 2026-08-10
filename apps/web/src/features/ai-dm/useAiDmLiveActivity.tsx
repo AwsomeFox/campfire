@@ -14,8 +14,9 @@
  * each page opening its own stream — this is the "single shared subscription" the
  * issue calls for.
  *
- * Issue #427 extends the shared subscription with the running transcript so the
- * encounter-page driver dock can render narration without opening a second stream.
+ * Issue #427 extends the shared subscription with the authoritative transcript so the
+ * encounter-page driver dock has the same shared history as the Table without opening a
+ * second stream.
  *
  * `PlayerDisplayPage` lives OUTSIDE `Layout` (issue #60 mounts it with no chrome), so
  * it cannot reach this context; it may call `useAiDmLiveActivityState` directly for
@@ -29,17 +30,24 @@
  */
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { AiDmMode } from '@campfire/schema';
-import { useAiDmSeat, useAiDmSession, invalidateAiDm, invalidateAiDmToolConfirmations } from '../../lib/query';
+import {
+  AI_DM_TRANSCRIPT_LIST_MAX_LIMIT,
+  type AiDmMode,
+  type AiDmTranscriptPage,
+} from '@campfire/schema';
+import { queryKeys, useAiDmSeat, useAiDmSession, invalidateAiDm, invalidateAiDmToolConfirmations } from '../../lib/query';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAuth } from '../../app/auth';
+import { api, API, ApiError } from '../../lib/api';
 import { usePendingHydrate } from './usePendingHydrate';
 import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChip, type ToolStreamEvent } from './toolActivity';
 import {
   transcriptReducer,
-  loadTranscript,
   saveTranscript,
+  loadTranscript,
+  clearTranscript,
   emptyTranscript,
+  transcriptEntryId,
   type TranscriptAction,
   type TranscriptState,
 } from './transcript';
@@ -74,13 +82,21 @@ export interface AiDmLiveActivityState {
   proposalFiledCount: number;
   /** The last fully-aggregated narration line (`narration.message`) — the player-display ticker's feed. */
   lastNarration: string | null;
-  /** Client-assembled narration transcript (#427 encounter dock). */
+  /** Authoritative narration transcript (#427 encounter dock). */
   transcript: TranscriptState;
+  /** The authoritative transcript request has settled for the current viewer projection. */
+  transcriptFetched: boolean;
+  /** Durable SSE rows that arrived before the current history request settled. */
+  preHydrationLiveEntryIds: ReadonlySet<string>;
+  /** Advances whenever the current owner's transcript is reset or rehydrated. */
+  transcriptGeneration: number;
+  /** Synchronously reads the reset generation for in-flight continuation guards. */
+  getTranscriptGeneration: () => number;
   /** Dispatch local transcript actions (echo player lines, rules answers, …). */
   dispatchTranscript: (action: TranscriptAction) => void;
 }
 
-const INITIAL_STATE: Omit<AiDmLiveActivityState, 'transcript' | 'dispatchTranscript'> = {
+const INITIAL_STATE: Omit<AiDmLiveActivityState, 'transcript' | 'transcriptFetched' | 'preHydrationLiveEntryIds' | 'transcriptGeneration' | 'getTranscriptGeneration' | 'dispatchTranscript'> = {
   mode: undefined,
   live: false,
   turnActive: false,
@@ -131,16 +147,18 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
    *     things to run after a reload — exactly the window in which a slow auth check used
    *     to let it read the previous account's cache.
    */
-  const { me, ready } = useAuth();
+  const { me, ready, roleIn } = useAuth();
   const pendingHydrate = usePendingHydrate({ ready, userId: me?.user.id ?? null });
   const viewerId = pendingHydrate.viewerId;
+  // The durable transcript is role-projected by the server. Keep role in the reducer
+  // ownership key so a live promotion/demotion resets and rehydrates before the dock can
+  // render the prior projection.
+  const effectiveRole = campaignId === undefined ? null : roleIn(campaignId);
 
-  // 'activity' scope (#572): this provider is NON-authoritative — it folds the legacy
-  // signal frames into bubbles with random ids and no `seq`. AiTablePage is mounted inside
-  // the same Layout and writes the authoritative format. Sharing one key made the last
-  // writer before a reload win, and a legacy snapshot hydrated by the authoritative page
-  // cannot be merged by eventId, so every narration line rendered twice.
-  const key = `${viewerId ?? ''}:${campaignId ?? ''}:${enabled}`;
+  // Keep a separate cache namespace from AiTablePage: both surfaces now read the same
+  // authoritative server events, but the Layout provider remains mounted when moving between
+  // routes and must not overwrite the Table page's paint cache during that transition.
+  const key = `${viewerId ?? ''}:${campaignId ?? ''}:${enabled}:${effectiveRole ?? ''}`;
 
   /**
    * Which `key` the reducer state currently belongs to.
@@ -156,12 +174,95 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
    * ACCOUNTS, which is the exact leak this issue is about.
    */
   const transcriptOwnerRef = useRef<string>('');
+  // A transcript reset keeps the same owner key but invalidates every earlier history
+  // request. Incrementing this independently prevents a slow pre-reset response from
+  // restoring rows the DM just erased.
+  const transcriptRequestGenerationRef = useRef(0);
+  const lastSeqRef = useRef(0);
+  const [transcriptFetched, setTranscriptFetched] = useState(false);
+  const [preHydrationLiveEntryIds, setPreHydrationLiveEntryIds] = useState<ReadonlySet<string>>(new Set());
+  const preHydrationLiveEntryIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const transcriptGenerationRef = useRef(0);
+  const [transcriptGeneration, setTranscriptGeneration] = useState(0);
+  const advanceTranscriptGeneration = useCallback(() => {
+    const next = transcriptGenerationRef.current + 1;
+    transcriptGenerationRef.current = next;
+    setTranscriptGeneration(next);
+  }, []);
+  const getTranscriptGeneration = useCallback(() => transcriptGenerationRef.current, []);
 
   useEffect(() => {
-    if (!enabled || campaignId === undefined || viewerId === null) return;
+    lastSeqRef.current = transcript.lastSeq ?? 0;
+  }, [transcript.lastSeq]);
+
+  const fetchTranscript = useCallback(
+    async (ownerKey: string, after?: number, requestGeneration = transcriptRequestGenerationRef.current) => {
+      if (campaignId === undefined) return;
+      let watermark = after;
+      for (let page = 0; page < 20; page += 1) {
+        try {
+          const result = await api.get<AiDmTranscriptPage>(
+            `${API}/campaigns/${campaignId}/ai-dm/transcript?limit=${AI_DM_TRANSCRIPT_LIST_MAX_LIMIT}` +
+              (watermark ? `&after=${watermark}` : ''),
+          );
+          // The Layout provider survives viewer and campaign changes. An old request must not
+          // fold into the newly-owned reducer, even when the response happens to win a race.
+          if (
+            transcriptOwnerRef.current !== ownerKey
+            || transcriptRequestGenerationRef.current !== requestGeneration
+          ) return;
+          if (watermark === undefined) {
+            // The first page is authoritative replacement, not an incremental gap fill:
+            // remove cached rows absent from the server while retaining durable stream rows
+            // explicitly observed since this request began.
+            clearTranscript(viewerId, campaignId, 'activity');
+            dispatchTranscript({
+              type: 'reconcileInitialAuthoritative',
+              events: result.items,
+              keepEntryIds: preHydrationLiveEntryIdsRef.current,
+            });
+          } else if (result.items.length > 0) {
+            dispatchTranscript({ type: 'serverEvents', events: result.items });
+          }
+          const last = result.items[result.items.length - 1];
+          if (watermark === undefined || !result.hasMore || !last) return;
+          watermark = last.seq;
+        } catch (err) {
+          // A 403/404 is not a transient history-read failure: this viewer no longer has
+          // authority to retain the projection (or the campaign is gone). Match the Table
+          // surface by purging both cache scopes and the in-memory activity transcript.
+          // Keep the owner/generation guard so an old request cannot clear a new viewer.
+          if (
+            err instanceof ApiError
+            && (err.status === 403 || err.status === 404)
+            && transcriptOwnerRef.current === ownerKey
+            && transcriptRequestGenerationRef.current === requestGeneration
+          ) {
+            clearTranscript(viewerId, campaignId);
+            clearTranscript(viewerId, campaignId, 'activity');
+            // Invalidate every overlapping history read before an older authorized response
+            // can repopulate this projection after access has been revoked.
+            ++transcriptRequestGenerationRef.current;
+            lastSeqRef.current = 0;
+            preHydrationLiveEntryIdsRef.current = new Set();
+            setPreHydrationLiveEntryIds(preHydrationLiveEntryIdsRef.current);
+            advanceTranscriptGeneration();
+            dispatchTranscript({ type: 'reset' });
+            dispatchTranscript({ type: 'authoritative' });
+          }
+          // A live stream remains useful when transcript history is temporarily unavailable.
+          return;
+        }
+      }
+    },
+    [advanceTranscriptGeneration, campaignId, viewerId],
+  );
+
+  useEffect(() => {
+    if (!enabled || campaignId === undefined || viewerId === null || effectiveRole === null) return;
     if (transcriptOwnerRef.current !== key) return;
-    saveTranscript(viewerId, campaignId, transcript, 'activity');
-  }, [campaignId, enabled, transcript, viewerId, key]);
+    saveTranscript(viewerId, campaignId, transcript, 'activity', effectiveRole);
+  }, [campaignId, effectiveRole, enabled, transcript, viewerId, key]);
 
   // Reset activity + transcript when the viewer, campaign or driver mode changes.
   const prevKeyRef = useRef<string>('');
@@ -173,17 +274,46 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     prevKeyRef.current = key;
     setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
     seededRef.current = false;
+    setTranscriptFetched(!enabled);
+    preHydrationLiveEntryIdsRef.current = new Set();
+    setPreHydrationLiveEntryIds(preHydrationLiveEntryIdsRef.current);
+    advanceTranscriptGeneration();
     pendingHydrate.mark();
+    transcriptOwnerRef.current = key;
+    const requestGeneration = ++transcriptRequestGenerationRef.current;
     if (campaignId !== undefined && viewerId !== null) {
       dispatchTranscript({
         type: 'hydrate',
-        state: enabled ? loadTranscript(viewerId, campaignId, 'activity') : emptyTranscript,
+        // Old thin-stream activity snapshots have no projection marker and are rejected by
+        // loadTranscript. Current authoritative snapshots paint immediately only when their
+        // server role projection matches this viewer's effective role.
+        state: effectiveRole === null
+          ? emptyTranscript
+          : loadTranscript(viewerId, campaignId, 'activity', effectiveRole),
       });
+      if (enabled) {
+        dispatchTranscript({ type: 'authoritative' });
+        void fetchTranscript(key, undefined, requestGeneration).finally(() => {
+          if (
+            transcriptOwnerRef.current === key
+            && transcriptRequestGenerationRef.current === requestGeneration
+          ) setTranscriptFetched(true);
+        });
+      }
     } else {
       dispatchTranscript({ type: 'reset' });
     }
-    transcriptOwnerRef.current = key;
-  }, [key, campaignId, enabled, viewerId, pendingHydrate, pendingHydrate.identityPending]);
+  }, [
+    key,
+    campaignId,
+    enabled,
+    viewerId,
+    effectiveRole,
+    advanceTranscriptGeneration,
+    fetchTranscript,
+    pendingHydrate,
+    pendingHydrate.identityPending,
+  ]);
 
   useEffect(() => {
     setState((s) => (s.mode === mode ? s : { ...s, mode }));
@@ -205,6 +335,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     // we have not established yet is the same leak in the other direction.
     if (pendingHydrate.identityPending || viewerId === null) return;
     if (!seatQuery.isFetched || !sessionQuery.isFetched) return;
+    // The server transcript, not a scene/last-narration approximation, is the shared history.
+    // Only seed if that read settled empty or failed.
+    if (!transcriptFetched) return;
     if (session?.scene || session?.lastNarration) {
       dispatchTranscript({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
     }
@@ -217,6 +350,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     sessionQuery.isFetched,
     session,
     viewerId,
+    transcriptFetched,
     pendingHydrate.identityPending,
   ]);
 
@@ -228,6 +362,15 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     enabled ? campaignId : undefined,
     {
       onEvent: (event) => {
+        if (!transcriptFetched && event.type === 'transcript') {
+          // Some durable rows fold into a single DM bubble (`dm:<turnId>`), rather than
+          // retaining their server event id. Keep the final rendered id so go-live does
+          // not baseline an SSE addition that arrived during hydration.
+          const next = new Set(preHydrationLiveEntryIdsRef.current)
+            .add(transcriptEntryId(event.event));
+          preHydrationLiveEntryIdsRef.current = next;
+          setPreHydrationLiveEntryIds(next);
+        }
         setState((prev) => reduce(prev, event));
         if (enabled) {
           dispatchTranscript({ type: 'stream', event: event as any });
@@ -249,6 +392,27 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           // #1501: mirror AiTablePage — an approved mechanical commit arms the undo lever
           // server-side, so refetch the session to surface it. See AiTablePage for the full why.
           if (event.action === 'approved') invalidateAiDm(queryClient, campaignId);
+        } else if (event.type === 'transcript.reset') {
+          // The stream reducer has cleared the live projection. Remove its paint cache as
+          // well (for both the shared activity dock and the sibling Table route) — empty
+          // state is intentionally never persisted — and invalidate every pre-reset request
+          // before fetching the now-empty server history.
+          clearTranscript(viewerId, campaignId);
+          clearTranscript(viewerId, campaignId, 'activity');
+          lastSeqRef.current = 0;
+          setTranscriptFetched(false);
+          preHydrationLiveEntryIdsRef.current = new Set();
+          setPreHydrationLiveEntryIds(preHydrationLiveEntryIdsRef.current);
+          advanceTranscriptGeneration();
+          const requestGeneration = ++transcriptRequestGenerationRef.current;
+          void fetchTranscript(key, undefined, requestGeneration).finally(() => {
+            if (
+              transcriptOwnerRef.current === key
+              && transcriptRequestGenerationRef.current === requestGeneration
+            ) setTranscriptFetched(true);
+          });
+        } else if (event.type === 'grounding') {
+          void queryClient.invalidateQueries({ queryKey: queryKeys.aiDmGrounding(campaignId) });
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -264,18 +428,34 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
         }
       },
       onReconnect: () => {
-        if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
+        if (campaignId !== undefined) {
+          void fetchTranscript(key, lastSeqRef.current || undefined);
+          invalidateAiDm(queryClient, campaignId);
+        }
       },
       onStreamRecovery: () => {
-        if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
+        if (campaignId !== undefined) {
+          void fetchTranscript(key, lastSeqRef.current || undefined);
+          invalidateAiDm(queryClient, campaignId);
+        }
       },
-    }
+    },
+    effectiveRole,
   );
+
+  // The owner-changing hydrate runs after render. Never hand a new role, campaign, or
+  // viewer the prior owner's projection for that one render in between; the provider
+  // deliberately paints empty until its key effect has established the new owner.
+  const visibleTranscript = transcriptOwnerRef.current === key ? transcript : emptyTranscript;
 
   return {
     ...state,
     live: enabled,
-    transcript,
+    transcript: visibleTranscript,
+    transcriptFetched: transcriptOwnerRef.current === key && transcriptFetched,
+    preHydrationLiveEntryIds,
+    transcriptGeneration,
+    getTranscriptGeneration,
     dispatchTranscript: stableDispatch,
   };
 }
@@ -319,6 +499,10 @@ const AiDmLiveActivityContext = createContext<AiDmLiveActivityState | null>(null
 const INERT_CONTEXT: AiDmLiveActivityState = {
   ...INITIAL_STATE,
   transcript: emptyTranscript,
+  transcriptFetched: false,
+  preHydrationLiveEntryIds: new Set(),
+  transcriptGeneration: 0,
+  getTranscriptGeneration: () => 0,
   dispatchTranscript: NOOP_DISPATCH,
 };
 

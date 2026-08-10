@@ -139,7 +139,18 @@ export function isCampaignEvent(value: unknown): value is CampaignEvent {
   return false;
 }
 
-export function useCampaignEvents(campaignId: number | undefined, handlers: CampaignEventsHandlers): void {
+/**
+ * Subscribe to one campaign's event stream.
+ *
+ * `reconnectKey` is for a caller whose server-side event projection can change without a
+ * campaign or account change (for example, an in-place membership role update). Changing it
+ * disposes the old request and opens a new one under the current server authorization.
+ */
+export function useCampaignEvents(
+  campaignId: number | undefined,
+  handlers: CampaignEventsHandlers,
+  reconnectKey?: unknown,
+): void {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
@@ -183,5 +194,5 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
     });
 
     return () => loop.dispose();
-  }, [campaignId, resumeEpoch, userId]);
+  }, [campaignId, resumeEpoch, userId, reconnectKey]);
 }

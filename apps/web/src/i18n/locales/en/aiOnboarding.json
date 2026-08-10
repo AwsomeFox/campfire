@@ -5,7 +5,7 @@
       "intro": "These steps take a campaign from no AI to a working AI DM. Each step below reads its real state and links straight to the control that changes it.",
       "progress": "{{done}} of {{total}} steps done",
       "allDoneTitle": "The AI DM is ready",
-      "allDoneDriver": "The AI holds the DM seat and acts directly — it narrates, rolls dice, applies HP and conditions, and runs the session within the budget you set. Players join at the Table tab.",
+      "allDoneDriver": "The AI holds the DM seat and acts directly — it narrates, rolls dice, applies HP and conditions, and runs the session within the budget you set. Players join the live session from Encounters.",
       "allDoneCoDm": "The AI is co-DMing — it only proposes, and nothing lands in canon until a human DM approves it.",
       "loading": "Checking setup…",
       "unavailable": "Readiness could not be loaded. Try again from campaign settings.",
@@ -19,7 +19,7 @@
       "fixProvider": "Configure provider",
       "fixMode": "Choose a mode",
       "fixBudget": "Set a budget",
-      "openTable": "Open the Table",
+      "openEncounters": "Open Encounters",
       "checkTitles": {
         "serverFlag": "Server AI enabled",
         "serverCap": "Server-wide token cap",
@@ -61,7 +61,7 @@
         "provider": {
           "ready": "Using {{providerType}} / {{model}} from {{source}} with {{credentialSource}} credentials.",
           "noCredential": "A provider is configured, but no usable credential is available.",
-          "unconfigured": "Configure a campaign provider or ask a server admin to set a server default."
+          "unconfigured": "No server-side provider is configured, so Campfire uses its built-in no-op scaffold and Driver cannot run. Configure a campaign provider or ask a server admin to set a server default."
         },
         "model": {
           "allowed": "Execution model {{model}} passes the server allowlist.",
@@ -117,7 +117,7 @@
         "mode": {
           "title": "Operating mode chosen",
           "doneCoDm": "Mode is Co-DM — the AI only proposes; you approve every change before it applies.",
-          "doneDriver": "Mode is Driver — the AI acts directly as the DM, running the session at the Table.",
+          "doneDriver": "Mode is Driver — the AI acts directly as the DM, running the live session from Encounters.",
           "todo": "Pick how the AI participates. Co-DM (recommended) only proposes — you approve every change before it applies. Driver hands it the DM seat to act directly within the budget you set."
         },
         "budget": {
@@ -127,8 +127,8 @@
         },
         "table": {
           "title": "Players know where to play",
-          "driver": "In Driver mode, players join the shared session at the Table tab in the sidebar. Share that with your table.",
-          "notYet": "Once Driver mode is on, a Table tab appears for every member — that's where the session is played."
+          "driver": "In Driver mode, players open the running encounter in Encounters. The shared session chat sits beside the live tracker.",
+          "notYet": "Once Driver mode is on, players use Encounters for the shared live session chat and tracker."
         }
       },
       "costTokens": "Plan for up to {{tokens}} tokens (about {{prompt}} prompt + {{completion}} completion).",
@@ -156,11 +156,26 @@
       "driver": "AI: Driver",
       "coDmAria": "An AI is co-DMing this campaign — it only proposes; a human DM approves. What that means",
       "coDmPopover": "AI Co-DM explanation",
-      "driverAria": "An AI is running this campaign directly as the DM — open the Table"
+      "driverAria": "An AI is running this campaign directly as the DM — open Encounters"
     },
     "transparency": {
       "title": "What the AI sees and does",
-      "body": "The AI DM is given this campaign's summary and its session-zero charter — never any other campaign's data. If you configure an external AI provider, that context is sent to the endpoint you chose; see the AI privacy notice in provider settings for the full list and retention terms. The two modes have different authority. Co-DM asks: it only drafts proposals, and a human DM must approve every one before anything changes — the AI never writes to canon directly. Driver acts: the AI holds the DM seat and runs the session itself — narrating, rolling dice, applying HP and conditions, and resolving live play within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for DM review. In Driver mode the DM and the table can pause the AI or take the seat back at any time from the Table page."
+      "body": "The AI DM is given this campaign's summary and its session-zero charter — never any other campaign's data. If you configure an external AI provider, that context is sent to the endpoint you chose; see the AI privacy notice in provider settings for the full list and retention terms. The two modes have different authority. Co-DM asks: it only drafts proposals, and a human DM must approve every one before anything changes — the AI never writes to canon directly. Driver acts: the AI holds the DM seat and runs the session itself — narrating, rolling dice, applying HP and conditions, and resolving live play within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for DM review. In Driver mode the DM and the table can pause the AI or take the seat back at any time from the running encounter."
+    },
+    "paths": {
+      "title": "Choose the right AI path",
+      "coDm": {
+        "label": "Co-DM",
+        "body": "Drafts proposals for human approval; it does not run a live session."
+      },
+      "driver": {
+        "label": "Driver",
+        "body": "A server-side provider runs the built-in live session chat beside a running encounter."
+      },
+      "mcp": {
+        "label": "External MCP agent",
+        "body": "A separately connected agent can use Campfire tools for prep or play, but it does not power this built-in Driver chat."
+      }
     },
     "gate": {
       "openFix": "Fix this",
@@ -198,7 +213,7 @@
       },
       "paused": {
         "title": "The AI DM is paused",
-        "body": "The session is paused. The DM can resume it from the Table."
+        "body": "The session is paused. The DM can resume it from the running encounter."
       },
       "humanControl": {
         "title": "A human holds the seat",
