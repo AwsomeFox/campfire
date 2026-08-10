@@ -16,6 +16,7 @@
  */
 import { type CSSProperties, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import type { ActionSpec, Character, RollCheckDefinition, UsableAction } from '@campfire/schema';
 import {
   ruleSystemAdapter,
@@ -275,15 +276,38 @@ export function CharacterStatCard({
 
   return (
     <div style={{ marginTop: 5 }}>
-      <button
-        type="button"
-        className="btn btn-ghost"
-        {...buttonProps}
-        aria-label={`${open ? 'Collapse' : 'Expand'} ${character.name}'s character sheet`}
-        style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
-      >
-        <span aria-hidden="true">{open ? '▾' : '▸'}</span> Character sheet
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          {...buttonProps}
+          aria-label={`${open ? 'Collapse' : 'Expand'} ${character.name}'s character sheet`}
+          style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+        >
+          <span aria-hidden="true">{open ? '▾' : '▸'}</span> Character sheet
+        </button>
+        {/*
+         * Issue #1513 gap 7: the only route out of an encounter was locations, quests, and
+         * sessions — inventory, background, XP, and notes were unreachable mid-fight, even
+         * from the DM's own party card. This is the escape hatch: a link straight to the
+         * full sheet, gated on `campaignId` (this card is only ever mounted where one is
+         * available) so it never renders without somewhere real to go. The destination
+         * route enforces its own authorization exactly as any other sheet visit would — this
+         * is a navigation shortcut, not a new read path, so it grants nothing this reader
+         * couldn't already reach by typing the URL.
+         */}
+        {campaignId != null && (
+          <Link
+            to={`/c/${campaignId}/characters/${character.id}`}
+            className="btn btn-ghost"
+            data-testid={`open-full-sheet-${character.id}`}
+            aria-label={`Open ${character.name}'s full character sheet`}
+            style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+          >
+            Full sheet <span aria-hidden="true">↗</span>
+          </Link>
+        )}
+      </div>
       {open && (
         <div
           {...regionProps}

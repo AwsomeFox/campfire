@@ -582,3 +582,31 @@ describe('CombatantRow initiative roll gate (issue #2123)', () => {
     expect(screen.getByText('–')).toBeTruthy();
   });
 });
+
+/**
+ * Issue #1513 gap 7: zero routes from the encounter to the full character sheet — a
+ * player or DM mid-fight had no way to reach inventory, background, XP, or notes without
+ * navigating away by hand. `CharacterStatCard` now renders a "Full sheet" escape-hatch
+ * link next to its own collapse toggle. Rendered rather than source-scanned: the point is
+ * to prove the href actually resolves to this character's real sheet route, and that the
+ * link is gated on `campaignId` (the same signal that already governs whether the card's
+ * rolls are interactive — see `CombatantRow`'s viewer-gating note), not shown unattached
+ * to anywhere real to go.
+ */
+describe('CombatantRow -> CharacterStatCard "open full sheet" link (issue #1513)', () => {
+  test('renders next to the collapse toggle with an href to this character\'s sheet', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, campaignId: 5 });
+    const link = screen.getByTestId('open-full-sheet-7') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/c/5/characters/7');
+  });
+
+  test('does not render when campaignId is undefined (viewer gating, matching the roll-interactivity gate)', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, campaignId: undefined });
+    expect(screen.queryByTestId('open-full-sheet-7')).toBeNull();
+  });
+
+  test('does not render on a monster row, which has no character sheet to open', () => {
+    renderRow({ combatant: baseCombatant(), character: null, campaignId: 5 });
+    expect(screen.queryByTestId('open-full-sheet-101')).toBeNull();
+  });
+});
