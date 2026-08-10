@@ -28,6 +28,10 @@ import { normalizeBasePrefix } from './src/lib/public-base';
  * `appVersionDefine.spec.tsx` mounts `MetricsCard` (which reads
  * `__APP_VERSION__` directly in JSX) so this gap cannot reopen silently.
  */
+// An unset, malformed, or non-positive override must leave vitest on its own
+// default rather than reach the pool as NaN or 0.
+const vitestMaxWorkers = Number.parseInt(process.env.VITEST_MAX_WORKERS ?? '', 10);
+
 export default defineConfig({
   plugins: [react()],
   define: {
@@ -42,8 +46,6 @@ export default defineConfig({
     // otherwise sizes itself against the whole machine, which is wrong when
     // several agent sessions share it. `scripts/with-test-lock.sh` sets the
     // variable for local runs; unset keeps vitest's own default.
-    ...(process.env.VITEST_MAX_WORKERS
-      ? { maxWorkers: Number(process.env.VITEST_MAX_WORKERS) }
-      : {}),
+    ...(vitestMaxWorkers > 0 ? { maxWorkers: vitestMaxWorkers } : {}),
   },
 });

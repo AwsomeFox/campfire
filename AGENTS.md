@@ -93,7 +93,11 @@ tests at once therefore exhaust host memory, and two concurrent browser runs
 silently share one seeded backend. The lock makes those runs queue instead; it
 waits up to an hour, reclaims a lock whose holder died, and is a no-op when `CI`
 is set. Invoke tests through the npm scripts, not by calling `jest`, `vitest`,
-or `playwright` directly — a direct call bypasses the lock. `JEST_MAX_WORKERS`,
+or `playwright` directly — a direct call bypasses the lock. `test:watch` and
+`test:e2e:ui` stay unlocked deliberately, because a long-lived interactive
+session would hold the lock indefinitely and starve every other session; UI mode
+therefore serves its own backend on port 8125 rather than sharing 8123 with a
+locked `test:e2e` run. `JEST_MAX_WORKERS`,
 `VITEST_MAX_WORKERS`, and `CAMPFIRE_TEST_HEAP_MB` override the per-run caps;
 `CAMPFIRE_TEST_LOCK_HELD=1` skips locking entirely.
 
