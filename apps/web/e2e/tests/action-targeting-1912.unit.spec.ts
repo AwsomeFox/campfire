@@ -64,7 +64,9 @@ test('legal target affordances support repeated pointer and keyboard selection',
   expect(mapSource).toContain('targetGestureRef.current = { tokenId: gesture.tokenId, moved: gesture.moved };');
   expect(mapSource).toContain('const targetAvailable = selectedTarget || !targeting?.atCapacity;');
   expect(mapSource).toContain('&& ((targeting?.selectedIds.includes(c.id) ?? false) || !targeting?.atCapacity);');
-  expect(mapSource).toContain('aria-disabled={legalTarget && !targetAvailable ? true : undefined}');
+  // Issue #1917 stage 3: the token wrapper is now `MapTokenSlot`, a real component, so this
+  // reaches the DOM through its `ariaDisabled` prop rather than JSX's `aria-disabled=` directly.
+  expect(mapSource).toContain('ariaDisabled={legalTarget && !targetAvailable ? true : undefined}');
   expect(mapSource).toContain('if (targetClickable && e.isPrimary)');
   expect(mapSource).toContain('clientX: e.clientX, clientY: e.clientY');
   expect(mapSource).toContain('strokeWidth={2}');
