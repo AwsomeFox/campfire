@@ -37,6 +37,26 @@ describe('MapObject write contracts (issue #1308)', () => {
   it('rejects an empty iconSlug — a set piece must have a real icon, not a blank one', () => {
     expect(MapObjectCreate.safeParse({ ...placement, iconSlug: '' }).success).toBe(false);
   });
+
+  it('issue #2175: fills a size default (5 — percent of map width) when size is omitted', () => {
+    expect(MapObject.parse(placement).size).toBe(5);
+  });
+
+  it('issue #2175: accepts an explicit in-range size and rejects an out-of-range one', () => {
+    expect(MapObjectCreate.safeParse({ ...placement, size: 24 }).success).toBe(true);
+    expect(MapObjectCreate.safeParse({ ...placement, size: 0 }).success).toBe(false);
+    expect(MapObjectCreate.safeParse({ ...placement, size: 101 }).success).toBe(false);
+  });
+
+  it('issue #2175: accepts a size patch and rejects an out-of-range size patch', () => {
+    expect(MapObjectUpdate.safeParse({ size: 18 }).success).toBe(true);
+    expect(MapObjectUpdate.safeParse({ size: 0 }).success).toBe(false);
+    expect(MapObjectUpdate.safeParse({ size: 101 }).success).toBe(false);
+  });
+
+  it('issue #2175: does not materialize placement defaults on a size-only update field', () => {
+    expect(MapObjectUpdate.parse({ size: 18 })).toEqual({ size: 18 });
+  });
 });
 
 describe('filterMapObjectsForViewer (issue #1308) — the server\'s one map-object visibility computation', () => {

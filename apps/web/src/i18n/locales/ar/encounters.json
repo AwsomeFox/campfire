@@ -265,6 +265,7 @@
         "labelPlaceholder": "التسمية (مثال: صندوق مفخخ)",
         "xField": "X %",
         "yField": "Y %",
+        "sizeField": "الحجم %",
         "dmOnly": "لمدير اللعبة فقط",
         "add": "إضافة",
         "placing": "جارٍ الوضع…",
@@ -272,7 +273,15 @@
         "placeError": "تعذر وضع العنصر.",
         "updateError": "تعذر تحديث العنصر.",
         "removed": "تمت إزالة {{label}}",
-        "removeError": "تعذرت إزالة العنصر."
+        "removeError": "تعذرت إزالة العنصر.",
+        "placeOnMap": "ضع على الخريطة",
+        "cancelPlace": "إلغاء",
+        "armedHint": "انقر على الخريطة لوضع {{label}}. اضغط Esc للإلغاء.",
+        "dragHint": "اسحب للتحريك، انقر للتحديد",
+        "resizeHandle": "تغيير الحجم",
+        "placedOnMap": "تم وضع {{label}} على الخريطة",
+        "movedAnnounce": "تم تحريك {{label}} إلى {{x}}٪ عرضًا و{{y}}٪ نزولًا",
+        "placeCancelled": "تم إلغاء وضع عنصر الخريطة"
       },
       "setup": "إعداد الخريطة",
       "fog": {

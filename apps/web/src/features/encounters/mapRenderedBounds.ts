@@ -279,3 +279,20 @@ export function snapMapPercentCalibrated(
   const snapped = snapLayerPxToGrid(px, calPx);
   return layerPxToMapPercent(snapped, mapRect);
 }
+
+/**
+ * Compute a map object's `size` (diameter, percent of the rendered map WIDTH — issue #2175) from
+ * a resize-grip drag: twice the pointer's distance from the object's fixed centre, in the same
+ * isotropic layer-px space the grid uses. Clamped to the schema's [1, 100] bounds and rounded to
+ * one decimal so the live preview and the committed PATCH read identically. Returns the schema
+ * default (5) when the map rect is degenerate rather than a NaN.
+ */
+export function mapObjectSizeFromDrag(center: MapPercent, pointer: MapPercent, mapRect: Rect | null): number {
+  if (!mapRect || !(mapRect.width > 0)) return 5;
+  const c = mapPercentToLayerPx(center, mapRect);
+  const p = mapPercentToLayerPx(pointer, mapRect);
+  const radiusPx = Math.hypot(p.x - c.x, p.y - c.y);
+  const sizePercent = ((2 * radiusPx) / mapRect.width) * 100;
+  if (!Number.isFinite(sizePercent)) return 5;
+  return Math.max(1, Math.min(100, Math.round(sizePercent * 10) / 10));
+}

@@ -26,7 +26,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapObjectCreate, MapObjectUpdate, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, hasCriticalHitsForAdapter, hasInitiativeRollForAdapter, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { rulesetCapabilitiesForSelection } from '../../lib/rules';
@@ -68,6 +68,7 @@ import { RulesLookupPanel } from './RulesLookupPanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ResourceTrackerPanel } from "./ResourceTrackerPanel";
 import { MapObjectsPanel } from './MapObjectsPanel';
+import { useMapObjectsApi, type MapObjectPlacementArm } from './mapObjectsApi';
 import { shouldRevealInitiative } from './initiativeReveal';
 import { CheckRequestPanel, GroupCheckBoard } from './CheckRequests';
 import { EncounterQuickWhisperPanel } from './EncounterQuickWhisperPanel';
@@ -3826,6 +3827,30 @@ export default function RunSessionPage() {
     void clearPlayerAoeTemplates().catch(reportError);
   }, [clearPlayerAoeTemplates, reportError]);
 
+  // Issue #2175: map-object canvas interactions (click-to-place / drag / resize). The same
+  // scoped `/encounters/:id/map-objects` endpoints the "Set pieces" panel uses, centralized in
+  // `useMapObjectsApi` and threaded to BattleMap as stable callbacks beside the AoE ones above.
+  // `mapObjectPlacementArm` is the shared click-to-place arming state between the panel (arms
+  // with the chosen icon) and BattleMap (consumes the next map press and clears the arm).
+  const mapObjectsApi = useMapObjectsApi(eid);
+  const [mapObjectPlacementArm, setMapObjectPlacementArm] = useState<MapObjectPlacementArm | null>(null);
+  const handlePlaceMapObject = useCallback(
+    (create: MapObjectCreate) => {
+      setMapObjectPlacementArm(null);
+      void mapObjectsApi.place(create).catch(reportError);
+    },
+    [mapObjectsApi, reportError],
+  );
+  const handleUpdateMapObject = useCallback(
+    (objectId: string, patch: MapObjectUpdate) => {
+      void mapObjectsApi.update(objectId, patch).catch(reportError);
+    },
+    [mapObjectsApi, reportError],
+  );
+  const handleMapObjectPlacementArmChange = useCallback((arm: MapObjectPlacementArm | null) => {
+    setMapObjectPlacementArm(arm);
+  }, []);
+
   // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
   // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
   // saves it hidden (never on the player Handouts card), sets it as the encounter's battle
@@ -4695,6 +4720,10 @@ export default function RunSessionPage() {
             onUpdateAoe={handleUpdateAoe}
             onRemoveAoe={handleRemoveAoe}
             onClearPlayerAoe={canEditEncounter ? handleClearPlayerAoe : undefined}
+            onPlaceMapObject={canEditEncounter ? handlePlaceMapObject : undefined}
+            onUpdateMapObject={canEditEncounter ? handleUpdateMapObject : undefined}
+            mapObjectPlacementArm={canEditEncounter ? mapObjectPlacementArm : null}
+            onMapObjectPlacementArmChange={canEditEncounter ? handleMapObjectPlacementArmChange : undefined}
             hpFeedbackByCombatant={hpFeedbackByCombatant}
             onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
             onImportMap={canEditEncounter ? handleImportMap : undefined}
@@ -5655,7 +5684,7 @@ export default function RunSessionPage() {
                     `?? []` matches BattleMap's own defensive read of this same field (review:
                     PR #2174) — cheap insurance against any future caller of this panel with an
                     encounter object that predates the field. */}
-                <MapObjectsPanel encounterId={eid} objects={encounter.mapObjects ?? []} canDmWrite={canDmWrite} onError={surfaceActionError} />
+                <MapObjectsPanel encounterId={eid} objects={encounter.mapObjects ?? []} canDmWrite={canDmWrite} onError={surfaceActionError} placementArmed={mapObjectPlacementArm != null} onArmPlacement={handleMapObjectPlacementArmChange} />
               </>
             )}
             {canDmWrite && <GroupCheckBoard campaignId={cid} />}

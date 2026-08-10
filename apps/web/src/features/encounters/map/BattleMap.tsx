@@ -4,10 +4,10 @@ import { createPortal } from 'react-dom';
 import { UIIcon } from '../../../components/UIIcon';
 import { GatedControl } from '../../../components/GatedControl';
 import { revealCockpitPanel } from '../vtt/revealCockpitPanel';
-import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridDistanceRule, GridType, HexOrientation, TokenSize } from '@campfire/schema';
+import type { AoeShape, AoeTemplate, Attachment, Combatant, EncounterWithCombatants, FogState, GenerateMapParams, GridDistanceRule, GridType, HexOrientation, MapObject, MapObjectCreate, MapObjectUpdate, TokenSize } from '@campfire/schema';
 import type { HpFeedbackEvent } from '../hpFeedback';
 import { FloatingNumbers } from '../FloatingNumbers';
-import { FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, eraseFogRegion, filterAoeTemplatesForViewer, fogRectFromCorners, gridDistanceForAdapter, hitTestFogRegion, moveFogRegion, ruleSystemAdapter, type CustomMechanicsProfile } from '@campfire/schema';
+import { DEFAULT_MAP_OBJECT_SIZE, FogUndoStack, appendFogReveal, deleteFogRegion, ensureFogRectIds, eraseFogRegion, filterAoeTemplatesForViewer, fogRectFromCorners, gridDistanceForAdapter, hitTestFogRegion, moveFogRegion, ruleSystemAdapter, type CustomMechanicsProfile } from '@campfire/schema';
 import { useQuery } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../../lib/api';
 import { reconcileFogSyncState } from '../fogSyncState';
@@ -29,7 +29,7 @@ import { planFormationPlacement, planCollisionFreePlacement, resolveDesiredForma
 import { gridCellRevealRect } from '../fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from '../aoeHitTest';
 import { buildAoeDamageApplications, normalizeDirectDamageType, type DamageSaveOutcome, type DirectDamageMetadata, type TargetDamageApplication } from '../directDamage';
-import { calibrationToPx, clampPercent, computeContainedRect, DEFAULT_GRID_OPACITY, layerPxToMapPercent, mapPercentToLayerPx, pointerToMapPercent, resolveGridCalibration, snapMapPercentCalibrated, type GridCalibration, type Rect } from '../mapRenderedBounds';
+import { calibrationToPx, clampPercent, computeContainedRect, DEFAULT_GRID_OPACITY, layerPxToMapPercent, mapObjectSizeFromDrag, mapPercentToLayerPx, pointerToMapPercent, resolveGridCalibration, snapMapPercentCalibrated, type GridCalibration, type Rect } from '../mapRenderedBounds';
 import { formatRulerReadout, gridCellUnitPlural, measureToolHelp, rulerDistanceFeet } from '../rulerReadout';
 import { hexAoeCirclePolygons, hexPolygons, hexKeyboardStepPx, mapPercentGridDistance, snapFogRectToHexGrid, snapMapPercentToHex, tokenFootprintDiameterPx } from '../hexGeometry';
 import { dragBudget, dragMoveFt, isCurrentActorDrag, type DragBudget } from '../dragDistance';
@@ -113,6 +113,12 @@ const KEYBOARD_DRAG_BURST_MS = 900;
 
 /** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
 function newAoeId(): string {
+  const uuid = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+  return uuid.slice(0, 40);
+}
+
+/** Stable-ish short id for a new map object (issue #2175). Mirrors `newAoeId` + the panel's own `newMapObjectId`. */
+function newMapObjectId(): string {
   const uuid = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
   return uuid.slice(0, 40);
 }
@@ -243,6 +249,21 @@ export type BattleMapProps = {
   onRemoveAoe?: (templateId: string) => void;
   onClearPlayerAoe?: () => void;
   aoeDeclarerNames?: ReadonlyMap<string, string>;
+  /**
+   * Map objects (issue #2175) — click-to-place / drag-on-canvas / resize. These mirror the
+   * `onDeclareAoe`/`onUpdateAoe` callback contract above: BattleMap stays API-decoupled and the
+   * page owns the scoped `/encounters/:id/map-objects` writes. All DM-only at the server; these
+   * props are simply absent (undefined) for a non-DM/cast viewer, which keeps the overlay inert.
+   */
+  onPlaceMapObject?: (create: MapObjectCreate) => void | Promise<void>;
+  onUpdateMapObject?: (objectId: string, patch: MapObjectUpdate) => void | Promise<void>;
+  /**
+   * Click-to-place arming (issue #2175): the DM picks an icon in the "Set pieces" panel and
+   * arms placement, then the next map press drops the object at the (grid-snapped) press point
+   * and the page clears the arm. `null`/undefined = not armed.
+   */
+  mapObjectPlacementArm?: { iconSlug: string; label: string; dmOnly: boolean } | null;
+  onMapObjectPlacementArmChange?: (arm: { iconSlug: string; label: string; dmOnly: boolean } | null) => void;
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
   onImportMap?: (attachmentId: number) => void;
   showGuidance?: boolean;
@@ -559,6 +580,10 @@ export const BattleMap = memo(function BattleMap({
   onRemoveAoe = () => undefined,
   onClearPlayerAoe,
   aoeDeclarerNames = new Map(),
+  onPlaceMapObject,
+  onUpdateMapObject,
+  mapObjectPlacementArm = null,
+  onMapObjectPlacementArmChange,
   onGenerateMap,
   onImportMap,
   showGuidance,
@@ -614,6 +639,12 @@ export const BattleMap = memo(function BattleMap({
     | { kind: 'token-select'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint; additive: boolean }
     | { kind: 'token-lasso'; pointerId: number; captureTarget: Element; points: MapPoint[]; additive: boolean }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
+    // Issue #2175: a persisted map-object drag (move) or corner-grip drag (resize). Mirrors
+    // 'aoe' as a distinct gesture kind — same pointer-capture/release lifecycle, but a separate
+    // data shape (mode + center) and a separate persistence callback (`onUpdateMapObject`).
+    // `center` is the object's pre-gesture position; for a resize it is the fixed anchor the
+    // dragged grip measures a radius from. `point` is the live pointer location.
+    | { kind: 'map-object'; mode: 'move' | 'resize'; pointerId: number; captureTarget: Element; objectId: string; center: MapPoint; point: MapPoint }
     | { kind: 'fog'; mode: 'reveal' | 'erase'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
     | { kind: 'fog-region'; pointerId: number; captureTarget: Element; regionId: string; start: MapPoint; last: MapPoint }
     | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
@@ -716,6 +747,13 @@ export const BattleMap = memo(function BattleMap({
   const [aoeDraft, setAoeDraft] = useState<{ id: string; x: string; y: string; sizeFt: string; angleDeg: string } | null>(null);
   const [editingAoeDraft, setEditingAoeDraft] = useState(false);
   const pendingAoeDraftRef = useRef<string | null>(null);
+  // Issue #2175: live map-object gesture previews + the DM's selected object. Like `aoeDrag`,
+  // these override the rendered position/size for the in-flight gesture only and are cleared on
+  // release (then the encounter refetch lands the committed value). `selectedMapObjectId` drives
+  // the selection ring + the resize grip on the overlay.
+  const [selectedMapObjectId, setSelectedMapObjectId] = useState<string | null>(null);
+  const [mapObjectDrag, setMapObjectDrag] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [mapObjectResize, setMapObjectResize] = useState<{ id: string; size: number } | null>(null);
   // Keyboard-accessible token selection and numeric editing state (issue #419).
   const [selectedTokenId, setSelectedTokenId] = useState<number | null>(null);
   // This is intentionally a Set rather than a colour-only visual state: the adjacent
@@ -774,6 +812,9 @@ export const BattleMap = memo(function BattleMap({
       dragPosStore.set(null);
     } else if (kind === 'aoe') {
       setAoeDrag(null);
+    } else if (kind === 'map-object') {
+      setMapObjectDrag(null);
+      setMapObjectResize(null);
     } else if (kind === 'fog') {
       setRevealCorners(null);
     } else if (kind === 'fog-region') {
@@ -853,6 +894,12 @@ export const BattleMap = memo(function BattleMap({
         : isCast
           ? playerDisplayEncounterMapUrl(campaignId, encounter.id, encounter.updatedAt)
           : encounterMapUrl(encounter.id, encounter.updatedAt);
+  // Issue #2175: the object overlay is grabbable only for a writing DM, in the Move tool, on a
+  // loaded map, and only when click-to-place is NOT armed (an armed press must fall through to
+  // the surface so it places a new object rather than dragging the one under the cursor).
+  // viewportPan is checked at gesture time (in the handlers) rather than here so toggling pan
+  // does not by itself re-render the memoized overlay.
+  const mapObjectsInteractive = effectiveCanDmWrite && tool === 'move' && !!mapImageUrl && !mapObjectPlacementArm;
   // Issue #604 — responsive battle map. The board used to load at full resolution on
   // every device; the derivative ladder lets the browser pick a rung that fits the
   // surface. Both the manifest and every srcset URL go through the ROLE-SAFE
@@ -884,6 +931,7 @@ export const BattleMap = memo(function BattleMap({
 
   const gridSize = encounter.gridSize; // cell edge as % of map width; null = no grid
   const gridScale = encounter.gridScale;
+  const gridSnap = encounter.gridSnap;
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
   const hexOrientation = encounter.hexOrientation ?? 'pointy';
@@ -1171,6 +1219,15 @@ export const BattleMap = memo(function BattleMap({
   }
 
   function onViewportKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    // Issue #2175: Escape cancels an armed click-to-place before any tool-specific Escape
+    // handling (measure/fog cancel) runs, so a DM who armed placement and thought better of
+    // it has one consistent way out.
+    if (mapObjectPlacementArm && e.key === 'Escape') {
+      e.preventDefault();
+      onMapObjectPlacementArmChange?.(null);
+      announce(t('encounters.map.objects.placeCancelled'));
+      return;
+    }
     // Issue #2047: Shift+Enter/Space, checked before the plain-ping activation below,
     // opens the intent menu instead of sending an unlabeled ping — the keyboard-only
     // path to the same Look/Danger/Move-here menu long-press and right-click reach.
@@ -1457,6 +1514,20 @@ export const BattleMap = memo(function BattleMap({
     // Letterbox bands are inert — do not start ping/measure/reveal/deselect there (#464).
     const pct = pointerToPercent(e);
     if (!pct) return;
+    // Issue #2175 click-to-place: an armed placement consumes the next map press at the
+    // grid-snapped point regardless of the active tool, then disarms. The icon/label were
+    // chosen in the "Set pieces" panel; the server fills the size default.
+    if (mapObjectPlacementArm && effectiveCanDmWrite && mapImageUrl) {
+      e.preventDefault();
+      const snapped = snapPoint(pct);
+      const arm = mapObjectPlacementArm;
+      onMapObjectPlacementArmChange?.(null);
+      announce(t('encounters.map.objects.placedOnMap', { label: arm.label || arm.iconSlug }));
+      void Promise.resolve(
+        onPlaceMapObject?.({ id: newMapObjectId(), iconSlug: arm.iconSlug, label: arm.label, x: snapped.x, y: snapped.y, size: DEFAULT_MAP_OBJECT_SIZE, dmOnly: arm.dmOnly }),
+      ).catch((err: unknown) => onError(err instanceof Error ? err.message : t('encounters.map.objects.placeError')));
+      return;
+    }
     if (tool === 'ping') {
       // Issue #1937: the secondary (right) mouse button never arms a plain-tap ping — it
       // opens the intent menu instead, through the dedicated onContextMenu handler below.
@@ -1600,6 +1671,15 @@ export const BattleMap = memo(function BattleMap({
     } else if (gesture.kind === 'aoe') {
       gesture.point = pct;
       setAoeDrag({ id: gesture.templateId, ...pct });
+    } else if (gesture.kind === 'map-object') {
+      gesture.point = pct;
+      if (gesture.mode === 'move') {
+        setMapObjectDrag({ id: gesture.objectId, ...pct });
+      } else {
+        // Resize: the new diameter (% of map width) is twice the pointer's distance from the
+        // object's fixed centre, measured in the same isotropic layer-px space as the grid.
+        setMapObjectResize({ id: gesture.objectId, size: mapObjectSizeFromDrag(gesture.center, pct, mapRect) });
+      }
     } else if (gesture.kind === 'calibrate') {
       gesture.point = pct;
       setCalibrateDrag({ anchor: gesture.anchor, ...pct });
@@ -1715,6 +1795,23 @@ export const BattleMap = memo(function BattleMap({
       const point = finalPoint ?? gesture.point;
       if (effectiveCanDmWrite) updateAoe(gesture.templateId, { x: point.x, y: point.y });
       else updatePlayerAoeFromDraft(gesture.templateId, { x: point.x, y: point.y });
+      return;
+    }
+    if (gesture.kind === 'map-object') {
+      const point = finalPoint ?? gesture.point;
+      if (gesture.mode === 'move') {
+        // Snap the DROP (not the live preview) the same way a token drop snaps — calibrated
+        // grid + hex when configured (issue #2175 grid-snapping criterion).
+        const snapped = snapPoint(point);
+        void Promise.resolve(onUpdateMapObject?.(gesture.objectId, { x: snapped.x, y: snapped.y })).catch((err: unknown) =>
+          onError(err instanceof Error ? err.message : t('encounters.map.objects.updateError')),
+        );
+      } else {
+        const size = mapObjectSizeFromDrag(gesture.center, point, mapRect);
+        void Promise.resolve(onUpdateMapObject?.(gesture.objectId, { size })).catch((err: unknown) =>
+          onError(err instanceof Error ? err.message : t('encounters.map.objects.updateError')),
+        );
+      }
       return;
     }
     if (gesture.kind === 'calibrate') {
@@ -2018,6 +2115,81 @@ export const BattleMap = memo(function BattleMap({
     if (effectiveCanDmWrite) onSetAoe(aoeTemplates.filter((t) => t.id !== id));
     else onRemoveAoe(id);
   }
+
+  // Issue #2175: map-object canvas interactions. These three are `useCallback`-stable (their deps
+  // are all stable across a token drag — effectiveCanDmWrite, the arm, viewportPan, the grid
+  // snapshot, and the page-owned mutation callbacks) so the memoized `MapObjectsOverlay`'s
+  // `React.memo` boundary holds and a token drag elsewhere never re-renders the object layer.
+  // Each mirrors its `AoeTemplate` sibling: capture on press, arm a `'map-object'` gesture, let
+  // `onSurfacePointerMove`/`onSurfacePointerUp` drive the live preview and the committed PATCH.
+  const onMapObjectHandlePointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>, obj: MapObject) => {
+      if (!e.isPrimary || activeGestureRef.current || viewportPan || !effectiveCanDmWrite) return;
+      // Click-to-place is armed: do not start a drag (and do not stop propagation) — let the
+      // press bubble to the surface so it places a NEW object at this point.
+      if (mapObjectPlacementArm) return;
+      e.currentTarget.focus();
+      setSelectedMapObjectId(obj.id);
+      e.preventDefault();
+      e.stopPropagation();
+      const captureTarget = e.currentTarget;
+      captureTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      const point = { x: obj.x, y: obj.y };
+      activeGestureRef.current = { kind: 'map-object', mode: 'move', pointerId: e.pointerId, captureTarget, objectId: obj.id, center: point, point };
+      setMapObjectDrag({ id: obj.id, ...point });
+    },
+    [effectiveCanDmWrite, mapObjectPlacementArm, viewportPan],
+  );
+
+  const onMapObjectResizeHandlePointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLButtonElement>, obj: MapObject) => {
+      if (!e.isPrimary || activeGestureRef.current || viewportPan || !effectiveCanDmWrite || mapObjectPlacementArm) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const captureTarget = e.currentTarget;
+      captureTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      const center = { x: obj.x, y: obj.y };
+      activeGestureRef.current = { kind: 'map-object', mode: 'resize', pointerId: e.pointerId, captureTarget, objectId: obj.id, center, point: center };
+      setMapObjectResize({ id: obj.id, size: obj.size });
+    },
+    [effectiveCanDmWrite, mapObjectPlacementArm, viewportPan],
+  );
+
+  const onMapObjectHandleKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>, obj: MapObject) => {
+      if (!effectiveCanDmWrite) return;
+      e.stopPropagation();
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSelectedMapObjectId(null);
+        return;
+      }
+      const arrow = e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown';
+      if (!arrow) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Nudge by one percent (Shift = five), then snap to the calibrated grid the same way a
+      // pointer drop does. Hex keyboard snapping is a minor known gap (a hex-grid DM still gets
+      // full hex snap on pointer place/drag via `snapPoint`); the panel's X/Y inputs remain the
+      // exact keyboard fallback.
+      const mult = e.shiftKey ? 5 : 1;
+      const dx = (e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0) * mult;
+      const dy = (e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0) * mult;
+      let next = { x: clampPercent(obj.x + dx), y: clampPercent(obj.y + dy) };
+      if (mapRect) next = snapMapPercentCalibrated(next, calibration, mapRect, gridOn && gridSnap);
+      void Promise.resolve(onUpdateMapObject?.(obj.id, { x: next.x, y: next.y })).catch((err: unknown) =>
+        onError(err instanceof Error ? err.message : t('encounters.map.objects.updateError')),
+      );
+      announce(t('encounters.map.objects.movedAnnounce', { label: obj.label || obj.iconSlug, x: Math.round(next.x), y: Math.round(next.y) }));
+    },
+    [effectiveCanDmWrite, onUpdateMapObject, mapRect, calibration, gridOn, gridSnap, t, announce, onError],
+  );
 
   // Measurement readout — fractional cells along a straight line, rounded to whole cells for scale.
   const rulerReadout = (() => {
@@ -3190,10 +3362,13 @@ export const BattleMap = memo(function BattleMap({
                   encounterId={encounter.id}
                 />
 
-                {/* Persistent map icons/set pieces (issue #1308) — read-only; place/move/label/
-                    delete happen through the "Set pieces" DM panel, not by dragging this layer.
-                    `encounter.mapObjects` is already server-redacted (a dmOnly object is dropped
-                    wholesale for a non-DM before this component ever sees it).
+                {/* Persistent map icons/set pieces (issue #1308; interactive in #2175). A DM in
+                    the Move tool drags an icon to move it and drags the selected object's corner
+                    grip to resize; click-to-place is armed from the "Set pieces" panel and
+                    consumed by the surface pointer handler. `encounter.mapObjects` is already
+                    server-redacted (a dmOnly object is dropped wholesale for a non-DM before this
+                    component ever sees it), and `interactive` is false for non-DM/cast/armed
+                    contexts, so the layer stays inert for players.
                     `?? []` matches every other read of a `.default([])`-backed encounter list in
                     this file (see `encounter.aoe ?? []` at :1001/:2219/:2333/:2344) — a real
                     server response always sends the array, but a hand-built encounter object
@@ -3202,7 +3377,39 @@ export const BattleMap = memo(function BattleMap({
                     `player-display-cast-session.spec.ts` — a missing array threw inside this
                     overlay and took the whole map scene down with it, since BattleMap has no
                     error boundary of its own). */}
-                <MapObjectsOverlay mapObjects={encounter.mapObjects ?? []} mapRect={mapRect} />
+                <MapObjectsOverlay
+                  mapObjects={encounter.mapObjects ?? []}
+                  mapRect={mapRect}
+                  interactive={mapObjectsInteractive}
+                  selectedId={selectedMapObjectId}
+                  dragOverride={mapObjectDrag}
+                  resizeOverride={mapObjectResize}
+                  onObjectPointerDown={onMapObjectHandlePointerDown}
+                  onResizeHandlePointerDown={onMapObjectResizeHandlePointerDown}
+                  onObjectKeyDown={onMapObjectHandleKeyDown}
+                />
+
+                {/* Click-to-place arming banner (issue #2175): the DM armed placement from the
+                    "Set pieces" panel; the next map press drops the object. Surfaced on the map
+                    itself (not the panel) so the affordance is visible while attention is here. */}
+                {mapObjectPlacementArm && (
+                  <div
+                    className="absolute left-1/2 top-2 -translate-x-1/2"
+                    data-testid="map-object-placement-banner"
+                    style={{
+                      zIndex: 12,
+                      padding: '4px 10px',
+                      borderRadius: 'var(--radius-md)',
+                      background: 'color-mix(in srgb, var(--color-accent) 22%, var(--color-surface))',
+                      border: '1px solid var(--color-accent)',
+                      fontSize: 12,
+                      pointerEvents: 'none',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {t('encounters.map.objects.armedHint', { label: mapObjectPlacementArm.label || mapObjectPlacementArm.iconSlug })}
+                  </div>
+                )}
 
                 {/* Calibration anchors (issue #417) — DM-only, only in the Calibrate tool.
                     Drag the origin anchor to a corner of the map's printed grid, then drag the

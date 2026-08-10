@@ -18,14 +18,14 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { MapObject } from '@campfire/schema';
+import { DEFAULT_MAP_OBJECT_SIZE } from '@campfire/schema';
 import { Card, Btn, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
-import { api, API, translateApiError } from '../../lib/api';
-import { invalidateEncounter } from '../../lib/query';
-import { useQueryClient } from '@tanstack/react-query';
+import { translateApiError } from '../../lib/api';
 import { useAnnounce } from '../../components/Announcer';
+import { useMapObjectsApi, type MapObjectPlacementArm } from './mapObjectsApi';
 
 /** Stable-ish short id for a new map object (crypto.randomUUID when available). Mirrors BattleMap's own newAoeId. */
 function newMapObjectId(): string {
@@ -44,15 +44,21 @@ export function MapObjectsPanel({
   objects,
   canDmWrite,
   onError,
+  placementArmed,
+  onArmPlacement,
 }: {
   encounterId: number;
   objects: MapObject[];
   canDmWrite: boolean;
   onError: (msg: string | null) => void;
+  /** Whether click-to-place is currently armed (issue #2175) — drives the armed banner/cancel UI. */
+  placementArmed: boolean;
+  /** Arm click-to-place with the chosen icon/label, or pass null to cancel. */
+  onArmPlacement: (arm: MapObjectPlacementArm | null) => void;
 }) {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const announce = useAnnounce();
+  const { place: placeObject, update: updateObject, remove: removeObject } = useMapObjectsApi(encounterId);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [addLabel, setAddLabel] = useState('');
   const [addIconSlug, setAddIconSlug] = useState('');
@@ -66,18 +72,10 @@ export function MapObjectsPanel({
     setBusyId('__add__');
     const id = newMapObjectId();
     try {
-      await api.post(`${API}/encounters/${encounterId}/map-objects`, {
-        id,
-        label: addLabel.trim(),
-        iconSlug: addIconSlug,
-        x: 50,
-        y: 50,
-        dmOnly: false,
-      });
+      await placeObject({ id, label: addLabel.trim(), iconSlug: addIconSlug, x: 50, y: 50, size: DEFAULT_MAP_OBJECT_SIZE, dmOnly: false });
       setAddLabel('');
       setAddIconSlug('');
       announce(t('encounters.map.objects.placed', { label: addLabel.trim() || addIconSlug }));
-      invalidateEncounter(queryClient, encounterId);
     } catch (err) {
       onError(translateApiError(err, t, { fallbackKey: 'encounters.map.objects.placeError' }));
     } finally {
@@ -85,12 +83,22 @@ export function MapObjectsPanel({
     }
   }
 
-  async function update(objectId: string, patch: Partial<Pick<MapObject, 'label' | 'iconSlug' | 'x' | 'y' | 'dmOnly'>>): Promise<void> {
+  /** Arm click-to-place (issue #2175): the DM picked an icon + label; the next map press places it. */
+  function armPlace(): void {
+    if (!addIconSlug || placementArmed) {
+      // Toggling off an already-armed placement cancels it.
+      onArmPlacement(null);
+      return;
+    }
+    onError(null);
+    onArmPlacement({ iconSlug: addIconSlug, label: addLabel.trim(), dmOnly: false });
+  }
+
+  async function update(objectId: string, patch: Partial<Pick<MapObject, 'label' | 'iconSlug' | 'x' | 'y' | 'size' | 'dmOnly'>>): Promise<void> {
     onError(null);
     setBusyId(objectId);
     try {
-      await api.patch(`${API}/encounters/${encounterId}/map-objects/${encodeURIComponent(objectId)}`, patch);
-      invalidateEncounter(queryClient, encounterId);
+      await updateObject(objectId, patch);
     } catch (err) {
       onError(translateApiError(err, t, { fallbackKey: 'encounters.map.objects.updateError' }));
     } finally {
@@ -102,9 +110,8 @@ export function MapObjectsPanel({
     onError(null);
     setBusyId(objectId);
     try {
-      await api.delete(`${API}/encounters/${encounterId}/map-objects/${encodeURIComponent(objectId)}`);
+      await removeObject(objectId);
       announce(t('encounters.map.objects.removed', { label }));
-      invalidateEncounter(queryClient, encounterId);
     } catch (err) {
       onError(translateApiError(err, t, { fallbackKey: 'encounters.map.objects.removeError' }));
     } finally {
@@ -166,6 +173,19 @@ export function MapObjectsPanel({
                 if (next !== obj.y) void update(obj.id, { y: next });
               }}
             />
+            <TextInput
+              type="number"
+              min={1}
+              max={100}
+              defaultValue={obj.size}
+              aria-label={t('encounters.map.objects.sizeField')}
+              disabled={busyId === obj.id}
+              style={{ width: 64 }}
+              onBlur={(e) => {
+                const next = clampPercent(e.currentTarget.value, obj.size);
+                if (next !== obj.size) void update(obj.id, { size: next });
+              }}
+            />
             <label className="flex items-center gap-1 text-[11px] text-secondary">
               <input
                 type="checkbox"
@@ -210,13 +230,31 @@ export function MapObjectsPanel({
           onChange={(e) => setAddLabel(e.currentTarget.value)}
           placeholder={t('encounters.map.objects.labelPlaceholder')}
           aria-label={t('encounters.map.objects.labelField')}
-          disabled={busyId === '__add__'}
+          disabled={busyId === '__add__' || placementArmed}
           style={{ flex: '1 1 140px', minWidth: 100 }}
         />
-        <Btn type="submit" density="xs" disabled={busyId === '__add__' || !addIconSlug}>
+        <Btn type="submit" density="xs" disabled={busyId === '__add__' || !addIconSlug || placementArmed}>
           {busyId === '__add__' ? t('encounters.map.objects.placing') : t('encounters.map.objects.add')}
         </Btn>
+        {/* Issue #2175 click-to-place: arms placement so the DM's next map press drops the object
+            at the (grid-snapped) click point, instead of defaulting to map center. Kept alongside
+            the center-placing Add button so a keyboard-only DM still has a no-canvas path. */}
+        <Btn
+          type="button"
+          density="xs"
+          ghost
+          disabled={busyId === '__add__' || (!placementArmed && !addIconSlug)}
+          aria-pressed={placementArmed}
+          onClick={armPlace}
+        >
+          {placementArmed ? t('encounters.map.objects.cancelPlace') : t('encounters.map.objects.placeOnMap')}
+        </Btn>
       </form>
+      {placementArmed && (
+        <p className="text-[11px] text-secondary" data-testid="map-objects-armed-hint">
+          {t('encounters.map.objects.armedHint', { label: addLabel.trim() || addIconSlug })}
+        </p>
+      )}
       {pickingIconFor != null && (
         <IconPicker
           value={pickingIconFor === 'add' ? addIconSlug : objects.find((o) => o.id === pickingIconFor)?.iconSlug ?? ''}

@@ -11813,9 +11813,10 @@ describe('encounters — issue #1308: map objects (e2e)', () => {
       expect(placed.body).toMatchObject(chest);
 
       // Persists across a fresh GET (issue #1308 acceptance criterion — "place object ->
-      // reload -> object still visible to DM").
+      // reload -> object still visible to DM"). The server fills the size default (issue
+      // #2175) because the placement omits it.
       const afterPlace = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
-      expect(afterPlace.body.mapObjects).toEqual([chest]);
+      expect(afterPlace.body.mapObjects).toEqual([{ ...chest, size: 5 }]);
 
       // Move + relabel in one PATCH.
       const moved = await request(server)
@@ -11826,7 +11827,7 @@ describe('encounters — issue #1308: map objects (e2e)', () => {
       expect(moved.body).toMatchObject({ id: 'chest-1', x: 60, y: 70, label: 'Empty chest (looted)', iconSlug: 'chest', dmOnly: false });
 
       const afterMove = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
-      expect(afterMove.body.mapObjects).toEqual([{ ...chest, x: 60, y: 70, label: 'Empty chest (looted)' }]);
+      expect(afterMove.body.mapObjects).toEqual([{ ...chest, size: 5, x: 60, y: 70, label: 'Empty chest (looted)' }]);
 
       const removed = await request(server).delete(`/api/v1/encounters/${encounterId}/map-objects/chest-1`).set(dm);
       expect(removed.status).toBe(200);
@@ -11863,14 +11864,14 @@ describe('encounters — issue #1308: map objects (e2e)', () => {
     expect(dmRes.body.mapObjects.map((o: { id: string }) => o.id).sort()).toEqual(['secret-trap', 'visible-marker']);
 
     const playerRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
-    expect(playerRes.body.mapObjects).toEqual([visibleObj]);
+    expect(playerRes.body.mapObjects).toEqual([{ ...visibleObj, size: 5 }]);
     // Not just id-absent: the WHOLE response body must carry no trace of the secret object —
     // coordinates, label, or icon.
     expect(JSON.stringify(playerRes.body)).not.toContain('secret-trap');
     expect(JSON.stringify(playerRes.body)).not.toContain('Poison dart trap');
 
     const viewerRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(viewer);
-    expect(viewerRes.body.mapObjects).toEqual([visibleObj]);
+    expect(viewerRes.body.mapObjects).toEqual([{ ...visibleObj, size: 5 }]);
 
     // Flipping dmOnly back to false on a live object reveals it on the very next player read.
     const revealed = await request(server).patch(`/api/v1/encounters/${encounterId}/map-objects/secret-trap`).set(dm).send({ dmOnly: false });
@@ -11934,6 +11935,32 @@ describe('encounters — issue #1308: map objects (e2e)', () => {
     ).body.id;
     expect((await request(server).post(`/api/v1/encounters/${fresh}/map-objects`).set(dm).send({ ...chest, x: 150 })).status).toBe(400);
     expect((await request(server).post(`/api/v1/encounters/${fresh}/map-objects`).set(dm).send({ ...chest, iconSlug: '' })).status).toBe(400);
+  });
+
+  it('issue #2175: a DM may set and resize an object (size field), and rejects an out-of-range size (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    const fresh = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Resize Fight', hidden: false })
+    ).body.id;
+    // Place with an explicit size (canvas resize / click-to-place carry one).
+    const placed = await request(server).post(`/api/v1/encounters/${fresh}/map-objects`).set(dm).send({ ...chest, size: 12 });
+    expect(placed.status).toBe(201);
+    expect(placed.body).toMatchObject({ id: 'chest-1', size: 12 });
+
+    // Resize via a PATCH that carries only the size field (a canvas resize handle commits this).
+    const resized = await request(server).patch(`/api/v1/encounters/${fresh}/map-objects/chest-1`).set(dm).send({ size: 24 });
+    expect(resized.status).toBe(200);
+    expect(resized.body).toMatchObject({ id: 'chest-1', size: 24 });
+    expect(resized.body.x).toBe(chest.x); // a size-only patch leaves position untouched.
+
+    const after = await request(server).get(`/api/v1/encounters/${fresh}`).set(dm);
+    expect(after.body.mapObjects).toEqual([{ ...chest, size: 24 }]);
+
+    // Out-of-range size is rejected at the schema boundary, same as an out-of-range coordinate.
+    expect((await request(server).post(`/api/v1/encounters/${fresh}/map-objects`).set(dm).send({ ...chest, id: 'too-big', size: 101 })).status).toBe(400);
+    expect((await request(server).patch(`/api/v1/encounters/${fresh}/map-objects/chest-1`).set(dm).send({ size: 0 })).status).toBe(400);
+
+    await request(server).delete(`/api/v1/encounters/${fresh}/map-objects/chest-1`).set(dm);
   });
 
   it('an archived campaign blocks map-object writes for the DM too (403)', async () => {
