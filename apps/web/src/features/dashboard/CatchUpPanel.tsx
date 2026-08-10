@@ -96,12 +96,12 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
   if (dismissed || !data || data.totalCount === 0) return null;
 
   const isTodaySince = data.since ? Math.floor((Date.now() - new Date(data.since).getTime()) / (1000 * 60 * 60 * 24)) <= 0 : true;
-  const sinceLabel =
-    data.since && isTodaySince
-      ? t('catchUp.today')
-      : data.since
-        ? t('catchUp.timeAgo', { time: timeAgo(data.since) })
-        : t('catchUp.today');
+  // `timeAgo` already returns a COMPLETE relative phrase — "28d ago", "just now", and an
+  // absolute date once past 30 days. It used to be wrapped in a `"{{time}} ago"` string,
+  // which appended a second suffix to every branch: the dashboard read "since 28d ago
+  // ago", and would have read "since just now ago" or "since 8/10/2026 ago" in the other
+  // two. Nothing to add here; the helper's output is the whole label.
+  const sinceLabel = data.since && !isTodaySince ? timeAgo(data.since) : t('catchUp.today');
 
   const showSessionToggle =
     sessionSince != null && data.lastCaughtUpAt != null && sessionSince !== data.lastCaughtUpAt;
