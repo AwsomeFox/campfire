@@ -47,8 +47,6 @@ function renderHeader(overrides: Partial<Props> = {}) {
     onRequestEnd: vi.fn(),
     onRequestReopen: vi.fn(),
     onRequestDelete: vi.fn(),
-    turnTimerSeconds: 0,
-    onSetTurnTimerSeconds: vi.fn(),
     ...overrides,
   };
   return render(<DmLifecycleHeader {...props} />);

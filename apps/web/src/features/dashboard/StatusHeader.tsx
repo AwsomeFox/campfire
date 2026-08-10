@@ -11,7 +11,6 @@ import { Card, Btn } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
 import { GameIcon } from '../../components/GameIcon';
-import { CampaignCover } from '../../components/CampaignCover';
 import { PageTitle } from '../../components/PageTitle';
 import { TermHelp } from '../../components/TermHelp';
 import { useSaveFeedback } from '../../components/SaveFeedback';
@@ -146,13 +145,6 @@ export function StatusHeader({
   // (session, danger, location) — no boxed card. See Campfire.dc.html ~L417-425.
   return (
     <section className="cf-brand-scene" aria-label="Campaign overview">
-      <CampaignCover
-        campaignId={campaignId}
-        name={campaign.name}
-        variant="banner"
-        className="cf-brand-scene__cover"
-        showMonogram={false}
-      />
       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 14px', marginTop: 12 }}>
       {/* Issue #1711: this was an <h3> wearing PageTitle's CSS class with a hand-set
           fontSize — the Dashboard route shipped no real <h1> at all. `size="compact"`

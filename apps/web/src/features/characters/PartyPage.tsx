@@ -21,7 +21,6 @@ import { useCampaign } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, HpBar } from '../../components/ui';
 import { formatNumber } from '../../lib/format';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
-import { CampaignCover } from '../../components/CampaignCover';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { avatarTone, initials } from './avatar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
@@ -173,7 +172,6 @@ export default function PartyPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
-      <CampaignCover campaignId={id} name={campaign?.name ?? 'Campaign'} variant="strip" showMonogram={false} />
       <PageHeader
         title={t('nav.party')}
         secondaryActions={secondaryActions}

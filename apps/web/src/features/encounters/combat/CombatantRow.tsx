@@ -644,13 +644,12 @@ export const CombatantRow = memo(function CombatantRow({
       data-current-turn={isCurrentTurn ? 'true' : undefined}
       data-target-legal={targeting?.legal ? 'true' : undefined}
       data-target-selected={targeting?.selected ? 'true' : undefined}
-      className={`cf-hp-feedback-anchor${feedbackClass}`}
+      // The wrap-flow lives in `.cf-combatant-row` (index.css) rather than inline so a
+      // container query can restack it: this row was authored for the full-width roster,
+      // and inside the ~430px VTT rail every band (initiative, identity, HP, adjust,
+      // reveal) wrapped independently into a ragged block with a dead left gutter.
+      className={`cf-combatant-row cf-hp-feedback-anchor${feedbackClass}`}
       style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        gap: 10,
-        padding: '9px 14px',
         borderLeft: `2px solid ${edgeColor}`,
         background: isCurrentTurn ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
         boxShadow: targeting?.selected ? '0 0 0 2px var(--color-accent)' : targeting?.legal && !targeting?.declared && !targetSelectionUnavailable ? '0 0 0 1px white' : isCurrentTurn ? '0 0 0 1px color-mix(in srgb, var(--color-accent) 35%, transparent)' : 'none',
@@ -712,8 +711,11 @@ export const CombatantRow = memo(function CombatantRow({
               }
             }}
             style={{
-              width: 44,
-              minWidth: 44,
+              // 52, not 44: the input has horizontal padding, so at 44 a two-digit
+              // initiative was clipped to its first digit and a bitten-off second
+              // ("18" rendered as "1:"). 44 remains the tap-target floor via minHeight.
+              width: 52,
+              minWidth: 52,
               height: 44,
               minHeight: 44,
               flex: 'none',
@@ -816,7 +818,11 @@ export const CombatantRow = memo(function CombatantRow({
           )}
         </div>
       )}
-      <div style={{ flex: 1, minWidth: 160 }}>
+      {/* The identity band — name, tags, conditions, actions, statblock editor. It is the
+          only band that must keep a usable measure, so in the VTT rail it claims a full
+          line of its own (see `.cf-combatant-row` in index.css) rather than being crushed
+          to whatever the fixed-size bands leave over. */}
+      <div className="cf-combatant-identity">
         {editingIdentity ? (
           <div className="flex gap-2 items-end flex-wrap" style={{ marginBottom: 4 }}>
             <div className="field" style={{ flex: 1, minWidth: 120 }}>
@@ -1935,7 +1941,9 @@ export const CombatantRow = memo(function CombatantRow({
               value={exactHp}
               onChange={(e) => setExactHp(e.target.value)}
               className="input cf-target-44"
-              style={{ width: 60, textAlign: 'center' }}
+              // 72: at 60 the padding left ~31px of text box, so even the three-character
+              // "Amt" placeholder was clipped to "Am".
+              style={{ width: 72, textAlign: 'center' }}
               aria-label="Exact HP amount"
               disabled={syncBlocked}
             />

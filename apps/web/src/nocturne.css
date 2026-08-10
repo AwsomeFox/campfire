@@ -125,6 +125,16 @@ h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
   line-height: 1.12; letter-spacing: -0.015em; margin: 0 0 var(--space-2);
 }
+/* CASCADE TRAP — read before writing `className="text-sm"` on a heading.
+   This file is imported UNLAYERED (index.css: `@import "./nocturne.css"`), while every
+   Tailwind utility lives in `@layer utilities`. Unlayered rules win over layered ones
+   regardless of specificity, so these element sizes beat `text-xs`/`text-sm`/`text-lg`
+   on an <h1>–<h6> and the utility is silently inert. Roughly 60 headings across the app
+   are currently rendering at these display sizes when their author asked for 14px.
+   Use `.card-kicker` / `.card-title` (classes, which do win) for section headings, or
+   set the size on a wrapping element. Moving this import into `layer(base)` would fix
+   the whole class at once but re-sizes those ~60 headings in one go, so it wants its
+   own change with its own visual pass. */
 h1 { font-size: 2.625rem; }
 h2 { font-size: 2rem; }
 h3 { font-size: 1.5625rem; }

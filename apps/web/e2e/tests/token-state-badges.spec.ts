@@ -91,11 +91,15 @@ test('DM and player clients render token state safely, follow SSE turns, and ret
     await expect(playerPage.getByTestId(`map-token-current-turn-${bossId}`)).toHaveCount(0);
     await expect(playerPage.getByTestId(`map-token-current-turn-${skirmisherId}`)).toBeVisible();
 
+    // Token detail now lives behind the rail's Map setup tool, the same disclosure
+    // contract as Grid & fog — the cockpit stopped parking these controls on the board.
+    await dmPage.getByTestId('map-setup-toggle').click();
     const detailMode = dmPage.getByTestId('map-token-detail-mode');
     await detailMode.selectOption('off');
     await expect(dmPage.getByTestId(`map-token-hp-arc-${bossId}`)).toHaveCount(0);
     await expect(dmPage.getByTestId(`map-token-current-turn-${skirmisherId}`)).toHaveCount(0);
     await dmPage.reload();
+    await dmPage.getByTestId('map-setup-toggle').click();
     await expect(dmPage.getByTestId('map-token-detail-mode')).toHaveValue('off');
     await expect(dmPage.getByTestId(`map-token-hp-arc-${bossId}`)).toHaveCount(0);
 

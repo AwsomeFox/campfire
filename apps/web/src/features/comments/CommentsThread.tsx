@@ -255,7 +255,11 @@ export function CommentsThread({
       className="space-y-3"
       aria-labelledby={`discussion-heading-${entityType}-${entityId}`}
     >
-      <h3 id={`discussion-heading-${entityType}-${entityId}`} className="text-sm font-bold text-slate-400 uppercase tracking-wide flex items-center gap-2">
+      {/* `card-kicker`, not `text-sm`: nocturne.css sets a bare `h3 { font-size: 1.5625rem }`
+          OUTSIDE Tailwind's layers, and unlayered rules beat layered utilities — so the
+          `text-sm` this heading used to carry was inert and it rendered at 25px, twice the
+          size of every card kicker beside it on the character sheet. */}
+      <h3 id={`discussion-heading-${entityType}-${entityId}`} className="card-kicker font-bold flex items-center gap-2">
         Discussion
         {totalComments > 0 && <span className="tag">{totalComments}</span>}
       </h3>

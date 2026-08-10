@@ -66,12 +66,18 @@ export const KEYBOARD_COMMANDS: readonly KeyboardCommandMeta[] = [
   {
     // #599. Escape is not available (it closes dialogs) and every unmodified letter is
     // swallowed by the typing guard, so this is a chord — but it is a chord nobody has to
-    // remember under pressure, because the button it mirrors is on screen at all times.
-    // Deliberately NOT context-gated: unlike Next turn there is no state in which stopping
-    // the table is unavailable, which is why this entry has no `contextHint`.
+    // remember under pressure, because the button it mirrors is on screen beside it.
+    //
+    // Still not gated by application STATE — there is no point in a session at which
+    // stopping the table is unavailable, so the handler passes an unconditional action.
+    // The hint is about LOCATION: the handler is registered by `SafetyHoldBar`, which now
+    // mounts only on the Table page, so the chord is live exactly where the button is.
+    // Saying so beats a shortcuts panel that lists it as unconditional and then does
+    // nothing when someone presses it mid-combat.
     id: 'safetyHold',
     label: 'Pause the table (safety)',
     description: 'Immediately stop encounter advancement and the AI DM. No reason required.',
+    contextHint: 'On the Table page, alongside the Pause the table button.',
     defaultChord: { key: 'x', mod: true, shift: true },
   },
 ] as const;

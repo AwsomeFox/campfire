@@ -2,6 +2,7 @@
   "encounters": {
     "title": "المواجهات",
     "combatLogHeading": "سجل القتال",
+    "tableSetup": "إعداد الطاولة",
     "actions": {
       "title": "الإجراءات",
       "use": "استخدام",
@@ -255,6 +256,19 @@
         "overSpeed": "تجاوز السرعة",
         "movedMessage": "تحرك {{feet}} {{unit}}.",
         "undoneMessage": "تم التراجع عن الحركة."
+      },
+      "setup": "إعداد الخريطة",
+      "fog": {
+        "undo": "تراجع",
+        "redo": "إعادة"
+      },
+      "manage": {
+        "title": "إدارة الرموز",
+        "select": "تحديد",
+        "arrange": "ترتيب",
+        "formations": "التشكيلات",
+        "selectedTokens": "الرموز المحددة",
+        "selectedTokenList": "قائمة الرموز المحددة"
       }
     },
     "workspace": {

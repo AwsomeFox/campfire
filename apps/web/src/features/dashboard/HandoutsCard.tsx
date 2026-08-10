@@ -155,7 +155,11 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
               <div
                 key={a.id}
                 className="cf-inset"
-                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 8, borderRadius: 10 }}
+                // `flex-wrap` + `align-items: flex-start`: the DM buttons are `shrink-0`,
+                // so on a narrow card they crushed the info column to a few characters
+                // ("fog-security-map.png" rendered as "f…") and the DM-only badge landed
+                // on top of "Edit details". They now drop to their own line instead.
+                style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 10, padding: 10, borderRadius: 10 }}
               >
                 {a.mime === 'application/pdf' ? (
                   <div
@@ -197,23 +201,30 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                   <div style={{ marginTop: 2 }}>
                     <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={UI_ICON_SIZE.xs} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={UI_ICON_SIZE.xs} className="inline align-text-bottom" /> Revealed</>}</Chip>
                   </div>
-                  <div style={{ marginTop: 4, display: 'flex', gap: 8, alignItems: 'center' }}>
+                  {/* The visible labels are bare verbs: they used to repeat the filename
+                      three times ("View fog-security-map.png", "Download …", "Print …"),
+                      which in this narrow card wrapped each link across four lines and
+                      buried the badge and the DM buttons. The name is one line above and
+                      still reaches assistive tech via aria-label. */}
+                  <div style={{ marginTop: 4, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                     <a
                       className="text-[11px] hover:underline"
                       href={attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt })}
                       target="_blank"
                       rel="noopener noreferrer"
+                      aria-label={`View ${meta.title || a.filename}`}
                       style={{ color: 'var(--color-accent)' }}
                     >
-                      View {meta.title || a.filename}
+                      View
                     </a>
                     <a
                       className="text-[11px] hover:underline"
                       href={attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt }, { download: '1' })}
                       download={a.filename}
+                      aria-label={`Download ${meta.title || a.filename}`}
                       style={{ color: 'var(--color-accent)' }}
                     >
-                      Download {meta.title || a.filename}
+                      Download
                     </a>
                     {a.mime !== 'application/pdf' && (
                       <button
@@ -225,16 +236,17 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                             win.addEventListener('load', () => win.print(), { once: true });
                           }
                         }}
+                        aria-label={`Print ${meta.title || a.filename}`}
                         style={{ color: 'var(--color-accent)' }}
                       >
-                        Print {meta.title || a.filename}
+                        Print
                       </button>
                     )}
                   </div>
                 </div>
                 {canDmWrite && (
+                  <div className="flex items-center gap-1.5 flex-wrap" style={{ marginInlineStart: 'auto' }}>
                   <Btn density="xs" ghost className="text-[11px]" onClick={() => { setEditing(a); setDraft(draftFor(a)); }}>Edit details</Btn>
-                )}
                 {canDmWrite && (
                   <Btn density="xs"
                     ghost
@@ -245,6 +257,8 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                   >
                     {busyId === a.id ? '…' : a.hidden ? 'Reveal' : 'Hide'}
                   </Btn>
+                )}
+                  </div>
                 )}
               </div>
               );

@@ -8,9 +8,15 @@ import { afterCombatantIdForMoveDown, afterCombatantIdForMoveUp, isAwaitingReord
 import { duplicateCombatantName } from './duplicateCombatantName';
 import { CombatantStatblock } from './combat/CombatantStatblock';
 import { dismissKillPrompt, shouldShowKillPrompt } from './combat/statblockReveal';
-import { DmLifecycleHeader, EncounterSyncBanner } from './DmLifecycleHeader';
+import { DmLifecycleHeader, EncounterSyncBanner, TurnTimerControl } from './DmLifecycleHeader';
 import { GatedControl } from '../../components/GatedControl';
-import { actionApplyGateReason, gateReasonText, nextTurnGateReason } from './lifecycleGate';
+import {
+  actionApplyGateReason,
+  gateReasonText,
+  nextTurnGateReason,
+  turnTimerControlDisabled,
+  turnTimerControlVisible,
+} from './lifecycleGate';
 import { DEATH_STATE_LABEL } from './combat/DeathSaves';
 import { classifyDeathSaveOutcome, deathSaveSpectatorToastInfo, type DeathSaveOutcome } from './combat/deathSaveOutcome';
 import { useTranslation } from 'react-i18next';
@@ -859,7 +865,10 @@ export default function RunSessionPage() {
   const announce = useAnnounce();
   // #599/#1933: mirrors the server's assertNoSafetyHold rejection on start/nextTurn/
   // undoTurn/endTurn as a GatedControl reason — no server or authorization change, just
-  // reading the same table-wide safety-hold state SafetyHoldBar already shows everyone.
+  // reading the table-wide safety-hold state. The cockpit does not mount SafetyHoldBar
+  // (it is on the Table page), so these gate reasons are the whole of the in-cockpit
+  // signal that a hold is up: they must keep saying WHY the control is dead, not just
+  // that it is.
   const { data: tableSafety } = useTableSafety(Number.isFinite(cid) ? cid : undefined);
   const safetyHoldActive = tableSafety?.active === true;
 
@@ -4575,6 +4584,18 @@ export default function RunSessionPage() {
               audience="dm"
             />
           )}
+          {/* The pacing-limit setting, beside the readout it drives. It used to open from
+              an unlabeled stopwatch at the head of the lifecycle control group, a row
+              below this pill — the control and its effect were nowhere near each other. */}
+          {isDm && turnTimerControlVisible(lifecycle.reopen) && (
+            <TurnTimerControl
+              turnTimerSeconds={encounter.turnTimerSeconds}
+              onSetTurnTimerSeconds={(seconds) => {
+                void queueEncounterPatch({ turnTimerSeconds: seconds });
+              }}
+              disabled={turnTimerControlDisabled({ headerBusy, riskyBlocked })}
+            />
+          )}
         </div>
       }
       statusSlot={
@@ -4636,10 +4657,6 @@ export default function RunSessionPage() {
               setConfirmReopen(true);
             }}
             onRequestDelete={() => setConfirmDelete(true)}
-            turnTimerSeconds={encounter.turnTimerSeconds}
-            onSetTurnTimerSeconds={(seconds) => {
-              void queueEncounterPatch({ turnTimerSeconds: seconds });
-            }}
           />
         </>
       }
@@ -5371,6 +5388,12 @@ export default function RunSessionPage() {
               />
           </VttPanelSection>
           <VttPanelSection id="table" activeTabId={activePanelTab}>
+            {/* One card, matching the design's rail: everything from here to the lifecycle
+                guidance is table-wide setup, and as loose sibling rows it read as a pile of
+                un-owned controls above the first real card (with the cast help `?` orphaned
+                on a line of its own). */}
+            <Card className="space-y-2.5" data-testid="table-setup-panel">
+              <span className="card-kicker">{t('encounters.tableSetup')}</span>
               {/* Player display / Cast controls (issue #547). In the cockpit these live
                   with the other table-wide setup rather than in the 54px header, which the
                   design reserves for identity, round state and the turn controls. */}
@@ -5388,6 +5411,7 @@ export default function RunSessionPage() {
                     <Btn density="xs" ghost className="text-xs" onClick={reconnectPlayerDisplay}>
                       Reconnect/focus
                     </Btn>
+                    <TermHelp termId="cast" />
                     <span
                       className={`tag ${castWindowState === 'ready' ? 'tag-accent' : 'tag-neutral'}`}
                       role="status"
@@ -5406,7 +5430,6 @@ export default function RunSessionPage() {
                       )}
                     </span>
                   </div>
-                  <TermHelp termId="cast" />
                   {castDisplayNotice && (
                     <p className="text-xs text-muted m-0" role="status" data-testid="player-display-notice">
                       {castDisplayNotice}
@@ -5509,6 +5532,15 @@ export default function RunSessionPage() {
                 </div>
               );
             })()}
+              <EncounterLinks
+                campaignId={cid}
+                encounter={encounter}
+                canEdit={canEditEncounter}
+                onSave={async (patch) => {
+                  await queueEncounterPatch(patch);
+                }}
+              />
+            </Card>
             {isArchmage && encounter.status === 'running' && (
               <Card
                 density="compact" elev="sm"
@@ -5609,14 +5641,6 @@ export default function RunSessionPage() {
             {canDmWrite && encounter.status === 'ended' && (
               <EncounterAftermathPanel campaignId={cid} encounterId={eid} />
             )}
-            <EncounterLinks
-              campaignId={cid}
-              encounter={encounter}
-              canEdit={canEditEncounter}
-              onSave={async (patch) => {
-                await queueEncounterPatch(patch);
-              }}
-            />
             {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
                 the resulting prompt above via CheckRequestPrompts. */}
             <ResourceTrackerPanel campaignId={cid} encounterId={eid} characters={characters} combatants={orderedCombatants} canDmWrite={canDmWrite} canPlayerWrite={canPlayerWrite} ownedCharacterIds={ownedCharacterIds} encounterWritable={encounter.status !== 'ended'} />

@@ -69,6 +69,7 @@ import {
   hasDegreesOfSuccessForAdapter,
   hasAdapterOwnedAttackRoll,
   sortCheckCatalog,
+  DND5E_ABILITY_KEYS,
   formatCheckBreakdown,
   restOptionsForAdapter,
   inferActionSpecFromText,
@@ -768,8 +769,7 @@ export default function CharacterPage() {
           save rolled in the encounter land in one feed rather than two.
         */}
         <aside
-          className="min-w-0 cf-print-hide xl:col-span-2 2xl:col-span-1 2xl:sticky 2xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)] 2xl:overflow-y-auto 2xl:overscroll-contain"
-          style={{ top: 'calc(var(--app-header-h, 0px) + 4rem)' }}
+          className="min-w-0 cf-print-hide xl:col-span-2 2xl:col-span-1"
           aria-label="Roll feed"
           data-testid="character-roll-feed"
         >
@@ -1613,8 +1613,7 @@ function CharacterVitalsRail({
 
   return (
     <div
-      className="cf-sheet-rail min-w-0 space-y-4 xl:sticky xl:max-h-[calc(100vh-var(--app-header-h,0px)-5rem)] xl:overflow-y-auto xl:overscroll-contain"
-      style={{ top: 'calc(var(--app-header-h, 0px) + 4rem)' }}
+      className="cf-sheet-rail min-w-0 space-y-4"
       data-testid="character-vitals-rail"
     >
       <section
@@ -1899,7 +1898,10 @@ function TempHpControl({
 
   return (
     <div className="flex items-center gap-2 cf-print-hide" role="group" aria-label={`${character.name} temporary hit points`} data-testid="character-temp-hp">
-      <span className="flex-1 text-[length:var(--type-label)] text-secondary">Temp HP</span>
+      {/* `mr-auto`, not `flex-1`: as a growing item the label pushed the −/value/+ triple
+          apart across the whole card, so what should read as one stepper read as three
+          unrelated controls. */}
+      <span className="mr-auto text-[length:var(--type-label)] text-secondary">Temp HP</span>
       <Btn
         density="xs"
         ghost
@@ -1979,7 +1981,19 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
   const profs = new Set<string>(character.saveProficiencies);
 
   const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
-  const saves = useMemo(() => catalog.filter((c) => c.category === 'save'), [catalog]);
+  // Canonical ability order (STR, DEX, CON, INT, WIS, CHA), not the catalog's shared
+  // favorites-then-alphabetical order. `sortCheckCatalog` is right for the check PICKER,
+  // where a proficient save should surface first; on the sheet it put the six saves in
+  // CHA, CON, DEX, INT, STR, WIS directly beneath an ability-score row in canonical
+  // order, and floated proficient saves out of sequence. The design shows all six in
+  // fixed order and marks proficiency with a dot instead. Non-5e adapters' extra saves
+  // keep their catalog order after the six.
+  const saves = useMemo(() => {
+    const order = new Map<string, number>(DND5E_ABILITY_KEYS.map((k, i) => [k.toLowerCase(), i]));
+    const rank = (c: RollCheckDefinition) =>
+      order.get((c.ability ?? c.id.replace('save:', '')).toLowerCase()) ?? DND5E_ABILITY_KEYS.length;
+    return catalog.filter((c) => c.category === 'save').sort((a, b) => rank(a) - rank(b));
+  }, [catalog]);
   // The chooser needs BOTH a system that can honour it and a viewer who can roll: PF2e's
   // saves are not roll-two-keep, and a reader (archived campaign, non-owner) gets static
   // tiles — either way an enabled chooser would only move a status label, driving nothing.
@@ -3355,28 +3369,34 @@ function HpEditor({
   // Contextual HP labels (issue #448): announce character + current/max, not bare deltas.
   const { name, hpCurrent, hpMax } = character;
   return (
+    // A 4-up grid with "Full heal" on its own row underneath, rather than one wrapping
+    // flex row. The vitals rail is 16rem, so five 52px+ controls never fit a line: the
+    // wrap landed 3 + 2, which reads as two unrelated groups. The grid keeps the four
+    // deltas together at every rail width and lets them shrink instead of breaking.
     <div
-      className="flex gap-2 flex-wrap cf-print-hide"
+      className="flex flex-col gap-2 cf-print-hide"
       role="group"
       aria-label={`${name} hit points`}
       data-testid="character-hp-editor"
     >
-      {/* No density prop (issue #1683 review): a fixed 52×44 HP-delta control
-          cluster, sized to match its sibling "Full heal" button below (also no
-          density, also inline minHeight: 44) — deliberately NOT dense. xs would
-          be a no-op (inline style governs) and misleadingly suggest a 24px floor. */}
-      {([-5, -1, 1, 5] as const).map((step) => (
-        <Btn
-          key={step}
-          className=""
-          style={{ minWidth: 52, minHeight: 44 }}
-          disabled={busy}
-          aria-label={hpDeltaLabel(name, step, hpCurrent, hpMax)}
-          onClick={(e) => click(step, e)}
-        >
-          {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
-        </Btn>
-      ))}
+      <div className="grid grid-cols-4 gap-1.5">
+        {/* No density prop (issue #1683 review): a fixed 44-tall HP-delta control
+            cluster, sized to match its sibling "Full heal" button below (also no
+            density, also inline minHeight: 44) — deliberately NOT dense. xs would
+            be a no-op (inline style governs) and misleadingly suggest a 24px floor. */}
+        {([-5, -1, 1, 5] as const).map((step) => (
+          <Btn
+            key={step}
+            className=""
+            style={{ minWidth: 0, minHeight: 44, paddingInline: 0 }}
+            disabled={busy}
+            aria-label={hpDeltaLabel(name, step, hpCurrent, hpMax)}
+            onClick={(e) => click(step, e)}
+          >
+            {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
+          </Btn>
+        ))}
+      </div>
       <Btn
         style={{ minHeight: 44 }}
         disabled={busy}
@@ -3490,8 +3510,8 @@ function ConditionsRow({
   }
   const compositionGate = compositionGateRef.current;
 
-  async function addCondition() {
-    const v = value.trim();
+  async function applyCondition(name: string) {
+    const v = name.trim();
     if (!v || busy) return;
     setBusy(true);
     onError(null);
@@ -3507,6 +3527,8 @@ function ConditionsRow({
       setBusy(false);
     }
   }
+
+  const addCondition = () => applyCondition(value);
 
   async function removeCondition(cond: string) {
     if (busy) return;
@@ -3531,6 +3553,14 @@ function ConditionsRow({
   // — feeling fine." directly under an active "Exhaustion 3", visibly contradicting itself.
   // Gate the empty state on whether the excluded track is ALSO inactive.
   const excludedTrackActive = excludeKey ? character.conditions.some((c) => c.trim().toLowerCase() === excludeKey) : false;
+
+  // The first three of the adapter's conditions this character does not already have,
+  // minus the leveled track (which owns its own widget above — offering a bare "+
+  // Exhaustion" here would set it with no level).
+  const applied = new Set(character.conditions.map((c) => c.trim().toLowerCase()));
+  const quickAddConditions = adapter.conditions
+    .filter((c) => !applied.has(c.trim().toLowerCase()) && c.trim().toLowerCase() !== excludeKey)
+    .slice(0, 3);
 
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
@@ -3600,14 +3630,32 @@ function ConditionsRow({
             </button>
           </form>
         ) : (
-          <button
-            type="button"
-            onClick={() => setAdding(true)}
-            className="btn btn-ghost cf-density-xs cf-print-hide"
-            style={{ border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
-          >
-            + add
-          </button>
+          <>
+            {/* One-tap quick-adds, as in the design's CONDITIONS card ("+ Poisoned
+                + Prone + Stunned"). The adapter owns the vocabulary, so a non-5e system
+                offers its own three; anything past them still goes through "+ add". */}
+            {quickAddConditions.map((cond) => (
+              <button
+                key={cond}
+                type="button"
+                onClick={() => void applyCondition(cond)}
+                disabled={busy}
+                className="btn btn-ghost cf-density-xs cf-print-hide"
+                aria-label={`Add condition ${cond}`}
+                style={{ border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+              >
+                + {cond}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setAdding(true)}
+              className="btn btn-ghost cf-density-xs cf-print-hide"
+              style={{ border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+            >
+              + add
+            </button>
+          </>
         ))}
     </div>
   );
@@ -3878,8 +3926,11 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
   // Manual character (no ddbId) — honest guidance, no "soon" hand-wave.
   if (!ddbId) {
     return (
-      <div className="flex justify-between gap-2">
-        <span className="text-muted">D&amp;D Beyond</span>
+      // `flex-wrap` + a non-wrapping label: this card sits in the sheet's narrow right
+      // rail, where `justify-between` alone broke the label itself onto two lines
+      // ("D&D" / "Beyond") with the value crowding it.
+      <div className="flex flex-wrap justify-between gap-x-2 gap-y-0.5">
+        <span className="text-muted shrink-0 whitespace-nowrap">D&amp;D Beyond</span>
         <span className="text-right text-secondary">
           Created manually
           {canEdit && (
@@ -3898,8 +3949,8 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
   const isBareId = /^\d+$/.test(sourceId);
 
   return (
-    <div className="flex justify-between gap-2">
-      <span className="text-muted">D&amp;D Beyond</span>
+    <div className="flex flex-wrap justify-between gap-x-2 gap-y-0.5">
+      <span className="text-muted shrink-0 whitespace-nowrap">D&amp;D Beyond</span>
       <span className="text-right min-w-0">
         <span className="block">Imported from D&amp;D Beyond</span>
         <span className="block text-[11px] text-secondary">

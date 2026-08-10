@@ -14,10 +14,12 @@ const RECOVERIES: readonly SafetyHoldRecovery[] = ['resume', 'rewind', 'veil', '
 /**
  * The participant-facing table safety control (issue #599).
  *
- * Mounted once in the campaign Layout so it is present on EVERY campaign route — the encounter
- * tracker, the AI Table, quests, the party sheet. "Persistent" in the acceptance criteria is
- * doing real work: a safety tool you have to navigate to is a safety tool you do not have when
- * you need it, and the moment someone needs this is not a moment to go looking for a tab.
+ * Mounted once in the campaign Layout, on the AI Table route only (see `onPlaySurface`).
+ * #599 asked for it on EVERY campaign route on the reasoning that a safety tool you have to
+ * navigate to is one you do not have when you need it. The cost of that reading was a
+ * permanent red band above the quest list, the compendium, the character sheet and the
+ * encounter cockpit — surfaces where nobody is at a table to stop — so it is now on the one
+ * route where a table is actually being run through this app.
  *
  * FOUR THINGS THIS DELIBERATELY DOES NOT DO
  *
@@ -74,7 +76,10 @@ export function SafetyHoldBar({ campaignId }: { campaignId: number }) {
 
   return (
     <>
-      <div className={`cf-safety-bar${active ? ' cf-safety-bar-active' : ''}`} data-testid="safety-bar">
+      <div
+        className={`cf-safety-bar${active ? ' cf-safety-bar-active' : ''}`}
+        data-testid="safety-bar"
+      >
         {active ? (
           <div className="cf-safety-banner" role="status" data-testid="safety-banner">
             <strong>{t('safety.paused')}</strong>{' '}
@@ -93,6 +98,7 @@ export function SafetyHoldBar({ campaignId }: { campaignId: number }) {
           <div className="cf-safety-idle">
             <Btn
               danger
+              density="compact"
               busy={busy}
               onClick={() => void activate()}
               aria-keyshortcuts={shortcut.ariaKeyshortcuts}

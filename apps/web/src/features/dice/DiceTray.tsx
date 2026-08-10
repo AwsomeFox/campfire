@@ -664,7 +664,10 @@ export function DiceTray({
           type="button"
           onClick={() => void doRoll()}
           disabled={!canRoll}
-          style={{ flex: 1, minHeight: compact ? 40 : 48, fontSize: compact ? 14 : 16 }}
+          // Capped, not full-bleed. `flex: 1` alone made this an 1100px+ bar on the
+          // character sheet, where the dice log sits in the page-wide column — the design
+          // keeps its primary buttons at a readable measure and lets the row breathe.
+          style={{ flex: 1, maxWidth: 360, minHeight: compact ? 40 : 48, fontSize: compact ? 14 : 16 }}
         >
           {rolling ? t('dice.rolling') : exprs.length === 0 ? t('dice.roll') : t('dice.rollExpr', { preview: previewText(pool, modifier, advMode) })}
         </Btn>
