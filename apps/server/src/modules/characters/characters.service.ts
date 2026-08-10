@@ -455,6 +455,10 @@ export class CharactersService {
     // copied from a caller payload. It keeps the shared log linked to the same sheet
     // that supplied the roll catalog and modifier.
     result.characterId = row.id;
+    // Issue #2155: every roll this endpoint produces — ability check, skill, save, or
+    // initiative — is a 'check' in the shared log's grouping, the one bucket the
+    // reference VTT's own log uses for all of them.
+    result.kind = 'check';
     const persisted = await this.rolls.record(row.campaignId, result, user);
 
     // Degrees of success: PF2e steps a nat-20 up / nat-1 down. The natural die face is the

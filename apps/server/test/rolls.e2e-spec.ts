@@ -40,6 +40,8 @@ describe('shared dice log (e2e)', () => {
     expect(res.body.rollerUserId).toBe('dev:p-1');
     expect(typeof res.body.rollerName).toBe('string');
     expect(typeof res.body.createdAt).toBe('string');
+    // Issue #2155: a free-form expression is the shared log's catch-all 'roll' kind.
+    expect(res.body.kind).toBe('roll');
   });
 
   it('accepts advantage (2d20kh1): rolls both d20s, keeps the higher, total = kept', async () => {
@@ -253,6 +255,9 @@ describe('shared dice log (e2e)', () => {
     });
     expect(res.body.kept).toBeUndefined();
     expect(res.body.terms).toBeUndefined();
+    // Issue #2155: a physical roll's kind is never guessed — it reads as unclassified,
+    // the same as a pre-#2155 row, rather than risking a wrong one.
+    expect(res.body.kind).toBeUndefined();
 
     const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=5`).set(player);
     expect(feed.body.some((r: { id: number }) => r.id === res.body.id)).toBe(true);
@@ -278,6 +283,9 @@ describe('shared dice log (e2e)', () => {
     expect(res.body.terms.map((t: { sides?: number }) => t.sides)).toEqual([20, 6, 6]);
     expect(res.body.terms.reduce((sum: number, t: { value: number }) => sum + t.value, 0)).toBe(res.body.total);
     expect(res.body.rolls).toEqual(res.body.terms.flatMap((t: { rolls?: number[] }) => t.rolls ?? []));
+    // Issue #2155: Open Legend's native action-dice roll is this system's check/resolution
+    // mechanic — the same 'check' bucket every other adapter reaches via the check catalog.
+    expect(res.body.kind).toBe('check');
 
     const feed = await request(server).get(`/api/v1/campaigns/${openLegendId}/rolls?limit=5`).set(player);
     expect(feed.status).toBe(200);

@@ -97,6 +97,9 @@ describe('character roll catalog (e2e)', () => {
     expect(res.body.roll.rollerUserId).toBe('dev:owner-1');
     // 5e reports no degrees of success.
     expect(res.body.degree).toBeUndefined();
+    // Issue #2155: every roll this endpoint produces (ability/skill/save/initiative) is a
+    // 'check' in the shared log's grouping — the one bucket the reference VTT uses for all.
+    expect(res.body.roll.kind).toBe('check');
   });
 
   it('advantage rolls two d20 and keeps the higher (5e supports it)', async () => {
