@@ -125,6 +125,7 @@ export const INVENTORY_ADD_PREFIX = 'inventory-add';
 export const INVENTORY_FIELD = {
   name: 'name',
   qty: 'qty',
+  weight: 'weight',
   owner: 'owner',
   notes: 'notes',
 } as const;

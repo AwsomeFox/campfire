@@ -24,7 +24,7 @@ type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
 
 function inventoryAuditPayload(action: InventoryItemAuditPayload['action'], actor: string, role: Role, before: typeof inventoryItems.$inferSelect | null, after: typeof inventoryItems.$inferSelect): InventoryItemAuditPayload {
   const context = getRequestContext();
-  const fields = ['name', 'qty', 'notes', 'iconSlug', 'ownerType', 'characterId', 'equipped', 'equipSlot', 'equippedAction'] as const;
+  const fields = ['name', 'qty', 'weight', 'notes', 'iconSlug', 'ownerType', 'characterId', 'equipped', 'equipSlot', 'equippedAction'] as const;
   const standardChanges: InventoryItemAuditPayload['changes'] = fields
     .filter((field) => before?.[field] !== after[field])
     .map((field) => ({ field, before: before?.[field] ?? null, after: after[field] ?? null, visibility: 'member' as const }));
@@ -111,6 +111,16 @@ function qtyFingerprint(input: InventoryItemUpdateInput): string {
     rest.equipSlot = input.equipSlot ?? null;
     rest.equippedAction = input.equippedAction ?? null;
   }
+  // Issue #2157 (same rule as the equip trio above, and for the same reason): `weight` is a
+  // field this PR introduces, so it is appended ONLY when the request actually touches it. A
+  // request that never touches weight computes the exact same fingerprint shape a pre-#2157
+  // binary would have stored, so a qty-only idempotency retry spanning this upgrade still
+  // matches its persisted fingerprint and replays — see the identical reasoning on the equip
+  // fields above, and the regression test this guards ("a qty-only idempotency retry spanning
+  // the #1326 upgrade still replays rather than 409ing").
+  if (input.weight !== undefined) {
+    rest.weight = input.weight;
+  }
   // Issue #1901 rework (review: chatgpt-codex-connector P2): `displaceEquipped` changes
   // what a combined qty+equip write is AUTHORIZED to do (unequip another item) without
   // changing qty/equip/equipSlot/equippedAction themselves, so it must be part of the
@@ -164,6 +174,7 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     qty: row.qty,
     notes: row.notes,
     iconSlug: row.iconSlug,
+    weight: row.weight,
     ruleEntryId: row.ruleEntryId ?? null,
     compendiumRef: ref,
     compendiumSnapshot: snapshot,
@@ -524,6 +535,7 @@ export class InventoryService {
         qty: input.qty ?? 1,
         notes: input.notes ?? '',
         iconSlug: input.iconSlug ?? '',
+        weight: input.weight ?? 0,
         createdAt: ts,
         updatedAt: ts,
       }).returning().all();
@@ -590,6 +602,14 @@ export class InventoryService {
       if (existing && input.duplicateMode === 'increment') {
         [row] = tx.update(inventoryItems).set({ qty: sql`${inventoryItems.qty} + ${input.qty}`, notes: input.notes ? sql`CASE WHEN ${inventoryItems.notes} = '' THEN ${input.notes} ELSE ${inventoryItems.notes} END` : undefined, updatedAt: ts }).where(eq(inventoryItems.id, existing.id)).returning().all();
       } else {
+        // Issue #2157: `weight` is deliberately left at its column default (0) here rather
+        // than sourced from the entry's compendium data. The importers that feed
+        // `ruleEntries` disagree about whether they capture a weight at all — the OSR
+        // importer does, Open5e's weapon/armor mappers currently don't — and PF2e's source
+        // material expresses encumbrance in "Bulk", not pounds, so a value read off an
+        // arbitrary entry could silently be the wrong unit or simply absent. Acquiring from
+        // the compendium hands the player a real item they can then weigh by hand; teaching
+        // every importer to extract a pounds-denominated weight is separate follow-up work.
         [row] = tx.insert(inventoryItems).values({ campaignId, ownerType, characterId, name: entry.name, qty: input.qty, notes: input.notes, iconSlug: entry.iconSlug ?? '', ruleEntryId: entry.id, compendiumRef: JSON.stringify(ref), compendiumSnapshot: JSON.stringify(snapshot), compendiumState: 'linked', createdAt: ts, updatedAt: ts }).returning().all();
       }
       if (input.idempotencyKey) tx.insert(inventoryQtyIdempotency).values({ key: input.idempotencyKey, itemId: row.id, userId: user.id, fingerprint, responseJson: JSON.stringify(row), createdAt: ts }).run();
@@ -970,6 +990,7 @@ export class InventoryService {
         if (input.name !== undefined) update.name = input.name;
         if (input.notes !== undefined) update.notes = input.notes;
         if (input.iconSlug !== undefined) update.iconSlug = input.iconSlug;
+        if (input.weight !== undefined) update.weight = input.weight;
         if (moved) {
           update.ownerType = finalOwnerType;
           update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;

@@ -21,7 +21,7 @@ import { IconPicker } from '../../components/IconPicker';
 import { Markdown } from '../../components/Markdown';
 import { getIcon } from '../../lib/icons';
 import { defaultItemIconSlug, itemIconSlug } from '../../lib/inventoryIcons';
-import { parseLocalizedInteger } from '../../lib/i18nNumbers';
+import { parseLocalizedInteger, parseLocalizedNumber } from '../../lib/i18nNumbers';
 import { useFormattingLocale, formatNumber } from '../../lib/format';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 import { useDialog } from '../../components/useDialog';
@@ -83,10 +83,22 @@ export function ItemSection({
   const { t } = useTranslation();
   if (items.length === 0 && title !== partyStashTitle) return null;
 
+  // Issue #2157: a plain sum of weight*qty across this section's items — no encumbrance
+  // threshold or "carried / unencumbered" comparison, since that needs a per-rule-system
+  // limit from the adapter (several registered adapters have no encumbrance concept at
+  // all) and is left for a follow-up. Omitted entirely when nobody in this section has
+  // set a weight, so a table that never uses the field sees no new UI at all.
+  const totalWeight = items.reduce((sum, item) => sum + item.weight * item.qty, 0);
+
   const body = (
     <>
       <h2 className="flex items-center gap-2 font-bold text-white text-sm">
         <GameIcon slug={icon} size={UI_ICON_SIZE.sm} /> {title}
+        {totalWeight > 0 && (
+          <span className="text-xs font-normal text-secondary" data-testid="inventory-section-weight">
+            {t('inventory.fields.weight.sectionTotal', { weight: formatNumber(totalWeight, { maximumFractionDigits: 2 }) })}
+          </span>
+        )}
       </h2>
       {items.length === 0 ? (
         <p className="text-sm text-secondary">{t('inventory.empty')}</p>
@@ -134,6 +146,34 @@ export function ItemRow({
   useEffect(() => {
     setCommitted(item);
   }, [item]);
+
+  // Weight editor (issue #2157) — a compact inline number field, committed on blur like the
+  // icon/notes fields elsewhere on this row, rather than a separate save button. Draft state
+  // is reset from `committed.weight` whenever the item changes so a stale edit never survives
+  // a concurrent update from another player.
+  const [weightDraft, setWeightDraft] = useState(String(committed.weight));
+  const [weightError, setWeightError] = useState<string | null>(null);
+  const formatLocale = useFormattingLocale();
+  useEffect(() => {
+    setWeightDraft(String(committed.weight));
+    setWeightError(null);
+  }, [committed.weight]);
+
+  async function commitWeight() {
+    const parsed = parseLocalizedNumber(weightDraft, formatLocale);
+    if (!parsed.ok) {
+      setWeightError(parsed.error);
+      return;
+    }
+    if (parsed.value < 0 || parsed.value > 10_000) {
+      setWeightError(t('inventory.fields.weight.rangeError'));
+      return;
+    }
+    setWeightError(null);
+    setWeightDraft(String(parsed.value));
+    if (parsed.value === committed.weight) return;
+    await patch({ weight: parsed.value });
+  }
 
   // Equip/unequip (issue #1901) — a character-owned item can carry an authored
   // `equippedAction` that surfaces as a usable combat action once equipped (server-side,
@@ -407,6 +447,12 @@ export function ItemRow({
         <p className="text-sm font-semibold text-white truncate">
           {committed.name}
           {committed.qty !== 1 && <span className="text-secondary font-normal"> ×{committed.qty}</span>}
+          {!editable && committed.weight > 0 && (
+            <span className="text-secondary font-normal" data-testid="inventory-item-weight-display">
+              {' '}
+              · {t('inventory.fields.weight.display', { weight: formatNumber(committed.weight, { maximumFractionDigits: 2 }) })}
+            </span>
+          )}
         </p>
         {committed.notes && <Markdown className="!text-[12px] !text-secondary">{committed.notes}</Markdown>}
         {committed.compendiumState && (
@@ -428,6 +474,7 @@ export function ItemRow({
           </div>
         )}
         {error && <p className="text-[12px] text-rose-400">{error}</p>}
+        {weightError && <p className="text-[12px] text-rose-400" data-testid="inventory-item-weight-error">{weightError}</p>}
 
         {/* Equip/unequip (issue #1901) — party-stash items can never be equipped. */}
         {committed.ownerType === 'character' && (
@@ -668,6 +715,22 @@ export function ItemRow({
       </div>
       {editable && (
         <div className="flex flex-wrap items-center gap-1.5 shrink-0 w-full sm:w-auto sm:ml-auto justify-end cf-print-hide">
+          <label className="flex items-center gap-1 text-[11px] text-secondary">
+            {t('inventory.fields.weight.shortLabel')}
+            <TextInput
+              type="text"
+              inputMode="decimal"
+              density="xs"
+              className="text-xs"
+              style={{ width: 56 }}
+              value={weightDraft}
+              disabled={busy}
+              aria-label={t('inventory.fields.weight.ariaEdit', { name: committed.name })}
+              onChange={(e) => setWeightDraft(e.target.value)}
+              onBlur={() => void commitWeight()}
+              data-testid="inventory-item-weight-input"
+            />
+          </label>
           <Btn density="xs"
             ghost
             className="!px-2 text-xs"
@@ -793,10 +856,12 @@ export function AddItemForm({
   const [owner, setOwner] = useState(defaultOwner);
   const [notes, setNotes] = useState('');
   const [iconSlug, setIconSlug] = useState('');
+  const [weight, setWeight] = useState('');
   const [pickingIcon, setPickingIcon] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [qtyError, setQtyError] = useState<string | null>(null);
+  const [weightError, setWeightError] = useState<string | null>(null);
   const formatLocale = useFormattingLocale();
   const qtyHelp = t('inventory.quantityHelp', {
     min: formatNumber(ITEM_QTY_MIN),
@@ -818,6 +883,21 @@ export function AddItemForm({
       return;
     }
     setQtyError(null);
+    // Weight is optional at creation — an empty field means "not set yet" (0), not an error.
+    let weightValue = 0;
+    if (weight.trim() !== '') {
+      const weightParsed = parseLocalizedNumber(weight, formatLocale);
+      if (!weightParsed.ok) {
+        setWeightError(weightParsed.error);
+        return;
+      }
+      if (weightParsed.value < 0 || weightParsed.value > 10_000) {
+        setWeightError(t('inventory.fields.weight.rangeError'));
+        return;
+      }
+      weightValue = weightParsed.value;
+    }
+    setWeightError(null);
     setSaving(true);
     setError(null);
     try {
@@ -826,6 +906,7 @@ export function AddItemForm({
         qty: qtyParsed.value,
         notes: notes.trim(),
         iconSlug,
+        weight: weightValue,
       };
       if (owner !== 'party') {
         body.ownerType = 'character';
@@ -885,6 +966,24 @@ export function AddItemForm({
             onChange={(e) => {
               setQty(e.target.value);
               setQtyError(null);
+            }}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.weight}
+            label={t('inventory.fields.weight.label')}
+            type="text"
+            inputMode="decimal"
+            value={weight}
+            error={weightError}
+            help={t('inventory.fields.weight.help')}
+            placeholder="0"
+            optional
+            onChange={(e) => {
+              setWeight(e.target.value);
+              setWeightError(null);
             }}
           />
         </div>

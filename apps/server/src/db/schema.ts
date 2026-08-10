@@ -1986,6 +1986,9 @@ export const inventoryItems = sqliteTable('inventory_items', {
   equipped: integer('equipped', { mode: 'boolean' }).notNull().default(false),
   equipSlot: text('equip_slot'),
   equippedAction: text('equipped_action'),
+  // Item weight in pounds (issue #2157) — see the schema comment on
+  // `InventoryItem.weight` in @campfire/schema for the unit decision.
+  weight: real('weight').notNull().default(0),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
   // Soft-delete tombstone (issue #551): NULL == live; ISO timestamp == trashed.

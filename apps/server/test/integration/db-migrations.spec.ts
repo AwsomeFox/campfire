@@ -2598,6 +2598,51 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0188 adds inventory_items.weight when upgrading a pre-#2157 DB and defaults existing rows to 0', () => {
+    expect(MIGRATION_NAMES).toContain('0188_inventory_items_weight_2157');
+
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    const ts = new Date().toISOString();
+    seeded.sqlite.prepare(`INSERT INTO campaigns (name, created_at, updated_at) VALUES ('Weight Campaign', ?, ?)`).run(ts, ts);
+    const campaignId = (seeded.sqlite.prepare("SELECT id FROM campaigns WHERE name = 'Weight Campaign'").get() as { id: number }).id;
+    seeded.sqlite
+      .prepare(
+        `INSERT INTO inventory_items (campaign_id, owner_type, name, qty, notes, icon_slug, created_at, updated_at)
+         VALUES (?, 'party', 'Legacy Bedroll', 1, '', '', ?, ?)`,
+      )
+      .run(campaignId, ts, ts);
+    seeded.sqlite.close();
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.pragma('foreign_keys = OFF');
+      legacy.exec('ALTER TABLE inventory_items DROP COLUMN weight');
+      legacy.prepare('DELETE FROM __migrations WHERE name = ?').run('0188_inventory_items_weight_2157');
+      expect(columnNames(legacy, 'inventory_items')).not.toContain('weight');
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'inventory_items')).toContain('weight');
+      expect(
+        (upgraded.sqlite
+          .prepare('SELECT name FROM __migrations WHERE name = ?')
+          .get('0188_inventory_items_weight_2157') as { name?: string })?.name,
+      ).toBe('0188_inventory_items_weight_2157');
+      // The pre-existing row backfills to 0 (never set), not NULL — matching every other
+      // never-set numeric default on this table.
+      const row = upgraded.sqlite.prepare("SELECT weight FROM inventory_items WHERE name = 'Legacy Bedroll'").get() as {
+        weight: number;
+      };
+      expect(row.weight).toBe(0);
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
   it('0153 adds the aftermath_grant_window column to ai_driver_control_state when upgrading (#1781)', () => {
     expect(MIGRATION_NAMES).toContain('0153_ai_driver_aftermath_grant_window_1781');
 

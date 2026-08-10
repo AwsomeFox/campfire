@@ -613,6 +613,26 @@ function migrateEncountersTableForMapObjects1308(sqlite: Database.Database): voi
 }
 
 /**
+ * Migration for issue #2157: `inventory_items.weight` didn't exist on pre-#2157 DBs.
+ * Plain `NOT NULL DEFAULT 0` ADD COLUMN — SQLite backfills every existing row with the
+ * default in the same statement, so no separate UPDATE pass is needed, and a 0 weight is
+ * indistinguishable from "never set", matching every other never-set numeric default on
+ * this table (`qty`, coin counts). New DBs never hit this path — BOOTSTRAP_SQL already
+ * declares the column.
+ */
+function migrateInventoryItemsTableForWeight2157(sqlite: Database.Database): void {
+  const hasInventoryItemsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'")
+    .get();
+  if (!hasInventoryItemsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'weight')) return;
+
+  sqlite.exec('ALTER TABLE inventory_items ADD COLUMN weight REAL NOT NULL DEFAULT 0');
+}
+
+/**
  * Migration for DBs created before session scheduling (issue #13):
  * `campaigns.ics_token` didn't exist. Plain nullable ADD COLUMN — no table
  * rebuild needed, same as migrateCampaignsTableForMapAttachment above.
@@ -5707,6 +5727,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   // migration has never shipped on any real database either, so renumbering to 0187
   // is safe by the identical argument.
   { name: '0187_encounters_map_objects_1308', run: migrateEncountersTableForMapObjects1308 },
+  { name: '0188_inventory_items_weight_2157', run: migrateInventoryItemsTableForWeight2157 },
 ];
 
 /**

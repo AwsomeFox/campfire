@@ -53,6 +53,11 @@ export default function InventoryPage() {
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(() => searchParams.get('action') === 'add-item');
   const [showCompendiumPicker, setShowCompendiumPicker] = useState(false);
+  // Issue #2157: client-side name/notes search — the campaign inventory list has no
+  // server-side pagination (`listForCampaign` returns every live item in one query), so
+  // there is nothing a server-side `?q=` parameter would save; filtering the already-loaded
+  // `items` array is both correct and simplest.
+  const [search, setSearch] = useState('');
 
   const closeAdding = useCallback(() => {
     setAdding(false);
@@ -171,18 +176,32 @@ export default function InventoryPage() {
     return chars;
   }, [fullCharacters, isDm, myUserId]);
 
-  const partyItems = items.filter((i) => i.ownerType === 'party');
+  // Issue #2157: matched against name and notes, case-insensitively. Filtering happens
+  // BEFORE grouping so a section with no matches disappears the same way it does when it
+  // is genuinely empty (ItemSection already renders nothing for a non-party-stash section
+  // with zero items).
+  const searchTerm = search.trim().toLowerCase();
+  const visibleItems = useMemo(() => {
+    if (!searchTerm) return items;
+    return items.filter(
+      (i) => i.name.toLowerCase().includes(searchTerm) || i.notes.toLowerCase().includes(searchTerm),
+    );
+  }, [items, searchTerm]);
+
+  const partyItems = visibleItems.filter((i) => i.ownerType === 'party');
   const characterGroups = useMemo(() => {
     const groups: { character: PartyCharacter | null; label: string; items: InventoryItem[] }[] = [];
     for (const c of party) {
-      const owned = items.filter((i) => i.ownerType === 'character' && i.characterId === c.id);
+      const owned = visibleItems.filter((i) => i.ownerType === 'character' && i.characterId === c.id);
       if (owned.length > 0) groups.push({ character: c, label: c.name, items: owned });
     }
     const knownIds = new Set(party.map((c) => c.id));
-    const orphans = items.filter((i) => i.ownerType === 'character' && (i.characterId == null || !knownIds.has(i.characterId)));
+    const orphans = visibleItems.filter((i) => i.ownerType === 'character' && (i.characterId == null || !knownIds.has(i.characterId)));
     if (orphans.length > 0) groups.push({ character: null, label: t('inventory.unassigned'), items: orphans });
     return groups;
-  }, [items, party, t]);
+  }, [visibleItems, party, t]);
+  const searchActive = searchTerm.length > 0;
+  const noSearchResults = searchActive && partyItems.length === 0 && characterGroups.length === 0;
 
   if (!Number.isFinite(id)) {
     return (
@@ -260,17 +279,37 @@ export default function InventoryPage() {
             />
           ) : (
             <>
-              <ItemSection
-                key="party-stash"
-                title={t('inventory.partyStash')}
-                icon="backpack"
-                items={partyItems}
-                characters={party}
-                writableOwners={writableOwners}
-                canEditItem={canEditItem}
-                onChanged={load}
-                partyStashTitle={t('inventory.partyStash')}
-              />
+              {items.length > 0 && (
+                <TextInput
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={t('inventory.searchPlaceholder')}
+                  aria-label={t('inventory.searchAria')}
+                  data-testid="inventory-search"
+                />
+              )}
+              {noSearchResults && (
+                <Card className="text-sm text-secondary">{t('inventory.searchNoResults', { query: search.trim() })}</Card>
+              )}
+              {/* Issue #2157: while a search is active and it matches nothing in the party
+                  stash, skip the section entirely rather than rendering ItemSection's normal
+                  "always show party stash, even empty" behavior — that empty state means "the
+                  party owns nothing", which would misreport a stash that has items the search
+                  just doesn't match. */}
+              {!(searchActive && partyItems.length === 0) && (
+                <ItemSection
+                  key="party-stash"
+                  title={t('inventory.partyStash')}
+                  icon="backpack"
+                  items={partyItems}
+                  characters={party}
+                  writableOwners={writableOwners}
+                  canEditItem={canEditItem}
+                  onChanged={load}
+                  partyStashTitle={t('inventory.partyStash')}
+                />
+              )}
               {characterGroups.map((group) => (
                 <ItemSection
                   key={group.character?.id ?? 'orphans'}
