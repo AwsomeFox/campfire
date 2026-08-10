@@ -552,6 +552,7 @@
       "tabTurn": "Turn",
       "tabParty": "Party",
       "tabLog": "Log",
+      "tabDriver": "AI Driver",
       "tabTable": "Table",
       "turnBar": "Turn bar",
       "turnBarToggle": "Collapse or expand the turn bar",

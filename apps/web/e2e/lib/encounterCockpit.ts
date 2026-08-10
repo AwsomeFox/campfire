@@ -3,16 +3,19 @@
  *
  * The run page is the full-viewport VTT cockpit: the map owns the canvas and
  * everything else lives in one of the side panel's tabs (Turn / Party / Log /
- * Table). The panel opens on Turn while combat is running and on Party
+ * Driver / Table). The panel opens on Turn while combat is running and on Party
  * otherwise, so a spec that drives the roster, the log, or the table-wide setup
  * has to say which tab it wants rather than assuming one long scrolling page.
+ * Driver only exists while the campaign's AI-DM mode is 'driver' (issue #2158) —
+ * a spec targeting it must first arrange for that mode, the same precondition
+ * the AI driver dock itself already needed to render at all.
  *
  * Both helpers are idempotent — calling them when the target is already open is
  * a no-op, so they are safe to call defensively at the top of a flow.
  */
 import { expect, type Locator, type Page } from '@playwright/test';
 
-export type CockpitTab = 'turn' | 'party' | 'log' | 'table';
+export type CockpitTab = 'turn' | 'party' | 'log' | 'driver' | 'table';
 
 /** Bring one of the cockpit side-panel tabs to the front. */
 export async function openCockpitTab(page: Page, tab: CockpitTab): Promise<void> {

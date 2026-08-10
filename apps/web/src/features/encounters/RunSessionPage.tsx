@@ -1054,7 +1054,7 @@ export default function RunSessionPage() {
    * and whether the initiative strip over the map is collapsed. Nothing here
    * affects what the viewer is allowed to see or write.
    */
-  type PanelTab = 'turn' | 'party' | 'log' | 'table';
+  type PanelTab = 'turn' | 'party' | 'log' | 'driver' | 'table';
   /**
    * The viewer's explicit tab choice, and the default it overrides — both stamped with the
    * encounter they belong to. `RunSessionPage` is reused across encounter navigations, so
@@ -4348,7 +4348,17 @@ export default function RunSessionPage() {
   // default only kept people from LANDING there. Drop the tab instead, and fall back to
   // Party if it disappears while selected.
   const turnTabAvailable = encounterRunning || (!isDm && myCombatants.length > 0);
-  const activePanelTab: PanelTab = panelTab === 'turn' && !turnTabAvailable ? 'party' : panelTab;
+  // Issue #2158 review (Copilot): the Driver tab has the identical "selected but no
+  // longer available" shape Turn already had (comment above) — `panelTabChoice` only
+  // stamps `{eid, running}`, not `liveActivity.mode`, so a viewer who picked Driver and
+  // then watched the campaign leave Driver mode kept `panelTab === 'driver'` with no
+  // tab and no VttPanelSection left to match it, a blank panel. Same fallback shape as
+  // Turn: drop to Party, the one tab that's always present.
+  const driverTabAvailable = liveActivity.mode === 'driver' && encounter != null;
+  const activePanelTab: PanelTab =
+    panelTab === 'turn' && !turnTabAvailable ? 'party'
+    : panelTab === 'driver' && !driverTabAvailable ? 'party'
+    : panelTab;
   // Prefer a combatant the viewer can resolve. Fall back only to character combatants
   // (party HP is shared table knowledge); never surface monster/NPC concentration
   // queues to non-resolvers — those embed secret exact damage/DC (#43 / #606).
@@ -4796,6 +4806,13 @@ export default function RunSessionPage() {
         ...(turnTabAvailable ? [{ id: 'turn', label: t('encounters.vtt.tabTurn') }] : []),
         { id: 'party', label: t('encounters.vtt.tabParty'), badge: orderedCombatants.length > 0 ? orderedCombatants.length : undefined },
         { id: 'log', label: t('encounters.vtt.tabLog') },
+        // Issue #2158 (#1513 gap 5): its own tab, alongside Log — not bundled into
+        // Table with Discussion and the DM setup tools, which is where it lived
+        // before this split and is what made it read as squeezed/hard to find.
+        // `driverTabAvailable` also gates the VttPanelSection below AND feeds
+        // activePanelTab's fallback above, so the tab, the section, and the stored
+        // selection cannot disagree — the identical shape as `turnTabAvailable`.
+        ...(driverTabAvailable ? [{ id: 'driver', label: t('encounters.vtt.tabDriver') }] : []),
         { id: 'table', label: t('encounters.vtt.tabTable') },
       ]}
       activeTabId={activePanelTab}
@@ -5388,6 +5405,23 @@ export default function RunSessionPage() {
                 customMechanicsProfile={campaign?.customMechanicsProfile}
               />
           </VttPanelSection>
+          {/* Issue #2158 (#1513 gap 5): the AI-DM driver dock's own tab (#427: transcript +
+              composer + recovery without leaving tracker), split out of Table where it used
+              to compete for space with Discussion and the DM setup tools. `driverTabAvailable`
+              is the same boolean the tab array and activePanelTab's fallback both use; the
+              trailing `&& encounter` is only here because TypeScript can't narrow `encounter`
+              to non-null through a derived boolean, which `<EncounterAiDriverPanel>` requires. */}
+          {driverTabAvailable && encounter && (
+            <VttPanelSection id="driver" activeTabId={activePanelTab}>
+              <EncounterAiDriverPanel
+                campaignId={cid}
+                encounterId={eid}
+                encounter={encounter}
+                isDm={isDm}
+                canCompose={canPlayerWrite}
+              />
+            </VttPanelSection>
+          )}
           <VttPanelSection id="table" activeTabId={activePanelTab}>
             {/* One card, matching the design's rail: everything from here to the lifecycle
                 guidance is table-wide setup, and as loose sibling rows it read as a pile of
@@ -5628,16 +5662,6 @@ export default function RunSessionPage() {
                   </div>
                 </details>
               </Card>
-            )}
-            {/* AI-DM driver dock (#427): transcript + composer + recovery without leaving tracker. */}
-            {liveActivity.mode === 'driver' && encounter && (
-              <EncounterAiDriverPanel
-                campaignId={cid}
-                encounterId={eid}
-                encounter={encounter}
-                isDm={isDm}
-                canCompose={canPlayerWrite}
-              />
             )}
             {canDmWrite && encounter.status === 'ended' && (
               <EncounterAftermathPanel campaignId={cid} encounterId={eid} />
