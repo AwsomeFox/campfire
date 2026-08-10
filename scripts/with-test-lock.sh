@@ -41,48 +41,52 @@ LOCK="${CAMPFIRE_TEST_LOCK:-/tmp/campfire-test.lock}"
 WAIT="${CAMPFIRE_TEST_LOCK_WAIT:-3600}"
 POLL=5
 
-# Both acquire paths are atomic against concurrent callers and reclaim a lock
-# whose holder died (SIGKILL, closed terminal, crashed agent). shlock — present
-# on macOS as /usr/bin/shlock — does exactly this; the mkdir path is the POSIX
-# fallback for hosts without it.
-# Settable to '' to exercise the mkdir fallback on a host that does have shlock;
-# otherwise the fallback is unreachable — and so untestable — on macOS.
-SHLOCK="${CAMPFIRE_TEST_LOCK_SHLOCK-$(command -v shlock 2>/dev/null || true)}"
+# `mkdir` is the whole mutex: it either creates the directory or fails,
+# atomically, against any number of concurrent callers. Deliberately not shlock,
+# even though macOS ships it — its own stale-lock handling is the same
+# check-then-unlink shown to race below, and it would leave a second on-disk
+# shape (a padded pid in a regular file) for this script to interpret.
+REAPER="$LOCK.reaper"
 
-# The two paths leave different shapes on disk — shlock writes a padded pid into
-# a regular file, the fallback writes one into $LOCK/pid — and a host can move
-# between them (shlock installed, removed, or a lock left by an older run). Read
-# whichever shape is actually there, or a wrapper that finds the other one waits
-# out the full timeout on a lock it can neither read nor reclaim.
 holder_pid() {
   if [ -d "$LOCK" ]; then
     pid=$(tr -d '[:space:]' <"$LOCK/pid" 2>/dev/null || true)
   elif [ -e "$LOCK" ]; then
+    # A regular file at this path is a lock from an older revision of this
+    # script, which wrote the pid there directly.
     pid=$(tr -d '[:space:]' <"$LOCK" 2>/dev/null || true)
   else
     pid=''
   fi
-  # Anything non-numeric is not a pid we may safely test with kill -0.
+  # Anything non-numeric is not a pid we may safely test with kill -0, so the
+  # lock is waited out rather than guessed at and stolen.
   case "$pid" in
     '' | *[!0-9]*) return 1 ;;
   esac
   echo "$pid"
 }
 
+# Reclaiming a dead holder's lock has to be exclusive, not merely careful.
+# Checking the pid and then deleting is two steps: two waiters can both see the
+# same dead pid, the first deletes and acquires, and the second's delete then
+# removes a lock the first now legitimately holds — handing the next waiter a
+# lock while a test run is live, which is the exact overlap this script exists
+# to prevent. Creating $REAPER is the atomic gate. While it is held nobody else
+# can remove $LOCK, so the pid re-read below cannot be invalidated between the
+# read and the rm.
 reclaim_if_stale() {
   stale_pid=$(holder_pid) || return 1
   if kill -0 "$stale_pid" 2>/dev/null; then return 1; fi
-  rm -rf "$LOCK"
+  mkdir "$REAPER" 2>/dev/null || return 1
+  current_pid=$(holder_pid) || current_pid=''
+  if [ "$current_pid" = "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+    rm -rf "$LOCK"
+  fi
+  rmdir "$REAPER" 2>/dev/null || true
   return 0
 }
 
 acquire() {
-  if [ -n "$SHLOCK" ]; then
-    # shlock reclaims a stale lock of its own shape; a leftover directory is the
-    # one case it cannot create over.
-    if [ -d "$LOCK" ]; then reclaim_if_stale || true; fi
-    if "$SHLOCK" -f "$LOCK" -p $$; then return 0; else return 1; fi
-  fi
   if mkdir "$LOCK" 2>/dev/null; then
     echo $$ >"$LOCK/pid"
     return 0
@@ -92,17 +96,14 @@ acquire() {
 }
 
 release() {
-  if [ -n "$SHLOCK" ]; then
-    rm -f "$LOCK"
-  else
-    rm -rf "$LOCK"
-  fi
+  rm -rf "$LOCK"
 }
 
 waited=0
 until acquire; do
   if [ "$waited" -ge "$WAIT" ]; then
     echo "with-test-lock: gave up after ${WAIT}s waiting for $LOCK" >&2
+    echo "with-test-lock: if no test run is actually active, remove $LOCK and $REAPER" >&2
     exit 75
   fi
   if [ "$waited" -eq 0 ]; then
