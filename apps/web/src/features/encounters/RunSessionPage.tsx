@@ -851,7 +851,7 @@ export default function RunSessionPage() {
   const { me, staleIdentity } = useAuth();
   const formattingLocale = useFormattingLocale();
   const timeFormat = useTimeFormat();
-  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  const { isDm, isViewer, canDmWrite, canPlayerWrite } = useCampaignAccess();
   // Issue #1904: the per-combatant "Roll initiative" action animates through the same
   // shared dice overlay/toast as every other campaign roll.
   const { beginRollAnimation, cancelRollAnimation, showRoll } = useRollResultToast();
@@ -4404,6 +4404,22 @@ export default function RunSessionPage() {
 
   const encounterBanners = (
     <>
+      {/* Issue #2160 (Viewer-explicit-gating, staged ahead of the full role-based combatant
+          drawer): a Viewer's read-only status in the runner was previously emergent — every
+          write control simply never mounts (`canEditCombatantPermission` reduces to false for
+          `isViewer`, see the comment above that function), so there was no single place that
+          told a Viewer WHY the tracker looked inert. `isViewer` is the same flag
+          `deriveCampaignAccess` already derives from role; this only makes its consequence
+          visible instead of leaving it to be inferred from a page of absent buttons. */}
+      {isViewer && (
+        <div
+          role="status"
+          data-testid="viewer-read-only-banner"
+          className="rounded-lg border border-slate-700 bg-slate-900/40 px-3 py-2 text-sm"
+        >
+          {t('encounters.viewer.readOnlyBanner')}
+        </div>
+      )}
       {(loadError || actionError) && (
         <ErrorNote
           message={actionError?.message ?? loadError ?? ''}

@@ -125,6 +125,9 @@
       "bannerOverrideOwnReconnecting": "Reconnecting — you can still update your own combatant until live again.",
       "bannerOverrideOwnStale": "Live updates interrupted — you can still update your own combatant until resynced."
     },
+    "viewer": {
+      "readOnlyBanner": "You're viewing as a Viewer — read only. Dice rolls, HP, and combatant edits are limited to the DM and players."
+    },
     "feedback": {
       "down": "DOWN",
       "revive": "UP",
