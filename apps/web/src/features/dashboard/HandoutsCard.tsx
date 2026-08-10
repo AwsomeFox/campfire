@@ -246,18 +246,17 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                 </div>
                 {canDmWrite && (
                   <div className="flex items-center gap-1.5 flex-wrap" style={{ marginInlineStart: 'auto' }}>
-                  <Btn density="xs" ghost className="text-[11px]" onClick={() => { setEditing(a); setDraft(draftFor(a)); }}>Edit details</Btn>
-                {canDmWrite && (
-                  <Btn density="xs"
-                    ghost
-                    className="text-[11px]"
-                    disabled={busyId === a.id}
-                    onClick={() => void toggleReveal(a)}
-                    title={a.hidden ? 'Warn before revealing the raw handout file' : undefined}
-                  >
-                    {busyId === a.id ? '…' : a.hidden ? 'Reveal' : 'Hide'}
-                  </Btn>
-                )}
+                    <Btn density="xs" ghost className="text-[11px]" onClick={() => { setEditing(a); setDraft(draftFor(a)); }}>Edit details</Btn>
+                    <Btn
+                      density="xs"
+                      ghost
+                      className="text-[11px]"
+                      disabled={busyId === a.id}
+                      onClick={() => void toggleReveal(a)}
+                      title={a.hidden ? 'Warn before revealing the raw handout file' : undefined}
+                    >
+                      {busyId === a.id ? '…' : a.hidden ? 'Reveal' : 'Hide'}
+                    </Btn>
                   </div>
                 )}
               </div>

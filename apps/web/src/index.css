@@ -2746,19 +2746,30 @@ a:hover .cf-name-reveal {
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4);
   }
-  /* HP and its adjust cluster read as one block, each taking the full measure. */
-  .cf-combatant-row > :nth-last-child(4),
-  .cf-combatant-row > :nth-last-child(3) {
+  /*
+   * HP and its adjust cluster read as one block, each taking the full measure.
+   *
+   * Addressed by class, NOT by position. These were `:nth-last-child(4)`/`(3)`, which
+   * only lands on the HP pair when the row happens to end in exactly the expected tail —
+   * and it never reliably does. `CombatantRow`'s trailing children are all conditional:
+   * the statblock Reveal only for a monster/NPC the viewer may edit, Duplicate only with
+   * `onDuplicate`, Remove only with `canRemove`, plus a whisper button and an expanded
+   * whisper composer that come and go per row and per viewer. With the full tail present
+   * the positional rules stretched Reveal and Duplicate while leaving HP cramped — the
+   * exact inverse of the intent.
+   */
+  .cf-combatant-row > .cf-combatant-vitals,
+  .cf-combatant-row > .cf-combatant-hp-adjust {
     flex-basis: 100%;
   }
-  /* Reveal / duplicate / remove close the card quietly until the row is engaged. */
-  .cf-combatant-row > .btn:last-child,
-  .cf-combatant-row > .btn:nth-last-child(2),
-  .cf-combatant-row > .btn:nth-last-child(3) {
+  /* Reveal / duplicate / remove close the card quietly until the row is engaged. Also by
+     class: `.btn:nth-last-child(n)` dimmed whichever buttons happened to sit there,
+     which on a row with a whisper button was the wrong set. */
+  .cf-combatant-row > .cf-combatant-row-action {
     opacity: 0.75;
   }
-  .cf-combatant-row:hover > .btn,
-  .cf-combatant-row:focus-within > .btn {
+  .cf-combatant-row:hover > .cf-combatant-row-action,
+  .cf-combatant-row:focus-within > .cf-combatant-row-action {
     opacity: 1;
   }
   /* `flex: 0 0 100%` — shrink must be 0 or the band simply squeezes in beside the

@@ -1795,7 +1795,7 @@ export const CombatantRow = memo(function CombatantRow({
           </div>
         )}
       </div>
-      <div style={{ minWidth: 140, flex: 'none' }}>
+      <div className="cf-combatant-vitals" style={{ minWidth: 140, flex: 'none' }}>
         {combatant.hpCurrent != null && combatant.hpMax != null ? (
           <>
             {combatant.hpTemp != null && combatant.hpTemp > 0 && (
@@ -1915,7 +1915,7 @@ export const CombatantRow = memo(function CombatantRow({
           so we never render steppers pointing at a null value. Mirrors the sheet's
           ±5 / ±1 controls, incl. shift-click ×5 (issue #68). */}
       {canEditPermission && combatant.hpCurrent != null && (
-        <div style={{ display: 'flex', gap: 8, flex: 'none', flexWrap: 'wrap', alignItems: 'center', maxWidth: '100%' }} data-testid="hp-steppers">
+        <div className="cf-combatant-hp-adjust" style={{ display: 'flex', gap: 8, flex: 'none', flexWrap: 'wrap', alignItems: 'center', maxWidth: '100%' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
             <GatedControl key={step} reason={syncBlockedReason}>
               <button
@@ -1985,7 +1985,7 @@ export const CombatantRow = memo(function CombatantRow({
       {canEditIdentity && (combatant.kind === 'monster' || combatant.kind === 'npc') && onPatchCombatant && (
         <button
           type="button"
-          className="btn btn-ghost cf-target-44 text-xs"
+          className="btn btn-ghost cf-target-44 text-xs cf-combatant-row-action"
           style={{ minWidth: 44, height: 44, flex: 'none' }}
           disabled={busy || syncBlocked}
           aria-pressed={combatant.statblockRevealed}
@@ -2011,7 +2011,7 @@ export const CombatantRow = memo(function CombatantRow({
       )}
       {onDuplicate && (
         <button
-          className="btn btn-icon btn-ghost cf-target-44"
+          className="btn btn-icon btn-ghost cf-target-44 cf-combatant-row-action"
           style={{ width: 44, height: 44, flex: 'none' }}
           disabled={busy || syncBlocked}
           onClick={onDuplicate}
@@ -2024,7 +2024,7 @@ export const CombatantRow = memo(function CombatantRow({
       )}
       {canRemove && (
         <button
-          className="btn btn-icon btn-ghost cf-target-44"
+          className="btn btn-icon btn-ghost cf-target-44 cf-combatant-row-action"
           style={{ width: 44, height: 44, flex: 'none' }}
           disabled={busy}
           onClick={onRemove}

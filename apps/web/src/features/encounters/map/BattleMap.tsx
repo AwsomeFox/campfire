@@ -3877,15 +3877,22 @@ export const BattleMap = memo(function BattleMap({
             className={isVtt ? 'cf-vtt-map-tray' : undefined}
             style={isVtt ? undefined : { display: 'contents' }}
           >
-          {/* In the cockpit this whole tray is behind the rail's Selection tool (see
+          {/* In the cockpit this tray is behind the rail's "Manage tokens" tool (see
               `selectionDisclosure`); in the card layout it is always in flow, where it
-              covers nothing. */}
-          {!isCast && (!isVtt || selectionDisclosure.open) && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
+              covers nothing.
+
+              The disclosure gate applies to DMs ONLY, because the button that opens it
+              is itself DM-gated. Applying it to everyone hid the Unplaced list — the one
+              way a player puts their own character on the board — behind a control no
+              player can see, so in the cockpit a player simply could not place their
+              token and had to ask the DM to do it. Players keep the tray in flow, as
+              they had it before the disclosure existed. */}
+          {!isCast && (!isVtt || !effectiveIsDm || selectionDisclosure.open) && (unplaced.length > 0 || hiddenByFog.length > 0 || (effectiveIsDm && placed.length > 0)) && (
             <div
               className="flex flex-col gap-2"
               style={{ padding: '0 14px 10px' }}
               data-testid="map-token-trays"
-              {...(isVtt ? selectionDisclosure.regionProps : {})}
+              {...(isVtt && effectiveIsDm ? selectionDisclosure.regionProps : {})}
             >
               {/* Three labelled groups, not one flat run of buttons: what you are
                   selecting, what to do with the selection, and saved formations. The
