@@ -12,6 +12,20 @@
 # browser tier, two runs silently sharing one seeded backend
 # (`reuseExistingServer` in apps/web/playwright.config.ts).
 #
+# How: an exclusive flock(2) on $CAMPFIRE_TEST_LOCK, taken before the command
+# runs. The kernel owns the lock, which is what makes this simple — it is
+# released the moment the holder exits, including on SIGKILL, so there is no
+# lockfile to go stale, no pid to publish, and no recovery path to get wrong.
+# An earlier revision of this script hand-rolled a mkdir-based lock with pid
+# files and stale reclamation; every interesting bug in review came from that
+# machinery rather than from the locking itself.
+#
+# The lock is taken and then the command is exec'd *in place*, so the test
+# process itself holds the lock: signals from the terminal or a supervisor reach
+# it directly, its exit status is reported unchanged, and there is no wrapper
+# process left in the middle to forward either. Descendants inherit the open
+# file description, so the lock also covers workers that outlive their parent.
+#
 # Usage:  scripts/with-test-lock.sh <command> [args...]
 #
 # Environment:
@@ -33,123 +47,23 @@ fi
 # CI runners are single-tenant and sized by the workflow. Never lock or re-cap
 # there — the caps below are tuned for a developer machine hosting several agent
 # sessions, not for a 2-core hosted runner.
+#
+# CAMPFIRE_TEST_LOCK_HELD is what keeps an aggregate script (`test:all`) that
+# calls wrapped leaf scripts from deadlocking: flock is per open file
+# description, so a nested wrapper would block on a lock its own parent holds.
 if [ -n "${CI:-}" ] || [ -n "${CAMPFIRE_TEST_LOCK_HELD:-}" ]; then
   exec "$@"
 fi
 
 LOCK="${CAMPFIRE_TEST_LOCK:-/tmp/campfire-test.lock}"
 WAIT="${CAMPFIRE_TEST_LOCK_WAIT:-3600}"
-POLL=5
 
-# `mkdir` is the whole mutex: it either creates the directory or fails,
-# atomically, against any number of concurrent callers. Deliberately not shlock,
-# even though macOS ships it — its own stale-lock handling is the same
-# check-then-unlink shown to race below, and it would leave a second on-disk
-# shape (a padded pid in a regular file) for this script to interpret.
-REAPER="$LOCK.reaper"
+# A malformed wait would otherwise disable the timeout entirely (alarm 0).
+case "$WAIT" in
+  '' | *[!0-9]*) WAIT=3600 ;;
+esac
 
-holder_pid() {
-  if [ -d "$LOCK" ]; then
-    pid=$(tr -d '[:space:]' <"$LOCK/pid" 2>/dev/null || true)
-  elif [ -e "$LOCK" ]; then
-    # A regular file at this path is a lock from an older revision of this
-    # script, which wrote the pid there directly.
-    pid=$(tr -d '[:space:]' <"$LOCK" 2>/dev/null || true)
-  else
-    pid=''
-  fi
-  # Anything non-numeric is not a pid we may safely test with kill -0, so the
-  # lock is waited out rather than guessed at and stolen.
-  case "$pid" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  echo "$pid"
-}
-
-# Reclaiming a dead holder's lock has to be exclusive, not merely careful.
-# Checking the pid and then deleting is two steps: two waiters can both see the
-# same dead pid, the first deletes and acquires, and the second's delete then
-# removes a lock the first now legitimately holds — handing the next waiter a
-# lock while a test run is live, which is the exact overlap this script exists
-# to prevent. Creating $REAPER is the atomic gate. While it is held nobody else
-# can remove $LOCK, so the pid re-read below cannot be invalidated between the
-# read and the rm.
-# The gate is held for a few milliseconds, so a reclaimer killed inside it is
-# unlikely — but it would otherwise wedge every future reclaim until someone
-# cleared the directory by hand. Recover it only when the owner is gone AND the
-# gate has sat for over a minute, which no live critical section ever does.
-gate_is_abandoned() {
-  gate_pid=$(tr -d '[:space:]' <"$REAPER/pid" 2>/dev/null || true)
-  case "$gate_pid" in
-    '' | *[!0-9]*) gate_pid='' ;;
-  esac
-  if [ -n "$gate_pid" ] && kill -0 "$gate_pid" 2>/dev/null; then return 1; fi
-  [ -n "$(find "$REAPER" -maxdepth 0 -mmin +1 2>/dev/null)" ] || return 1
-  rm -rf "$REAPER"
-}
-
-enter_gate() {
-  if mkdir "$REAPER" 2>/dev/null; then
-    echo $$ >"$REAPER/pid"
-    return 0
-  fi
-  gate_is_abandoned || return 1
-  if mkdir "$REAPER" 2>/dev/null; then
-    echo $$ >"$REAPER/pid"
-    return 0
-  fi
-  return 1
-}
-
-reclaim_if_stale() {
-  stale_pid=$(holder_pid) || return 1
-  if kill -0 "$stale_pid" 2>/dev/null; then return 1; fi
-  enter_gate || return 1
-  current_pid=$(holder_pid) || current_pid=''
-  if [ "$current_pid" = "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
-    rm -rf "$LOCK"
-  fi
-  rm -rf "$REAPER"
-  return 0
-}
-
-acquire() {
-  if mkdir "$LOCK" 2>/dev/null; then
-    echo $$ >"$LOCK/pid"
-    return 0
-  fi
-  reclaim_if_stale || true
-  return 1
-}
-
-# Only ever delete a lock this process actually owns. Releasing unconditionally
-# would let a late or repeated release (the signal path below releases, then the
-# EXIT trap runs too) delete a lock another wrapper has since acquired.
-release() {
-  owner=$(holder_pid) || return 0
-  [ "$owner" = "$$" ] || return 0
-  rm -rf "$LOCK"
-}
-
-waited=0
-until acquire; do
-  if [ "$waited" -ge "$WAIT" ]; then
-    echo "with-test-lock: gave up after ${WAIT}s waiting for $LOCK" >&2
-    echo "with-test-lock: if no test run is actually active, remove $LOCK and $REAPER" >&2
-    exit 75
-  fi
-  if [ "$waited" -eq 0 ]; then
-    echo "with-test-lock: another test run holds $LOCK — waiting..." >&2
-  fi
-  sleep "$POLL"
-  waited=$((waited + POLL))
-done
-
-trap 'release' EXIT
-
-# Inherited by everything below, including nested `npm run` hops, so an
-# aggregate script (`test:all`) that calls wrapped leaf scripts does not
-# deadlock against the lock it is already holding.
+# Inherited by everything below, including nested `npm run` hops.
 export CAMPFIRE_TEST_LOCK_HELD=1
 
 # Backstops, not the primary defence: the lock is what keeps runs apart, but if
@@ -158,33 +72,37 @@ export JEST_MAX_WORKERS="${JEST_MAX_WORKERS:-4}"
 export VITEST_MAX_WORKERS="${VITEST_MAX_WORKERS:-4}"
 export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${CAMPFIRE_TEST_HEAP_MB:-2048}"
 
-# Run the command as a job this shell can still address after a signal. With the
-# child in the foreground, sh defers trap handling until it exits, so a TERM
-# aimed at the wrapper alone would neither stop the test nor release the lock,
-# and the wrapper would then report the finished child's status as if the
-# cancelled run had succeeded. Job control puts the child in its own process
-# group so the signal reaches its workers too.
-set -m 2>/dev/null || true
-"$@" &
-child=$!
+# perl is preferred over flock(1) because it can take the lock and then exec the
+# command in place. flock(1) stays a parent process, so a signal aimed at it
+# does not reach the test command. perl ships with macOS; flock(1) covers hosts
+# that have util-linux but no perl.
+if command -v perl >/dev/null 2>&1; then
+  exec perl -e '
+    use strict;
+    use Fcntl qw(:flock);
+    # Keep fds <= 10 clear of close-on-exec so the lock survives the exec below.
+    $^F = 10;
+    my $path = shift @ARGV;
+    my $wait = shift @ARGV;
+    open(my $fh, ">>", $path) or die "with-test-lock: cannot open $path: $!\n";
+    unless (flock($fh, LOCK_EX | LOCK_NB)) {
+      warn "with-test-lock: another test run holds $path — waiting...\n";
+      $SIG{ALRM} = sub {
+        warn "with-test-lock: gave up after ${wait}s waiting for $path\n";
+        exit 75;
+      };
+      alarm $wait;
+      flock($fh, LOCK_EX) or die "with-test-lock: cannot lock $path: $!\n";
+      alarm 0;
+    }
+    exec { $ARGV[0] } @ARGV or die "with-test-lock: cannot run $ARGV[0]: $!\n";
+  ' "$LOCK" "$WAIT" "$@"
+fi
 
-# Always forward as TERM: a background child in a non-interactive shell has INT
-# set to ignore, so re-sending INT would not stop it. Signal the child's process
-# group when job control gave it one, falling back to the child alone.
-stop_child() {
-  kill -TERM "-$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true
-  wait "$child" 2>/dev/null || true
-  release
-  # Re-raise so the caller sees the wrapper die of the signal, not of a status.
-  trap - "$1"
-  kill -"$1" $$
-}
-trap 'stop_child TERM' TERM
-trap 'stop_child INT' INT
-trap 'stop_child HUP' HUP
+if command -v flock >/dev/null 2>&1; then
+  exec flock -E 75 -w "$WAIT" "$LOCK" "$@"
+fi
 
-set +e
-wait "$child"
-status=$?
-set -e
-exit "$status"
+echo "with-test-lock: neither perl nor flock(1) found — running WITHOUT the lock." >&2
+echo "with-test-lock: concurrent test runs on this host will not be serialized." >&2
+exec "$@"

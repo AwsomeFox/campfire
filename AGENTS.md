@@ -91,8 +91,11 @@ the browser tier boots a Nest server plus Chromium on the fixed port 8123 with
 `reuseExistingServer`. Several agent sessions in separate worktrees running
 tests at once therefore exhaust host memory, and two concurrent browser runs
 silently share one seeded backend. The lock makes those runs queue instead; it
-waits up to an hour, reclaims a lock whose holder died, and is a no-op when `CI`
-is set. Invoke tests through the npm scripts, not by calling `jest`, `vitest`,
+waits up to an hour and is a no-op when `CI` is set. It is an `flock(2)` held by
+the test process itself, so the kernel releases it the moment that process and
+its workers exit — a crashed or killed run leaves nothing to clean up, and
+workers that outlive their parent keep holding it rather than letting the next
+run start on top of them. Invoke tests through the npm scripts, not by calling `jest`, `vitest`,
 or `playwright` directly — a direct call bypasses the lock. `test:watch` and
 `test:e2e:ui` stay unlocked deliberately, because a long-lived interactive
 session would hold the lock indefinitely and starve every other session; UI mode
