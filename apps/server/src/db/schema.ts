@@ -1243,6 +1243,52 @@ export const campaignCatchUpCursors = sqliteTable(
   }),
 );
 
+// Issue #840 — personal navigation: a user's private bookmarks and bounded recent
+// history. Both are per-user, per-campaign polymorphic soft references into the
+// supported canon entity set. The FK user_id ON DELETE CASCADE tears them down with
+// the account (no orphaned private data on deletion) and campaign_id ON DELETE
+// CASCADE tears them down with the campaign. entityType/entityId is a soft
+// reference like entity_revisions: visibility is re-resolved at READ time from the
+// owning entity services' role-filtered lists, so a row whose target is hidden,
+// deleted, or no longer accessible (lost membership / cross-campaign) is simply
+// omitted from responses — never returned, never revealing the target's existence.
+export const userBookmarks = sqliteTable(
+  'user_bookmarks',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+    entityType: text('entity_type').notNull(),
+    entityId: integer('entity_id').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    // One bookmark per (user, campaign, target) — adding the same target twice is a no-op.
+    userTarget: uniqueIndex('idx_user_bookmarks_user_target').on(t.userId, t.campaignId, t.entityType, t.entityId),
+    user: index('idx_user_bookmarks_user').on(t.userId),
+  }),
+);
+
+export const userRecentViews = sqliteTable(
+  'user_recent_views',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+    entityType: text('entity_type').notNull(),
+    entityId: integer('entity_id').notNull(),
+    // Server-stamped instant of the latest visit (bumped on each re-visit).
+    visitedAt: text('visited_at').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    // One row per (user, campaign, target): a re-visit bumps visitedAt rather than
+    // adding a duplicate, which is what keeps the bounded recent-history list stable.
+    userTarget: uniqueIndex('idx_user_recent_views_user_target').on(t.userId, t.campaignId, t.entityType, t.entityId),
+    user: index('idx_user_recent_views_user').on(t.userId),
+  }),
+);
+
 // Safe, server-admin-visible history of membership rows repaired while adding
 // the campaign_members.user_id FK (#849). This deliberately has no campaign/user
 // FKs: it records references that were already missing and remains useful after

@@ -1062,6 +1062,35 @@ CREATE TABLE IF NOT EXISTS campaign_catch_up_cursors (
   UNIQUE(user_id, campaign_id)
 );
 
+-- Issue #840 — personal navigation: a user's private bookmarks. Polymorphic soft
+-- reference (campaign_id, entity_type, entity_id) into the supported canon entity
+-- set; visibility is re-resolved at READ time so hidden/deleted/inaccessible targets
+-- drop out of responses. user_id / campaign_id ON DELETE CASCADE clean up with the
+-- account / campaign (no orphaned private data).
+CREATE TABLE IF NOT EXISTS user_bookmarks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(user_id, campaign_id, entity_type, entity_id)
+);
+
+-- Issue #840 — personal navigation: bounded recent-history per user. One row per
+-- (user, campaign, target); a re-visit bumps visited_at. Trimmed per user/campaign
+-- by PersonalNavigationService so the list stays bounded. Same cascade clean-up.
+CREATE TABLE IF NOT EXISTS user_recent_views (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  visited_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(user_id, campaign_id, entity_type, entity_id)
+);
+
 -- Migration repair history for #849. No FKs by design: rows describe missing
 -- references and must remain readable to a server admin without campaign access.
 CREATE TABLE IF NOT EXISTS membership_integrity_repairs (
@@ -2183,6 +2212,11 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_re
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_catch_up_campaign ON campaign_catch_up_cursors(campaign_id);
+-- Issue #840: personal-navigation read paths filter by user (and campaign), so the
+-- user_id prefixes both tables' non-unique indexes; the UNIQUE(user,campaign,type,id)
+-- constraint above already covers the exact-target lookup and dedupe upsert.
+CREATE INDEX IF NOT EXISTS idx_user_bookmarks_user ON user_bookmarks(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_recent_views_user ON user_recent_views(user_id);
 -- Issue #819: exclusive character seat — at most one membership may link a given
 -- character. Partial so unlinked (NULL) seats do not collide. Matches migration 0067.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
