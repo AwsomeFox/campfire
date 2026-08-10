@@ -38,6 +38,7 @@ import {
   encounterEvents,
   notifications,
   notificationDigestQueue,
+  pushSubscriptions,
   sessionShares,
   castSessions,
   combatants,
@@ -698,7 +699,7 @@ export class UsersService {
    * Admin password reset (POST /users/:id/password). A reset is a
    * credential-compromise response — "this account's credentials may have
    * leaked" — so it must cut off everything already issued, not just future
-   * logins: every session AND every personal access token is revoked
+   * logins: every session, personal access token, and browser-push capability is revoked
    * alongside the hash update. (Previously only passwordHash changed, so a
    * leaked `cf_pat_…` token or stolen cookie survived the reset — issue #44.)
    * Self-service change (POST /me/password, AuthService.changeOwnPassword)
@@ -707,12 +708,18 @@ export class UsersService {
    */
   async setPassword(id: number, newPassword: string): Promise<void> {
     await this.getRowOrThrow(id);
-    await this.db
-      .update(users)
-      .set({ passwordHash: hashPassword(newPassword), updatedAt: nowIso() })
-      .where(eq(users.id, id));
-    await this.db.delete(userSessions).where(eq(userSessions.userId, id));
-    await this.db.delete(apiTokens).where(eq(apiTokens.userId, id));
+    const passwordHash = hashPassword(newPassword);
+    this.db.transaction((tx) => {
+      const existing = tx.select({ id: users.id }).from(users).where(eq(users.id, id)).limit(1).get();
+      if (!existing) throw new NotFoundException(`User ${id} not found`);
+      tx.update(users)
+        .set({ passwordHash, updatedAt: nowIso() })
+        .where(eq(users.id, id))
+        .run();
+      tx.delete(userSessions).where(eq(userSessions.userId, id)).run();
+      tx.delete(apiTokens).where(eq(apiTokens.userId, id)).run();
+      tx.delete(pushSubscriptions).where(eq(pushSubscriptions.userId, id)).run();
+    });
   }
 
   /** Kill every session for this user except `keepTokenHash` (if provided). */

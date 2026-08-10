@@ -3317,8 +3317,9 @@ export type CommentReplyPage = z.infer<typeof CommentReplyPage>;
 // (quest_updated), a member submits a proposal to the DM (proposal_submitted) or
 // the DM approves/rejects it (proposal_resolved), or a member posts to the DM
 // scribe inbox (inbox_submitted, issue #832). Read via
-// GET /notifications (own rows only); real-time push can layer on later — the
-// store is plain rows, transport-agnostic.
+// GET /notifications (own rows only). Browser Web Push (#1323) mirrors rows
+// only after they have been materialized in this store; it does not re-evaluate
+// preferences or quiet hours. The store remains transport-agnostic and authoritative.
 export const NotificationType = z.enum([
   'recap_posted',
   'recap_share_enabled',
@@ -3601,6 +3602,48 @@ export const NotificationPreferencesUpdate = z.object({
   quietHours: QuietHours.partial().optional(),
 });
 export type NotificationPreferencesUpdate = z.infer<typeof NotificationPreferencesUpdate>;
+
+// ---------- browser push notifications (issue #1323) ----------
+// A Push API subscription is browser/device-scoped and user-owned. The endpoint
+// and encryption keys are opaque capabilities supplied by PushManager; the
+// server stores them only so it can fan out an already-authorized in-app
+// notification through the browser vendor's Web Push service.
+export const BrowserPushSubscription = z.object({
+  endpoint: z
+    .string()
+    .url()
+    .max(2048)
+    .refine((value) => {
+      try {
+        return new URL(value).protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }, 'Push endpoint must use HTTPS'),
+  keys: z.object({
+    p256dh: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+={0,2}$/, 'Invalid p256dh key'),
+    auth: z.string().min(1).max(256).regex(/^[A-Za-z0-9_-]+={0,2}$/, 'Invalid auth key'),
+  }),
+  userAgent: z.string().max(500).default(''),
+});
+export type BrowserPushSubscription = z.infer<typeof BrowserPushSubscription>;
+
+/** Public, non-secret server capability returned to an authenticated browser. */
+export const BrowserPushStatus = z.object({
+  configured: z.boolean(),
+  publicKey: z.string().nullable(),
+});
+export type BrowserPushStatus = z.infer<typeof BrowserPushStatus>;
+
+export const BrowserPushUnsubscribe = z.object({
+  endpoint: BrowserPushSubscription.shape.endpoint,
+});
+export type BrowserPushUnsubscribe = z.infer<typeof BrowserPushUnsubscribe>;
+
+export const BrowserPushUnsubscribeResult = z.object({
+  removed: z.boolean(),
+});
+export type BrowserPushUnsubscribeResult = z.infer<typeof BrowserPushUnsubscribeResult>;
 
 // ---------- rule packs (Compendium backend) ----------
 // Installed, server-wide rules content (spells/monsters/items/…) imported from
@@ -7024,6 +7067,11 @@ export const SetupRequest = z.object({ username: User.shape.username, password: 
 // UNauthenticated path would let a caller force the server to run scrypt (CPU-heavy)
 // against an arbitrarily large input before verifyPassword() even gets to reject it.
 export const LoginRequest = z.object({ username: z.string().min(1), password: z.string().min(1).max(200) });
+/** Optional browser capability detached atomically with the current cookie session. */
+export const LogoutRequest = z.object({
+  pushEndpoint: BrowserPushSubscription.shape.endpoint.optional(),
+});
+export type LogoutRequest = z.infer<typeof LogoutRequest>;
 export const UserCreate = z.object({ username: User.shape.username, password: Password, displayName: z.string().max(120).optional(), serverRole: ServerRole.optional() });
 // Self-service signup (POST /auth/signup) — same shape as SetupRequest, but the created
 // account is always serverRole 'user' (never admin) and the route is gated on allowSignup.

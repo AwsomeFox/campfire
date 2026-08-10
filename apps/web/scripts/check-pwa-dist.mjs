@@ -162,6 +162,15 @@ if (existsSync(join(dist, "sw.js"))) {
     sw.includes("sw-sensitive-purge.js") || /importScripts/i.test(sw),
     "sw.js should importScripts sw-sensitive-purge.js for activate hygiene",
   );
+  // Issue #1323: the generated worker must load the browser-push event handlers.
+  check(existsSync(join(dist, "sw-push.js")), "missing sw-push.js (Web Push handlers)");
+  check(sw.includes("sw-push.js"), "sw.js should importScripts sw-push.js");
+  if (existsSync(join(dist, "sw-push.js"))) {
+    const pushWorker = read("sw-push.js");
+    check(pushWorker.includes("'push'"), "sw-push.js should handle push events");
+    check(pushWorker.includes("'notificationclick'"), "sw-push.js should handle notification clicks");
+    check(pushWorker.includes("openWindow"), "sw-push.js should open notification deep links");
+  }
   check(
     sw.includes("no-store") || sw.includes("bno-store"),
     "sw.js should reject Cache-Control: no-store in cacheWillUpdate",

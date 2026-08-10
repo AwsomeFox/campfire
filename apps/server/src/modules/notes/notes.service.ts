@@ -38,7 +38,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { canSee } from '../../common/note-visibility';
 import { assertMayInteract, noteVisibilityIsOutbound } from '../../common/interactive-capability';
-import { blockedTargetsOf } from '../../common/safety-controls';
+import { blockedTargetsOf, suppressedRecipients } from '../../common/safety-controls';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
@@ -1088,8 +1088,14 @@ export class NotesService {
 
       if (!row) {
         const [current] = tx.select().from(notes).where(eq(notes.id, id)).limit(1).all();
-        return { transitioned: false as const, row: current };
+        return { transitioned: false as const, row: current, push: null };
       }
+
+      let push: {
+        recipient: number;
+        actorUserId: string;
+        event: Parameters<NotificationsService['pushMaterializedNotification']>[2];
+      } | null = null;
 
       tx.insert(auditLog)
         .values({
@@ -1114,21 +1120,42 @@ export class NotesService {
         // best-effort behavior without letting a notification FK abort canon.
         const recipientExists = tx.select({ id: users.id }).from(users).where(eq(users.id, recipient)).limit(1).get();
         if (recipientExists) {
+          const recipientStillMember = tx
+            .select({ id: campaignMembers.id })
+            .from(campaignMembers)
+            .where(
+              and(
+                eq(campaignMembers.campaignId, row.campaignId),
+                eq(campaignMembers.userId, recipient),
+              ),
+            )
+            .limit(1)
+            .get();
           try {
+            const event = {
+              type: 'note_reply' as const,
+              title: `${user.name || 'The DM'} resolved your inbox note`,
+              body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(row.body),
+              entityType: null,
+              entityId: null,
+              actorName: user.name,
+            };
             tx.insert(notifications)
               .values({
                 userId: recipient,
                 campaignId: row.campaignId,
-                type: 'note_reply',
-                title: `${user.name || 'The DM'} resolved your inbox note`,
-                body: row.resolvedNote ? excerpt(row.resolvedNote) : excerpt(row.body),
+                type: event.type,
+                title: event.title,
+                body: event.body,
                 entityType: null,
                 entityId: null,
-                actorName: user.name,
+                actorName: event.actorName,
+                actorUserId: user.id,
                 readAt: null,
                 createdAt: ts,
               })
               .run();
+            if (recipientStillMember) push = { recipient, actorUserId: user.id, event };
           } catch {
             // Match NotificationsService.notifyUser: notification delivery is
             // best-effort and must never roll back the canonical terminal
@@ -1137,7 +1164,7 @@ export class NotesService {
         }
       }
 
-      return { transitioned: true as const, row };
+      return { transitioned: true as const, row, push };
     });
 
     const row = outcome.row;
@@ -1152,6 +1179,28 @@ export class NotesService {
         row.entityId === terminal.entityId;
       if (!identical) {
         throw new ConflictException(`Inbox item ${id} already has a different terminal result`);
+      }
+    }
+    if (outcome.push) {
+      try {
+        const suppressed = await suppressedRecipients(this.db, [String(outcome.push.recipient)], {
+          campaignId: row.campaignId,
+          actorUserId: outcome.push.actorUserId,
+          entityType: null,
+          entityId: null,
+        });
+        if (!suppressed.has(String(outcome.push.recipient))) {
+          this.notifications.pushMaterializedNotification(
+            outcome.push.recipient,
+            row.campaignId,
+            outcome.push.event,
+            ts,
+          );
+        }
+      } catch {
+        // The canonical resolution and its notification row are already committed.
+        // Fail closed for OS push without turning an optional safety lookup failure
+        // into a false failure response for the successful domain transition.
       }
     }
     return toDomain(row);

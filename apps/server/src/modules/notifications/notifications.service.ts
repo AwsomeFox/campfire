@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import {
   CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
@@ -24,7 +24,9 @@ import {
   campaignMembers,
   campaigns,
   characters,
+  comments,
   encounters,
+  memberSafetyControls,
   notificationDigestQueue,
   notificationPreferences,
   notificationQuietHours,
@@ -34,6 +36,10 @@ import { nowIso } from '../../common/time';
 import { minRole, type RequestUser } from '../../common/user.types';
 import { blockedTargetsOf, suppressedRecipients } from '../../common/safety-controls';
 import { decideDelivery, isWithinQuietHours } from './notification-preferences.util';
+import {
+  PushNotificationsService,
+  type BrowserPushDelivery,
+} from './push-notifications.service';
 
 /**
  * What a domain service passes when something notification-worthy happens.
@@ -131,6 +137,11 @@ const DIGEST_FLUSH_INTERVAL_MS = 60_000;
 const DIGEST_BATCH_SIZE = 500;
 /** Keep every SQLite `IN (...)` write comfortably below its bind-variable limit. */
 const SQLITE_ID_BATCH_SIZE = 1_000;
+const BLOCK_FILTER_EXEMPT_TYPES = new Set<string>([
+  ...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES,
+  'safety_hold',
+]);
+const DEFERRED_MEMBERSHIP_EXEMPT_TYPES = new Set<string>(MEMBERSHIP_NOTIFICATION_TYPES);
 
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
@@ -174,9 +185,10 @@ function defaultQuietHours(): QuietHoursType {
 
 /**
  * In-app notification store. Deliberately transport-agnostic: rows are written
- * synchronously by domain services and read by polling clients today; a
- * real-time push channel (SSE — issue #4) can later observe the same writes
- * without any change to emitters or the table.
+ * synchronously by domain services and read by polling clients. Browser Web
+ * Push (#1323) mirrors rows only after they have been materialized. It never
+ * re-evaluates preferences or quiet hours, including for the narrow cases where
+ * another domain service writes its notification row atomically.
  *
  * Emission is best-effort by design: callers `await` it inside the same request
  * but a notification failure must never fail the triggering write, so both
@@ -193,7 +205,12 @@ export class NotificationsService implements OnApplicationBootstrap {
   private readonly logger = new Logger(NotificationsService.name);
   private flushingDigests = false;
 
-  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
+  constructor(
+    @Inject(DB) private readonly db: DrizzleDb,
+    @Optional()
+    @Inject(PushNotificationsService)
+    private readonly push?: Pick<PushNotificationsService, 'deliver'>,
+  ) {}
 
   /**
    * Drain deferred notifications on a cadence. No boot-time flush (nothing is
@@ -508,13 +525,17 @@ export class NotificationsService implements OnApplicationBootstrap {
     // and an abuser must not be able to reach a blocker by choosing an event type.
     if (isCriticalNotificationCategory(category)) {
       let guardPassed = true;
+      let createdAt: string | null = null;
       this.db.transaction((tx) => {
         if (writeGuard && !writeGuard(tx)) {
           guardPassed = false;
           return;
         }
-        this.insertRowsTx(tx, allowed, campaignId, event, actorUserId, hiddenStatusContext);
+        createdAt = this.insertRowsTx(tx, allowed, campaignId, event, actorUserId, hiddenStatusContext);
       });
+      if (guardPassed && createdAt) {
+        this.schedulePush(this.pushDeliveries(allowed, campaignId, event, createdAt, true));
+      }
       return guardPassed;
     }
 
@@ -533,6 +554,7 @@ export class NotificationsService implements OnApplicationBootstrap {
       else quiet.push(userId);
     }
 
+    let immediateCreatedAt: string | null = null;
     if (immediate.length > 0 || digest.length > 0 || quiet.length > 0) {
       let guardPassed = true;
       this.db.transaction((tx) => {
@@ -540,10 +562,15 @@ export class NotificationsService implements OnApplicationBootstrap {
           guardPassed = false;
           return;
         }
-        if (immediate.length > 0) this.insertRowsTx(tx, immediate, campaignId, event, actorUserId, hiddenStatusContext);
+        if (immediate.length > 0) {
+          immediateCreatedAt = this.insertRowsTx(tx, immediate, campaignId, event, actorUserId, hiddenStatusContext);
+        }
         if (digest.length > 0) this.enqueueDeferredTx(tx, digest, campaignId, event, 'digest', actorUserId, hiddenStatusContext);
         if (quiet.length > 0) this.enqueueDeferredTx(tx, quiet, campaignId, event, 'quiet_hours', actorUserId, hiddenStatusContext);
       });
+      if (guardPassed && immediateCreatedAt) {
+        this.schedulePush(this.pushDeliveries(immediate, campaignId, event, immediateCreatedAt, false));
+      }
       return guardPassed;
     }
     return guardWithoutWrite();
@@ -595,8 +622,8 @@ export class NotificationsService implements OnApplicationBootstrap {
     event: NotificationEvent,
     actorUserId: string | null,
     hiddenStatusContext?: HiddenStatusContext,
-  ): void {
-    if (recipients.length === 0) return;
+  ): string | null {
+    if (recipients.length === 0) return null;
     const ts = nowIso();
     const dataJson = event.data == null ? null : JSON.stringify(event.data);
     tx.insert(notifications)
@@ -621,6 +648,59 @@ export class NotificationsService implements OnApplicationBootstrap {
         })),
       )
       .run();
+    return ts;
+  }
+
+  private async insertRows(
+    recipients: number[],
+    campaignId: number,
+    event: NotificationEvent,
+    actorUserId: string | null,
+    hiddenStatusContext?: HiddenStatusContext,
+  ): Promise<string | null> {
+    return Promise.resolve(this.insertRowsTx(this.db, recipients, campaignId, event, actorUserId, hiddenStatusContext));
+  }
+
+  private pushDeliveries(
+    recipients: number[],
+    campaignId: number,
+    event: NotificationEvent,
+    createdAt: string,
+    critical: boolean,
+  ): BrowserPushDelivery[] {
+    return recipients.map((userId) => ({
+      userId,
+      campaignId,
+      type: event.type,
+      title: event.title,
+      body: event.body ?? '',
+      entityId: event.entityId ?? null,
+      createdAt,
+      critical,
+    }));
+  }
+
+  /** Fire-and-contain: a vendor outage never delays or rejects the domain write. */
+  private schedulePush(deliveries: BrowserPushDelivery[]): void {
+    if (!this.push || deliveries.length === 0) return;
+    void this.push.deliver(deliveries).catch((error) => {
+      this.logger.warn(`Browser push fan-out failed: ${String(error)}`);
+    });
+  }
+
+  /**
+   * Push a notification row that another service materialized inside its own
+   * atomic domain transaction. This does not write or re-gate the row; it only
+   * keeps the browser transport aligned with that already-committed in-app item.
+   */
+  pushMaterializedNotification(
+    userId: number,
+    campaignId: number,
+    event: NotificationEvent,
+    createdAt: string,
+  ): void {
+    const critical = isCriticalNotificationCategory(notificationCategory(event.type));
+    this.schedulePush(this.pushDeliveries([userId], campaignId, event, createdAt, critical));
   }
 
   /** Persist deferred notifications for later flush (digest cadence / after quiet hours). */
@@ -902,6 +982,88 @@ export class NotificationsService implements OnApplicationBootstrap {
   }
 
   /**
+   * Reapply membership plus recipient-facing quarantine/block rules immediately
+   * before a deferred excerpt can become either an in-app row or browser push.
+   * The caller runs this inside the materialization transaction so access or
+   * moderation changes cannot land between these reads and the insert.
+   */
+  private deferredSuppressedIdsTx(
+    tx: SyncDb,
+    rows: Array<typeof notificationDigestQueue.$inferSelect>,
+  ): Set<number> {
+    const suppressed = new Set<number>();
+    const userIds = [...new Set(rows.map((row) => row.userId))];
+    const campaignIds = [...new Set(rows.map((row) => row.campaignId))];
+    const currentMemberships = tx
+      .select({ userId: campaignMembers.userId, campaignId: campaignMembers.campaignId })
+      .from(campaignMembers)
+      .where(
+        and(
+          inArray(campaignMembers.userId, userIds),
+          inArray(campaignMembers.campaignId, campaignIds),
+        ),
+      )
+      .all();
+    const currentMembershipKeys = new Set(
+      currentMemberships.map((row) => `${row.campaignId}:${row.userId}`),
+    );
+    for (const row of rows) {
+      if (
+        !DEFERRED_MEMBERSHIP_EXEMPT_TYPES.has(row.type) &&
+        !currentMembershipKeys.has(`${row.campaignId}:${row.userId}`)
+      ) {
+        suppressed.add(row.id);
+      }
+    }
+
+    const commentIds = [...new Set(rows.flatMap((row) => row.commentId == null ? [] : [row.commentId]))];
+    if (commentIds.length > 0) {
+      const quarantined = tx
+        .select({ id: comments.id })
+        .from(comments)
+        .where(and(inArray(comments.id, commentIds), isNotNull(comments.quarantinedAt)))
+        .all();
+      const quarantinedIds = new Set(quarantined.map((row) => row.id));
+      for (const row of rows) {
+        if (row.commentId != null && quarantinedIds.has(row.commentId)) suppressed.add(row.id);
+      }
+    }
+
+    const recipientIds = [...new Set(rows.map((row) => String(row.userId)))];
+    const blocks = tx
+      .select({
+        ownerUserId: memberSafetyControls.ownerUserId,
+        targetUserId: memberSafetyControls.targetUserId,
+      })
+      .from(memberSafetyControls)
+      .where(
+        and(
+          inArray(memberSafetyControls.ownerUserId, recipientIds),
+          eq(memberSafetyControls.kind, 'block'),
+          isNull(memberSafetyControls.liftedAt),
+        ),
+      )
+      .all();
+    const blockedByOwner = new Map<string, Set<string>>();
+    for (const block of blocks) {
+      if (!block.targetUserId) continue;
+      const targets = blockedByOwner.get(block.ownerUserId) ?? new Set<string>();
+      targets.add(block.targetUserId);
+      blockedByOwner.set(block.ownerUserId, targets);
+    }
+    for (const row of rows) {
+      if (
+        row.actorUserId != null &&
+        !BLOCK_FILTER_EXEMPT_TYPES.has(row.type) &&
+        blockedByOwner.get(String(row.userId))?.has(row.actorUserId)
+      ) {
+        suppressed.add(row.id);
+      }
+    }
+    return suppressed;
+  }
+
+  /**
    * Drain the deferred queue into real notifications. A queued row is delivered
    * only when its recipient is NOT currently inside their quiet-hours window, so
    * quiet-hours holds naturally wait out the window while digest items flush on
@@ -924,65 +1086,98 @@ export class NotificationsService implements OnApplicationBootstrap {
           else byCampaign.set(row.campaignId, [row]);
         }
 
-        const deliverRows: Array<typeof notifications.$inferInsert> = [];
-        const deliveredIds: number[] = [];
-        const removedIds: number[] = [];
-
+        const candidateRows: typeof queued = [];
         for (const [campaignId, rows] of byCampaign) {
           const recipients = [...new Set(rows.map((r) => r.userId))];
           const quietByUser = await this.loadQuietHours(recipients, campaignId);
           for (const row of rows) {
             const quiet = quietByUser.get(row.userId);
-            if (!quiet || !isWithinQuietHours(quiet, nowMs)) {
-              deliverRows.push({
-                userId: row.userId,
-                campaignId: row.campaignId,
-                type: row.type,
-                title: row.title,
-                body: row.body,
-                entityType: row.entityType,
-                entityId: row.entityId,
-                commentId: row.commentId,
-                data: row.data,
-                hiddenStatusContext: row.hiddenStatusContext,
-                actorName: row.actorName,
-                actorUserId: row.actorUserId,
-                readAt: null,
-                createdAt: row.createdAt,
-              });
-              deliveredIds.push(row.id);
-            }
+            if (quiet && isWithinQuietHours(quiet, nowMs)) continue;
+            candidateRows.push(row);
           }
         }
 
-        const authorizedDeliverRows: Array<typeof notifications.$inferInsert> = [];
-        const authorizedDeliveredIds: number[] = [];
+        if (candidateRows.length === 0) break;
+
+        const deliverRows: Array<typeof notifications.$inferInsert> = [];
+        const deliveredIds: number[] = [];
+        const removedIds: number[] = [];
+
         this.db.transaction((tx) => {
-          for (let index = 0; index < deliverRows.length; index += 1) {
-            const row = deliverRows[index];
+          const suppressedIds = this.deferredSuppressedIdsTx(tx, candidateRows);
+          for (const row of candidateRows) {
+            if (suppressedIds.has(row.id)) {
+              removedIds.push(row.id);
+              continue;
+            }
             const disposition = row.hiddenStatusContext
               ? this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext)
               : 'allow';
             if (disposition === 'deny') {
-              removedIds.push(deliveredIds[index]);
+              removedIds.push(row.id);
               continue;
             }
-            authorizedDeliverRows.push(disposition === 'redact' ? { ...row, entityType: null, entityId: null, data: null } : row);
-            authorizedDeliveredIds.push(deliveredIds[index]);
+            deliverRows.push(
+              disposition === 'redact'
+                ? {
+                    userId: row.userId,
+                    campaignId: row.campaignId,
+                    type: row.type,
+                    title: row.title,
+                    body: row.body,
+                    entityType: null,
+                    entityId: null,
+                    commentId: row.commentId,
+                    data: null,
+                    hiddenStatusContext: row.hiddenStatusContext,
+                    actorName: row.actorName,
+                    actorUserId: row.actorUserId,
+                    readAt: null,
+                    createdAt: row.createdAt,
+                  }
+                : {
+                    userId: row.userId,
+                    campaignId: row.campaignId,
+                    type: row.type,
+                    title: row.title,
+                    body: row.body,
+                    entityType: row.entityType,
+                    entityId: row.entityId,
+                    commentId: row.commentId,
+                    data: row.data,
+                    hiddenStatusContext: row.hiddenStatusContext,
+                    actorName: row.actorName,
+                    actorUserId: row.actorUserId,
+                    readAt: null,
+                    createdAt: row.createdAt,
+                  },
+            );
+            deliveredIds.push(row.id);
           }
-          const heldRows = queued.filter((row) => !deliveredIds.includes(row.id));
-          for (const row of heldRows) {
-            if (row.hiddenStatusContext && this.hiddenStatusAuthorizedTx(tx, row.userId, row.campaignId, row.hiddenStatusContext) === 'deny') {
-              removedIds.push(row.id);
-            }
+          if (deliverRows.length > 0) tx.insert(notifications).values(deliverRows).run();
+          const consumedIds = [...deliveredIds, ...removedIds];
+          if (consumedIds.length > 0) {
+            tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, consumedIds)).run();
           }
-          if (authorizedDeliverRows.length > 0) tx.insert(notifications).values(authorizedDeliverRows).run();
-          const consumedIds = [...authorizedDeliveredIds, ...removedIds];
-          if (consumedIds.length > 0) tx.delete(notificationDigestQueue).where(inArray(notificationDigestQueue.id, consumedIds)).run();
         });
 
-        if (authorizedDeliveredIds.length === 0 && removedIds.length === 0) break;
-        delivered += authorizedDeliveredIds.length;
+        if (deliveredIds.length === 0 && removedIds.length === 0) break;
+
+        if (deliverRows.length > 0) {
+          this.schedulePush(
+            deliverRows.map((row) => ({
+              userId: row.userId,
+              campaignId: row.campaignId,
+              type: row.type as NotificationType,
+              title: row.title,
+              body: row.body ?? '',
+              entityId: row.entityId ?? null,
+              createdAt: row.createdAt,
+              critical: isCriticalNotificationCategory(notificationCategory(row.type as NotificationType)),
+            })),
+          );
+        }
+        delivered += deliveredIds.length;
 
         if (queued.length < DIGEST_BATCH_SIZE) break;
       }
@@ -1205,7 +1400,7 @@ export class NotificationsService implements OnApplicationBootstrap {
   private static blockedActorFilter(blockedActorIds: string[]): SQL {
     return or(
       isNull(notifications.actorUserId),
-      inArray(notifications.type, [...CAMPAIGN_LIFECYCLE_NOTIFICATION_TYPES, 'safety_hold']),
+      inArray(notifications.type, [...BLOCK_FILTER_EXEMPT_TYPES]),
       notInArray(notifications.actorUserId, blockedActorIds),
     )!;
   }

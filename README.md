@@ -171,6 +171,9 @@ running on 8080 — maps to the container's internal 8080).
 | `ORIGIN` | *(unset)* | Comma-separated allowed CORS origin(s). Leave unset for same-origin deployments (the default — SPA + API on one origin) |
 | `TRUST_PROXY` | `1` (trust one hop) | Express `trust proxy` setting — pass a hop count (`1`, `2`, …), `false`, or an explicit IP/subnet allow-list. Needed for rate limiting and `req.ip` to see the real client IP behind a reverse proxy (Traefik in the reference deployment) |
 | `PUBLIC_BASE` | `/` | **Build-time** reverse-proxy subpath (issue #798). Set to the path prefix the app is served under, e.g. `/campfire` when the public URL is `https://host/campfire/...`. Baked into the image: the Docker build stamps it into the web bundle (asset URLs, PWA manifest scope/start_url, service-worker patterns, router basename, and the in-app API client) and re-declares it at runtime so the server can prefix its browser-facing OIDC redirects. **Re-build the image to change it.** See **Reverse-proxy subpath** below |
+| `VAPID_PUBLIC_KEY` | *(unset)* | URL-safe public VAPID key for browser Web Push. Browser notifications stay disabled unless all three `VAPID_*` values are set |
+| `VAPID_PRIVATE_KEY` | *(unset)* | Matching private VAPID key. Treat it as a server secret; it is never returned by the API or stored in SQLite |
+| `VAPID_SUBJECT` | *(unset)* | Web Push contact URI, such as `mailto:admin@example.com` or `https://campfire.example.com/contact` |
 | `API_DOCS` | *(unset)* | Swagger UI (`/api/docs`) + OpenAPI JSON (`/api/openapi.json`) exposure. Unset: enabled in dev, **disabled in production**. Set `1` to force-enable (e.g. agent self-discovery on a trusted network) or `0` to force-disable |
 | `ALLOW_INSECURE_HTTP` | *(unset)* | Set to `1` for a no-TLS LAN/homelab deployment reached over plain HTTP (`http://192.168.1.x:8080`). Drops the HTTPS-assuming security headers (CSP `upgrade-insecure-requests`, HSTS) and issues the session cookie without `Secure` so login works. **Leave unset whenever you have TLS** |
 | `OIDC_ISSUER` | *(unset)* | OIDC provider issuer URL (enables SSO login when set, alongside local auth) |
@@ -201,6 +204,25 @@ running on 8080 — maps to the container's internal 8080).
 
 `WEB_DIST` and `NODE_ENV` are already baked into the image (`NODE_ENV=production`,
 `WEB_DIST=/app/web-dist`) — you shouldn't need to set either.
+
+### Browser push notifications
+
+Browser/OS notifications are opt-in per browser and require HTTPS (localhost is
+the browser-supported development exception). Generate one VAPID key pair for
+the Campfire installation and keep using that pair; rotating it invalidates
+existing browser subscriptions:
+
+```bash
+npm exec --workspace apps/server -- web-push generate-vapid-keys --json
+```
+
+Set the printed values as `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`, set
+`VAPID_SUBJECT` to an operator contact URI, and restart Campfire. Users can then
+enable **Preferences → Notifications → Also notify this browser**. The alert
+contains only the notification title, a short excerpt, and a Campfire link. That
+encrypted payload still travels through the browser vendor's push service
+(Google, Mozilla, Apple, or Microsoft); in-app notifications continue to work
+when Web Push is unset or unavailable.
 
 ### Backup & restore
 

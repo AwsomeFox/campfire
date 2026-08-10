@@ -37,6 +37,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     const fresh = openDatabase(dataDir);
     try {
       expect(columnNames(fresh.sqlite, 'combatants')).toContain('npc_identity_source_id');
+      expect(columnNames(fresh.sqlite, 'push_subscriptions')).toEqual(
+        expect.arrayContaining(['user_id', 'endpoint', 'p256dh', 'auth', 'user_agent', 'last_used_at']),
+      );
     } finally { fresh.sqlite.close(); }
   });
 
@@ -181,6 +184,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(columnNames(sqlite, 'schedule_templates')).toEqual(expect.arrayContaining(['name', 'timezone', 'slots_json']));
       expect(MIGRATION_NAMES).toContain('0161_character_combatant_speed_1910');
+      expect(MIGRATION_NAMES).toContain('0182_push_subscriptions_1323');
+      expect(columnNames(sqlite, 'push_subscriptions')).toEqual(
+        expect.arrayContaining(['user_id', 'endpoint', 'p256dh', 'auth', 'user_agent', 'last_used_at']),
+      );
     } finally {
       sqlite.close();
     }

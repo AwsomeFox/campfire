@@ -1792,6 +1792,29 @@ export const notificationDigestQueue = sqliteTable('notification_digest_queue', 
   createdAt: text('created_at').notNull(),
 });
 
+// Issue #1323 — one browser Push API subscription per opaque endpoint. The
+// endpoint is globally unique so signing into a different Campfire account in
+// the same browser transfers that browser subscription instead of notifying two
+// accounts. Encryption keys are the public subscription material produced by
+// PushManager; the VAPID private key remains environment-only.
+export const pushSubscriptions = sqliteTable(
+  'push_subscriptions',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull(),
+    endpoint: text('endpoint').notNull(),
+    p256dh: text('p256dh').notNull(),
+    auth: text('auth').notNull(),
+    userAgent: text('user_agent').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    lastUsedAt: text('last_used_at'),
+  },
+  (t) => ({
+    endpoint: uniqueIndex('idx_push_subscriptions_endpoint').on(t.endpoint),
+    user: index('idx_push_subscriptions_user').on(t.userId),
+  }),
+);
+
 // Issue #789 — dedup ledger for scheduled-session reminders and unanswered-RSVP
 // nudges. One row per (schedule, user, kind) guarantees a reminder/nudge is sent
 // at most once, so a reschedule or a retried sweep never double-sends.

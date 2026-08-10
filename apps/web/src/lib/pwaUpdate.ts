@@ -7,6 +7,7 @@
 
 import { clearApiCache } from './swCache';
 import { canReloadNow } from './reloadGuard';
+import { PUSH_DISPLAY_STATE_CACHE } from './browserPush';
 
 export interface PwaUpdateState {
   needRefresh: boolean;
@@ -127,6 +128,10 @@ export async function clearCacheAndReload(): Promise<boolean> {
     if (typeof globalThis.caches !== 'undefined') {
       const keys = await globalThis.caches.keys();
       for (const key of keys) {
+        // This cache is authorization-transition state, not offline content.
+        // Preserve a failed-detach sentinel across recovery reloads so a retained
+        // PushManager subscription cannot silently bind to another account.
+        if (key === PUSH_DISPLAY_STATE_CACHE) continue;
         await globalThis.caches.delete(key);
       }
     }

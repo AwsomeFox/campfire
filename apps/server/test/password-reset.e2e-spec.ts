@@ -1,4 +1,8 @@
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { pushSubscriptions } from '../src/db/schema';
+import { nowIso } from '../src/common/time';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 /**
@@ -9,7 +13,7 @@ import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './tes
  *   GET  /users/reset-requests admin — list open requests
  *   POST /users/reset-requests/:id/approve admin — mints one-time code (returned once)
  *   DELETE /users/reset-requests/:id admin — dismiss/revoke
- *   POST /auth/reset-confirm   @Public — redeems code, sets password, kills sessions
+ *   POST /auth/reset-confirm   @Public — redeems code, sets password, revokes issued access
  */
 describe('password reset — request/approve/confirm (e2e)', () => {
   let ctx: TestAppContext;
@@ -78,6 +82,17 @@ describe('password reset — request/approve/confirm (e2e)', () => {
 
     const listRes = await adminAgent.get('/api/v1/users/reset-requests');
     const requestId = listRes.body[0].id;
+    const resetUserId = listRes.body[0].userId as number;
+    const db = ctx.app.get<DrizzleDb>(DB);
+    db.insert(pushSubscriptions).values({
+      userId: resetUserId,
+      endpoint: 'https://fcm.googleapis.com/fcm/send/recovery-reset-victim',
+      p256dh: 'public-key',
+      auth: 'auth-secret',
+      userAgent: 'Compromised browser',
+      createdAt: nowIso(),
+      lastUsedAt: null,
+    }).run();
 
     const approveRes = await adminAgent.post(`/api/v1/users/reset-requests/${requestId}/approve`);
     expect(approveRes.status).toBe(201);
@@ -102,6 +117,8 @@ describe('password reset — request/approve/confirm (e2e)', () => {
     const listAfterConfirm = await adminAgent.get('/api/v1/users/reset-requests');
     expect(listAfterConfirm.body).toHaveLength(0);
     expect((await oldSessionAgent.get('/api/v1/me')).status).toBe(401);
+    expect(db.select({ id: pushSubscriptions.id }).from(pushSubscriptions)
+      .where(eq(pushSubscriptions.userId, resetUserId)).all()).toEqual([]);
 
     // Old password no longer works; new one does.
     const oldLogin = await request(server).post('/api/v1/auth/login').send({ username: 'forgetful', password: 'old-password-1' });

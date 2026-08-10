@@ -5151,6 +5151,26 @@ function migrateHiddenStatusNotificationAuthorization2112(sqlite: Database.Datab
   }
 }
 
+/** Issue #1323: durable, user-owned browser Push API subscriptions. */
+function migratePushSubscriptions1323(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      endpoint TEXT NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      user_agent TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      last_used_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint
+      ON push_subscriptions(endpoint);
+    CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user
+      ON push_subscriptions(user_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -5520,6 +5540,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0180_hidden_status_notification_authorization_2112', run: migrateHiddenStatusNotificationAuthorization2112 },
   // #2112 claimed 0180 on main before #810 shipped, so the audit payload uses 0181.
   { name: '0181_audit_payload_json_810', run: migrateAuditLogForPayloadJson810 },
+  { name: '0182_push_subscriptions_1323', run: migratePushSubscriptions1323 },
 ];
 
 /**

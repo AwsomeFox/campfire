@@ -1,9 +1,15 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Inject, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { NotificationsService } from './notifications.service';
-import { BulkNotificationDto, NotificationPreferencesUpdateDto } from './notifications.dto';
+import {
+  BrowserPushSubscriptionDto,
+  BrowserPushUnsubscribeDto,
+  BulkNotificationDto,
+  NotificationPreferencesUpdateDto,
+} from './notifications.dto';
+import { PushNotificationsService } from './push-notifications.service';
 
 /**
  * User-scoped (never campaign-scoped): every route operates on the CALLER's own
@@ -13,7 +19,11 @@ import { BulkNotificationDto, NotificationPreferencesUpdateDto } from './notific
 @ApiTags('notifications')
 @Controller('notifications')
 export class NotificationsController {
-  constructor(private readonly notifications: NotificationsService) {}
+  constructor(
+    private readonly notifications: NotificationsService,
+    @Inject(PushNotificationsService)
+    private readonly push: Pick<PushNotificationsService, 'status' | 'subscribe' | 'unsubscribe'>,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List my notifications', description: 'Own notifications only, newest first, with cursor pagination and filters.' })
@@ -87,6 +97,36 @@ export class NotificationsController {
     return this.notifications.setPreferences(user, campaignId, body);
   }
 
+  @Get('push-status')
+  @ApiOperation({
+    summary: 'Get browser push configuration',
+    description: 'Returns whether Web Push is configured and, when enabled, the public VAPID key. No private key or subscription is exposed.',
+  })
+  @ApiResponse({ status: 200, description: '{ configured, publicKey }' })
+  pushStatus() {
+    return this.push.status();
+  }
+
+  @Post('push-subscribe')
+  @ApiOperation({ summary: 'Subscribe this browser to my notifications' })
+  @ApiResponse({ status: 201, description: 'The public browser-push configuration.' })
+  async subscribePush(
+    @CurrentUser() user: RequestUser,
+    @Body() body: BrowserPushSubscriptionDto,
+  ) {
+    return this.push.subscribe(user, body);
+  }
+
+  @Delete('push-subscribe')
+  @ApiOperation({ summary: 'Unsubscribe this browser from my notifications' })
+  @ApiResponse({ status: 200, description: '{ removed }' })
+  async unsubscribePush(
+    @CurrentUser() user: RequestUser,
+    @Body() body: BrowserPushUnsubscribeDto,
+  ) {
+    return this.push.unsubscribe(user, body.endpoint);
+  }
+
   @Post('mark-read')
   @ApiOperation({ summary: 'Mark selected, campaign, or all notifications read' })
   @ApiResponse({ status: 201, description: '{ updated, updatedIds }' })
@@ -122,4 +162,3 @@ export class NotificationsController {
     return this.notifications.markAllRead(user);
   }
 }
-

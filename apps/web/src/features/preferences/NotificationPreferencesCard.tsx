@@ -23,6 +23,12 @@ import {
   type NotificationPreferences,
 } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import {
+  disableBrowserPush,
+  enableBrowserPush,
+  inspectBrowserPush,
+  type BrowserPushUiState,
+} from '../../lib/browserPush';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, ErrorNote } from '../../components/ui';
 
@@ -56,6 +62,8 @@ export function NotificationPreferencesCard() {
   const [drafts, setDrafts] = useState<NotificationCampaignPreferences[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [savingIds, setSavingIds] = useState<Set<number>>(new Set());
+  const [pushState, setPushState] = useState<BrowserPushUiState>({ kind: 'loading' });
+  const [pushBusy, setPushBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,6 +75,20 @@ export function NotificationPreferencesCard() {
         if (!cancelled) setLoadError(true);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void inspectBrowserPush()
+      .then((state) => {
+        if (!cancelled) setPushState(state);
+      })
+      .catch(() => {
+        if (!cancelled) setPushState({ kind: 'error' });
+      });
     return () => {
       cancelled = true;
     };
@@ -115,6 +137,43 @@ export function NotificationPreferencesCard() {
     }
   }
 
+  async function toggleBrowserPush() {
+    if (pushState.kind !== 'ready') return;
+    setPushBusy(true);
+    try {
+      if (pushState.enabled) {
+        await disableBrowserPush();
+        announce(t('preferences.notifBrowserDisabledAnnouncement'));
+      } else {
+        await enableBrowserPush(pushState.publicKey);
+        announce(t('preferences.notifBrowserEnabledAnnouncement'));
+      }
+      setPushState(await inspectBrowserPush());
+    } catch (error) {
+      announce(error instanceof ApiError || error instanceof Error ? error.message : t('preferences.notifBrowserError'), {
+        assertive: true,
+      });
+      try {
+        setPushState(await inspectBrowserPush());
+      } catch {
+        setPushState({ kind: 'error' });
+      }
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
+  function browserPushStatusText(): string {
+    if (pushState.kind === 'loading') return t('preferences.notifBrowserLoading');
+    if (pushState.kind === 'unsupported') return t('preferences.notifBrowserUnsupported');
+    if (pushState.kind === 'unconfigured') return t('preferences.notifBrowserUnconfigured');
+    if (pushState.kind === 'error') return t('preferences.notifBrowserError');
+    if (pushState.permission === 'denied') return t('preferences.notifBrowserBlocked');
+    return pushState.enabled
+      ? t('preferences.notifBrowserEnabled')
+      : t('preferences.notifBrowserDisabled');
+  }
+
   function isValidTimezone(tz: string): boolean {
     if (!tz.trim()) return false;
     try {
@@ -147,6 +206,33 @@ export function NotificationPreferencesCard() {
     <Card density="compact" elev="sm" data-testid="notification-preferences">
       <span className="card-kicker">{t('preferences.notifTitle')}</span>
       <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>{t('preferences.notifBlurb')}</p>
+
+      <div
+        className="cf-inset"
+        data-testid="browser-push-preference"
+        style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 7 }}
+      >
+        <strong style={{ fontSize: 13.5 }}>{t('preferences.notifBrowserTitle')}</strong>
+        <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+          {t('preferences.notifBrowserBlurb')}
+        </p>
+        <label className="flex items-center gap-2" style={{ fontSize: 13 }}>
+          <input
+            type="checkbox"
+            data-testid="browser-push-toggle"
+            checked={pushState.kind === 'ready' && pushState.enabled}
+            disabled={
+              pushBusy ||
+              pushState.kind !== 'ready' ||
+              (pushState.kind === 'ready' && pushState.permission === 'denied')
+            }
+            onChange={() => void toggleBrowserPush()}
+          />
+          {t('preferences.notifBrowserToggle')}
+        </label>
+        <span className="text-muted" style={{ fontSize: 11.5 }}>{browserPushStatusText()}</span>
+        <span className="text-muted" style={{ fontSize: 11.5 }}>{t('preferences.notifBrowserPrivacy')}</span>
+      </div>
 
       {drafts.length === 0 && (
         <p className="text-muted" style={{ fontSize: 13 }}>{t('preferences.notifNoCampaigns')}</p>
