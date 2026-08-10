@@ -241,20 +241,24 @@ test.describe('storyline form component accessibility', () => {
 
     // The title input and the summary textarea share one line: their vertical spans
     // overlap. In the broken column layout they sat one above the other.
-    const titleBox = (await page.getByRole('textbox', { name: 'New arc title' }).boundingBox())!;
-    const summaryBox = (await page.getByRole('textbox', { name: 'Summary (optional)' }).boundingBox())!;
+    const summary = page.getByRole('textbox', { name: 'Summary (optional)' });
+    await expect(summary).toBeVisible();
+    const titleBox = await page.getByRole('textbox', { name: 'New arc title' }).boundingBox();
+    const summaryBox = await summary.boundingBox();
     expect(titleBox).not.toBeNull();
     expect(summaryBox).not.toBeNull();
     expect(
-      Math.min(titleBox.y + titleBox.height, summaryBox.y + summaryBox.height) -
-        Math.max(titleBox.y, summaryBox.y),
+      Math.min(titleBox!.y + titleBox!.height, summaryBox!.y + summaryBox!.height) -
+        Math.max(titleBox!.y, summaryBox!.y),
       'the arc title and summary must share a row, not stack',
     ).toBeGreaterThan(0);
 
     // A heading in column flow must be as tall as its own text. 180px/150px were the
     // stray flex-bases; a real single-line heading here is well under 60px.
     const arcHeading = page.getByRole('heading', { name: arc.title, exact: true });
-    const arcBox = (await arcHeading.boundingBox())!;
-    expect(arcBox.height, 'the arc heading must size to its text').toBeLessThan(60);
+    await expect(arcHeading).toBeVisible();
+    const arcBox = await arcHeading.boundingBox();
+    expect(arcBox).not.toBeNull();
+    expect(arcBox!.height, 'the arc heading must size to its text').toBeLessThan(60);
   });
 });
