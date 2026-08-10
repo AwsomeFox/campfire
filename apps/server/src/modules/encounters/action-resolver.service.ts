@@ -335,9 +335,10 @@ export class ActionResolverService {
   private targetDefenses(
     row: typeof combatants.$inferSelect,
     damageTypes?: readonly string[],
+    categories?: Readonly<Record<string, readonly string[]>>,
   ): TargetDefenses {
     const data = this.statblockData(row);
-    return damageDefensesFromStatblock(data, damageTypes?.length ? damageTypes : undefined);
+    return damageDefensesFromStatblock(data, damageTypes?.length ? damageTypes : undefined, categories);
   }
 
   /** A target's saving-throw modifier for one ability (character: mod + prof; monster: statblock mod). */
@@ -1045,10 +1046,13 @@ export class ActionResolverService {
     const branch = pickOutcomeBranch(spec, outcome);
     // A closed adapter vocabulary lets the shared parser conservatively exclude
     // qualified Open5e display clauses instead of flattening them into unconditional
-    // resistance during structured action resolution.
+    // resistance during structured action resolution. `damageTypeCategories` (issue #2150)
+    // fans a category token like PF2e's "physical" out to its plain members so the defence
+    // applies to a typed Strike rather than being dropped by canonical parsing.
     const defenses = this.targetDefenses(
       target,
       (adapter as unknown as RuleSystemAdapter).damageTypes,
+      (adapter as unknown as RuleSystemAdapter).damageTypeCategories,
     );
     if (branch) {
       // Save-for-half: a branch flagged halfDamage with NO damage of its own borrows the

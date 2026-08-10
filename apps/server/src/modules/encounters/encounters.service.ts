@@ -1289,6 +1289,7 @@ export class EncountersService {
     row: typeof combatants.$inferSelect,
     damageTypes: readonly string[] | undefined,
     db: SyncDb = this.db,
+    categories?: Readonly<Record<string, readonly string[]>>,
   ): TargetDefenses {
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
     const encounter = db
@@ -1305,7 +1306,7 @@ export class EncountersService {
       .where(and(eq(ruleEntries.id, row.ruleEntryId), campaignScope))
       .get();
     const data = entry ? fromJsonText<Record<string, unknown>>(entry.dataJson, {}) : {};
-    return damageDefensesFromStatblock(data, damageTypes);
+    return damageDefensesFromStatblock(data, damageTypes, categories);
   }
 
   /** Batch-load compendium statblocks for boss-action detection (issue #618). */
@@ -5952,6 +5953,7 @@ export class EncountersService {
                     fresh,
                     adapter.damageTypes?.length ? adapter.damageTypes : undefined,
                     tx,
+                    adapter.damageTypeCategories,
                   )
                 : { resistances: [], vulnerabilities: [], immunities: [] },
               { half: patch.saveOutcome === 'half' },

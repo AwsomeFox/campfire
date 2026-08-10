@@ -959,14 +959,18 @@ describe('PF2e derived attacks (#2144)', () => {
     expect(deriveEquippedItemAction({ itemName: 'Shortbow', data: propulsive, character: weak, adapter: pf2e })!.damage).toBe('1d6 piercing');
   });
 
-  it('does not gain 5e\'s closed-vocabulary damage-type check', () => {
-    // `Pf2eAdapter` deliberately declares no `damageTypes` — see the comment on the adapter for
-    // why a closed PF2e vocabulary is an encounter-damage change, not an equipment one. So the
-    // length bound is the only gate here, exactly as it was before #2144, and this pins that
-    // rather than leaving it to be assumed.
+  it('now gains the same closed-vocabulary damage-type check 5e has (#2150)', () => {
+    // `Pf2eAdapter` declares its `damageTypes` vocabulary (#2150), so the derivation gates a
+    // resolvable spec's damage type exactly the way 5e does — a "Slashing damage" the length
+    // bound once waved through now degrades to text-only, because defenses match by EXACT
+    // lowercased type and this token would sail past a slashing resistance untouched.
     const odd = { ...pf2eLongsword, damageType: ['Slashing damage'] };
-    const action = deriveEquippedItemAction({ itemName: 'Longsword', data: odd, character: pf2eFighter, adapter: pf2e })!;
-    expect(isResolvableSpec(action.spec)).toBe(true);
+    const oddAction = deriveEquippedItemAction({ itemName: 'Longsword', data: odd, character: pf2eFighter, adapter: pf2e })!;
+    expect(isResolvableSpec(oddAction.spec)).toBe(false);
+    // A canonical PF2e type still resolves case-insensitively.
+    const clean = deriveEquippedItemAction({ itemName: 'Longsword', data: pf2eLongsword, character: pf2eFighter, adapter: pf2e })!;
+    expect(isResolvableSpec(clean.spec)).toBe(true);
+    expect(clean.damage).toContain('slashing');
   });
 
   it('adds nothing for a weapon the PF2e sheet records no training in', () => {
