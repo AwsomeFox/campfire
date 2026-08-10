@@ -174,6 +174,28 @@ const EQUIPMENT = [
     source: ['Pathfinder Player Core'],
     license: 'ORC',
   },
+  // A magic weapon, shaped exactly as AoN serves one (issue #2144): shelved under Weapons,
+  // naming the base weapon it is built on, and stating NO damage of its own. 424 of the live
+  // PF2e Weapons rows look like this, so an importer that keeps only what the row itself says
+  // leaves most of the system's actual weapons with no attack to derive.
+  {
+    id: 'smoking-sword',
+    name: 'Smoking Sword',
+    type: 'Item',
+    level: 3,
+    price: 6000,
+    price_raw: '60 gp',
+    bulk: 1,
+    bulk_raw: '1',
+    category: 'equipment',
+    item_category: 'Weapons',
+    rarity: 'common',
+    base_item: ['Longsword'],
+    trait: ['Evocation', 'Fire', 'Magical'],
+    text: "Smoke constantly belches from this +1 magic longsword. Any hit with this sword deals 1 extra fire damage.",
+    source: ['Pathfinder Beginner Box'],
+    license: 'ORC',
+  },
 ];
 
 const FEATS = [

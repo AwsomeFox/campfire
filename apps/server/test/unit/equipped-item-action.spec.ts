@@ -1,4 +1,15 @@
-import { CharacterAction, deriveEquippedItemAction, DND5E_DAMAGE_TYPES, isResolvableSpec, rebuildEditedActionSpec, type ItemActionAdapter } from '@campfire/schema';
+import {
+  CharacterAction,
+  deriveEquippedItemAction,
+  Dnd5eAdapter,
+  DND5E_DAMAGE_TYPES,
+  equippedActionHasContent,
+  isResolvableSpec,
+  Pf2eAdapter,
+  rebuildEditedActionSpec,
+  StarfinderAdapter,
+  type ItemActionAdapter,
+} from '@campfire/schema';
 
 /**
  * Issue #2097 — deriving an equipped item's attack from its compendium data.
@@ -8,12 +19,17 @@ import { CharacterAction, deriveEquippedItemAction, DND5E_DAMAGE_TYPES, isResolv
  * numbers, so every input it cannot read confidently has to produce a row that says so
  * instead of a plausible one.
  */
-const dnd5e: ItemActionAdapter = {
-  id: 'dnd5e',
-  abilityModifier: (score) => Math.floor((score - 10) / 2),
-  damageTypes: DND5E_DAMAGE_TYPES,
-};
-const pf2e: ItemActionAdapter = { id: 'pf2e', abilityModifier: (score) => Math.floor((score - 10) / 2) };
+// The REAL adapters, not hand-rolled doubles (issue #2144). What a system's derivation does
+// now depends on which optional hooks its adapter declares, so a double is exactly the wrong
+// thing here: it would let the production adapter drop `weaponProficiencyBonus` — silently
+// turning every weapon in that system text-only — while this suite went on proving the maths
+// against a stand-in that still had it.
+const dnd5e: ItemActionAdapter = Dnd5eAdapter;
+const pf2e: ItemActionAdapter = Pf2eAdapter;
+// Starfinder 1e computes to-hit from a per-class BAB table and `Character.className` is free
+// text, so its adapter declares no proficiency curve — the standing example of a system that
+// gets an action with a real damage line and no derived to-hit.
+const noAttackMath: ItemActionAdapter = StarfinderAdapter;
 
 /** An Open5e weapon row as the #2096 importer stores it. */
 function open5eWeapon(over: Record<string, unknown> = {}) {
@@ -29,8 +45,14 @@ function open5eWeapon(over: Record<string, unknown> = {}) {
   };
 }
 
-const fighter = { stats: { STR: 16, DEX: 12 }, level: 5 }; // STR +3, DEX +1, proficiency +3
-const rogue = { stats: { STR: 8, DEX: 18 }, level: 1 }; // STR -1, DEX +4, proficiency +2
+// Weapon training is now READ from the sheet rather than assumed (issue #2144), so these
+// fixtures record it. `martial` covers every open5eWeapon() below (`isSimple: false`); the
+// untrained cases get their own fixture rather than being the accidental default.
+const TRAINED_IN_EVERYTHING = { simple: 'proficient', martial: 'proficient' } as const;
+const fighter = { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: TRAINED_IN_EVERYTHING }; // STR +3, DEX +1, proficiency +3
+const rogue = { stats: { STR: 8, DEX: 18 }, level: 1, weaponProficiencies: TRAINED_IN_EVERYTHING }; // STR -1, DEX +4, proficiency +2
+/** Same fighter, no training recorded — the case the old assumed-proficiency default hid. */
+const untrainedFighter = { stats: { STR: 16, DEX: 12 }, level: 5 };
 
 describe('deriveEquippedItemAction (#2097)', () => {
   describe('5e attack math', () => {
@@ -128,13 +150,54 @@ describe('deriveEquippedItemAction (#2097)', () => {
       }
     });
 
-    it('states the proficiency assumption in the action itself', () => {
-      // Campfire's Character carries no weapon-proficiency data, so proficiency is an assumed
-      // default. It has to be visible to whoever reads the row, not buried in a commit message.
+    it('shows the rank it read, and its whole breakdown', () => {
+      // The breakdown has to be visible to whoever reads the row: it is the only way to tell a
+      // to-hit that is wrong because the sheet is wrong from one that is wrong because the
+      // derivation is. Issue #2144 replaced the old "assumes proficiency" wording with the
+      // rank actually read off the sheet.
       const action = deriveEquippedItemAction({ itemName: 'Longsword', data: open5eWeapon(), character: fighter, adapter: dnd5e });
-      expect(action!.notes.toLowerCase()).toContain('assumes proficiency');
       expect(action!.notes).toContain('STR +3');
-      expect(action!.notes).toContain('proficiency +3');
+      expect(action!.notes).toContain('trained +3');
+      expect(action!.notes.toLowerCase()).not.toContain('assumes proficiency');
+    });
+
+    it('adds NO proficiency for a weapon the sheet records no training in', () => {
+      // The case the old assumption was silently wrong about, and the whole reason
+      // `Character.weaponProficiencies` exists (issue #2144). STR +3 and nothing else.
+      const action = deriveEquippedItemAction({
+        itemName: 'Longsword',
+        data: open5eWeapon(),
+        character: untrainedFighter,
+        adapter: dnd5e,
+      })!;
+      expect(action.toHit).toBe('+3');
+      // …and it says so, because a missing proficiency term reads as a bug unless explained.
+      expect(action.notes).toContain('untrained +0');
+      expect(action.notes.toLowerCase()).toContain('no training with this weapon is recorded');
+    });
+
+    it('matches training by the weapon name as well as by category', () => {
+      // An Elf trained with the longsword specifically, and nothing else — the by-name half of
+      // the lookup. Categories and names compose; neither shadows the other.
+      const action = deriveEquippedItemAction({
+        itemName: 'Longsword',
+        data: open5eWeapon(),
+        character: { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { Longsword: 'proficient' } },
+        adapter: dnd5e,
+      })!;
+      expect(action.toHit).toBe('+6');
+    });
+
+    it("takes the BEST of the weapon's own rank and its category's", () => {
+      const action = deriveEquippedItemAction({
+        itemName: 'Longsword',
+        data: open5eWeapon(),
+        character: { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { martial: 'trained', longsword: 'master' } },
+        adapter: dnd5e,
+      })!;
+      // 5e prices every trained rung the same (+3 here), so the assertion that bites is the
+      // note: the higher rank is the one that was read.
+      expect(action.notes).toContain('master +3');
     });
 
     it('omits the modifier from the damage expression when it is zero', () => {
@@ -271,7 +334,11 @@ describe('deriveEquippedItemAction (#2097)', () => {
     it('still derives for an adapter that declares no damage vocabulary', () => {
       // Nothing to check against, so the length bound stays the only gate — a system that has
       // not declared its vocabulary must not be silently downgraded to text-only.
-      const noVocab: ItemActionAdapter = { id: 'dnd5e', abilityModifier: (s2) => Math.floor((s2 - 10) / 2) };
+      const noVocab: ItemActionAdapter = {
+        id: 'dnd5e',
+        abilityModifier: (s2) => Math.floor((s2 - 10) / 2),
+        weaponProficiencyBonus: Dnd5eAdapter.weaponProficiencyBonus,
+      };
       const action = deriveEquippedItemAction({
         itemName: 'Homebrew Blade',
         data: open5eWeapon({ damageType: 'ichor' }),
@@ -295,11 +362,14 @@ describe('deriveEquippedItemAction (#2097)', () => {
     });
 
     it('does not compute a to-hit for a rule system it has no attack math for', () => {
+      // Gated on the ADAPTER declaring a proficiency curve, not on its id (issue #2144).
+      // Starfinder 1e computes from a per-class BAB table there is nothing on the sheet to
+      // look up, so it declares none and its weapons stay honestly unfinished.
       const action = deriveEquippedItemAction({
-        itemName: 'Longsword',
-        data: open5eWeapon(),
+        itemName: 'Pulsecaster',
+        data: { damage: '1d6', damageType: 'Electricity', range: 30, category: 'Weapon' },
         character: fighter,
-        adapter: pf2e,
+        adapter: noAttackMath,
       });
       expect(action).not.toBeNull();
       expect(action!.toHit).toBe('');
@@ -344,7 +414,10 @@ describe('deriveEquippedItemAction (#2097)', () => {
       const action = deriveEquippedItemAction({
         itemName: 'Pulsecaster Pistol',
         data: { category: 'weapon', damage: '1d4', damageType: 'fire', range: 30 },
-        character: fighter,
+        // A bare `category: 'weapon'` names no trainable category — it says "this is a weapon",
+        // which is what got it an action row at all, not what KIND of weapon it is. Training
+        // for a row like that has to be recorded against the weapon itself.
+        character: { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { 'pulsecaster pistol': 'trained' } },
         adapter: dnd5e,
       });
       expect(action).not.toBeNull();
@@ -698,7 +771,9 @@ describe('text-only actions still carry their damage line (#2097 review, Copilot
       itemName: 'Longsword',
       data: { itemKind: 'weapon', damageDice: '1d8', damageType: 'Slashing', properties: [] },
       character: fighter,
-      adapter: pf2e,
+      // A system with no declared proficiency curve — PF2e used to be one, and got its own
+      // maths in #2144, so the standing example is now Starfinder 1e.
+      adapter: noAttackMath,
     })!;
     // Action lists render `damage` prominently; leaving it empty hid real, sourced data.
     expect(action.damage).toBe('1d8 slashing');
@@ -715,5 +790,232 @@ describe('text-only actions still carry their damage line (#2097 review, Copilot
     })!;
     expect(action.damage).toBe('0 bludgeoning');
     expect(isResolvableSpec(action.spec)).toBe(false);
+  });
+});
+
+/**
+ * Issue #2144 — an item that its own compendium data calls a weapon always grants an attack
+ * row, even when the numbers are missing.
+ *
+ * #2097 derived nothing at all from such an item, which on a character sheet is
+ * indistinguishable from the feature not existing. The three sources this covers all reach
+ * that state honestly: an Open5e magic weapon whose base weapon the SRD does not name, a
+ * PF2e/SF2e weapon acquired before its importer learned to keep `damage`, and any item
+ * acquired before #2144 whose accepted snapshot therefore has no stats in it.
+ */
+describe('deriveEquippedItemAction: an item that declares itself a weapon (#2144)', () => {
+  it('derives a real attack from a magic weapon carrying its base weapon', () => {
+    const action = deriveEquippedItemAction({
+      itemName: 'Longsword (+1)',
+      // As mapMagicItem now stores it: the magic-item shelf plus the nested base weapon.
+      data: { category: 'Weapon', rarity: 'Uncommon', requiresAttunement: false, ...open5eWeapon() },
+      character: fighter,
+      adapter: dnd5e,
+    })!;
+    expect(action.toHit).toBe('+6');
+    expect(action.damage).toBe('1d8+3 slashing');
+    expect(isResolvableSpec(action.spec)).toBe(true);
+  });
+
+  it('still grants a text-only attack when the weapon carries no numbers', () => {
+    const action = deriveEquippedItemAction({
+      itemName: '+1 Weapon',
+      data: { category: 'Weapon', rarity: 'Uncommon', requiresAttunement: false },
+      character: fighter,
+      adapter: dnd5e,
+    })!;
+    expect(action).not.toBeNull();
+    expect(action.kind).toBe('attack');
+    expect(action.notes).toMatch(/fill it in/i);
+    // The point of the row is that it is visibly unfinished, never plausibly wrong.
+    expect(isResolvableSpec(action.spec)).toBe(false);
+    expect(action.toHit).toBe('');
+  });
+
+  it("reads PF2e/SF2e's own vocabulary for a weapon with no numbers", () => {
+    // An Archives of Nethys weapon acquired before #2103 taught the importer to keep
+    // `damage`: the shelf and the weapon-only fields are all that survived, and they are
+    // enough to know an attack row belongs here.
+    const stale = deriveEquippedItemAction({
+      itemName: 'Pulsecaster Pistol',
+      data: { level: 0, bulk: 1, category: 'weapon', rarity: 'common', weaponCategory: 'Simple', weaponGroup: 'Shock' },
+      character: fighter,
+      adapter: pf2e,
+    })!;
+    expect(stale).not.toBeNull();
+    expect(stale.kind).toBe('attack');
+    expect(stale.toHit).toBe('');
+  });
+
+  it('derives nothing from armor or from an ordinary object', () => {
+    // The common case, and it has to stay silent: an attack row on every backpack would be
+    // worse than the missing row this whole change is about.
+    for (const data of [
+      { itemKind: 'armor', armorCategory: 'heavy', acBase: 16 },
+      { category: 'Armor', rarity: 'Uncommon' },
+      { category: 'Wondrous Item', rarity: 'Uncommon' },
+      { level: 1, bulk: 'L', category: 'equipment' },
+      {},
+    ]) {
+      expect(deriveEquippedItemAction({ itemName: 'Thing', data, character: fighter, adapter: dnd5e })).toBeNull();
+    }
+  });
+});
+
+/**
+ * Issue #2144 — the editor's blank draft is not an authored action.
+ *
+ * `CharacterAction` needs only a name, so "open the action editor, save without typing"
+ * produced a valid row that showed nothing, rolled nothing, and suppressed the derived attack
+ * the weapon had been granting — the one thing worse than no editor.
+ */
+describe('equippedActionHasContent (#2144)', () => {
+  it('rejects an action that says nothing beyond its own name', () => {
+    expect(equippedActionHasContent(CharacterAction.parse({ name: 'Longsword' }))).toBe(false);
+    expect(equippedActionHasContent(CharacterAction.parse({ name: 'Longsword', toHit: '   ', notes: '  ' }))).toBe(false);
+    expect(equippedActionHasContent(null)).toBe(false);
+    expect(equippedActionHasContent(undefined)).toBe(false);
+  });
+
+  it('accepts anything a human actually filled in', () => {
+    expect(equippedActionHasContent(CharacterAction.parse({ name: 'Longsword', toHit: '+6' }))).toBe(true);
+    expect(equippedActionHasContent(CharacterAction.parse({ name: 'Longsword', damage: '1d8+3 slashing' }))).toBe(true);
+    expect(equippedActionHasContent(CharacterAction.parse({ name: 'Shove', notes: 'Athletics contest' }))).toBe(true);
+    // A rich MCP-authored action can legitimately carry only a spec and a name.
+    const spec = rebuildEditedActionSpec(
+      CharacterAction.parse({ name: 'Longsword', toHit: '+6', damage: '1d8+3 slashing' }),
+      'dnd5e',
+      DND5E_DAMAGE_TYPES,
+    ).spec;
+    expect(equippedActionHasContent(CharacterAction.parse({ name: 'Longsword', spec }))).toBe(true);
+  });
+});
+
+/**
+ * Issue #2144 — PF2e gets a derived to-hit.
+ *
+ * It always could have: `pf2eProficiencyBonus` has been in the adapter since #415. What kept
+ * Pathfinder weapons showing a damage line and a blank attack bonus was an `adapter.id !==
+ * 'dnd5e'` gate plus a sheet with nowhere to record which weapons the character is trained in.
+ *
+ * Three things here are PF2e's and NOT 5e's, and each is a way this could have been silently
+ * wrong: proficiency adds your LEVEL, the rank spans +2 to +8, and a ranged Strike adds no
+ * ability modifier to damage at all.
+ */
+describe('PF2e derived attacks (#2144)', () => {
+  /** An AoN longsword as the importer stores it: martial, melee, damage packed as "1d8 S". */
+  const pf2eLongsword = {
+    level: 0,
+    category: 'weapon',
+    itemCategory: 'Weapons',
+    damage: '1d8 S',
+    damageType: ['Slashing'],
+    weaponCategory: 'Martial',
+    weaponGroup: 'Sword',
+    weaponType: 'Melee',
+    traits: ['Versatile P'],
+  };
+
+  const pf2eFighter = { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { martial: 'expert', simple: 'trained' } };
+
+  it('adds level plus the rank bonus, not a fixed proficiency', () => {
+    const action = deriveEquippedItemAction({ itemName: 'Longsword', data: pf2eLongsword, character: pf2eFighter, adapter: pf2e })!;
+    // STR +3, plus expert at level 5 = 5 + 4. 5e would have said +6 for the same sheet.
+    expect(action.toHit).toBe('+12');
+    expect(action.notes).toContain('expert +9');
+    expect(isResolvableSpec(action.spec)).toBe(true);
+  });
+
+  it("strips AoN's damage-type abbreviation out of the dice string", () => {
+    // `"1d8 S"` is dice + the type's initial. Left in, it fails every rollable-dice check and
+    // the weapon degrades to a text-only row — which is what happened even once #2103 kept
+    // the stats. The type comes from `damage_type`, which is unambiguous.
+    const action = deriveEquippedItemAction({ itemName: 'Longsword', data: pf2eLongsword, character: pf2eFighter, adapter: pf2e })!;
+    expect(action.damage).toBe('1d8+3 slashing');
+  });
+
+  it('adds no ability modifier to a ranged Strike\'s damage', () => {
+    // Player Core, "Damage": a ranged Strike adds nothing unless Propulsive or Thrown. 5e's
+    // rule — the same modifier that hit also adds to damage — would hand every bow in the
+    // game its wielder's Dexterity, on every hit, and the number would look plausible.
+    const pistol = { ...pf2eLongsword, damage: '1d6 E', damageType: ['Electricity'], weaponCategory: 'Simple', weaponType: 'Ranged', traits: [] };
+    const action = deriveEquippedItemAction({ itemName: 'Pulsecaster Pistol', data: pistol, character: pf2eFighter, adapter: pf2e })!;
+    // DEX +1 plus trained at level 5 (5 + 2) on the attack…
+    expect(action.toHit).toBe('+8');
+    // …and a bare die for damage.
+    expect(action.damage).toBe('1d6 electricity');
+  });
+
+  it('gives a Thrown weapon full Strength on damage and a Propulsive one half', () => {
+    const thrown = { ...pf2eLongsword, damage: '1d6 P', damageType: ['Piercing'], weaponType: 'Ranged', traits: ['Thrown'] };
+    expect(deriveEquippedItemAction({ itemName: 'Javelin', data: thrown, character: pf2eFighter, adapter: pf2e })!.damage).toBe('1d6+3 piercing');
+
+    const propulsive = { ...thrown, traits: ['Propulsive'] };
+    // Half of STR +3, rounded down.
+    expect(deriveEquippedItemAction({ itemName: 'Shortbow', data: propulsive, character: pf2eFighter, adapter: pf2e })!.damage).toBe('1d6+1 piercing');
+
+    // …and a Propulsive weapon never punishes a weak archer: a negative Strength adds nothing.
+    const weak = { stats: { STR: 6, DEX: 18 }, level: 5, weaponProficiencies: { martial: 'trained' } };
+    expect(deriveEquippedItemAction({ itemName: 'Shortbow', data: propulsive, character: weak, adapter: pf2e })!.damage).toBe('1d6 piercing');
+  });
+
+  it('does not gain 5e\'s closed-vocabulary damage-type check', () => {
+    // `Pf2eAdapter` deliberately declares no `damageTypes` — see the comment on the adapter for
+    // why a closed PF2e vocabulary is an encounter-damage change, not an equipment one. So the
+    // length bound is the only gate here, exactly as it was before #2144, and this pins that
+    // rather than leaving it to be assumed.
+    const odd = { ...pf2eLongsword, damageType: ['Slashing damage'] };
+    const action = deriveEquippedItemAction({ itemName: 'Longsword', data: odd, character: pf2eFighter, adapter: pf2e })!;
+    expect(isResolvableSpec(action.spec)).toBe(true);
+  });
+
+  it('adds nothing for a weapon the PF2e sheet records no training in', () => {
+    const untrained = { stats: { STR: 16, DEX: 12 }, level: 5 };
+    const action = deriveEquippedItemAction({ itemName: 'Longsword', data: pf2eLongsword, character: untrained, adapter: pf2e })!;
+    // PF2e untrained is a flat +0 — you do not even add your level (Player Core,
+    // "Proficiency"), so this is STR alone and the level term is absent entirely.
+    expect(action.toHit).toBe('+3');
+    expect(action.notes).toContain('untrained +0');
+  });
+});
+
+/**
+ * Issue #2144 review — the two ways a real proficiency entry failed to match the weapon it
+ * was written for. Both were invisible: the attack still derived, just without its bonus.
+ */
+describe('proficiency matching against the weapon (#2144 review)', () => {
+  it("matches a magic weapon by the BASE weapon it is built on", () => {
+    // chatgpt-codex-connector P2: a magic weapon's inventory name is never its base weapon's,
+    // so a character trained in `Longsword` by name read as untrained with a Longsword (+1) —
+    // the very weapon they specialise in. Open5e embeds the base item; PF2e names it.
+    const magic = { ...open5eWeapon(), baseItem: 'Longsword' };
+    const byName = { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { Longsword: 'proficient' } };
+    const action = deriveEquippedItemAction({ itemName: 'Longsword (+1)', data: magic, character: byName, adapter: dnd5e })!;
+    expect(action.toHit).toBe('+6');
+
+    // …and the base name is a NAME, not a free pass: an unrelated weapon still gets nothing.
+    const other = deriveEquippedItemAction({ itemName: 'Greatsword', data: open5eWeapon(), character: byName, adapter: dnd5e })!;
+    expect(other.toHit).toBe('+3');
+  });
+
+  it("matches D&D Beyond's split martial-melee / martial-ranged categories", () => {
+    // chatgpt-codex-connector P2: DDB grants `martial-melee-weapons`, stored as `martial
+    // melee`, and no weapon used to emit that key — so the proficiency matched nothing at all.
+    const melee = { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { 'martial melee': 'proficient' } };
+    const longsword = deriveEquippedItemAction({ itemName: 'Longsword', data: open5eWeapon(), character: melee, adapter: dnd5e })!;
+    expect(longsword.toHit).toBe('+6');
+
+    // …and it stays a SPLIT grant: a martial RANGED weapon is not covered by it. Collapsing
+    // the split to a bare `martial` would have over-granted exactly here.
+    const longbow = open5eWeapon({
+      damageType: 'Piercing',
+      properties: [{ name: 'Ammunition', type: null, detail: null }],
+    });
+    const bow = deriveEquippedItemAction({ itemName: 'Longbow', data: longbow, character: melee, adapter: dnd5e })!;
+    expect(bow.toHit).toBe('+1'); // DEX +1, no proficiency
+
+    // The broad category still covers both halves.
+    const broad = { stats: { STR: 16, DEX: 12 }, level: 5, weaponProficiencies: { martial: 'proficient' } };
+    expect(deriveEquippedItemAction({ itemName: 'Longbow', data: longbow, character: broad, adapter: dnd5e })!.toHit).toBe('+4');
   });
 });

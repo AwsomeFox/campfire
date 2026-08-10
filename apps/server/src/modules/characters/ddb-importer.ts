@@ -534,6 +534,42 @@ function computeSkills(mods: DdbModifier[]): Record<string, 'proficient' | 'expe
   return skills;
 }
 
+/**
+ * Weapon training from `proficiency`-type `*-weapons` modifiers (issue #2144).
+ *
+ * D&D Beyond expresses weapon proficiency the same way it expresses skills and saves — a
+ * modifier whose subType names what the character is proficient with: `simple-weapons`,
+ * `martial-weapons`, and the melee/ranged splits some subclasses grant. Those go straight onto
+ * the sheet, so an imported Fighter's equipped longsword derives its +proficiency instead of
+ * arriving untrained.
+ *
+ * Only CATEGORY proficiencies are read. DDB also grants named-weapon proficiencies (an Elf's
+ * longsword, a Rogue's hand crossbow) as a bare subType with no distinguishing suffix —
+ * `longsword` sits in the same list as `thieves-tools`, `vehicles-land` and `dwarvish` — so
+ * collecting them means either an SRD weapon allowlist this importer does not have or
+ * importing tool and language proficiencies as weapons. Categories cover how nearly every 5e
+ * character is armed; a named exception is one entry a player adds on the sheet, and an entry
+ * that is missing costs a visible +0 the action's own notes explain, not a silent wrong number.
+ *
+ * The SPLIT forms DDB also publishes (`martial-melee-weapons`) are stored as the spaced
+ * `martial melee`, which `categoryKeys` in the derivation emits alongside the broad `martial`
+ * for every melee martial weapon — so the two halves meet (issue #2144 review,
+ * chatgpt-codex-connector P2). Storing only `martial` here instead would have been wrong in
+ * the other direction: it would grant a martial-MELEE proficiency to longbows too.
+ */
+function computeWeaponProficiencies(mods: DdbModifier[]): Record<string, 'proficient'> {
+  const out: Record<string, 'proficient'> = {};
+  for (const m of mods) {
+    if (m.type !== 'proficiency' || typeof m.subType !== 'string') continue;
+    if (!m.subType.endsWith('-weapons')) continue;
+    // `simple-weapons` -> "simple"; `martial-melee-weapons` -> "martial melee". Stored as the
+    // spaced form the sheet's own control offers, and matched case-insensitively either way.
+    const category = m.subType.slice(0, -'-weapons'.length).split('-').filter(Boolean).join(' ');
+    if (category) out[category] = 'proficient';
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Combat payload (issue #1903) — attacks, spells, spell slots.
 //
@@ -1433,6 +1469,7 @@ export function mapDdbCharacter(data: DdbCharacterData): CharacterCreateInput {
     hpCurrent,
     saveProficiencies: computeSaveProficiencies(mods),
     skills: computeSkills(mods),
+    weaponProficiencies: computeWeaponProficiencies(mods),
     actions,
     spellSlots,
     portraitUrl: portraitUrl ? String(portraitUrl) : null,

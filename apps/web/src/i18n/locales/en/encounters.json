@@ -2,6 +2,7 @@
   "encounters": {
     "title": "Encounters",
     "combatLogHeading": "Combat log",
+    "tableSetup": "Table setup",
     "actions": {
       "title": "Actions",
       "use": "Use",
@@ -255,6 +256,19 @@
         "overSpeed": "over speed",
         "movedMessage": "Moved {{feet}} {{unit}}.",
         "undoneMessage": "Move undone."
+      },
+      "setup": "Map setup",
+      "fog": {
+        "undo": "Undo",
+        "redo": "Redo"
+      },
+      "manage": {
+        "title": "Manage tokens",
+        "select": "Select",
+        "arrange": "Arrange",
+        "formations": "Formations",
+        "selectedTokens": "Selected tokens",
+        "selectedTokenList": "Selected token list"
       }
     },
     "workspace": {

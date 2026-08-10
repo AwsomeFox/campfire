@@ -39,6 +39,15 @@ import type { RuleEntryType } from '@campfire/schema';
  *     (issue #2096). Weapon `damage_dice` is not reliably a dice expression (the
  *     SRD Net arrives as "0") and `range` is 0/0 for melee but a real 20/60 for a
  *     thrown melee weapon, so neither field is interpreted here.
+ *   - A magicitem row EMBEDS the base item it is built on: `weapon` (550 of the
+ *     2.3k rows are category "Weapon"; 521 carry the block) and `armor` (131 and
+ *     124) hold exactly the stat objects `/v2/weapons/` and `/v2/armor/` publish
+ *     at top level — verified live 2026-08-09. A Longsword (+1) is a 1d8 slashing
+ *     weapon and the API says so; dropping the block left every magic weapon in
+ *     the compendium with no damage at all, which is the whole reason equipping
+ *     one granted no attack (issue #2144). The nested block omits `range` /
+ *     `long_range`, so a magic weapon's ranged-ness is read from its Ammunition
+ *     property alone — which is what the derivation already relies on.
  *   - License isn't per-entry; it's derived from `document.licenses[].name`
  *     (documents endpoint) or, more simply, from the known SRD/CC-BY-4.0
  *     baseline license all `results[].document` entries carry via their own
@@ -49,7 +58,11 @@ import type { RuleEntryType } from '@campfire/schema';
 
 export const OPEN5E_DEFAULT_BASE_URL = 'https://api.open5e.com/v2';
 /** Importer schema revision. Reinstalling an older pack deterministically refreshes its rows. */
-export const OPEN5E_PACK_VERSION = 'open5e-v2-creature-rolls-1';
+// Both sides of the #2144/#2138 merge bumped this, for different reasons (magic items now
+// keep their nested weapon/armor stats; creatures now carry rolls). One combined value, since
+// what matters is only that it DIFFERS from any previously shipped revision — an install
+// holding either predecessor re-imports and picks up both changes.
+export const OPEN5E_PACK_VERSION = 'open5e-v2-creature-rolls-gear-2';
 export const MAX_ENTRIES_PER_SECTION = 2000;
 // Live sections are large: creatures ~3.5k, magicitems ~2.3k, spells ~2k entries
 // (verified against api.open5e.com 2026-07). Open5e's DRF pagination honours large
@@ -468,17 +481,59 @@ export function mapCreature(row: Record<string, unknown>): ImportedEntry {
   };
 }
 
-function mapMagicItem(row: Record<string, unknown>): ImportedEntry {
+/**
+ * Magic items from `/v2/magicitems/`, including the base weapon or armour they are built on
+ * (issue #2144).
+ *
+ * A magic weapon row nests the complete `/v2/weapons/` stat object under `weapon` (and a
+ * magic armour row nests `/v2/armor/`'s under `armor`), naming the base item it modifies:
+ * Longsword (+1) embeds the Longsword's 1d8 slashing, Greatsword of Sharpness embeds 2d6.
+ * Keeping only `{category, rarity, requiresAttunement}` threw all of it away, so every magic
+ * weapon in the compendium arrived with no damage — and equipping one derived no attack, the
+ * symptom #2097 was supposed to have fixed. These are exactly the weapons a DM hands out, so
+ * in practice it was most of them.
+ *
+ * `category` ("Weapon") stays as upstream's magic-item shelf and is NOT conflated with the
+ * `itemKind` discriminator the nested block contributes; a row with no nested block keeps
+ * `category` alone, which is still enough for a consumer to know it is a weapon it cannot
+ * price out (the SRD's generic "+1 Weapon" is one).
+ */
+export function mapMagicItem(row: Record<string, unknown>): ImportedEntry {
   const category = nestedName(row.category);
   const rarity = nestedName(row.rarity);
   const desc = asString(row.desc);
+  const weapon = asRecord(row.weapon);
+  const armor = weapon ? null : asRecord(row.armor);
+  const base = weapon ? weaponFacts(weapon) : armor ? armorFacts(armor) : null;
+  const baseName = nestedName(weapon ?? armor ?? null);
+  const statLines = base
+    ? (base.itemKind === 'weapon' ? weaponBodyLines(base) : armorBodyLines(base)).concat(
+        baseName ? `**Base item:** ${baseName}` : [],
+      )
+    : [];
   return {
     slug: asString(row.key) || asString(row.name),
     name: asString(row.name),
     type: 'item',
-    summary: truncate([category, rarity].filter(Boolean).join(' · ') || desc, 300),
-    body: desc,
-    dataJson: JSON.stringify({ category, rarity, requiresAttunement: row.requires_attunement ?? null }),
+    summary: truncate(
+      [category, rarity, base?.itemKind === 'weapon' ? weaponDamageLine(base) : (base?.acDisplay ?? '')]
+        .filter(Boolean)
+        .join(' · ') || desc,
+      300,
+    ),
+    // Stats first, then upstream's prose: the prose describes what the magic does, and reads
+    // as an answer to the stat block rather than a replacement for it.
+    body: [...statLines, desc].filter(Boolean).join('\n\n'),
+    // `baseItem` is the NAME of the weapon/armour this magic item is built on ("Longsword" for
+    // a Longsword (+1)). Kept because a character trained in that weapon by name is trained in
+    // the magic version of it, and the item's own name never says so (issue #2144 review).
+    dataJson: JSON.stringify({
+      category,
+      rarity,
+      requiresAttunement: row.requires_attunement ?? null,
+      ...base,
+      ...(baseName ? { baseItem: baseName } : {}),
+    }),
     license: licenseOf(row),
     source: sourceOf(row),
   };
@@ -526,53 +581,18 @@ function weaponProperties(v: unknown): Array<{ name: string; type: string | null
  * pretend otherwise.
  */
 export function mapWeapon(row: Record<string, unknown>): ImportedEntry {
-  const damageDice = asString(row.damage_dice);
-  const damageType = nestedName(row.damage_type);
-  const properties = weaponProperties(row.properties);
-  const isSimple = typeof row.is_simple === 'boolean' ? row.is_simple : null;
-  const range = numberOrNull(row.range);
-  const longRange = numberOrNull(row.long_range);
-  const distanceUnit = asString(row.distance_unit);
-  const physical = properties.filter((p) => p.type !== 'Mastery');
-  const masteries = properties.filter((p) => p.type === 'Mastery');
-  const damageLine = [damageDice, damageType.toLowerCase()].filter(Boolean).join(' ');
-  const summaryBits = [
-    isSimple === null ? '' : isSimple ? 'simple weapon' : 'martial weapon',
-    damageLine,
-    physical.map((p) => p.name).join(', '),
-  ].filter(Boolean);
-  // These rows carry NO `desc` (verified live 2026-08-08) — unlike spells and magic items,
-  // an Open5e weapon is pure structured data. Rendering the stats as the body keeps the
-  // compendium reader from showing a blank page, the same way mapClass/mapSpecies render
-  // their `features`/`traits` arrays into markdown instead of leaving an empty `desc`.
-  const bodyLines = [
-    damageLine ? `**Damage:** ${damageLine}` : '',
-    range !== null && range > 0 ? `**Range:** ${range}/${longRange ?? range} ${distanceUnit || 'feet'}` : '',
-    physical.length ? `**Properties:** ${physical.map((p) => (p.detail ? `${p.name} (${p.detail})` : p.name)).join(', ')}` : '',
-    masteries.length ? `**Mastery:** ${masteries.map((p) => p.name).join(', ')}` : '',
-  ].filter(Boolean);
+  const facts = weaponFacts(row);
   return {
     slug: asString(row.key) || asString(row.name),
     name: asString(row.name),
     type: 'item',
-    summary: truncate(summaryBits.join(' · '), 300),
-    body: bodyLines.join('\n\n'),
-    dataJson: JSON.stringify({
-      // Discriminator for a consumer reading a mixed bag of `item` entries. Deliberately
-      // NOT called `category`: mapMagicItem already uses that key for the upstream magic-item
-      // category ("Wondrous Item", "Weapon", …), and overloading it would make
-      // `data.category === 'weapon'` mean two different things depending on which endpoint
-      // the row came from.
-      itemKind: 'weapon',
-      damageDice: damageDice || null,
-      damageType: damageType || null,
-      range,
-      longRange,
-      distanceUnit: distanceUnit || null,
-      isSimple,
-      isImprovised: typeof row.is_improvised === 'boolean' ? row.is_improvised : null,
-      properties,
-    }),
+    summary: truncate(weaponSummaryBits(facts).join(' · '), 300),
+    // These rows carry NO `desc` (verified live 2026-08-08) — unlike spells and magic items,
+    // an Open5e weapon is pure structured data. Rendering the stats as the body keeps the
+    // compendium reader from showing a blank page, the same way mapClass/mapSpecies render
+    // their `features`/`traits` arrays into markdown instead of leaving an empty `desc`.
+    body: weaponBodyLines(facts).join('\n\n'),
+    dataJson: JSON.stringify(facts),
     license: licenseOf(row),
     source: sourceOf(row),
   };
@@ -580,36 +600,128 @@ export function mapWeapon(row: Record<string, unknown>): ImportedEntry {
 
 /** Mundane armour and shields from `/v2/armor/` (issue #2096). Same no-`desc` shape as weapons. */
 export function mapArmor(row: Record<string, unknown>): ImportedEntry {
-  const acDisplay = asString(row.ac_display);
-  const category = asString(row.category);
-  const stealth = typeof row.grants_stealth_disadvantage === 'boolean' ? row.grants_stealth_disadvantage : null;
-  const strengthRequired = numberOrNull(row.strength_score_required);
-  const summaryBits = [category, acDisplay ? `AC ${acDisplay}` : ''].filter(Boolean);
-  const bodyLines = [
-    acDisplay ? `**Armor Class:** ${acDisplay}` : '',
-    category ? `**Category:** ${category}` : '',
-    strengthRequired !== null ? `**Strength:** ${strengthRequired}` : '',
-    stealth === true ? '**Stealth:** disadvantage' : '',
-  ].filter(Boolean);
+  const facts = armorFacts(row);
   return {
     slug: asString(row.key) || asString(row.name),
     name: asString(row.name),
     type: 'item',
-    summary: truncate(summaryBits.join(' · '), 300),
-    body: bodyLines.join('\n\n'),
-    dataJson: JSON.stringify({
-      itemKind: 'armor',
-      armorCategory: category || null,
-      acDisplay: acDisplay || null,
-      acBase: numberOrNull(row.ac_base),
-      acAddDex: typeof row.ac_add_dexmod === 'boolean' ? row.ac_add_dexmod : null,
-      acCapDex: numberOrNull(row.ac_cap_dexmod),
-      grantsStealthDisadvantage: stealth,
-      strengthScoreRequired: strengthRequired,
-    }),
+    summary: truncate([facts.armorCategory ?? '', facts.acDisplay ? `AC ${facts.acDisplay}` : ''].filter(Boolean).join(' · '), 300),
+    body: armorBodyLines(facts).join('\n\n'),
+    dataJson: JSON.stringify(facts),
     license: licenseOf(row),
     source: sourceOf(row),
   };
+}
+
+/**
+ * The weapon stats one Open5e row publishes, in the single shape every consumer reads
+ * (issues #2096, #2144).
+ *
+ * Shared verbatim by `/v2/weapons/` rows, where these fields sit at top level, and by the
+ * `weapon` block a `/v2/magicitems/` row embeds for the base weapon it is built on. One
+ * function so a magic Longsword (+1) and a mundane Longsword reach the equipped-action
+ * derivation as the same thing — the alternative was a second, drifting copy of the shape
+ * the derivation happens to consume.
+ *
+ * Faithful ingestion, no interpretation: `damage_dice` is stored exactly as upstream sent it
+ * and is NOT validated as a dice expression here, because it is not always one (the SRD Net
+ * arrives as the string `"0"`). Whoever builds an attack out of this data is the layer that
+ * has to decide what an unusable value means; silently dropping or "fixing" it here would
+ * hide a real upstream shape from every consumer at once. Same reasoning for `range` —
+ * melee weapons report `0/0`, while a thrown melee weapon like the Dagger reports a real
+ * `20/60`, so range alone does not classify a weapon as ranged and this mapper does not
+ * pretend otherwise. A nested block carries no range at all, so both come back null there.
+ */
+interface WeaponFacts {
+  itemKind: 'weapon';
+  damageDice: string | null;
+  damageType: string | null;
+  range: number | null;
+  longRange: number | null;
+  distanceUnit: string | null;
+  isSimple: boolean | null;
+  isImprovised: boolean | null;
+  properties: Array<{ name: string; type: string | null; detail: string | null }>;
+}
+
+function weaponFacts(w: Record<string, unknown>): WeaponFacts {
+  return {
+    // Discriminator for a consumer reading a mixed bag of `item` entries. Deliberately
+    // NOT called `category`: mapMagicItem already uses that key for the upstream magic-item
+    // category ("Wondrous Item", "Weapon", …), and overloading it would make
+    // `data.category === 'weapon'` mean two different things depending on which endpoint
+    // the row came from.
+    itemKind: 'weapon',
+    damageDice: asString(w.damage_dice) || null,
+    damageType: nestedName(w.damage_type) || null,
+    range: numberOrNull(w.range),
+    longRange: numberOrNull(w.long_range),
+    distanceUnit: asString(w.distance_unit) || null,
+    isSimple: typeof w.is_simple === 'boolean' ? w.is_simple : null,
+    isImprovised: typeof w.is_improvised === 'boolean' ? w.is_improvised : null,
+    properties: weaponProperties(w.properties),
+  };
+}
+
+/** "1d8 slashing", or '' when upstream gave neither half. */
+function weaponDamageLine(facts: WeaponFacts): string {
+  return [facts.damageDice ?? '', (facts.damageType ?? '').toLowerCase()].filter(Boolean).join(' ');
+}
+
+function weaponSummaryBits(facts: WeaponFacts): string[] {
+  return [
+    facts.isSimple === null ? '' : facts.isSimple ? 'simple weapon' : 'martial weapon',
+    weaponDamageLine(facts),
+    facts.properties.filter((p) => p.type !== 'Mastery').map((p) => p.name).join(', '),
+  ].filter(Boolean);
+}
+
+function weaponBodyLines(facts: WeaponFacts): string[] {
+  const damageLine = weaponDamageLine(facts);
+  const physical = facts.properties.filter((p) => p.type !== 'Mastery');
+  const masteries = facts.properties.filter((p) => p.type === 'Mastery');
+  return [
+    damageLine ? `**Damage:** ${damageLine}` : '',
+    facts.range !== null && facts.range > 0
+      ? `**Range:** ${facts.range}/${facts.longRange ?? facts.range} ${facts.distanceUnit || 'feet'}`
+      : '',
+    physical.length ? `**Properties:** ${physical.map((p) => (p.detail ? `${p.name} (${p.detail})` : p.name)).join(', ')}` : '',
+    masteries.length ? `**Mastery:** ${masteries.map((p) => p.name).join(', ')}` : '',
+  ].filter(Boolean);
+}
+
+interface ArmorFacts {
+  itemKind: 'armor';
+  armorCategory: string | null;
+  acDisplay: string | null;
+  acBase: number | null;
+  acAddDex: boolean | null;
+  acCapDex: number | null;
+  grantsStealthDisadvantage: boolean | null;
+  strengthScoreRequired: number | null;
+}
+
+/** The armour counterpart of {@link weaponFacts}, shared by `/v2/armor/` and a nested block. */
+function armorFacts(a: Record<string, unknown>): ArmorFacts {
+  return {
+    itemKind: 'armor',
+    armorCategory: asString(a.category) || null,
+    acDisplay: asString(a.ac_display) || null,
+    acBase: numberOrNull(a.ac_base),
+    acAddDex: typeof a.ac_add_dexmod === 'boolean' ? a.ac_add_dexmod : null,
+    acCapDex: numberOrNull(a.ac_cap_dexmod),
+    grantsStealthDisadvantage: typeof a.grants_stealth_disadvantage === 'boolean' ? a.grants_stealth_disadvantage : null,
+    strengthScoreRequired: numberOrNull(a.strength_score_required),
+  };
+}
+
+function armorBodyLines(facts: ArmorFacts): string[] {
+  return [
+    facts.acDisplay ? `**Armor Class:** ${facts.acDisplay}` : '',
+    facts.armorCategory ? `**Category:** ${facts.armorCategory}` : '',
+    facts.strengthScoreRequired !== null ? `**Strength:** ${facts.strengthScoreRequired}` : '',
+    facts.grantsStealthDisadvantage === true ? '**Stealth:** disadvantage' : '',
+  ].filter(Boolean);
 }
 
 function mapCondition(row: Record<string, unknown>): ImportedEntry {

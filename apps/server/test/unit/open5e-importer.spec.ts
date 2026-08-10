@@ -1,5 +1,5 @@
 import { damageDefensesFromStatblock, DND5E_DAMAGE_TYPES } from '@campfire/schema';
-import { mapArmor, mapCreature, mapWeapon } from '../../src/modules/rules/open5e-importer';
+import { mapArmor, mapCreature, mapMagicItem, mapWeapon } from '../../src/modules/rules/open5e-importer';
 
 describe('Open5e creature importer', () => {
   it('preserves explicitly published creature save and skill modifiers for encounter rolls (issue #1314)', () => {
@@ -276,5 +276,91 @@ describe('Open5e armor importer (#2096)', () => {
       mapArmor({ key: 'b', name: 'Chain Mail', category: 'heavy', ac_display: '16', ac_base: 16, ac_add_dexmod: false, ac_cap_dexmod: null }).dataJson!,
     );
     expect(none).toMatchObject({ acAddDex: false, acCapDex: null });
+  });
+});
+
+/**
+ * Issue #2144 — a magic item embeds the base item it is built on, and that block is the only
+ * place the SRD states a magic weapon's damage. Dropping it left "Longsword (+1)" with no
+ * dice at all, so equipping one derived no attack: the #2097 feature looked broken for the
+ * very items a DM actually hands out (550 of the 2.3k magic items are category "Weapon").
+ */
+describe('Open5e magic item importer (#2144)', () => {
+  const longswordPlus1 = {
+    key: 'srd-2024_longsword-plus-1',
+    name: 'Longsword (+1)',
+    desc: 'You have a bonus to attack and damage rolls made with this magic weapon.',
+    category: { name: 'Weapon', key: 'weapon' },
+    rarity: { name: 'Uncommon', key: 'uncommon' },
+    requires_attunement: false,
+    weapon: {
+      name: 'Longsword',
+      key: 'srd-2024_longsword',
+      damage_dice: '1d8',
+      damage_type: { name: 'Slashing', key: 'slashing' },
+      distance_unit: 'feet',
+      is_simple: false,
+      is_improvised: false,
+      properties: [{ property: { name: 'Versatile', type: null }, detail: '1d10' }],
+    },
+    armor: null,
+  };
+
+  it('keeps the nested base weapon, in the same shape a mundane weapon row produces', () => {
+    const data = JSON.parse(mapMagicItem(longswordPlus1).dataJson!);
+    expect(data).toMatchObject({
+      category: 'Weapon',
+      rarity: 'Uncommon',
+      requiresAttunement: false,
+      itemKind: 'weapon',
+      damageDice: '1d8',
+      damageType: 'Slashing',
+    });
+    // The magic-item shelf and the weapon discriminator are different axes and both survive.
+    expect(data.properties).toContainEqual({ name: 'Versatile', type: null, detail: '1d10' });
+    // …and the base weapon's NAME, which the item's own name never states (#2144 review):
+    // a character trained in `Longsword` is trained with a Longsword (+1).
+    expect(data.baseItem).toBe('Longsword');
+  });
+
+  it('renders the base stats above the prose that describes the magic', () => {
+    const entry = mapMagicItem(longswordPlus1);
+    expect(entry.body.indexOf('1d8 slashing')).toBeLessThan(entry.body.indexOf('bonus to attack'));
+    expect(entry.body).toContain('**Base item:** Longsword');
+    expect(entry.summary).toContain('1d8 slashing');
+  });
+
+  it('keeps a nested base armor the same way', () => {
+    const data = JSON.parse(
+      mapMagicItem({
+        key: 'srd-2024_adamantine-armor-breastplate',
+        name: 'Adamantine Armor (Breastplate)',
+        desc: 'Any Critical Hit against you becomes a normal hit.',
+        category: { name: 'Armor', key: 'armor' },
+        rarity: { name: 'Uncommon', key: 'uncommon' },
+        weapon: null,
+        armor: { name: 'Breastplate', category: 'medium', ac_base: 14, ac_display: '14 + Dex modifier (max 2)', ac_add_dexmod: true, ac_cap_dexmod: 2 },
+      }).dataJson!,
+    );
+    expect(data).toMatchObject({ category: 'Armor', itemKind: 'armor', acBase: 14, acCapDex: 2 });
+  });
+
+  it('still maps a magic item with no base item, exactly as it did before', () => {
+    // The SRD's generic "+1 Weapon" names no base weapon, and a Wondrous Item has none to
+    // name. Both must keep working — the nested block is an addition, not a requirement.
+    const data = JSON.parse(
+      mapMagicItem({
+        key: 'srd-2024_bag-of-holding',
+        name: 'Bag of Holding',
+        desc: 'This bag has an interior space considerably larger than its outside.',
+        category: { name: 'Wondrous Item', key: 'wondrous-item' },
+        rarity: { name: 'Uncommon', key: 'uncommon' },
+        requires_attunement: false,
+        weapon: null,
+        armor: null,
+      }).dataJson!,
+    );
+    // No base item, so no `baseItem` key at all — not a null to render or match against.
+    expect(data).toEqual({ category: 'Wondrous Item', rarity: 'Uncommon', requiresAttunement: false });
   });
 });

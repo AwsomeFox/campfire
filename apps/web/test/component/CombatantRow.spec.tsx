@@ -582,3 +582,48 @@ describe('CombatantRow initiative roll gate (issue #2123)', () => {
     expect(screen.getByText('–')).toBeTruthy();
   });
 });
+
+/**
+ * Issue #1513 gap 7: zero routes from the encounter to the full character sheet — a
+ * player or DM mid-fight had no way to reach inventory, background, XP, or notes without
+ * navigating away by hand. `CharacterStatCard` now renders a "Full sheet" escape-hatch
+ * link next to its own collapse toggle. Rendered rather than source-scanned: the point is
+ * to prove the href actually resolves to this character's real sheet route.
+ *
+ * Gated on `routeCampaignId`, NOT `campaignId` (review finding on PR #2153): `campaignId`
+ * is a WRITE gate that `RunSessionPage` clears to `undefined` while SSE is stale/reconnecting
+ * and, for a non-DM, whenever it isn't this combatant's active turn — gating a read-only nav
+ * link on it would have hidden the escape hatch for most of a fight, for a reader who already
+ * has real read access (mounting this card at all with a resolvable `character` already implies
+ * DM-or-owner, matching `GET /characters/:id`'s own rule). `routeCampaignId` carries none of
+ * that staleness/turn concern, so the link should render whenever it's set, independent of
+ * whether `campaignId` (and therefore rolling) is currently enabled.
+ */
+describe('CombatantRow -> CharacterStatCard "open full sheet" link (issue #1513)', () => {
+  test('renders next to the collapse toggle with an href to this character\'s sheet', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, campaignId: 5, routeCampaignId: 5 });
+    const link = screen.getByTestId('open-full-sheet-7') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/c/5/characters/7');
+  });
+
+  test('renders for a read-authorized player whose card is NOT roll-enabled (off-turn and/or SSE-stale) — campaignId undefined, routeCampaignId still set', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, campaignId: undefined, routeCampaignId: 5 });
+    const link = screen.getByTestId('open-full-sheet-7') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe('/c/5/characters/7');
+  });
+
+  test('renders for the DM viewing another player\'s card, same as the player\'s own', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, campaignId: 5, routeCampaignId: 5 });
+    expect(screen.getByTestId('open-full-sheet-7')).toBeTruthy();
+  });
+
+  test('does not render when routeCampaignId is undefined — nowhere real to link to', () => {
+    renderRow({ combatant: pcCombatant(), character: partyCharacter, campaignId: 5, routeCampaignId: undefined });
+    expect(screen.queryByTestId('open-full-sheet-7')).toBeNull();
+  });
+
+  test('does not render on a monster row, which has no character sheet to open', () => {
+    renderRow({ combatant: baseCombatant(), character: null, campaignId: 5, routeCampaignId: 5 });
+    expect(screen.queryByTestId('open-full-sheet-101')).toBeNull();
+  });
+});

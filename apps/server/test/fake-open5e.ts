@@ -159,8 +159,15 @@ const CREATURES = [
   },
 ];
 
+// Magic items from /v2/magicitems/. A magic WEAPON row nests the complete base weapon it is
+// built on under `weapon` (and magic armour nests `/v2/armor/`'s object under `armor`) —
+// 521 of the live SRD's 2.3k rows do, verified 2026-08-09 — which is the only place the API
+// states a magic weapon's damage. Issue #2144: dropping that block left every magic weapon in
+// the compendium with no stats, so equipping one derived no attack. The Bag of Holding keeps
+// the no-base-item shape covered, since most magic items have none.
 const MAGIC_ITEMS = [
-  { key: 'srd_bag-of-holding', name: 'Bag of Holding', desc: 'This bag has an interior space considerably larger than its outside dimensions.', category: { name: 'Wondrous Item', key: 'wondrous-item' }, rarity: { name: 'Uncommon', key: 'uncommon' }, requires_attunement: false, document: DOCUMENT },
+  { key: 'srd_bag-of-holding', name: 'Bag of Holding', desc: 'This bag has an interior space considerably larger than its outside dimensions.', category: { name: 'Wondrous Item', key: 'wondrous-item' }, rarity: { name: 'Uncommon', key: 'uncommon' }, requires_attunement: false, weapon: null, armor: null, document: DOCUMENT },
+  { key: 'srd-2024_longsword-plus-1', name: 'Longsword (+1)', desc: 'You have a bonus to attack and damage rolls made with this magic weapon.', category: { name: 'Weapon', key: 'weapon' }, rarity: { name: 'Uncommon', key: 'uncommon' }, requires_attunement: false, weapon: { name: 'Longsword', key: 'srd-2024_longsword', damage_dice: '1d8', damage_type: { name: 'Slashing', key: 'slashing' }, distance_unit: 'feet', is_simple: false, is_improvised: false, properties: [{ property: { name: 'Versatile', type: null, desc: 'A Versatile weapon can be used with one or two hands.' }, detail: '1d10' }] }, armor: null, document: DOCUMENT },
 ];
 
 const CONDITIONS = [

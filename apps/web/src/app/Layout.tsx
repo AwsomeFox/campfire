@@ -38,6 +38,7 @@ import { GameIcon } from '../components/GameIcon';
 import { BrandMark } from '../components/BrandMark';
 import { UIIcon } from '../components/UIIcon';
 import { TermHelp } from '../components/TermHelp';
+import { GLOSSARY_TERMS } from '../features/glossary/glossaryTerms';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
 import { RouteChangeFocus } from './RouteChangeFocus';
 import { SkipToMainLink } from './SkipToMainLink';
@@ -405,7 +406,11 @@ function SidebarNavButton({
   ariaKeyshortcuts?: string;
   title?: string;
 }) {
+  const { t } = useTranslation();
   const termHelp = item.termId ? <TermHelp termId={item.termId} align="end" /> : null;
+  // The one-line gloss, shown on hover of the nav item itself. The full disclosure
+  // (audience, canon impact, glossary deep link) stays behind the `?`.
+  const termHelpHint = item.termId ? t(GLOSSARY_TERMS[item.termId].shortKey) : undefined;
   const inner = (
     <>
       <span
@@ -460,16 +465,22 @@ function SidebarNavButton({
   }
   if (termHelp) {
     return (
-      <div className="flex items-center gap-1">
+      // The `?` is revealed by hovering or focusing the row rather than sitting on it
+      // permanently: a rail where three of eleven items carry a stray glyph reads as an
+      // inconsistency, not an affordance. Hovering the item now explains it via `title`;
+      // the marker itself stays in the DOM and merely fades in, so it remains a real
+      // keyboard-operable disclosure (issue #518) rather than a hover-only tooltip.
+      <div className="cf-nav-help-row flex items-center gap-1">
         <Link
           to={item.to}
           onClick={onClick}
           className="flex items-center gap-2 px-2.5 text-sm min-w-0 flex-1"
           style={{ ...sharedStyle, ...activeStyle }}
+          title={termHelpHint}
         >
           {inner}
         </Link>
-        {termHelp}
+        <span className="cf-nav-help-marker">{termHelp}</span>
       </div>
     );
   }
@@ -828,6 +839,28 @@ function LayoutContent() {
   // campaign dmNav pattern above so the sidebar shows a "Server admin" section
   // with sub-page links instead of the flat single entry used everywhere else.
   const onAdminRoute = location.pathname.startsWith('/admin');
+
+  /**
+   * The table safety hold (issue #599) is scoped to the AI Table — the one surface where a
+   * table is being run through this app — rather than to every campaign route.
+   *
+   * #599 mounted it everywhere on the reasoning that a safety tool you have to navigate to
+   * is one you do not have when you need it. What that bought in practice was a permanent
+   * red bar above the quest list, the compendium and the character sheet: prep and reading
+   * surfaces where nobody is at a table to stop. The keyboard shortcut travels with the
+   * component, so it is live on exactly this surface too.
+   *
+   * The encounter cockpit is deliberately NOT included, and does not mount its own copy
+   * either. It is the densest screen in the app and every row it spends is a row off the
+   * board; the hold is one route away on the Table page.
+   *
+   * `/c/:id/screen` is likewise absent, and always was in effect — the player display is
+   * routed OUTSIDE this layout (see router.tsx), so the `screen` arm this pattern used to
+   * carry could never match. That surface gets `SafetyHoldDisplayOverlay` instead: a cast
+   * screen is a television with no keyboard, so it acknowledges a hold rather than raising
+   * one.
+   */
+  const onPlaySurface = /^\/c\/\d+\/table(?:\/|$)/.test(location.pathname);
   const adminNav: NavItem[] = isAdmin
     ? [
         { key: 'admin-overview', label: t('nav.adminOverview'), to: '/admin' },
@@ -884,8 +917,16 @@ function LayoutContent() {
             >
               <BrandMark size={22} variant="mark" className="shrink-0" />
               <span className="min-w-0 leading-tight">
+                {/* The rail stays at the design's ~230px, so a long campaign name still
+                    ellipsises here (the design's own rail shows a short name and puts the
+                    full one in the page title). Widening the rail to fit was the wrong
+                    trade — it narrowed every page's content column by 34px to fix one
+                    label. The `title` gives the full name on hover/focus instead. Two
+                    lines are not an option either: the VTT reuses this block inside a
+                    fixed-height strip that clips a second line mid-glyph. */}
                 <span
                   className="block truncate text-[15px]"
+                  title={campaign?.name ?? undefined}
                   style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, color: 'var(--color-text)' }}
                 >
                   {campaign?.name ?? 'Campfire'}
@@ -1111,11 +1152,11 @@ function LayoutContent() {
           </div>
         )}
 
-        {/* #599 — the participant safety hold. Mounted here, above <main>, so it is on screen on
-            EVERY campaign route (encounter tracker, AI Table, everything else) rather than only
-            on the surface whose author remembered to add it. It renders nothing outside a
-            campaign, and nothing until the hold read resolves. */}
-        {campaignId !== undefined && <SafetyHoldBar campaignId={campaignId} />}
+        {/* #599 — the participant safety hold. Mounted here, above <main>, so it is on screen
+            on every PLAY surface (see `onPlaySurface`) rather than only on the one whose author
+            remembered to add it. It renders nothing outside a campaign, and nothing until the
+            hold read resolves. */}
+        {campaignId !== undefined && onPlaySurface && <SafetyHoldBar campaignId={campaignId} />}
 
         <main
           ref={mainRef}
