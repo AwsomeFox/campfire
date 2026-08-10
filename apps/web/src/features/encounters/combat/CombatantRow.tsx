@@ -1750,6 +1750,10 @@ export const CombatantRow = memo(function CombatantRow({
               openOnActiveTurn={openCardOnActiveTurn}
               /* Click-to-roll only from an active owned card, or any card for the DM. */
               campaignId={campaignId}
+              /* Issue #1513 review: the "Full sheet" link is read-only navigation, not a
+                 write, so it must not share campaignId's staleness/turn gating (#421) — same
+                 reasoning as the CreatureStatCard/whisper-notes uses of this prop below. */
+              routeCampaignId={routeCampaignId}
               /* Issue #1901: fetch the server's merged action list (sheet + equipped-item
                  actions) — mounting this card already implies DM-or-owner (see the `character`
                  prop gate above), matching listUsableActions' own authorization. */

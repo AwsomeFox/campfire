@@ -113,6 +113,7 @@ export function CharacterStatCard({
   defaultOpen = false,
   openOnActiveTurn = false,
   campaignId,
+  routeCampaignId,
   encounterId,
   combatantId,
   onError,
@@ -127,6 +128,15 @@ export function CharacterStatCard({
   openOnActiveTurn?: boolean;
   /** When set, the card becomes interactive: rolls post to this campaign's shared feed. */
   campaignId?: number;
+  /**
+   * Stable route campaign id (issue #1513 review) — mirrors `CombatantRow`'s own
+   * `routeCampaignId` prop and the same distinction it documents: unlike `campaignId` above,
+   * this is NOT cleared while SSE is stale/reconnecting or while it isn't this reader's turn
+   * (`RunSessionPage` passes it as a bare, unconditional `cid`). Used only for the "Full
+   * sheet" navigation link, which is a plain GET, not a write — it has none of the
+   * obsolete-modifier staleness concern `campaignId` guards against.
+   */
+  routeCampaignId?: number;
   /**
    * Issue #1901: when both are set, the Actions section fetches the server's MERGED action
    * list (`GET /encounters/:id/combatants/:cid/actions` — the same owner/DM-gated read
@@ -290,21 +300,36 @@ export function CharacterStatCard({
          * Issue #1513 gap 7: the only route out of an encounter was locations, quests, and
          * sessions — inventory, background, XP, and notes were unreachable mid-fight, even
          * from the DM's own party card. This is the escape hatch: a link straight to the
-         * full sheet, gated on `campaignId` (this card is only ever mounted where one is
-         * available) so it never renders without somewhere real to go. The destination
-         * route enforces its own authorization exactly as any other sheet visit would — this
-         * is a navigation shortcut, not a new read path, so it grants nothing this reader
-         * couldn't already reach by typing the URL.
+         * full sheet.
+         *
+         * Gated on `routeCampaignId`, NOT `campaignId` (review: PR #2153). `campaignId` is a
+         * WRITE gate — `CombatantRow` clears it to `undefined` while SSE is stale/reconnecting
+         * and, for a non-DM, whenever it isn't this combatant's active turn (#421) — so gating
+         * a read-only navigation link on it would hide the escape hatch for most of a fight,
+         * for a reader who already has real read access. `routeCampaignId` carries none of
+         * that staleness/turn concern (same distinction `CombatantRow` already draws for the
+         * compendium statblock read and whisper notes). Read authorization itself is enforced
+         * one layer up: `CharacterStatCard` only ever mounts with a non-null `character` when
+         * the viewer is the DM or the owning player (`RunSessionPage`'s `character` prop is
+         * computed as `isDm || ownedCharacterIds.has(...)`), matching the server's own
+         * `GET /characters/:id` rule ("DMs may read any party sheet; other members may read
+         * only sheets they own"). So this link never renders somewhere it would only 403 —
+         * it's a navigation shortcut, not a new read path, granting nothing this reader
+         * couldn't already reach by typing the URL. No `↗` glyph: unlike this app's external
+         * (`target="_blank"`) links that use it (e.g. "Source sheet ↗" on the D&D Beyond
+         * import), this navigates in-place — a new tab would lose the live encounter, which
+         * is wrong for a mid-fight escape hatch — matching the in-app "Open in Compendium"
+         * link elsewhere, which also carries no glyph.
          */}
-        {campaignId != null && (
+        {routeCampaignId != null && (
           <Link
-            to={`/c/${campaignId}/characters/${character.id}`}
+            to={`/c/${routeCampaignId}/characters/${character.id}`}
             className="btn btn-ghost"
             data-testid={`open-full-sheet-${character.id}`}
             aria-label={`Open ${character.name}'s full character sheet`}
             style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
           >
-            Full sheet <span aria-hidden="true">↗</span>
+            Full sheet
           </Link>
         )}
       </div>
