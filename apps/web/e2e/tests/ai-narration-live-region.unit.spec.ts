@@ -366,6 +366,33 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     ]);
   });
 
+  test('an empty initial history response removes cached rows but keeps concurrent SSE rows', () => {
+    const cached = transcriptReducer(emptyTranscript, {
+      type: 'localPlayer',
+      id: 'cached-player',
+      memberName: 'Runa',
+      text: 'Cached before the history read.',
+      at,
+    });
+    const streamed = {
+      eventId: 'live-player', seq: 1, campaignId: 1, kind: 'player.action' as const,
+      actorUserId: 'user-1', actorName: 'Runa', clientRef: null, turnId: null,
+      payload: { text: 'Arrived through SSE during the history read.' }, at,
+    };
+    const withLiveRow = transcriptReducer(cached, { type: 'serverEvents', events: [streamed] });
+
+    const reconciled = transcriptReducer(withLiveRow, {
+      type: 'reconcileEmptyAuthoritative',
+      keepEntryIds: new Set([transcriptEntryId(streamed)]),
+    });
+
+    expect(reconciled.entries).toMatchObject([
+      { id: 'live-player', kind: 'player', text: 'Arrived through SSE during the history read.' },
+    ]);
+    expect(reconciled.entries).not.toContainEqual(expect.objectContaining({ id: 'cached-player' }));
+    expect(reconciled.lastSeq).toBe(1);
+  });
+
   test('go-live still silences hydrated history and batched session seed', () => {
     const hydrated = fold(
       { type: 'turn.start', campaignId: 1, at },

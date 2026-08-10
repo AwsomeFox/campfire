@@ -242,6 +242,7 @@ export type TranscriptAction =
    * events are merged by their stable `eventId`, so re-delivery never duplicates a line.
    */
   | { type: 'serverEvents'; events: AiDmTranscriptEvent[] }
+  | { type: 'reconcileEmptyAuthoritative'; keepEntryIds: ReadonlySet<string> }
   /** Echo this client's own submission immediately (before/independent of the stream). */
   | {
       type: 'localPlayer';
@@ -943,6 +944,12 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       // reconnect) lands in the authoritative order regardless of how it was delivered.
       const ordered = [...action.events].sort((a, b) => a.seq - b.seq);
       return ordered.reduce(applyServerEvent, state);
+    }
+
+    case 'reconcileEmptyAuthoritative': {
+      const entries = state.entries.filter((entry) => action.keepEntryIds.has(entry.id));
+      const lastSeq = entries.reduce((max, entry) => Math.max(max, entry.seq ?? 0), 0);
+      return { entries, authoritative: true, ...(lastSeq > 0 ? { lastSeq } : {}) };
     }
 
     case 'localPlayer': {

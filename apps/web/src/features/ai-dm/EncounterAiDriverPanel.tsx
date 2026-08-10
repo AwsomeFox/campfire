@@ -93,6 +93,7 @@ export function EncounterAiDriverPanel({
   const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
   const narrationOwnerRef = useRef('');
   const composerOwnerRef = useRef('');
+  const transcriptGenerationRef = useRef(liveActivity.transcriptGeneration);
   const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
   const [narrationAnnouncements, setNarrationAnnouncements] = useState<NarrationLogAddition[]>([]);
   const displayNarrationAdditions = useCallback(
@@ -157,8 +158,18 @@ export function EncounterAiDriverPanel({
     setSceneField('');
     setSubmitting(false);
     setSubmitError(null);
+    setPauseBusy(false);
+    setPauseError(null);
+    setLifecycleBusy(false);
+    setLifecycleError(null);
+    setUndoBusy(false);
+    setUndoError(null);
     return () => { composerOwnerRef.current = ''; };
   }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role]);
+
+  useEffect(() => {
+    transcriptGenerationRef.current = liveActivity.transcriptGeneration;
+  }, [liveActivity.transcriptGeneration]);
 
   useEffect(() => {
     if (!liveActivity.transcriptFetched) {
@@ -244,6 +255,7 @@ export function EncounterAiDriverPanel({
     setSubmitError(null);
     const clientRef = newClientRef();
     const submissionOwner = composerOwnerRef.current;
+    const submissionGeneration = transcriptGenerationRef.current;
     const body: {
       input: string;
       scene?: string;
@@ -261,7 +273,7 @@ export function EncounterAiDriverPanel({
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/message`, body);
-      if (composerOwnerRef.current !== submissionOwner) return;
+      if (composerOwnerRef.current !== submissionOwner || transcriptGenerationRef.current !== submissionGeneration) return;
       dispatchTranscript({ type: 'localPlayer', memberName, characterName, text, clientRef });
       setInput('');
       setSceneField('');
@@ -279,46 +291,49 @@ export function EncounterAiDriverPanel({
     const { action, body } = aiDmPauseRequest(paused);
     setPauseBusy(true);
     setPauseError(null);
+    const owner = composerOwnerRef.current;
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`, body);
-      invalidateAiDm(queryClient, campaignId);
+      if (composerOwnerRef.current === owner) invalidateAiDm(queryClient, campaignId);
     } catch {
-      setPauseError(t('table.pauseFailed'));
+      if (composerOwnerRef.current === owner) setPauseError(t('table.pauseFailed'));
     } finally {
-      setPauseBusy(false);
+      if (composerOwnerRef.current === owner) setPauseBusy(false);
     }
   }
 
   async function onLifecycle(action: 'start-session' | 'wrap-up') {
     setLifecycleBusy(true);
     setLifecycleError(null);
+    const owner = composerOwnerRef.current;
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/${action}`);
-      invalidateAiDm(queryClient, campaignId);
+      if (composerOwnerRef.current === owner) invalidateAiDm(queryClient, campaignId);
     } catch (err) {
-      setLifecycleError(
+      if (composerOwnerRef.current === owner) setLifecycleError(
         err instanceof ApiError && err.message ? err.message : t('table.lifecycleFailed'),
       );
     } finally {
-      setLifecycleBusy(false);
+      if (composerOwnerRef.current === owner) setLifecycleBusy(false);
     }
   }
 
   async function onUndoAiAction() {
     setUndoBusy(true);
     setUndoError(null);
+    const owner = composerOwnerRef.current;
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/undo`);
-      invalidateAiDm(queryClient, campaignId);
+      if (composerOwnerRef.current === owner) invalidateAiDm(queryClient, campaignId);
     } catch (err) {
       const outcome = resolveUndoPostError(
         err instanceof ApiError ? err.status : undefined,
         translateApiError(err, t) || t('table.undoAiFailed'),
       );
-      if (outcome.invalidateSession) invalidateAiDm(queryClient, campaignId);
-      if (outcome.errorMessage) setUndoError(outcome.errorMessage);
+      if (composerOwnerRef.current === owner && outcome.invalidateSession) invalidateAiDm(queryClient, campaignId);
+      if (composerOwnerRef.current === owner && outcome.errorMessage) setUndoError(outcome.errorMessage);
     } finally {
-      setUndoBusy(false);
+      if (composerOwnerRef.current === owner) setUndoBusy(false);
     }
   }
 

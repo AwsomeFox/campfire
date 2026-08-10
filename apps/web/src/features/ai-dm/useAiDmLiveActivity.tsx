@@ -179,6 +179,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   const lastSeqRef = useRef(0);
   const [transcriptFetched, setTranscriptFetched] = useState(false);
   const [preHydrationLiveEntryIds, setPreHydrationLiveEntryIds] = useState<ReadonlySet<string>>(new Set());
+  const preHydrationLiveEntryIdsRef = useRef<ReadonlySet<string>>(new Set());
   const [transcriptGeneration, setTranscriptGeneration] = useState(0);
 
   useEffect(() => {
@@ -203,6 +204,16 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           ) return;
           if (result.items.length > 0) {
             dispatchTranscript({ type: 'serverEvents', events: result.items });
+          } else if (watermark === undefined) {
+            // `saveTranscript` intentionally does not persist an empty state, so remove
+            // this viewer's stale paint cache explicitly before reconciling the empty
+            // authoritative response. Any genuine transcript frames that won the fetch
+            // race are retained below and will be saved again by the normal effect.
+            clearTranscript(viewerId, campaignId, 'activity');
+            dispatchTranscript({
+              type: 'reconcileEmptyAuthoritative',
+              keepEntryIds: preHydrationLiveEntryIdsRef.current,
+            });
           }
           const last = result.items[result.items.length - 1];
           if (watermark === undefined || !result.hasMore || !last) return;
@@ -224,7 +235,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
             // can repopulate this projection after access has been revoked.
             ++transcriptRequestGenerationRef.current;
             lastSeqRef.current = 0;
-            setPreHydrationLiveEntryIds(new Set());
+            preHydrationLiveEntryIdsRef.current = new Set();
+            setPreHydrationLiveEntryIds(preHydrationLiveEntryIdsRef.current);
             setTranscriptGeneration((generation) => generation + 1);
             dispatchTranscript({ type: 'reset' });
             dispatchTranscript({ type: 'authoritative' });
@@ -254,7 +266,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
     seededRef.current = false;
     setTranscriptFetched(!enabled);
-    setPreHydrationLiveEntryIds(new Set());
+    preHydrationLiveEntryIdsRef.current = new Set();
+    setPreHydrationLiveEntryIds(preHydrationLiveEntryIdsRef.current);
     setTranscriptGeneration((generation) => generation + 1);
     pendingHydrate.mark();
     transcriptOwnerRef.current = key;
@@ -343,7 +356,10 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           // Some durable rows fold into a single DM bubble (`dm:<turnId>`), rather than
           // retaining their server event id. Keep the final rendered id so go-live does
           // not baseline an SSE addition that arrived during hydration.
-          setPreHydrationLiveEntryIds((ids) => new Set(ids).add(transcriptEntryId(event.event)));
+          const next = new Set(preHydrationLiveEntryIdsRef.current)
+            .add(transcriptEntryId(event.event));
+          preHydrationLiveEntryIdsRef.current = next;
+          setPreHydrationLiveEntryIds(next);
         }
         setState((prev) => reduce(prev, event));
         if (enabled) {
@@ -375,7 +391,8 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
           clearTranscript(viewerId, campaignId, 'activity');
           lastSeqRef.current = 0;
           setTranscriptFetched(false);
-          setPreHydrationLiveEntryIds(new Set());
+          preHydrationLiveEntryIdsRef.current = new Set();
+          setPreHydrationLiveEntryIds(preHydrationLiveEntryIdsRef.current);
           setTranscriptGeneration((generation) => generation + 1);
           const requestGeneration = ++transcriptRequestGenerationRef.current;
           void fetchTranscript(key, undefined, requestGeneration).finally(() => {
