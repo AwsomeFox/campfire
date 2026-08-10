@@ -209,6 +209,24 @@ test.describe('CSS custom-property validation (issue #882)', () => {
     expect(index).toMatch(/\.cf-dice-roll-overlay\s*\{[^}]*z-index:\s*var\(--cf-layer-modal\)/s);
   });
 
+  test('--color-warning is defined and matches the value its call sites already fell back to (issue #1533 §3)', () => {
+    // GroupActionRunner.tsx (x2), ActionUseFlow.tsx, and BattleMap.tsx all wrote
+    // var(--color-warning, #d97706) while --color-warning itself was undefined —
+    // the exact "referenced with a fallback, never defined" shape this whole
+    // suite exists to catch, just below the "no fallback" test's threshold
+    // because a fallback was present. Pin the real definition so those sites
+    // resolve through the design system rather than silently relying on the
+    // inline magic number forever.
+    expect(DEFINED.has('--color-warning'), '--color-warning must be defined').toBe(true);
+
+    const index = readFileSync(join(WEB_SRC, 'index.css'), 'utf8');
+    const definitionMatch = index.match(/--color-warning:\s*(#[0-9a-fA-F]+)/);
+    expect(definitionMatch, '--color-warning must be defined as a hex color').not.toBeNull();
+    // Same literal value the call sites' inline fallback already used, so this
+    // is a formalization with no visual change — not a redesign.
+    expect(definitionMatch![1].toLowerCase()).toBe('#d97706');
+  });
+
   test('CSS cascade files are discoverable (guards the fixture against relocation)', () => {
     // If index.css or nocturne.css moved, the DEFINED set would be empty and
     // the assertions above would vacuously pass. This guard fails loudly so a
