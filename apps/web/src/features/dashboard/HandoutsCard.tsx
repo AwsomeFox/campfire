@@ -14,7 +14,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import type { Attachment } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { shareInFlightRef } from '../../lib/shareInFlight';
-import { Card, Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
+import { Card, Btn, Chip, ErrorNote, Skeleton, TextInput } from '../../components/ui';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -323,7 +323,32 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
   );
 }
 
+/**
+ * Handout metadata inputs, used by BOTH the upload disclosure and the Edit details dialog.
+ *
+ * These were bare `<input>`s carrying `w-full rounded px-2 py-1 text-slate-900` — no
+ * background, no border, and near-black text. On this app's dark surfaces that renders
+ * eight labels above eight invisible boxes: you cannot see the field, and you cannot see
+ * what you type into it either. Almost certainly light-theme markup that never moved to
+ * the design system.
+ *
+ * `TextInput` applies `cf-input`, which is what every other text field in the app uses.
+ */
 function MetadataFields({ value, onChange }: { value: MetadataDraft; onChange: (next: MetadataDraft) => void }) {
   const fields: Array<[keyof MetadataDraft, string]> = [['title', 'Title'], ['caption', 'Caption'], ['altText', 'Alt text'], ['creator', 'Creator'], ['sourceUrl', 'Source URL'], ['license', 'License'], ['rights', 'Rights'], ['attribution', 'Attribution']];
-  return <div className="space-y-2" data-testid="handout-metadata-fields">{fields.map(([key, label]) => <label key={key} className="block text-xs">{label}<input aria-label={label} value={value[key]} onChange={(e) => onChange({ ...value, [key]: e.target.value })} className="w-full rounded px-2 py-1 text-slate-900" /></label>)}</div>;
+  return (
+    <div className="space-y-2" data-testid="handout-metadata-fields">
+      {fields.map(([key, label]) => (
+        <label key={key} className="block text-xs">
+          {label}
+          <TextInput
+            density="compact"
+            aria-label={label}
+            value={value[key]}
+            onChange={(e) => onChange({ ...value, [key]: e.target.value })}
+          />
+        </label>
+      ))}
+    </div>
+  );
 }
