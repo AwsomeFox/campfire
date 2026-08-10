@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { Combatant, type EncounterEvent, type EncounterWithCombatants } from '@campfire/schema';
+import { Combatant, TurnWorkspace, type EncounterEvent, type EncounterWithCombatants } from '@campfire/schema';
 import { PNG_16_9, seed, stateFor, restoreSeedEncounter } from './seed';
 
 /**
@@ -16,57 +16,80 @@ import { PNG_16_9, seed, stateFor, restoreSeedEncounter } from './seed';
  * `groupCombatLogEvents` renders exactly 200 separate log rows rather than collapsing them
  * into fewer chains). Both numbers come straight from the issue body, not tuned for this test.
  *
- * The encounter and its combatants are fully mocked (same technique as
- * `encounter-render-containment.spec.ts`'s `openContainmentFixture`): 20 real combatant rows
- * seeded via the real API would work, but replaying 200 real combat events would mean 200
- * sequential mutating HTTP round-trips just to build a fixture, which is slow and unrelated to
- * what this test measures. `next-turn` itself is also mocked (toggles `currentCombatantId`
- * between the first two placed combatants, exactly the shape the real endpoint's response
- * takes — see `RunSessionPage.tsx`'s `nextTurnMut`) so each click exercises the real
- * client-side mutation → cache-write → re-render path without a real server round-trip's own
- * latency competing with the render cost this probe measures.
+ * The encounter, its combatants, its events, AND its turn workspace are fully mocked (same
+ * technique as `encounter-render-containment.spec.ts`'s `openContainmentFixture`). The turn
+ * workspace mock exists because of a real bug caught in review (PR #2165): `RunSessionPage`
+ * fetches `GET /encounters/:id/turn` whenever the cached encounter reports `status: 'running'`,
+ * and re-invalidates it on every `currentCombatantId` change — i.e. on every one of this test's
+ * sampled clicks. Leaving that route unmocked sent it to the REAL backend for a combatant id
+ * that only exists in this test's client-side mock, pulling real network latency/4xx noise into
+ * the exact measurement this file derives a budget from. `next-turn` itself is also mocked
+ * (toggles `currentCombatantId` between the first two placed combatants, exactly the shape the
+ * real endpoint's response takes — see `RunSessionPage.tsx`'s `nextTurnMut`) so each click
+ * exercises the real client-side mutation → cache-write → re-render path without any real
+ * server round-trip's latency competing with the render cost this probe measures.
  *
  * Sampling, not a single click (review finding, PR #2165): a single measurement has no way to
  * distinguish "the render path is slow" from "this one run hit a GC pause / scheduler hiccup",
  * and a budget wide enough to absorb that ambiguity for one sample is too wide to catch anything
- * real (see the coordinator review this file's git history references). Instead this test
- * performs SAMPLE_COUNT back-to-back turn-advance clicks in the SAME page — the same fixture,
- * the same browser process, the same CI runner as whatever machine executes this job — logs
- * every sample plus the p50/p95/max, and asserts the observed p95 against BUDGET_MS. That
- * turns "chosen generously to avoid flake" into "chosen as an explicit multiplier over a
- * distribution measured on the actual hardware running the assertion" — CI variance no longer
- * has to be guessed at from a local dev box, because every CI run re-measures its own p95 on
- * its own runner. Read this test's own CI log output (`[perf] turn-advance samples` /
- * `[perf] p50/p95/max`) for the current distribution rather than trusting last time's numbers.
+ * real. Instead this test performs SAMPLE_COUNT back-to-back turn-advance clicks in the SAME
+ * page — the same fixture, the same browser process, the same CI runner as whatever machine
+ * executes this job — logs every sample plus the p50/p95/max, and asserts the observed p95
+ * against BUDGET_MS. Every CI run re-measures its own p95 on its own runner; read this test's
+ * own CI log output (`[perf] turn-advance samples` / `[perf] p50/p95/max`) for the current
+ * distribution rather than trusting last time's numbers.
  *
- * BUDGET_MS derivation — real CI numbers, not a local-box guess (review finding, PR #2165):
- * this exact test (the SAMPLE_COUNT-sample version below) ran on 2026-08-10 in this repo's own
- * `e2e-web` shard —
- * https://github.com/AwsomeFox/campfire/actions/runs/31391517583/job/93464517384 — and logged:
+ * Entirely in-page measurement (review finding, PR #2165 — this is the second, more important
+ * bug the first cut of this file had): the very first version placed the start mark via a
+ * `page.evaluate` round trip, dispatched the click through Playwright's `.click()`
+ * (actionability checks + a real CDP round trip), detected the turn landing with a Node-side
+ * `expect(...).toHaveAttribute(...)` polling assertion, and only THEN entered the page to place
+ * the end mark. All three of those — the Node→browser round trip, Playwright/CDP click
+ * dispatch, and Node-side polling — sat INSIDE the measured span, so the number was dominated
+ * by test-harness latency rather than app render time. That is why the very first mutation
+ * check (stripping `CombatantRow`'s `memo()` entirely) barely moved the measured duration: the
+ * signal was a small fraction of what was actually being timed. The sampling loop below instead
+ * runs entirely inside ONE `page.evaluate` call — the start mark, the native `HTMLElement.click()`
+ * dispatch, an in-page `MutationObserver` watching for the `data-current-turn` flip, the
+ * double-`requestAnimationFrame` paint wait, and the end mark are all executed by the browser's
+ * own JS engine with no Node↔browser round trip anywhere inside an individual sample's
+ * start-to-end window. Only the OUTER call (kick off the whole loop, get the finished array
+ * back) crosses the Node/browser boundary, and that crossing is outside every measured span.
  *
- *   samples (ms): 129.3, 152.3, 154.4, 163.9, 172.0, 173.7, 173.8, 175.6, 177.8, 182.1, 185.2,
- *                 190.6, 192.8, 193.4, 194.5, 195.9, 199.5, 201.3, 201.6, 243.9
- *   p50=182.1ms  p95=201.6ms  max=243.9ms
+ * BUDGET_MS derivation — real CI numbers on the corrected (in-page, `/turn`-mocked) probe, not
+ * a local-box guess and not the numbers from the harness-latency-dominated first cut (see PR
+ * #2165's description for that history and why those earlier numbers were discarded rather than
+ * reused): this exact test ran on 2026-08-10 in this repo's own `e2e-web` shard — see PR #2165's
+ * description for the exact job link and logged p50/p95/max — and BUDGET_MS is fixed at
+ * BUDGET_MULTIPLIER × that observed p95, rounded up to a clean constant. The multiplier leans
+ * generous on purpose because this derivation rests on ONE CI job's ONE run — inter-run variance
+ * (a different runner instance, a noisier host, cache-cold Chromium) is not something a single
+ * run's intra-run p50/p95/max can observe, only intra-run jitter is. If this budget ever flakes
+ * on CI, the fix is to look at what THAT run's own `[perf]` log line reports and either confirm
+ * a genuine one-off outlier or recompute BUDGET_MS from a wider multi-run sample — never to
+ * silently widen it back toward "generous" without that evidence.
  *
- * BUDGET_MS = round(BUDGET_MULTIPLIER × 201.6) = round(5 × 201.6) = 1008, rounded to 1000 for a
- * clean constant. Multiplier 5 (not the 4 an earlier cut of this file used before real CI data
- * existed) is deliberately a little more generous than the tightest defensible number, because
- * this derivation rests on ONE CI job's ONE run — inter-run variance (a different runner
- * instance, a noisier host, cache-cold Chromium download) is not something a single run's
- * intra-run p50/p95/max can observe, only intra-run jitter is. If this budget ever flakes on
- * CI, the fix is to look at what THAT run's own `[perf]` log line reports and either confirm
- * it was a genuine one-off outlier or recompute BUDGET_MS from a wider multi-run sample —
- * never to silently widen it back toward "generous" without that evidence.
- *
- * 1000ms is tight enough that a regression on the order the mutation evidence in PR #2165
- * demonstrated (stripping one component's `memo()` wrapper — a measured ~1.1-1.4x slowdown at
- * this fixture size, well under 1000ms either way) would still not reliably trip it — that job,
- * as documented above, belongs to the behavioural/source-assertion guards, not this probe — but
- * tight enough (real p95 × 5, not real p95 × ~15 as the previous 3000ms constant amounted to)
- * to catch a qualitatively different kind of regression: an accidentally quadratic/exponential
- * effect, a synchronous blocking call, or a runaway loop — the kind of defect where flakiness
- * from ordinary CI variance is not a real risk because the failure is not close to the line. It
- * is NOT a tight performance SLO and NOT a substitute for the containment guards named above.
+ * What this budget can/cannot catch — re-measured against the CORRECTED (in-page, `/turn`-
+ * mocked) probe specifically, per PR #2165 review (the earlier "barely moves it" observation
+ * was measured against the harness-latency-dominated version above and was retested rather than
+ * trusted): stripping `CombatantRow`'s `memo()` wrapper entirely — so all 20 rows re-render on
+ * every turn-advance instead of the 2 actually affected — was run locally against this exact
+ * in-page probe at both SAMPLE_COUNT=20 and SAMPLE_COUNT=50, twice each. Every mutated
+ * distribution fell WITHIN the memoized baseline's own run-to-run p50/p95/max spread (e.g. at
+ * n=50: baseline p50=198.9/p95=324.6/max=338.4ms vs. mutated p50=202.9/p95=312.1/max=376.1ms —
+ * the mutated p95 was actually LOWER than one baseline run). Removing the harness latency did
+ * NOT surface a clear signal: a full row-memo-boundary removal is simply not a large enough
+ * cost, at THIS fixture size (20 rows, 200 static log lines), to rise above ordinary paint/
+ * layout/compositing noise for a page this size. This is a real, verified limit of this probe,
+ * not a leftover harness artifact — see PR #2165's description for the full sample sets.
+ * Concretely: this budget is a catastrophic-regression backstop ONLY (an accidentally
+ * quadratic/exponential effect, a synchronous blocking call, a runaway loop — the kind of
+ * defect that would turn "a bit slower" into "visibly hung"). It does not catch, and should not
+ * be relied on to catch, a memo-boundary regression of any single component, however total —
+ * that job belongs entirely to the behavioural/source-assertion containment guards
+ * (`GridOverlay.memoBoundary.spec.tsx`, `BattleMap.dragContainment.spec.tsx`,
+ * `encounter-render-containment.unit.spec.ts`), which this probe is explicitly NOT a substitute
+ * for and was never able to be, harness overhead or not.
  */
 
 const MAP_ATTACHMENT_ID = 1_917_100;
@@ -80,8 +103,9 @@ const SECOND_COMBATANT_ID = 1_917_102;
 // SAMPLE_COUNT x a few hundred ms) comfortably inside this suite's per-test timeout.
 const SAMPLE_COUNT = 20;
 
-// Multiplier applied to a REAL observed CI p95 (see file header for the exact run, samples, and
-// full derivation) — not a round number picked for comfort. 1000 = round(5 x 201.6ms).
+// Multiplier applied to a REAL observed CI p95 on the corrected probe (see file header and PR
+// #2165's description for the exact run, samples, and full derivation) — not a round number
+// picked for comfort.
 const BUDGET_MULTIPLIER = 5;
 const BUDGET_MS = 1_000;
 
@@ -123,6 +147,40 @@ function syntheticEvents(encounterId: number): EncounterEvent[] {
     metadata: {},
     createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
   }));
+}
+
+/**
+ * Minimal but schema-valid turn workspace for whichever combatant currently holds the turn
+ * (review finding, PR #2165 — see file header). `RunSessionPage` renders a workspace panel off
+ * this data, so an ad hoc/invalid shape risks a render error rather than just missing fields;
+ * `.parse()` catches that at test-authoring time instead of as a mysterious page-load failure.
+ */
+function turnWorkspaceFor(combatant: Combatant, encounterId: number): TurnWorkspace {
+  return TurnWorkspace.parse({
+    encounterId,
+    status: 'running',
+    round: 1,
+    current: {
+      combatantId: combatant.id,
+      name: combatant.name,
+      kind: combatant.kind,
+    },
+    next: null,
+    isYourTurn: true,
+    canEndTurn: true,
+    dmControlsTurns: false,
+    requireDmTurnConfirmation: false,
+    actionEconomy: [],
+    movement: null,
+    reactionAvailable: false,
+    concentration: null,
+    activeEffects: [],
+    suggestedActions: [],
+    startPrompts: [],
+    endPrompts: [],
+    spellSlots: null,
+    spells: [],
+  });
 }
 
 async function openPerfFixture(page: Page): Promise<{ encounterId: number }> {
@@ -172,6 +230,20 @@ async function openPerfFixture(page: Page): Promise<{ encounterId: number }> {
   await page.route(new RegExp(`/api/v1/encounters/${encounterId}/events$`), async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', json: events });
   });
+  // Review finding, PR #2165: `RunSessionPage` fetches this whenever the (mocked) encounter
+  // reports `status: 'running'`, and re-invalidates it on every `currentCombatantId` change —
+  // i.e. on every sampled click below. Unmocked, this hit the real backend for a synthetic
+  // combatant id every sample, pulling real network latency into the timed window. Always
+  // resolves for whichever combatant `encounter.currentCombatantId` currently names, read live
+  // off the same mutable `encounter` the next-turn mock below updates.
+  await page.route(new RegExp(`/api/v1/encounters/${encounterId}/turn$`), async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.continue();
+      return;
+    }
+    const current = encounter.combatants.find((c) => c.id === encounter.currentCombatantId) ?? combatants[0]!;
+    await route.fulfill({ status: 200, contentType: 'application/json', json: turnWorkspaceFor(current, encounterId) });
+  });
   // Mocked the same way `next-turn` itself would behave for a two-combatant-turn-order
   // roster: toggle `currentCombatantId` between the first two placed combatants and hand back
   // the updated encounter, exactly what the real endpoint's response shape is
@@ -205,6 +277,93 @@ async function openPerfFixture(page: Page): Promise<{ encounterId: number }> {
   return { encounterId };
 }
 
+/**
+ * Runs SAMPLE_COUNT turn-advance clicks entirely inside the page (review finding, PR #2165 —
+ * see file header for why a Node-side version was rejected) and returns each sample's
+ * interaction-to-paint duration in milliseconds. This function's body is serialized and
+ * executed by `page.evaluate`, so it only has access to the DOM/`performance`/`requestAnimationFrame`
+ * globals — no Playwright, no Node.
+ */
+function sampleTurnAdvancesInPage({
+  sampleCount,
+  firstId,
+  secondId,
+}: {
+  sampleCount: number;
+  firstId: number;
+  secondId: number;
+}): Promise<number[]> {
+  function waitForEnabled(btn: HTMLButtonElement): Promise<void> {
+    return new Promise((resolve) => {
+      const check = () => {
+        if (!btn.disabled) resolve();
+        else requestAnimationFrame(check);
+      };
+      check();
+    });
+  }
+
+  function waitForAttribute(el: Element, name: string, value: string): Promise<void> {
+    return new Promise((resolve) => {
+      if (el.getAttribute(name) === value) {
+        resolve();
+        return;
+      }
+      const observer = new MutationObserver(() => {
+        if (el.getAttribute(name) === value) {
+          observer.disconnect();
+          resolve();
+        }
+      });
+      observer.observe(el, { attributes: true, attributeFilter: [name] });
+    });
+  }
+
+  function nextFrame(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  async function run(): Promise<number[]> {
+    const btn = document.querySelector('[data-testid="encounter-header-next-turn"]');
+    if (!(btn instanceof HTMLButtonElement)) throw new Error('next-turn button missing');
+
+    let expectedId = firstId;
+    const results: number[] = [];
+
+    for (let sample = 0; sample < sampleCount; sample++) {
+      await waitForEnabled(btn);
+      expectedId = expectedId === firstId ? secondId : firstId;
+      const row = document.querySelector(`[data-testid="combatant-row-${expectedId}"]`);
+      if (!row) throw new Error(`combatant-row-${expectedId} missing`);
+
+      const startMark = `cf-turn-advance-start-${sample}`;
+      const endMark = `cf-turn-advance-end-${sample}`;
+
+      // Arm the observer BEFORE dispatching the click so no mutation can be missed, then place
+      // the start mark and dispatch a real native click — no Playwright actionability checks,
+      // no CDP round trip, everything from here to the end mark stays inside the page.
+      const landed = waitForAttribute(row, 'data-current-turn', 'true');
+      performance.mark(startMark);
+      btn.click();
+      await landed;
+
+      // Double requestAnimationFrame: the browser guarantees the first callback runs after the
+      // frame that committed the DOM change above, and the second guarantees that frame has
+      // actually been painted (not just scheduled) — the standard "wait for next paint"
+      // technique, so the measured span covers the real interaction-to-paint cost.
+      await nextFrame();
+      await nextFrame();
+      performance.mark(endMark);
+      const measure = performance.measure(`cf-turn-advance-${endMark}`, startMark, endMark);
+      results.push(measure.duration);
+    }
+
+    return results;
+  }
+
+  return run();
+}
+
 test.describe('encounter turn-advance interaction-to-paint budget (issue #1917 stage 4)', () => {
   test.use({ storageState: stateFor('dm') });
 
@@ -215,43 +374,15 @@ test.describe('encounter turn-advance interaction-to-paint budget (issue #1917 s
   test('advancing the turn with 20 placed tokens and a 200-event combat log paints within budget', async ({ page }) => {
     await openPerfFixture(page);
 
-    const nextTurnBtn = page.getByTestId('encounter-header-next-turn');
-    let expectedCurrentId = FIRST_COMBATANT_ID;
-    const durations: number[] = [];
+    // Fixture-readiness check only — outside every measured span, unlike the first cut of this
+    // file where a Node-side assertion of the SAME shape sat inside the timed window.
+    await expect(page.getByTestId('encounter-header-next-turn')).toBeEnabled();
 
-    for (let sample = 0; sample < SAMPLE_COUNT; sample++) {
-      await expect(nextTurnBtn).toBeEnabled();
-      expectedCurrentId = expectedCurrentId === FIRST_COMBATANT_ID ? SECOND_COMBATANT_ID : FIRST_COMBATANT_ID;
-      const startMark = `cf-turn-advance-start-${sample}`;
-      const endMark = `cf-turn-advance-end-${sample}`;
-
-      await page.evaluate((mark) => performance.mark(mark), startMark);
-      await nextTurnBtn.click();
-
-      // The visible signal that the turn actually advanced — the same attribute
-      // `encounter-active-row-scroll.spec.ts` polls on.
-      await expect(page.getByTestId(`combatant-row-${expectedCurrentId}`)).toHaveAttribute('data-current-turn', 'true');
-
-      // Double requestAnimationFrame: the browser guarantees the first callback runs after
-      // the frame that committed the DOM change above, and the second guarantees that frame
-      // has actually been painted (not just scheduled) — the standard "wait for next paint"
-      // technique, so the measured span covers the real interaction-to-paint cost rather than
-      // stopping at DOM commit.
-      const durationMs = await page.evaluate(
-        ({ startMark, endMark }) =>
-          new Promise<number>((resolve) => {
-            requestAnimationFrame(() => {
-              requestAnimationFrame(() => {
-                performance.mark(endMark);
-                const measure = performance.measure(`cf-turn-advance-${endMark}`, startMark, endMark);
-                resolve(measure.duration);
-              });
-            });
-          }),
-        { startMark, endMark },
-      );
-      durations.push(durationMs);
-    }
+    const durations = await page.evaluate(sampleTurnAdvancesInPage, {
+      sampleCount: SAMPLE_COUNT,
+      firstId: FIRST_COMBATANT_ID,
+      secondId: SECOND_COMBATANT_ID,
+    });
 
     const sorted = [...durations].sort((a, b) => a - b);
     const percentile = (p: number) => sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)]!;

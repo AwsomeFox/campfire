@@ -111,10 +111,19 @@ test.describe('encounter cockpit memo boundaries (issue #1917 stage 1)', () => {
     // MapTokenSlot's own `useSyncExternalStore` call is what lets only the dragged token's
     // instance re-render per pointer-move frame — a non-dragged token's selector always
     // returns the same `null`, so `useSyncExternalStore`'s `Object.is` check bails it out.
-    expect(source).toMatch(/const live = useSyncExternalStore\(\s*dragPosStore\.subscribe,\s*\(\)\s*=>\s*\(isDragging \? dragPosStore\.getSnapshot\(\) : null\),\s*\);/);
+    // Whitespace/punctuation-tolerant on purpose (review finding, PR #2165 — the same lesson
+    // the `<GridOverlay ...>` assertion above already learned): pinning exact spacing around
+    // `?`/`:`, parens, and a trailing comma made this fail on a harmless Prettier reflow that
+    // changes nothing the invariant cares about. `\s*`/optional-group tolerance still requires
+    // every semantically load-bearing token — `useSyncExternalStore`, `dragPosStore.subscribe`,
+    // an `isDragging`-gated ternary calling `dragPosStore.getSnapshot()` with a `null` fallback
+    // — to be present, in order, so a reintroduced unconditional/ungated selector still fails.
+    expect(source).toMatch(/useSyncExternalStore\(\s*dragPosStore\.subscribe,\s*\(\)\s*=>\s*\(?\s*isDragging\s*\?\s*dragPosStore\.getSnapshot\(\)\s*:\s*null\s*\)?,?\s*\)/);
 
     expect(source).toContain('function DragDistanceOverlay({');
-    expect(source).toContain('const live = useSyncExternalStore(dragPosStore.subscribe, dragPosStore.getSnapshot);');
+    // Same whitespace tolerance as above, applied to DragDistanceOverlay's simpler (ungated)
+    // subscription — a Prettier-driven line wrap here shouldn't fail this guard either.
+    expect(source).toMatch(/useSyncExternalStore\(\s*dragPosStore\.subscribe,\s*dragPosStore\.getSnapshot,?\s*\)/);
 
     // Both call sites inside BattleMap's own render must pass the SAME store instance (a
     // ref's `.current`, stable across BattleMap's own re-renders) rather than each
