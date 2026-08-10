@@ -75,7 +75,7 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver must provide a positive qtyDelta or metadata (name/notes/iconSlug) to update_inventory_item.',
+      message: 'The driver must provide a positive qtyDelta or metadata (name/notes/iconSlug/weight) to update_inventory_item.',
     });
 
     // metadata-only edits are allowed
@@ -84,23 +84,30 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
       args: { itemId: 1, name: 'Longsword +1', notes: 'magic', iconSlug: 'sword' },
     });
 
+    // Issue #2157: weight is classified as metadata alongside name/notes/iconSlug — a
+    // weight-only edit (no qtyDelta) is accepted, not rejected as "nothing to do".
+    expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, weight: 2.5 }, session)).toEqual({
+      ok: true,
+      args: { itemId: 1, weight: 2.5 },
+    });
+
     // absolute qty (any value) is blocked — use qtyDelta instead
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, qty: 5 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: qty.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon/weight via update_inventory_item. Rejected: qty.',
     });
 
     // owner moves are blocked
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, ownerType: 'character' }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: ownerType.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon/weight via update_inventory_item. Rejected: ownerType.',
     });
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, characterId: 42 }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: characterId.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon/weight via update_inventory_item. Rejected: characterId.',
     });
 
     // Issue #1326 review (Codex/Devin) — the exact exposure this PR introduced: equipping
@@ -109,7 +116,7 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, equipped: true, equipSlot: 'main-hand' }, session)).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: equipped, equipSlot.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon/weight via update_inventory_item. Rejected: equipped, equipSlot.',
     });
     expect(
       guardDriverLivePlayArgs(
@@ -120,7 +127,7 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     ).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: equippedAction.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon/weight via update_inventory_item. Rejected: equippedAction.',
     });
 
     // Fail-closed proof: an entirely unknown field the schema has never had is refused
@@ -131,7 +138,7 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     ).toEqual({
       ok: false,
       code: 'forbidden_inventory_field',
-      message: 'The driver may only grant item quantity or edit name/notes/icon via update_inventory_item. Rejected: someBrandNewFieldNobodyHasAddedYet.',
+      message: 'The driver may only grant item quantity or edit name/notes/icon/weight via update_inventory_item. Rejected: someBrandNewFieldNobodyHasAddedYet.',
     });
   });
 
@@ -189,6 +196,16 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     ).toEqual({
       ok: true,
       args: { name: 'Rope (50ft)', qty: 2, ownerType: 'party' },
+    });
+
+    // Issue #2157: weight passes through the same as name/notes/iconSlug — it grants no
+    // new authority (no economy value, no character targeting), so it needs no dedicated
+    // guard beyond allowlist membership.
+    expect(
+      guardDriverLivePlayArgs('add_inventory_item', { name: 'Chainmail', qty: 1, weight: 55.5 }, session),
+    ).toEqual({
+      ok: true,
+      args: { name: 'Chainmail', qty: 1, weight: 55.5 },
     });
 
     // targeting a specific character (ownerType other than "party") is refused
