@@ -533,13 +533,18 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                 alignItems: 'center',
                 gap: 8,
                 minHeight: compact ? 28 : 32,
+                // Issue #2195 review: a background tint here sat behind the roll
+                // total, which is ALSO accent-coloured (`var(--color-accent)` etc,
+                // the same token family) — tint-behind-same-colour-text is close to
+                // worst case for contrast by construction, and axe caught it (two
+                // consecutive 'roll' totals in the dashboard command-deck spec fell
+                // below AA). The left border alone carries the grouping signal, sits
+                // to the side of every row's text rather than behind it, so it
+                // cannot affect contrast at all — no tint, nothing to retune per kind.
                 ...(groupAccent
                   ? {
                       borderLeft: `3px solid ${groupAccent}`,
-                      background: `color-mix(in srgb, ${groupAccent} 10%, transparent)`,
-                      borderRadius: 6,
                       paddingLeft: 6,
-                      paddingRight: 6,
                     }
                   : null),
               }}
