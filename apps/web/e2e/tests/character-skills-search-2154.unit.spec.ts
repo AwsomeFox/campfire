@@ -28,9 +28,20 @@ const characterPagePath = resolve(__dirname, '../../src/features/characters/Char
 
 test.describe('SkillsCard search wiring (#2154)', () => {
   // Slice out just the SkillsCard function so the assertions can't be satisfied by the
-  // encounter card's identical pattern elsewhere in the same file.
+  // encounter card's identical pattern elsewhere in the same file. The start/end markers
+  // are validated explicitly below: if either ever moves or is renamed, the slice collapses
+  // to '' (so the wiring assertions fail loudly) instead of silently swallowing the rest of
+  // the file via `slice(start, -1)` — the exact weakening the #2154 review flagged.
   const code = readFileSync(characterPagePath, 'utf8');
-  const skillsCard = code.slice(code.indexOf('function SkillsCard('), code.indexOf('function WeaponTrainingCard('));
+  const startIndex = code.indexOf('function SkillsCard(');
+  const endIndex = code.indexOf('function WeaponTrainingCard(');
+  const skillsCard = startIndex >= 0 && endIndex > startIndex ? code.slice(startIndex, endIndex) : '';
+
+  test('locates the SkillsCard source slice (markers found and ordered)', () => {
+    expect(startIndex).toBeGreaterThanOrEqual(0);
+    expect(endIndex).toBeGreaterThanOrEqual(0);
+    expect(endIndex).toBeGreaterThan(startIndex);
+  });
 
   test('renders a check-search input with the encounter-card parity attributes', () => {
     expect(skillsCard).toContain('data-testid="check-search"');
