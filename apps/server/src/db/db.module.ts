@@ -5580,6 +5580,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0180_hidden_status_notification_authorization_2112', run: migrateHiddenStatusNotificationAuthorization2112 },
   // #2112 claimed 0180 on main before #810 shipped, so the audit payload uses 0181.
   { name: '0181_audit_payload_json_810', run: migrateAuditLogForPayloadJson810 },
+  { name: '0182_push_subscriptions_1323', run: migratePushSubscriptions1323 },
   { name: '0183_dice_rolls_context_1511', run: migrateDiceRollsContext1511 },
   { name: '0184_campaigns_condition_definitions_1505', run: migrateCampaignsTableForConditionDefinitions1505 },
 ];
