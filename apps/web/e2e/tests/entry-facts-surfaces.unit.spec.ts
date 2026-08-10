@@ -85,12 +85,28 @@ test.describe('non-creature entry stats are rendered wherever an item is read', 
     expect(combatantStatblock).toMatch(/entry && hasEntryFacts\(entry\.dataJson\) \? \(/);
   });
 
-  test('the picker preview is height-bounded so the Add button stays reachable', () => {
-    // The modal card is `max-h-[85vh] overflow-hidden` and the results list holds a
-    // `min-h-[200px]` floor, so it cannot shrink to absorb a tall preview. An unbounded
-    // stat block would push the owner/quantity fields and the Add button out of the card
-    // with nothing scrollable to reach them.
-    expect(inventoryShared).toMatch(/max-h-\[\d+vh\] overflow-y-auto[^>]*compendium-picker-stats/s);
+  /**
+   * This used to assert the OPPOSITE shape — a `max-h-[22vh]` cap on the stats preview
+   * alone — and it passed while the bug it names was live. Capping only the preview left
+   * the rest of the selected-entry block (owner, quantity, notes) unbounded and the
+   * results list pinned to a `min-h-[200px]` floor it could not yield, so the footer was
+   * still pushed past the card's `overflow-hidden` edge: on an 800px viewport the Add
+   * button sat 105px below it and could not be clicked at all.
+   *
+   * The real invariant is structural, so that is what is asserted now: exactly the two
+   * regions that may absorb pressure are `flex-1 min-h-0` scrollers, and the footer never
+   * shrinks. `compendium-picker-reachable-add.spec.ts` covers the rendered geometry in a
+   * browser, which is what actually proves the button is reachable.
+   */
+  test('the picker gives its scroll pressure to the two flexible regions, never the footer', () => {
     expect(inventoryShared).toContain('max-h-[85vh]');
+    // The selected-entry block is a bounded scroller, not an unbounded stack.
+    expect(inventoryShared).toMatch(/flex-1 min-h-0 overflow-y-auto pt-3 border-t/);
+    // The results list keeps a browsing floor only while nothing is selected.
+    expect(inventoryShared).toMatch(/selectedEntry \? 'min-h-0' : 'min-h-\[\d+px\]'/);
+    // The footer carrying Cancel/Add must never be the thing that yields.
+    expect(inventoryShared).toMatch(/shrink-0 flex items-center justify-between pt-2 border-t/);
+    // …and the stats preview no longer carries a competing cap of its own.
+    expect(inventoryShared).not.toMatch(/max-h-\[\d+vh\] overflow-y-auto[^>]*compendium-picker-stats/s);
   });
 });
