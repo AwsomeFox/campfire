@@ -30,6 +30,14 @@ const NARROW_VIEWPORT = { width: 390, height: 844 };
  * - `character-sheet-tabs` — the character sheet's control column (`.seg-opt`, the exact
  *   class #1693 gave a WCAG floor to), captured at both desktop and a phone viewport since
  *   density problems show up first where space is tight.
+ * - `encounter cockpit header` (added for issue #1688) — NOT a screenshot, a computed-style
+ *   pin. The encounter cockpit's persistent header (`EncounterVttShell.tsx`'s
+ *   `.cf-vtt-header`) is, after re-measuring #1688, the single largest concentration of
+ *   direct `var(--space-N)` consumers in the app (~40 of ~85 total) and had zero prior
+ *   coverage of any kind. A scoped screenshot was tried and dropped — see that test's own
+ *   comment for why — so this surface has a `measureBox` padding pin only. Issue #2167
+ *   tracks the still-open screenshot coverage for this and the app's other direct
+ *   `--space-*` consumers.
  *
  * Only one theme is captured: Campfire ships a single dark theme (see index.css's `@media
  * print` comment — "the app is intentionally optimized for an interactive dark UI") with no
@@ -107,6 +115,52 @@ test.describe('control surface goldens (#1694)', () => {
       caret: 'hide',
       maxDiffPixelRatio: 0.45,
     });
+  });
+
+  test('encounter cockpit header (map furniture chrome, issue #1688)', async ({ page }) => {
+    // Re-measuring #1688's blast radius found the encounter VTT cockpit shell
+    // (EncounterVttShell.tsx, index.css's `.cf-vtt-*` block) has grown into the single
+    // largest concentration of direct `var(--space-N)` consumers in the app — ~40 of the
+    // ~85 current occurrences — and none of it was covered by any golden before this test.
+    //
+    // NOT a screenshot (deliberately, not an oversight): a screenshot was attempted first,
+    // scoped to `.cf-vtt-title` to dodge the header's live sync-status chip and DM turn
+    // timer as flake sources. It failed in CI — the baseline had to be generated locally
+    // against a substitute Chromium build (this sandbox has no network path to the pinned
+    // revision), and CI's real browser rendered the title 2px narrower (551px vs 549px,
+    // ~11% of pixels differing), most likely a font-metrics difference between browser
+    // builds rather than anything related to spacing. Rather than commit a screenshot this
+    // environment cannot verify against the browser CI actually uses, this test keeps only
+    // the computed-style pin below — see issue #2167 for the still-open screenshot
+    // coverage of this and the remaining direct `--space-*` consumers.
+    await restoreSeedEncounter();
+    const { campaignId, encounterId } = seed();
+    await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+
+    const header = page.getByTestId('encounter-vtt-header');
+    await expect(header).toBeVisible();
+    const title = header.locator('.cf-vtt-title');
+    await expect(title.locator('h1')).toBeVisible();
+    // Status badge text depends on restoreSeedEncounter() leaving the encounter 'running'.
+    await expect(title.getByText('Running')).toBeVisible();
+    await page.evaluate(() => (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts?.ready ?? Promise.resolve());
+
+    // `.cf-vtt-header` is `padding: var(--space-2) var(--space-4); gap: var(--space-3)`
+    // (index.css). 5.6px below is NOT an arbitrary geometry snapshot to "fix" if it ever
+    // goes red — it is --space-2 on the app's current 2.8px-per-unit scale
+    // (`--space-1..8: 2.8/5.6/8.4/.../22.4px`, index.css:384-389), Tailwind's own scale
+    // times 0.7. Issue #2169 (the retokening PR this pin exists to guard) proposes
+    // redefining that scale to Tailwind's own 4/8/12/16/24/32px, at which point --space-2
+    // becomes 8px. This assertion is a deliberate tripwire for exactly that change — if it
+    // ever fails outside of #2169 actually landing the retokening, that is real,
+    // unintentional drift in the token scale, not a stale test to loosen. It reads a CSS
+    // value, not pixels, so it is also unaffected by the browser-build issue above and
+    // would still catch the retokening even if a screenshot's tolerance had absorbed it.
+    const headerBox = await measureBox(header);
+    expect(
+      headerBox.paddingTop,
+      '.cf-vtt-header padding-top must equal --space-2 (5.6px on the current 2.8px scale) today — see the comment above before changing this value',
+    ).toBe('5.6px');
   });
 
   test('character sheet control column (desktop)', async ({ page }) => {

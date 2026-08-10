@@ -58,6 +58,11 @@
       "shareInactiveHint": "Check the link for typos, or ask your game master for a new one.",
       "shareInactiveHome": "Go to Campfire",
       "shareInactiveSignIn": "Sign in"
+    },
+    "discussion": {
+      "inboxTitle": "Discussions",
+      "unreadLabel": "Unread",
+      "inboxEmpty": "You're caught up on discussions."
     }
   }
 }

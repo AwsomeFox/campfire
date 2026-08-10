@@ -40,6 +40,7 @@ import { UIIcon } from '../components/UIIcon';
 import { TermHelp } from '../components/TermHelp';
 import { GLOSSARY_TERMS } from '../features/glossary/glossaryTerms';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
+import { RecentVisitRecorder } from './RecentVisitRecorder';
 import { RouteChangeFocus } from './RouteChangeFocus';
 import { SkipToMainLink } from './SkipToMainLink';
 import { MAIN_CONTENT_ID } from './routeFocus';
@@ -1167,6 +1168,7 @@ function LayoutContent() {
           <RouteChangeFocus mainRef={mainRef} campaignName={campaign?.name ?? null} />
           <MentionsProvider campaignId={campaignId}>
             <EntityDeepLinkFocus />
+            <RecentVisitRecorder />
             {campaignId !== undefined && <CheckRequestPrompts campaignId={campaignId} />}
             <Outlet />
           </MentionsProvider>

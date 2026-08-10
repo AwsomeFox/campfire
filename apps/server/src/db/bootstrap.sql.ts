@@ -751,6 +751,39 @@ CREATE TABLE IF NOT EXISTS comments (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #829: per-user, per-thread discussion subscription + read state. One row per
+-- (user, campaign, anchored entity). entity_type/entity_id is the SAME polymorphic soft
+-- reference the comments table uses (no single FK can span every anchorable entity), so
+-- the owning service cleans these rows up on entity removal and campaign_id carries the ON
+-- DELETE CASCADE that tears the whole set down with a campaign. user_id is a PLAIN INTEGER
+-- with no FK->users, matching notifications/api_tokens (the cascade-test seed relies on a
+-- synthetic user id; account-deletion pruning is not enforced on those siblings either).
+-- See db/schema.ts for docs.
+CREATE TABLE IF NOT EXISTS comment_thread_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  -- Plain INTEGER (no FK->users), matching notifications/api_tokens: the cascade
+  -- test seeds these rows with a synthetic user id, and account-deletion pruning is
+  -- not enforced on the sibling notification tables either. campaign_id carries the
+  -- ON DELETE CASCADE that tears the set down with a campaign.
+  user_id INTEGER NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  watching INTEGER NOT NULL DEFAULT 0,
+  muted INTEGER NOT NULL DEFAULT 0,
+  last_read_comment_id INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+-- The single state row per (user, campaign, anchor); upserts key on this.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_thread_state_user_campaign_anchor
+  ON comment_thread_state(user_id, campaign_id, entity_type, entity_id);
+-- Fan-out ("who is watching this thread?") and the per-user inbox read.
+CREATE INDEX IF NOT EXISTS idx_comment_thread_state_campaign_anchor
+  ON comment_thread_state(campaign_id, entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_comment_thread_state_user_campaign
+  ON comment_thread_state(user_id, campaign_id);
+
 -- Prose revision history (issue #157). NEW table, so a plain CREATE TABLE IF NOT EXISTS
 -- in bootstrap reaches both fresh and existing DBs (it runs every boot) — no migrate fn
 -- needed, same as encounter_events (#61). campaign_id carries ON DELETE CASCADE so a
@@ -1060,6 +1093,35 @@ CREATE TABLE IF NOT EXISTS campaign_catch_up_cursors (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, campaign_id)
+);
+
+-- Issue #840 — personal navigation: a user's private bookmarks. Polymorphic soft
+-- reference (campaign_id, entity_type, entity_id) into the supported canon entity
+-- set; visibility is re-resolved at READ time so hidden/deleted/inaccessible targets
+-- drop out of responses. user_id / campaign_id ON DELETE CASCADE clean up with the
+-- account / campaign (no orphaned private data).
+CREATE TABLE IF NOT EXISTS user_bookmarks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(user_id, campaign_id, entity_type, entity_id)
+);
+
+-- Issue #840 — personal navigation: bounded recent-history per user. One row per
+-- (user, campaign, target); a re-visit bumps visited_at. Trimmed per user/campaign
+-- by PersonalNavigationService so the list stays bounded. Same cascade clean-up.
+CREATE TABLE IF NOT EXISTS user_recent_views (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  entity_type TEXT NOT NULL,
+  entity_id INTEGER NOT NULL,
+  visited_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(user_id, campaign_id, entity_type, entity_id)
 );
 
 -- Migration repair history for #849. No FKs by design: rows describe missing
@@ -2184,6 +2246,11 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_re
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_catch_up_campaign ON campaign_catch_up_cursors(campaign_id);
+-- Issue #840: personal-navigation read paths filter by user (and campaign), so the
+-- user_id prefixes both tables' non-unique indexes; the UNIQUE(user,campaign,type,id)
+-- constraint above already covers the exact-target lookup and dedupe upsert.
+CREATE INDEX IF NOT EXISTS idx_user_bookmarks_user ON user_bookmarks(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_recent_views_user ON user_recent_views(user_id);
 -- Issue #819: exclusive character seat — at most one membership may link a given
 -- character. Partial so unlinked (NULL) seats do not collide. Matches migration 0067.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character

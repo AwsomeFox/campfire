@@ -5256,6 +5256,71 @@ function migratePushSubscriptions1323(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #829: per-user comment thread state (watching / muted / lastReadCommentId).
+ *
+ * The table is declared in BOOTSTRAP_SQL (CREATE ... IF NOT EXISTS runs every boot,
+ * reaching fresh AND upgraded DBs), so this migration exists for the ONE thing
+ * bootstrap cannot do idempotently on an upgraded DB: backfill. Before #829, a
+ * comment notified only members who had already posted on the same thread — the
+ * recipient set was derived live from prior `comments.author_user_id` values. #829
+ * moves that to an explicit `watching` flag on `comment_thread_state`, so every
+ * existing comment author is backfilled as `watching` on their own thread to
+ * preserve the pre-#829 behavior (a thread's prior participants still hear new
+ * replies). dev:* / token:* authors (non-numeric ids) have no users row and no
+ * thread state, matching the notification fan-out's numeric-recipient rule.
+ *
+ * The CREATE here is belt-and-braces for an upgraded DB whose boot ordering runs
+ * migrations before BOOTSTRAP_SQL: the backfill needs the table to exist, so this
+ * creates it idempotently and bootstrap's own CREATE IF NOT EXISTS is then a no-op.
+ * Fresh DBs record this migration as applied with the table empty (bootstrap owns
+ * the canonical DDL) and the backfill SELECT finds no comments.
+ */
+function migrateCommentThreadState829(sqlite: Database.Database): void {
+  const tableExists = (table: string): boolean =>
+    sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table) != null;
+
+  if (!tableExists('comment_thread_state')) {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS comment_thread_state (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id INTEGER NOT NULL,
+        watching INTEGER NOT NULL DEFAULT 0,
+        muted INTEGER NOT NULL DEFAULT 0,
+        last_read_comment_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_thread_state_user_campaign_anchor
+        ON comment_thread_state(user_id, campaign_id, entity_type, entity_id);
+      CREATE INDEX IF NOT EXISTS idx_comment_thread_state_campaign_anchor
+        ON comment_thread_state(campaign_id, entity_type, entity_id);
+      CREATE INDEX IF NOT EXISTS idx_comment_thread_state_user_campaign
+        ON comment_thread_state(user_id, campaign_id);
+    `);
+  }
+
+  if (!tableExists('comments')) return; // fresh DB — nothing to backfill.
+  const nowTs = new Date().toISOString();
+  sqlite
+    .prepare(
+      `INSERT OR IGNORE INTO comment_thread_state
+         (campaign_id, user_id, entity_type, entity_id, watching, muted, last_read_comment_id, created_at, updated_at)
+       SELECT DISTINCT
+         c.campaign_id,
+         CAST(c.author_user_id AS INTEGER),
+         c.entity_type,
+         c.entity_id,
+         1, 0, NULL, ?, ?
+       FROM comments c
+       WHERE CAST(c.author_user_id AS INTEGER) > 0`,
+    )
+    .run(nowTs, nowTs);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -5629,7 +5694,19 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0183_dice_rolls_context_1511', run: migrateDiceRollsContext1511 },
   { name: '0184_campaigns_condition_definitions_1505', run: migrateCampaignsTableForConditionDefinitions1505 },
   { name: '0185_characters_weapon_proficiencies_2144', run: migrateCharactersTableForWeaponProficiencies },
-  { name: '0186_encounters_map_objects_1308', run: migrateEncountersTableForMapObjects1308 },
+  // #829 discussions watch/mute/read-state: new `comment_thread_state` table. #2144
+  // claimed 0185 on main first, so this takes 0186 — it has never shipped on any real
+  // database, so renumbering is safe. runMigrations dedupes on the FULL name string,
+  // so the `_829` suffix is what guarantees run-once, and renaming it after a database
+  // has recorded it is the one edit that would silently break run-once. The table is
+  // created idempotently here AND in BOOTSTRAP_SQL (CREATE ... IF NOT EXISTS), and this
+  // migration backfills every existing comment author as `watching` on their own thread
+  // so the new fan-out model preserves pre-#829 "prior participants get notified" behavior.
+  { name: '0186_comment_thread_state_829', run: migrateCommentThreadState829 },
+  // #829 claimed 0186 on main first (same reasoning as the comment above it): this
+  // migration has never shipped on any real database either, so renumbering to 0187
+  // is safe by the identical argument.
+  { name: '0187_encounters_map_objects_1308', run: migrateEncountersTableForMapObjects1308 },
 ];
 
 /**

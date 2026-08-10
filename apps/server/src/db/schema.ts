@@ -845,6 +845,47 @@ export const comments = sqliteTable('comments', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Issue #829 — per-user, per-thread discussion subscription + read state. One row
+// per (user, campaign, anchored entity). `watching` opts a member into notifications
+// for the thread; `muted` opts them out (and wins over watching); `last_read_comment_id`
+// is the read cursor that drives unread counts. entity_type/entity_id is the SAME
+// polymorphic soft reference `comments` uses (no single FK can cover it), and the
+// application-level campaign purge + entity-remove cleanup tear these rows down with
+// their thread (see CampaignsService.purge). campaign_id carries ON DELETE CASCADE
+// (declared in BOOTSTRAP_SQL); user_id is a plain INTEGER matching notifications/
+// api_tokens (no FK), so the cascade-test seed is not blocked by a synthetic user id.
+export const commentThreadState = sqliteTable(
+  'comment_thread_state',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    campaignId: integer('campaign_id').notNull(),
+    userId: integer('user_id').notNull(), // recipient users.id
+    entityType: text('entity_type').notNull(),
+    entityId: integer('entity_id').notNull(),
+    watching: integer('watching', { mode: 'boolean' }).notNull().default(false),
+    muted: integer('muted', { mode: 'boolean' }).notNull().default(false),
+    lastReadCommentId: integer('last_read_comment_id'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    // The single state row per (user, campaign, anchor); upserts key on this.
+    userCampaignAnchor: uniqueIndex('idx_comment_thread_state_user_campaign_anchor').on(
+      t.userId,
+      t.campaignId,
+      t.entityType,
+      t.entityId,
+    ),
+    // Fan-out ("who is watching this thread?") and the per-user inbox read.
+    campaignAnchor: index('idx_comment_thread_state_campaign_anchor').on(
+      t.campaignId,
+      t.entityType,
+      t.entityId,
+    ),
+    userCampaign: index('idx_comment_thread_state_user_campaign').on(t.userId, t.campaignId),
+  }),
+);
+
 // Prose revision history (issue #157) — one row per committed prose update, holding a
 // snapshot of the entity's PRIOR content so a blind last-write-wins overwrite can be
 // listed and restored. entity_type/entity_id is a polymorphic (soft) reference across
@@ -1243,6 +1284,52 @@ export const campaignCatchUpCursors = sqliteTable(
   }),
 );
 
+// Issue #840 — personal navigation: a user's private bookmarks and bounded recent
+// history. Both are per-user, per-campaign polymorphic soft references into the
+// supported canon entity set. The FK user_id ON DELETE CASCADE tears them down with
+// the account (no orphaned private data on deletion) and campaign_id ON DELETE
+// CASCADE tears them down with the campaign. entityType/entityId is a soft
+// reference like entity_revisions: visibility is re-resolved at READ time from the
+// owning entity services' role-filtered lists, so a row whose target is hidden,
+// deleted, or no longer accessible (lost membership / cross-campaign) is simply
+// omitted from responses — never returned, never revealing the target's existence.
+export const userBookmarks = sqliteTable(
+  'user_bookmarks',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+    entityType: text('entity_type').notNull(),
+    entityId: integer('entity_id').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    // One bookmark per (user, campaign, target) — adding the same target twice is a no-op.
+    userTarget: uniqueIndex('idx_user_bookmarks_user_target').on(t.userId, t.campaignId, t.entityType, t.entityId),
+    user: index('idx_user_bookmarks_user').on(t.userId),
+  }),
+);
+
+export const userRecentViews = sqliteTable(
+  'user_recent_views',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+    entityType: text('entity_type').notNull(),
+    entityId: integer('entity_id').notNull(),
+    // Server-stamped instant of the latest visit (bumped on each re-visit).
+    visitedAt: text('visited_at').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    // One row per (user, campaign, target): a re-visit bumps visitedAt rather than
+    // adding a duplicate, which is what keeps the bounded recent-history list stable.
+    userTarget: uniqueIndex('idx_user_recent_views_user_target').on(t.userId, t.campaignId, t.entityType, t.entityId),
+    user: index('idx_user_recent_views_user').on(t.userId),
+  }),
+);
+
 // Safe, server-admin-visible history of membership rows repaired while adding
 // the campaign_members.user_id FK (#849). This deliberately has no campaign/user
 // FKs: it records references that were already missing and remains useful after
@@ -1606,7 +1693,7 @@ export const encounters = sqliteTable('encounters', {
   hexOrientation: text('hex_orientation').notNull().default('pointy'),
   aoe: text('aoe'),
   // Persistent map icons/set pieces (issue #1308) — JSON MapObject[] blob (null = []).
-  // Added by migration 0186_encounters_map_objects_1308 on older DBs.
+  // Added by migration 0187_encounters_map_objects_1308 on older DBs.
   mapObjects: text('map_objects'),
   // Grid calibration (issue #417) — align the overlay to a map's printed grid. All in
   // percent-of-map-width units; defaults reproduce the pre-#417 top-left square grid.

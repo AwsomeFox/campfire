@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import {
   COMMENTS_REPLY_MAX_LIMIT,
@@ -11,7 +11,18 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CommentsService } from './comments.service';
-import { CommentCreateDto, CommentDto, CommentReplyPageDto, CommentThreadPageDto, CommentUpdateDto } from './comments.dto';
+import {
+  CommentCreateDto,
+  CommentDto,
+  CommentInboxPageDto,
+  CommentReplyPageDto,
+  CommentThreadMarkReadDto,
+  CommentThreadPageDto,
+  CommentThreadStateDto,
+  CommentThreadStateUpdateDto,
+  CommentUnreadSummaryDto,
+  CommentUpdateDto,
+} from './comments.dto';
 import { parseCommentsLimit } from './comments-pagination';
 
 @ApiTags('comments')
@@ -112,6 +123,101 @@ export class CampaignCommentsController {
     // controller-only check would have left the agent surface open.
     const role = await this.access.requireMemberOnWritableCampaign(user, campaignId);
     return this.comments.create(campaignId, body, user, role);
+  }
+
+  @Get('thread-state')
+  @ApiOperation({
+    summary: 'Get the caller\u2019s per-thread discussion state',
+    description:
+      'Issue #829. Requires campaign membership AND visibility of the anchored entity (a hidden-entity thread 404s for a non-DM, issue #230). Returns the caller\u2019s watching/muted flags, the lastReadCommentId cursor, and the live unread count (comments after the cursor, excluding the caller\u2019s own posts).',
+  })
+  @ApiQuery({ name: 'entityType', required: true, enum: EntityType.options, description: 'The entity type the thread is anchored to.' })
+  @ApiQuery({ name: 'entityId', required: true, type: Number, description: 'The entity id the thread is anchored to.' })
+  @ApiResponse({ status: 200, description: 'Per-thread state for the caller.', type: CommentThreadStateDto })
+  async getThreadState(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('entityType') entityType: string,
+    @Query('entityId') entityId: string,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    const type = EntityType.parse(entityType) as EntityTypeValue;
+    return this.comments.getThreadState(campaignId, type, Number(entityId), user, role);
+  }
+
+  @Put('thread-state')
+  @ApiOperation({
+    summary: 'Set Watch/Mute for a discussion thread',
+    description:
+      'Issue #829. Requires campaign membership AND visibility of the anchored entity (issue #230). Provide `watching` and/or `muted`; only the provided field changes. A real member account is required (DEV/PAT identities cannot hold subscription state). Audited.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated per-thread state for the caller.', type: CommentThreadStateDto })
+  async setThreadState(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: CommentThreadStateUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    const entityType = EntityType.parse(body.entityType) as EntityTypeValue;
+    return this.comments.setThreadState(
+      campaignId,
+      entityType,
+      body.entityId,
+      user,
+      role,
+      { watching: body.watching, muted: body.muted },
+    );
+  }
+
+  @Post('thread-state/read')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Mark a discussion thread read up to a comment',
+    description:
+      'Issue #829. Requires campaign membership AND visibility of the anchored entity (issue #230). Advances the caller\u2019s lastReadCommentId cursor to `commentId` (a live comment on this anchor), or to the thread\u2019s latest live comment when `commentId` is omitted. The cursor is monotonic — it never moves backward — so unread state is retained until genuinely read (this is what clears a deep-linked comment).',
+  })
+  @ApiResponse({ status: 200, description: 'Updated per-thread state for the caller.', type: CommentThreadStateDto })
+  async markThreadRead(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: CommentThreadMarkReadDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    const entityType = EntityType.parse(body.entityType) as EntityTypeValue;
+    return this.comments.markThreadRead(campaignId, entityType, body.entityId, user, role, body.commentId);
+  }
+
+  @Get('unread-summary')
+  @ApiOperation({
+    summary: 'Per-anchor unread counts for the caller',
+    description:
+      'Issue #829. Requires campaign membership. Returns one entry per anchor with unread comments for the caller (anchors they can see; muted threads and the caller\u2019s own posts excluded). Optional `entityType` scopes the summary (e.g. `session` for session-card badges). Drives session-card badges and the discussion inbox.',
+  })
+  @ApiQuery({ name: 'entityType', required: false, enum: EntityType.options, description: 'Scope to one entity type (e.g. `session` for session cards).' })
+  @ApiResponse({ status: 200, description: 'Unread summary entries with unreadCount > 0.', type: CommentUnreadSummaryDto })
+  async unreadSummary(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('entityType') entityType?: string,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    const type = entityType ? (EntityType.parse(entityType) as EntityTypeValue) : undefined;
+    return this.comments.unreadSummary(campaignId, user, role, type);
+  }
+
+  @Get('inbox')
+  @ApiOperation({
+    summary: 'Discussion inbox for the caller',
+    description:
+      'Issue #829. Requires campaign membership. Returns the caller\u2019s WATCHING threads that have unread comments, newest-first, with a resolved entity name and the latest live comment. Hidden anchors the caller cannot see are dropped. Each item deep-links to its latest comment via the standard entity link.',
+  })
+  @ApiResponse({ status: 200, description: 'Unread watched threads, newest-first.', type: CommentInboxPageDto })
+  async inbox(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    return this.comments.inbox(campaignId, user, role);
   }
 }
 

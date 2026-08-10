@@ -35,12 +35,13 @@ import { CopyControl } from '../../components/CopyControl';
 import { SchedulePanel } from './SchedulePanel';
 import { ScribePanel } from './ScribePanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
+import { useCommentUnreadByEntity, useCommentInbox } from '../comments/useCommentThreadState';
 import { EncounterBacklinksCard } from '../../components/EncounterBacklinksCard';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { VirtualList } from '../../components/VirtualList';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
-import { entityTargetProps } from '../../lib/entityLinks';
+import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
 import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
 import { consumeEncounterAftermathRecap } from '../encounters/encounterAftermathHandoff';
@@ -90,6 +91,10 @@ export default function SessionsPage() {
 
   const selectedId = searchParams.get('session');
   const recapAction = searchParams.get('action');
+  // Issue #829: per-session unread discussion counts (session-card badges) and the
+  // campaign-wide discussion inbox.
+  const unreadBySession = useCommentUnreadByEntity(cid, 'session');
+  const commentInbox = useCommentInbox(cid);
   const fromEncounterId = Number(searchParams.get('fromEncounter'));
   const rawFromSchedule = Number(searchParams.get('fromSchedule'));
   const fromScheduleId = Number.isFinite(rawFromSchedule) && rawFromSchedule > 0 ? rawFromSchedule : null;
@@ -502,6 +507,42 @@ export default function SessionsPage() {
               preview), and review recent runs. Renders nothing until the AI DM seat is on. */}
           <ScribePanel campaignId={cid} isDm={isDm} />
 
+          {/* Issue #829 — discussion inbox: the caller's watched threads with unread
+              comments, newest-first. Each item deep-links to its latest comment. */}
+          {commentInbox.items.length > 0 && (
+            <Card>
+              <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wide m-0 mb-2">
+                {t('sessions.discussion.inboxTitle')}
+              </h3>
+              <ul className="space-y-1.5 list-none p-0 m-0">
+                {commentInbox.items.map((item) => (
+                  <li key={`${item.entityType}:${item.entityId}`}>
+                    <Link
+                      to={entityHref(cid, {
+                        type: 'comment',
+                        id: item.lastCommentId ?? item.entityId,
+                        parentType: item.entityType,
+                        parentId: item.entityId,
+                      })}
+                      className="flex items-baseline gap-2 text-sm"
+                    >
+                      <span className="flex-1 min-w-0 truncate">
+                        {item.entityName ?? item.entityType}
+                      </span>
+                      <span
+                        className="tag"
+                        aria-label={`${item.unreadCount} ${t('sessions.discussion.unreadLabel')}`}
+                        style={{ background: 'var(--color-accent)', color: 'var(--color-bg)' }}
+                      >
+                        {item.unreadCount}
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
+
           {sessions.length === 0 && !showAddForm ? (
             <Card>
               <EmptyState title={t('sessions.empty.noSessions')} />
@@ -523,13 +564,14 @@ export default function SessionsPage() {
                 {(s) => {
                   const isActive = selected?.id === s.id;
                   const title = s.title || 'Untitled session';
+                  const unread = unreadBySession.byEntity.get(s.id) ?? 0;
                   return (
                     <div key={s.id} role="listitem">
                       <button
                         type="button"
                         onClick={() => selectSession(s.id)}
                         aria-current={isActive ? 'true' : undefined}
-                        aria-label={`Session ${s.number}${s.title ? `, ${s.title},` : ''}, played ${formatDate(s.playedAt)}${isActive ? '. Selected.' : ''}`}
+                        aria-label={`Session ${s.number}${s.title ? `, ${s.title},` : ''}, played ${formatDate(s.playedAt)}${unread > 0 ? `, ${unread} ${t('sessions.discussion.unreadLabel')}` : ''}${isActive ? '. Selected.' : ''}`}
                         className="text-left w-full"
                         style={{
                           display: 'flex',
@@ -565,6 +607,15 @@ export default function SessionsPage() {
                           </span>
                           <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
                         </span>
+                        {unread > 0 && (
+                          <span
+                            className="tag"
+                            aria-label={`${unread} ${t('sessions.discussion.unreadLabel')}`}
+                            style={{ alignSelf: 'center', background: 'var(--color-accent)', color: 'var(--color-bg)' }}
+                          >
+                            {unread}
+                          </span>
+                        )}
                         {isActive && <span className="sr-only">Selected</span>}
                       </button>
                     </div>
