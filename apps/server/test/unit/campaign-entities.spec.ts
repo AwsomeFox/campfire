@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { eq } from 'drizzle-orm';
 import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { CharactersService } from '../../src/modules/characters/characters.service';
@@ -14,7 +15,7 @@ import { CampaignAccessService } from '../../src/modules/membership/campaign-acc
 import { NotificationsService } from '../../src/modules/notifications/notifications.service';
 import { ModerationService } from '../../src/modules/moderation/moderation.service';
 import type { RequestUser } from '../../src/common/user.types';
-import { campaigns } from '../../src/db/schema';
+import { auditLog, campaigns } from '../../src/db/schema';
 import { nowIso } from '../../src/common/time';
 
 describe('Campaign Entities (Characters, Notes, Quests, Inventory) unit tests', () => {
@@ -235,6 +236,15 @@ describe('Campaign Entities (Characters, Notes, Quests, Inventory) unit tests', 
       await inventoryService.remove(item.id, dmActor, 'dm');
       const afterRemove = await inventoryService.listForCampaign(campaignId, dmActor, 'dm');
       expect(afterRemove.length).toBe(0);
+
+      await inventoryService.restore(item.id, dmActor, 'dm');
+      const auditRows = await db.select().from(auditLog).where(eq(auditLog.entityId, item.id));
+      const payloads = auditRows
+        .filter((row) => ['item.create', 'item.update', 'item.delete', 'item.restore'].includes(row.action))
+        .map((row) => JSON.parse(row.payloadJson ?? '{}'));
+      expect(payloads.map((payload) => payload.action)).toEqual(['item.create', 'item.update', 'item.delete', 'item.restore']);
+      expect(payloads.every((payload) => payload.kind === 'inventory_item' && payload.entity.label === 'Healing Potion')).toBe(true);
+      expect(payloads.find((payload) => payload.action === 'item.delete').snapshot.qty).toBe(2);
     });
   });
 });

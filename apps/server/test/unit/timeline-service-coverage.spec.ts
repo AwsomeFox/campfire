@@ -150,7 +150,11 @@ describe('TimelineService unit coverage tests', () => {
     await timelineService.removeEvent(created.id, adminActor, 'dm');
     await timelineService.restoreEvent(created.id, adminActor, 'dm');
     const snapshots = await audit.listForCampaign(campaignId);
-    expect(snapshots.find((row) => row.action === 'timeline.event.delete')?.payload?.snapshot?.dmSecret).toBe('second secret');
-    expect(snapshots.find((row) => row.action === 'timeline.event.restore')?.payload?.snapshot?.dmSecret).toBe('second secret');
+    const deletedPayload = snapshots.find((row) => row.action === 'timeline.event.delete')?.payload;
+    const restoredPayload = snapshots.find((row) => row.action === 'timeline.event.restore')?.payload;
+    expect(deletedPayload?.kind).toBe('timeline_event');
+    expect(restoredPayload?.kind).toBe('timeline_event');
+    if (deletedPayload?.kind === 'timeline_event') expect(deletedPayload.snapshot?.dmSecret).toBe('second secret');
+    if (restoredPayload?.kind === 'timeline_event') expect(restoredPayload.snapshot?.dmSecret).toBe('second secret');
   });
 });

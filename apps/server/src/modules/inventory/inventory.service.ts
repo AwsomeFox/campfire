@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { canonicalJson, CharacterAction, CompendiumRef, CompendiumSnapshot, deriveEquippedItemAction, EquippedActionSource, rebuildEditedActionSpec, InventoryFromCompendium, InventoryItem, InventoryItemCreate, InventoryItemUpdate, ruleSystemAdapter, TreasuryPatch } from '@campfire/schema';
-import type { HomebrewMechanicsProfile, RuleSystemAdapter, Treasury, Role } from '@campfire/schema';
+import type { HomebrewMechanicsProfile, RuleSystemAdapter, Treasury, Role, InventoryItemAuditPayload } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { fromJsonText } from '../../common/json';
 import { campaigns, inventoryItems, inventoryQtyIdempotency, partyTreasury, characters, ruleEntries, rulePacks } from '../../db/schema';
@@ -13,6 +13,7 @@ import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { getRequestContext } from '../../common/request-context';
 
 type InventoryItemCreateInput = z.infer<typeof InventoryItemCreate>;
 type InventoryItemUpdateInput = z.infer<typeof InventoryItemUpdate>;
@@ -20,6 +21,13 @@ type InventoryFromCompendiumInput = z.infer<typeof InventoryFromCompendium>;
 type TreasuryPatchInput = z.infer<typeof TreasuryPatch>;
 
 type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
+
+function inventoryAuditPayload(action: InventoryItemAuditPayload['action'], actor: string, role: Role, before: typeof inventoryItems.$inferSelect | null, after: typeof inventoryItems.$inferSelect): InventoryItemAuditPayload {
+  const context = getRequestContext();
+  const fields = ['name', 'qty', 'notes', 'iconSlug', 'ownerType', 'characterId', 'equipped', 'equipSlot'] as const;
+  const changes = (action === 'item.delete' ? [{ field: 'trashed', before: false, after: true, visibility: 'member' as const }] : action === 'item.restore' ? [{ field: 'trashed', before: true, after: false, visibility: 'member' as const }] : fields.filter((field) => before?.[field] !== after[field]).map((field) => ({ field, before: before?.[field] ?? null, after: after[field] ?? null, visibility: 'member' as const })));
+  return { version: 1, kind: 'inventory_item', action, actor: { id: actor, role }, source: { transport: context?.transport ?? 'system', requestId: context?.requestId ?? null }, entity: { type: 'inventory_item', id: after.id, label: after.name, navigation: { route: 'inventory', query: 'item' } }, changes: changes.length ? changes : [{ field: 'updatedAt', before: before?.updatedAt ?? null, after: after.updatedAt, visibility: 'member' }], snapshot: action === 'item.delete' || action === 'item.restore' ? { name: before?.name ?? after.name, qty: before?.qty ?? after.qty, notes: before?.notes ?? after.notes, iconSlug: before?.iconSlug ?? after.iconSlug, ownerType: (before?.ownerType ?? after.ownerType) as 'party' | 'character', characterId: before?.characterId ?? after.characterId, equipped: before?.equipped ?? after.equipped, equipSlot: before?.equipSlot ?? after.equipSlot } : null, reason: null };
+}
 
 /**
  * How long qty idempotency rows are honored before opportunistic prune-on-write
@@ -480,9 +488,9 @@ export class InventoryService {
     }
 
     const ts = nowIso();
-    const [row] = await this.db
-      .insert(inventoryItems)
-      .values({
+    const actor = auditActor(user);
+    const row = this.db.transaction((tx) => {
+      const [created] = tx.insert(inventoryItems).values({
         campaignId,
         ownerType,
         characterId,
@@ -492,15 +500,9 @@ export class InventoryService {
         iconSlug: input.iconSlug ?? '',
         createdAt: ts,
         updatedAt: ts,
-      })
-      .returning();
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'item.create',
-      entityType: 'inventory_item',
-      entityId: row.id,
-      campaignId,
+      }).returning().all();
+      this.audit.logInTx(tx, { actor, actorRole: role, action: 'item.create', entityType: 'inventory_item', entityId: created.id, campaignId, payload: inventoryAuditPayload('item.create', actor, role, null, created) });
+      return created;
     });
     const created = toDomain(row);
     return (await this.resolveEquippedActions([created], user, role))[0];
@@ -1101,6 +1103,11 @@ export class InventoryService {
         }
 
         committed = this.redactEquippedActionForOwner(toDomain(next), user, role, finalOwnerUserId);
+        this.audit.logInTx(tx, {
+          actor: auditActor(user), actorRole: role, action: 'item.update', entityType: 'inventory_item', entityId: id,
+          campaignId: existing.campaignId, detail: `Inventory item “${next.name}” updated`,
+          payload: inventoryAuditPayload('item.update', auditActor(user), role, fresh, next),
+        });
 
         if (idempotencyKey && fingerprint) {
           try {
@@ -1164,7 +1171,6 @@ export class InventoryService {
     // Issue #1326: record the equip transition (if any) alongside the existing qty detail
     // rather than a separate audit action — this is still one `item.update` write.
     const equipChanged = existing.equipped !== committed.equipped || existing.equipSlot !== committed.equipSlot;
-    const hasDetail = qtyTouch || equipChanged;
     // Issue #1901 rework (review: chatgpt-codex-connector P1 / devin-ai-integration on
     // PR #1951): rewriting or clearing `equippedAction` on an item that stays equipped
     // changes the character's merged combat-action list exactly like an equip/unequip
@@ -1193,37 +1199,6 @@ export class InventoryService {
     // that is actually stored.
     const renamedGrantingItem = committed.name !== nameBeforeWrite && committed.equipped && committed.ownerType === 'character';
     const actionContentChanged = equippedActionEdited || renamedGrantingItem;
-
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'item.update',
-      entityType: 'inventory_item',
-      entityId: id,
-      campaignId: existing.campaignId,
-      detail: hasDetail
-        ? JSON.stringify({
-            actor: { id: user.id, name: user.name, role },
-            ...(qtyTouch
-              ? {
-                  kind: hasQtyDelta ? 'delta' : 'set',
-                  ...(hasQtyDelta ? { qtyDelta: input.qtyDelta } : { qty: input.qty }),
-                  after: committed.qty,
-                  ...(input.expectedUpdatedAt !== undefined ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
-                  ...(idempotencyKey ? { idempotencyKey } : {}),
-                }
-              : {}),
-            ...(equipChanged
-              ? {
-                  equip: {
-                    from: { equipped: existing.equipped, equipSlot: existing.equipSlot },
-                    to: { equipped: committed.equipped, equipSlot: committed.equipSlot },
-                  },
-                }
-              : {}),
-          })
-        : undefined,
-    });
 
     // Issue #1901 rework: `displaceEquipped` unequipped a slot-conflicting incumbent inside
     // the same transaction as this write — audit it as its own `item.update` (its own
@@ -1291,8 +1266,8 @@ export class InventoryService {
       equipSlot: existing.equipSlot,
     };
 
-    const [row] = await this.db
-      .update(inventoryItems)
+    const row = this.db.transaction((tx) => {
+      const [deleted] = tx.update(inventoryItems)
       // Issue #1326 review (coordinator): trashing an equipped item must clear
       // equipped/equipSlot so a replacement can claim the slot, but equippedAction is
       // inert while equipped is false and should round-trip with the tombstone. Nulled
@@ -1300,7 +1275,10 @@ export class InventoryService {
       // does not record it and restore() does not rewrite it.
       .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts, equipped: false, equipSlot: null })
       .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
-      .returning();
+      .returning().all();
+      if (deleted) this.audit.logInTx(tx, { actor, actorRole: role, action: 'item.delete', entityType: 'inventory_item', entityId: id, campaignId: existing.campaignId, detail: JSON.stringify({ snapshot }), payload: inventoryAuditPayload('item.delete', actor, role, existing, deleted) });
+      return deleted;
+    });
     if (!row) {
       // Another request already tombstoned this item — treat as already deleted
       // rather than overwriting the existing tombstone or logging a duplicate.
@@ -1308,15 +1286,6 @@ export class InventoryService {
     }
 
     const domain = toDomain(row);
-    await this.audit.log({
-      actor,
-      actorRole: role,
-      action: 'item.delete',
-      entityType: 'inventory_item',
-      entityId: id,
-      campaignId: existing.campaignId,
-      detail: JSON.stringify({ snapshot }),
-    });
 
     // Issue #1901 rework (review: devin-ai-integration on PR #1951): trashing an item that
     // was equipped and carried a granted action drops that action from the owning
@@ -1379,32 +1348,13 @@ export class InventoryService {
       // Party-owned items can never legitimately carry an equipped action.
       restoreUpdate.equippedAction = CLEARED_EQUIP_STATE.equippedAction;
     }
-    const [row] = await this.db
-      .update(inventoryItems)
-      .set(restoreUpdate)
-      .where(eq(inventoryItems.id, id))
-      .returning();
+    const row = this.db.transaction((tx) => {
+      const [restored] = tx.update(inventoryItems).set(restoreUpdate).where(eq(inventoryItems.id, id)).returning().all();
+      this.audit.logInTx(tx, { actor, actorRole: role, action: 'item.restore', entityType: 'inventory_item', entityId: id, campaignId: existing.campaignId, detail: JSON.stringify({ snapshot: { name: existing.name, qty: existing.qty, notes: existing.notes, iconSlug: existing.iconSlug, ownerType: existing.ownerType, characterId: existing.characterId }, ...(fallback ? { fallbackToParty: true } : {}) }), payload: inventoryAuditPayload('item.restore', actor, role, existing, restored) });
+      return restored;
+    });
 
     const domain = toDomain(row);
-    await this.audit.log({
-      actor,
-      actorRole: role,
-      action: 'item.restore',
-      entityType: 'inventory_item',
-      entityId: id,
-      campaignId: existing.campaignId,
-      detail: JSON.stringify({
-        snapshot: {
-          name: existing.name,
-          qty: existing.qty,
-          notes: existing.notes,
-          iconSlug: existing.iconSlug,
-          ownerType: existing.ownerType,
-          characterId: existing.characterId,
-        },
-        ...(fallback ? { fallbackToParty: true } : {}),
-      }),
-    });
 
     return (await this.resolveEquippedActions([domain], user, role))[0];
   }
