@@ -83,6 +83,20 @@ Run the smallest relevant checks while iterating. Run all checks affected by the
 final diff before handoff. GitHub's aggregate required check is named `ci`.
 Non-required browser jobs still matter when the branch caused their failure.
 
+Every test tier above is wrapped in `scripts/with-test-lock.sh`, which holds a
+machine-wide lock (`/tmp/campfire-test.lock`) for the duration of the run. Each
+tier sizes its worker pool against the whole machine — jest asks for 50% of the
+cores at a ~1GB-per-worker recycle threshold, vitest spawns its own pool, and
+the browser tier boots a Nest server plus Chromium on the fixed port 8123 with
+`reuseExistingServer`. Several agent sessions in separate worktrees running
+tests at once therefore exhaust host memory, and two concurrent browser runs
+silently share one seeded backend. The lock makes those runs queue instead; it
+waits up to an hour, reclaims a lock whose holder died, and is a no-op when `CI`
+is set. Invoke tests through the npm scripts, not by calling `jest`, `vitest`,
+or `playwright` directly — a direct call bypasses the lock. `JEST_MAX_WORKERS`,
+`VITEST_MAX_WORKERS`, and `CAMPFIRE_TEST_HEAP_MB` override the per-run caps;
+`CAMPFIRE_TEST_LOCK_HELD=1` skips locking entirely.
+
 `npm run typecheck` covers `apps/server/test/**` and the `apps/web` Playwright
 tree, and the `lint` job runs it — a broken service constructor/method
 signature fails there in under two minutes, not ~20 minutes later in

@@ -38,5 +38,12 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['test/component/**/*.spec.tsx'],
     reporters: ['default'],
+    // Same reasoning as `maxWorkers` in apps/server/jest.config.js: this pool
+    // otherwise sizes itself against the whole machine, which is wrong when
+    // several agent sessions share it. `scripts/with-test-lock.sh` sets the
+    // variable for local runs; unset keeps vitest's own default.
+    ...(process.env.VITEST_MAX_WORKERS
+      ? { maxWorkers: Number(process.env.VITEST_MAX_WORKERS) }
+      : {}),
   },
 });

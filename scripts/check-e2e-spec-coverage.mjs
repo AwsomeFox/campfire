@@ -52,7 +52,12 @@ function main() {
     return match?.[1] ?? '';
   };
   const errors = [];
-  if (webPackage.scripts?.['test:unit'] !== `playwright test --config ${unitConfig}`) errors.push(`apps/web test:unit must invoke ${unitConfig}`);
+  // A leading wrapper (today: scripts/with-test-lock.sh, which serializes local
+  // runs across agent sessions) is allowed; what this check exists to pin down
+  // is that the tier still ends up running the supported unit config.
+  const unitScript = webPackage.scripts?.['test:unit'] ?? '';
+  const unitInvocation = `playwright test --config ${unitConfig}`;
+  if (unitScript !== unitInvocation && !unitScript.endsWith(` ${unitInvocation}`)) errors.push(`apps/web test:unit must invoke ${unitConfig}`);
   if (!rootPackage.scripts?.['test:all']?.includes('test:unit:web')) errors.push('root test:all must invoke test:unit:web');
   const unitWeb = jobBlock('unit-web');
   const aggregateCi = jobBlock('ci');
