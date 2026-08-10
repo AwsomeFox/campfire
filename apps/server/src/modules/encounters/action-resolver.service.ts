@@ -341,6 +341,14 @@ export class ActionResolverService {
    * a stated rule, not a gap. A character is authored directly (no statblock prose to parse),
    * so there is no vocabulary filtering to apply — the three arrays are the canonical list as
    * entered, unlike `damageDefensesFromStatblock`'s best-effort parse.
+   *
+   * This also settles the interaction with #2177's PF2e category expansion (`categories`,
+   * e.g. "physical" -> ["bludgeoning", "piercing", "slashing"]): that expansion only ever
+   * happens inside `damageDefensesFromStatblock`, on the statblock branch below. A character
+   * hit takes the early return above and never reaches it, so a character's own defences are
+   * exactly the three arrays as authored — never widened or narrowed by category membership —
+   * regardless of what a same-row statblock would have expanded to. `categories` is threaded
+   * through only so the statblock branch can use it when the character branch does not apply.
    */
   private targetDefenses(
     row: typeof combatants.$inferSelect,

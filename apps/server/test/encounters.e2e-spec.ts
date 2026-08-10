@@ -633,6 +633,34 @@ describe('encounters (e2e)', () => {
       expect(invalid.status).toBe(400);
     });
 
+    it('direct tracker damage against a character-kind combatant respects ITS OWN authored defences, not just a statblock (issue #2156)', async () => {
+      const server = ctx.app.getHttpServer();
+      const character = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Defended PC', hpCurrent: 30, hpMax: 30, resistances: ['fire'], vulnerabilities: ['cold'], immunities: ['poison'] });
+      expect(character.status).toBe(201);
+      const added = await request(server)
+        .post(`/api/v1/encounters/${encounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'character', characterId: character.body.id });
+      expect(added.status).toBe(201);
+      const targetId = added.body.id;
+
+      const resisted = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -10, damageType: 'fire' });
+      expect(resisted.status).toBe(200);
+      expect(resisted.body.hpCurrent).toBe(25); // resistant: 10 halved (round down) to 5
+
+      const vulnerable = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -6, damageType: 'cold' });
+      expect(vulnerable.body.hpCurrent).toBe(13); // vulnerable: 6 doubled to 12
+
+      const immune = await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${targetId}`).set(dm)
+        .send({ hpDelta: -20, damageType: 'poison' });
+      expect(immune.body.hpCurrent).toBe(13); // immune: unchanged
+    });
+
     it('rejects direct-damage metadata for adapters that do not own 5e damage rules (issue #605)', async () => {
       const server = ctx.app.getHttpServer();
       const db = ctx.app.get<DrizzleDb>(DB);

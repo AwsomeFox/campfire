@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { and, eq } from 'drizzle-orm';
-import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState } from '@campfire/schema';
+import { ActionApplyRequest, ActionResolveRequest, ActionSpec, ActionUndoToken, CombatantTurnState, PF2E_DAMAGE_TYPE_CATEGORIES } from '@campfire/schema';
 import { openDatabase } from '../../src/db/db.module';
 import { actionApplyChains, actionPendingResolutions, auditLog, campaigns, characters, combatants, encounterEvents, encounters, inventoryItems, ruleEntries, rulePacks, users } from '../../src/db/schema';
 import { AuditService } from '../../src/modules/audit/audit.service';
@@ -1107,6 +1107,54 @@ describe('action resolver (real SQLite, service layer)', () => {
         const defenses = (service as any).targetDefenses(row);
         expect(defenses.resistances).toContain('cold');
         expect(defenses.immunities).not.toContain('cold');
+      },
+    );
+
+    it(
+      "precedence holds against a PF2e CATEGORY-expanded statblock too (#2177): a character vulnerable to " +
+        "'slashing' — a member of PF2e's 'physical' category — still reports only its own authored arrays " +
+        "when the same row's statblock is resistant to the whole 'physical' category, because the character " +
+        'branch returns before `damageDefensesFromStatblock` (and its category expansion) ever runs',
+      () => {
+        const { orm, service } = build();
+        const ts = new Date().toISOString();
+        const [campaign] = orm.insert(campaigns).values({ name: 'Category Precedence Test', ruleSystem: 'pf2e', createdAt: ts, updatedAt: ts }).returning().all();
+        const [rulePack] = orm.insert(rulePacks).values({ slug: 'category-precedence-pack', name: 'Category Precedence Pack', installedAt: ts }).returning().all();
+        // Statblock resistant to the whole 'physical' CATEGORY, which #2177's expansion turns
+        // into member types including 'slashing' — the opposite polarity of the character's own
+        // 'slashing' vulnerability below, so an accidental read of the statblock branch fails loudly.
+        const [entry] = orm
+          .insert(ruleEntries)
+          .values({
+            packId: rulePack.id,
+            slug: 'conflicting-category-statblock',
+            name: 'Conflicting Category Statblock',
+            type: 'monster',
+            dataJson: JSON.stringify({ armor_class: 10, hit_points: 10, damage_resistances: ['physical'] }),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        const [char] = orm
+          .insert(characters)
+          .values({ campaignId: campaign.id, ownerUserId: alice.id, name: 'Defender PC', hpCurrent: 30, hpMax: 30, vulnerabilities: JSON.stringify(['slashing']), createdAt: ts, updatedAt: ts })
+          .returning()
+          .all();
+        const [encounter] = orm.insert(encounters).values({ campaignId: campaign.id, name: 'Fight', status: 'running', round: 1, turnIndex: 0, createdAt: ts, updatedAt: ts }).returning().all();
+        const [combat] = orm
+          .insert(combatants)
+          .values({ encounterId: encounter.id, kind: 'character', characterId: char.id, ruleEntryId: entry.id, name: 'Defender PC', initiative: 10, hpCurrent: 30, hpMax: 30, sortOrder: 0 })
+          .returning()
+          .all();
+        const row = orm.select().from(combatants).where(eq(combatants.id, combat.id)).get()!;
+
+        // Pass `categories` explicitly, exactly as the real call site (adapter.damageTypeCategories)
+        // would for a PF2e campaign — proving the character branch ignores it, not merely that the
+        // test never supplied it.
+        const defenses = (service as any).targetDefenses(row, undefined, PF2E_DAMAGE_TYPE_CATEGORIES);
+        expect(defenses.vulnerabilities).toEqual(['slashing']);
+        expect(defenses.resistances).toEqual([]);
       },
     );
   });

@@ -1284,13 +1284,31 @@ export class EncountersService {
     return ruleSystemAdapter(row?.ruleSystem, fromJsonText<HomebrewMechanicsProfile | null>(row?.customMechanicsProfile, null));
   }
 
-  /** Statblock-derived damage defences for direct tracker damage (issue #605). */
+  /**
+   * Damage-type defences for direct tracker damage (issue #605), extended in #2156 to also
+   * check a linked character. Same precedence rule as `ActionResolverService.targetDefenses`,
+   * stated once there and mirrored here rather than duplicated in prose: a linked character's
+   * own authored defences win outright over any statblock-derived ones the same row might also
+   * carry, whether or not the statblock side would have had PF2e category tokens (#2177)
+   * expanded into member damage types first — the character branch never reaches
+   * `damageDefensesFromStatblock` at all, so category expansion is simply not in play for it.
+   */
   private targetDamageDefenses(
     row: typeof combatants.$inferSelect,
     damageTypes: readonly string[] | undefined,
     db: SyncDb = this.db,
     categories?: Readonly<Record<string, readonly string[]>>,
   ): TargetDefenses {
+    if (row.characterId !== null) {
+      const character = db.select().from(characters).where(eq(characters.id, row.characterId)).get();
+      if (character) {
+        return {
+          resistances: fromJsonText<string[]>(character.resistances, []),
+          vulnerabilities: fromJsonText<string[]>(character.vulnerabilities, []),
+          immunities: fromJsonText<string[]>(character.immunities, []),
+        };
+      }
+    }
     if (row.ruleEntryId === null) return { resistances: [], vulnerabilities: [], immunities: [] };
     const encounter = db
       .select({ campaignId: encounters.campaignId })
