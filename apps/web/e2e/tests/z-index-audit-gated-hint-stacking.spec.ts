@@ -48,7 +48,12 @@ test.describe('z-index audit — gated hint vs. sticky header on the dashboard (
     await expect(addD6).toBeVisible();
     await addD6.click();
 
-    const advantage = page.getByRole('button', { name: 'Advantage' });
+    // `exact: true` is load-bearing, not defensive: Playwright's default accessible-name
+    // match is a substring match, and "Advantage" is a substring of "Disadvantage" — the
+    // sibling GatedControl toggle right next to it. Without this the locator resolves to
+    // both buttons and every assertion below throws a strict-mode violation before the
+    // stacking-context measurement ever runs (caught by CI, not predicted).
+    const advantage = page.getByRole('button', { name: 'Advantage', exact: true });
     await expect(advantage).toBeDisabled();
     await advantage.focus();
     const hint = page.getByTestId('gated-control-hint').first();
