@@ -425,8 +425,15 @@ export function EncounterAiDriverPanel({
     const next = !rememberTranscript;
     setTranscriptRemember(viewerId, next);
     setRememberTranscript(next);
+    // Guard the immediate write with the same ownership check AiTablePage uses
+    // (transcriptOwnerRef === transcriptOwnerKey): only persist if the panel
+    // still owns this viewer/campaign/role/mode combo, so an identity or
+    // campaign switch can't land a stale transcript under a new key.
     if (next && liveActivity.mode === 'driver' && effectiveRole !== null) {
-      saveTranscript(viewerId, campaignId, transcript, 'activity', effectiveRole);
+      const owner = `${me?.user.id ?? ''}:${campaignId}:driver:${isDm}:${myMembership?.role ?? ''}`;
+      if (composerOwnerRef.current === owner) {
+        saveTranscript(viewerId, campaignId, transcript, 'activity', effectiveRole);
+      }
     }
   }
 
