@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Campaign } from '@campfire/schema';
-import { measureBox, renderCssFixture } from '../lib/computedStyle';
+import { measureBox } from '../lib/computedStyle';
 import { restoreSeedEncounter, seed, stateFor } from './seed';
 import { openCockpitTab } from '../lib/encounterCockpit';
 
@@ -382,33 +382,5 @@ test.describe('design-system spacing pins (issue #2167)', () => {
       hrBox.marginTop,
       '.hr margin-top must equal --space-4 (11.2px on the current 2.8px scale) today at Layout.tsx\'s sidebar divider — see the comment above before changing this value',
     ).toBe('11.2px');
-  });
-
-  test('nocturne .table: no JSX consumer, pinned against the compiled stylesheet', async ({ page }) => {
-    // `.table` (nocturne.css) is a direct `var(--space-N)` consumer named in this issue's
-    // "at minimum" list, but has no live page to measure it against: nothing in
-    // `apps/web/src` composes the class. Verified by searching for the class being
-    // COMPOSED, not merely for the `<table` element (a bare `<table className="w-full
-    // text-sm">` — the shape every real table in this app actually uses — would false-
-    // negative-free past a `<table` search without ever using this rule):
-    // `git grep -n 'className="[^"]*\btable\b[^"]*"' apps/web/src` and the template-literal
-    // form `git grep -n 'className={[^}]*\btable\b' apps/web/src` both return nothing.
-    // The rule stays live in the compiled stylesheet and will still shift silently under
-    // #2169's retokening, so it is pinned here via `renderCssFixture` — the documented
-    // fallback in computedStyle.ts for exactly this case ("no convenient live page renders
-    // the exact class combination you need") — against the real compiled CSS, not a
-    // hand-duplicated value. Run `npm run build` in apps/web before running this test.
-    await renderCssFixture(
-      page,
-      '<table class="table"><tbody><tr><td data-testid="fixture-td">cell</td></tr></tbody></table>',
-    );
-
-    const td = page.getByTestId('fixture-td');
-    const tdBox = await measureBox(td);
-    // 5.6px is --space-2 on the current 2.8px scale; #2169's retokening moves it to 8px.
-    expect(
-      tdBox.paddingTop,
-      '.table td padding must equal --space-2 (5.6px on the current 2.8px scale) today — see the comment above before changing this value',
-    ).toBe('5.6px');
   });
 });

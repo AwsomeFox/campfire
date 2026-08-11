@@ -2168,8 +2168,8 @@ h1, h2, h3, h4, h5, h6 {
   }
 }
 
-/* Tables — markdown emits a bare `<table>` (Nocturne only styles the `.table`
-   class), so give it borders + padding here. `display:block` + `overflow-x`
+/* Tables — markdown emits a bare `<table>` that no design-system class targets,
+   so give it borders + padding here. `display:block` + `overflow-x`
    turns the table into its own horizontal-scroll container so wide SRD
    class/monster tables scroll internally instead of forcing the whole page to
    scroll at 375px. */
