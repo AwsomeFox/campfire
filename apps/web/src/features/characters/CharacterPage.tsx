@@ -2051,6 +2051,11 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                   <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
                 </div>
               )}
+              {/* Proficiency toggle LEADS its item, matching the skills list below, where the
+                  ○/●/★ sits before the skill name. It used to sit top-right here and left
+                  there — the same control mirrored between two adjacent cards, so the eye
+                  had to relearn the pattern moving from saves to skills. `start-*` rather
+                  than `left-*` so it follows the writing direction in the ar locale. */}
               {canEdit ? (
                 <>
                   <button
@@ -2059,21 +2064,21 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                     disabled={busy}
                     aria-pressed={proficient}
                     aria-label={saveProficiencyLabel(k, proficient)}
-                    className="cf-target-44 absolute top-0.5 right-0.5 cf-print-hide"
+                    className="cf-target-44 absolute top-0.5 start-0.5 cf-print-hide"
                     style={{ background: 'transparent', border: 0, padding: 0, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                     title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
                   >
                     <span aria-hidden="true">{proficient ? '●' : '○'}</span>
                   </button>
                   {proficient && (
-                    <span className="cf-print-only absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
+                    <span className="cf-print-only absolute top-1 start-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
                       ●
                     </span>
                   )}
                 </>
               ) : (
                 proficient && (
-                  <span className="absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
+                  <span className="absolute top-1 start-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
                     ●
                   </span>
                 )
