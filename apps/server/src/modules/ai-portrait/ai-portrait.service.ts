@@ -11,6 +11,7 @@ import {
 import {
   AiPortraitGenerationJob,
   type AiPortraitCost,
+  type AiPortraitEntityType,
   type AiPortraitGenerationMethod,
   type AiPortraitGenerationRequest,
   type AiPortraitModeration,
@@ -28,6 +29,8 @@ import { AuditService } from '../audit/audit.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { CharactersService } from '../characters/characters.service';
 import { NpcsService } from '../npcs/npcs.service';
+import { FactionsService } from '../factions/factions.service';
+import { LocationsService } from '../locations/locations.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import {
   createAiImageProvider,
@@ -135,6 +138,8 @@ export class AiPortraitService {
     private readonly attachments: AttachmentsService,
     private readonly characters: CharactersService,
     private readonly npcs: NpcsService,
+    private readonly factions: FactionsService,
+    private readonly locations: LocationsService,
     private readonly audit: AuditService,
   ) {}
 
@@ -417,7 +422,7 @@ export class AiPortraitService {
     body: AttachGeneratedPortraitRequest,
     user: RequestUser,
     role: Role,
-  ): Promise<{ attachment: Attachment; entity: { type: 'character' | 'npc'; id: number }; provenance: AiPortraitProvenance }> {
+  ): Promise<{ attachment: Attachment; entity: { type: AiPortraitEntityType; id: number }; provenance: AiPortraitProvenance }> {
     const record = this.requireOwnedJob(jobId, campaignId, user);
     if (record.job.status !== 'succeeded') {
       throw new ConflictException(`Job ${jobId} is ${record.job.status}; only a succeeded job can be attached.`);
@@ -495,8 +500,12 @@ export class AiPortraitService {
       if (body.entityType === 'character') {
         // CharactersService.update asserts dm-or-owner — a player can only set their OWN portrait.
         await this.characters.update(body.entityId, { portraitUrl }, user, role);
-      } else {
+      } else if (body.entityType === 'npc') {
         await this.npcs.update(body.entityId, { portraitUrl }, user, role);
+      } else if (body.entityType === 'faction') {
+        await this.factions.update(body.entityId, { portraitUrl }, user, role);
+      } else if (body.entityType === 'location') {
+        await this.locations.update(body.entityId, { portraitUrl }, user, role);
       }
     } catch (err) {
       // Defensive: the pre-validation should have caught authority issues, but a race, a concurrent
@@ -510,9 +519,14 @@ export class AiPortraitService {
       // and restoring the prior URL is safe; if not, a concurrent user already changed it and we
       // must not clobber their value.
       try {
-        const currentRow = body.entityType === 'character'
-          ? await this.characters.getRowOrThrow(body.entityId)
-          : await this.npcs.getRowOrThrow(body.entityId);
+        const currentRow =
+          body.entityType === 'character'
+            ? await this.characters.getRowOrThrow(body.entityId)
+            : body.entityType === 'npc'
+            ? await this.npcs.getRowOrThrow(body.entityId)
+            : body.entityType === 'faction'
+            ? await this.factions.getRowOrThrow(body.entityId)
+            : await this.locations.getRowOrThrow(body.entityId);
         const currentUrl = currentRow.portraitUrl ?? '';
         if (currentUrl.includes(`/attachments/${attachment.id}/file`)) {
           if (body.entityType === 'character') {
@@ -522,8 +536,22 @@ export class AiPortraitService {
               user,
               role,
             );
-          } else {
+          } else if (body.entityType === 'npc') {
             await this.npcs.update(
+              body.entityId,
+              { portraitUrl: targetVisibility.priorPortraitUrl },
+              user,
+              role,
+            );
+          } else if (body.entityType === 'faction') {
+            await this.factions.update(
+              body.entityId,
+              { portraitUrl: targetVisibility.priorPortraitUrl },
+              user,
+              role,
+            );
+          } else if (body.entityType === 'location') {
+            await this.locations.update(
               body.entityId,
               { portraitUrl: targetVisibility.priorPortraitUrl },
               user,
@@ -556,16 +584,15 @@ export class AiPortraitService {
   /**
    * Validate the target entity exists, belongs to THIS campaign, and the caller has write
    * authority — BEFORE the attachment is persisted. This closes the cross-campaign gap (a DM in
-   * campaign A supplying a character/NPC id from campaign B) and the persist-before-authorize
+   * campaign A supplying a character/NPC/faction/location id from campaign B) and the persist-before-authorize
    * ordering issue (issue #1321 review feedback). Character authority is dm-or-owner (delegated to
-   * `CharactersService.assertCanWrite`); NPC authority is DM-only. Returns the target's `hidden`
-   * flag so the caller can match the attachment's visibility to the target's secrecy (a portrait
-   * for a hidden NPC must stay hidden), and the target's PRIOR `portraitUrl` so a failed linkage
-   * can be restored to exactly what it was before the update (review feedback).
+   * `CharactersService.assertCanWrite`); NPC, faction, and location authority are DM-only. Returns the
+   * target's `hidden` flag so the caller can match the attachment's visibility to the target's secrecy,
+   * and the target's PRIOR `portraitUrl` so a failed linkage can be restored to exactly what it was before the update.
    */
   private async validateTarget(
     campaignId: number,
-    entityType: 'character' | 'npc',
+    entityType: AiPortraitEntityType,
     entityId: number,
     user: RequestUser,
     role: Role,
@@ -582,16 +609,30 @@ export class AiPortraitService {
       return { hidden: false, priorPortraitUrl: row.portraitUrl ?? null };
     }
     if (role !== 'dm') {
-      throw new ForbiddenException('Only a DM may attach a portrait to an NPC.');
+      throw new ForbiddenException(`Only a DM may attach an image to a ${entityType}.`);
     }
-    const row = await this.npcs.getRowOrThrow(entityId);
-    if (row.campaignId !== campaignId) {
-      throw new BadRequestException(`NPC ${entityId} is not in campaign ${campaignId}.`);
+    if (entityType === 'npc') {
+      const row = await this.npcs.getRowOrThrow(entityId);
+      if (row.campaignId !== campaignId) {
+        throw new BadRequestException(`NPC ${entityId} is not in campaign ${campaignId}.`);
+      }
+      return { hidden: Boolean(row.hidden), priorPortraitUrl: row.portraitUrl ?? null };
     }
-    // Preserve the NPC's secrecy: if the NPC is hidden, the generated portrait must be hidden too,
-    // or a non-DM member could enumerate it through the attachment list and fetch the bytes even
-    // though the NPC itself returns 404 (issue #1321 review feedback).
-    return { hidden: Boolean(row.hidden), priorPortraitUrl: row.portraitUrl ?? null };
+    if (entityType === 'faction') {
+      const row = await this.factions.getRowOrThrow(entityId);
+      if (row.campaignId !== campaignId) {
+        throw new BadRequestException(`Faction ${entityId} is not in campaign ${campaignId}.`);
+      }
+      return { hidden: Boolean(row.hidden), priorPortraitUrl: row.portraitUrl ?? null };
+    }
+    if (entityType === 'location') {
+      const row = await this.locations.getRowOrThrow(entityId);
+      if (row.campaignId !== campaignId) {
+        throw new BadRequestException(`Location ${entityId} is not in campaign ${campaignId}.`);
+      }
+      return { hidden: row.status === 'unexplored', priorPortraitUrl: row.portraitUrl ?? null };
+    }
+    throw new BadRequestException(`Invalid entity type: ${entityType}`);
   }
 
   // ── generation core ───────────────────────────────────────────────────────────

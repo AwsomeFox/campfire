@@ -4981,9 +4981,9 @@ export class McpToolsService {
       server,
       user,
       'attach_generated_portrait',
-      'player: persist a chosen AI-generated candidate as a `kind="portrait"` attachment (issue #1321) and set it as the ' +
-        'target entity\'s portraitUrl. `entityType` ("character"|"npc") + `entityId` name the target. Linking reuses the ' +
-        'domain service\'s own authority: a player may attach only to a character they OWN (dm-or-owner), and NPC portrait ' +
+      'player: persist a chosen AI-generated candidate as a `kind="portrait"` attachment (issues #1321, #1325) and set it as the ' +
+        'target entity\'s portraitUrl. `entityType` ("character"|"npc"|"faction"|"location") + `entityId` name the target. Linking reuses the ' +
+        'domain service\'s own authority: a player may attach only to a character they OWN (dm-or-owner), and NPC/faction/location ' +
         'writes are DM-only — so this call 403s unless the caller owns the target character or is the DM. Prompt, ' +
         'provider/model, seed/params, dimensions, provenance, moderation, and cost are stamped into the attachment audit ' +
         'record. Returns { attachment, entity, provenance }.',
