@@ -6,17 +6,31 @@
  * banner, a "shown once" disclosure, a disabled-feature notice, …) untouched.
  * This suite pins the SOURCE at each migrated site so a future edit cannot
  * silently drop it back onto a raw `amber-*` class. It is deliberately a
- * cheap, fast smoke check, not the authoritative correctness check —
- * `warning-token-cascade.spec.ts` (browser-backed) is that: this codebase's
- * `index.css`/`nocturne.css` are imported unlayered, which always beats a
- * layered Tailwind utility (including an arbitrary-value one) regardless of
- * specificity or source order, so a source string can be byte-identical
- * between a working migration and a completely inert one. Real measurement
- * found FOUR of the sixteen sites below are exactly that trap — see
- * `warning-token-cascade.spec.ts`'s file header for the full mechanism and
- * the `KNOWN_INERT` list. This spec still asserts the source presence at
- * every one of the 16 (necessary, not sufficient), and additionally asserts
- * an exact PER-FILE occurrence COUNT for files with more than one migrated
+ * cheap, fast smoke check, **necessary but not sufficient** — a source string
+ * can be byte-identical between a working migration and a completely inert
+ * one whenever the element renders through a component (`<Card>`, `cf-inset`,
+ * `.btn`) carrying an unlayered `background`/`border` shorthand, since
+ * `index.css`/`nocturne.css` are imported unlayered and always beat a layered
+ * Tailwind utility (including an arbitrary-value one) regardless of
+ * specificity or source order. `warning-token-cascade.spec.ts`
+ * (browser-backed, real `getComputedStyle`) is the check that actually proves
+ * a site paints the right color; run it, don't just read this one, before
+ * trusting a "migrated" claim on this codebase's design-system classes.
+ *
+ * That trap caught 4 of this PR's original 16 candidate sites
+ * (`CampaignAuditPage.tsx:294` via `<Card>`'s `cf-card`, `MembersPage.tsx:483`
+ * and `InboxPage.tsx:700` via `cf-inset`, `SpellbookPanel.tsx:484` via
+ * `.btn`'s `background: 0 0` reset) — all four were reverted rather than
+ * shipped as source that claims `--color-warning` while painting
+ * `--color-divider`/`--cf-card`/transparent. Filed as a follow-up issue
+ * (warning-semantic variants for `.cf-card`/`.cf-inset`/`.btn`) rather than
+ * fixed here with an `!important` escape or a new unlayered modifier class —
+ * both are real design decisions, not mechanical fixes, and out of scope for
+ * a color migration. The 12 sites below are confirmed, by that same
+ * computed-style measurement, to actually paint `--color-warning`.
+ *
+ * This spec asserts source presence at each of the 12, with an exact
+ * PER-FILE occurrence COUNT for files with more than one migrated
  * declaration (`VisibleToPlayersBar.tsx`: 2, `RunSessionPage.tsx`: 3) —
  * matching only "at least one" would let one of several sites silently
  * regress back to raw amber while the others keep the test green.
@@ -25,16 +39,7 @@
  * single flat hex, unlike `--color-danger`'s multi-role family
  * (`--color-danger`, `--color-danger-solid*`, `--color-danger-border`,
  * `--color-danger-focus`, `--color-danger-ghost-*`, `--color-danger-disabled-*`).
- * Only the non-text roles (border, background tint, and one solid-fill site
- * where source-level `amber-600` was already the closest Tailwind step to
- * `--color-warning`) were migrated. Measured in a real Chromium canvas
- * against this app's actual compiled theme (Tailwind v4 ships its palette as
- * oklch, not hex) rather than assumed: `amber-600` resolves to rgb(225,113,0),
- * `--color-warning` to rgb(217,119,6) — close but NOT byte-identical, so this
- * is a small, deliberate, contrast-checked color move, not a no-op formalization.
- * (The white-on-button contrast number reported for `SpellbookPanel.tsx:484`
- * against this pairing was later found to describe a background that is
- * never actually painted there — see `warning-token-cascade.spec.ts`.)
+ * Only the non-text roles (border and background tint) were migrated.
  * Readable warning TEXT color, dark "muted surface" tints (`amber-950/*`), and
  * decorative/selection uses of amber are deliberately left alone — see the
  * PR description for the full excluded population and why. This guard
@@ -67,21 +72,12 @@ interface MigratedSite {
 const MIGRATED_SITES: MigratedSite[] = [
   {
     file: 'features/encounters/SpellbookPanel.tsx',
-    bannedPatterns: [/border-amber-500\/50/, /bg-amber-600\b/],
-    requiredPatterns: [
-      { pattern: /border-\[var\(--color-warning\)\]\/50/g, count: 1 },
-      { pattern: /bg-\[var\(--color-warning\)\]/g, count: 1 },
-    ],
-  },
-  {
-    file: 'features/admin/MembersPage.tsx',
-    bannedPatterns: [/border-amber-600\/40/],
-    requiredPatterns: [{ pattern: /border-\[var\(--color-warning\)\]\/40/g, count: 1 }],
-  },
-  {
-    file: 'features/notes/InboxPage.tsx',
-    bannedPatterns: [/border-amber-600\/40/],
-    requiredPatterns: [{ pattern: /border-\[var\(--color-warning\)\]\/40/g, count: 1 }],
+    // Only the modal border (:463) is migrated. The confirm button's bg-amber-600
+    // (:484) was reverted (#2203 review) — it renders through `.btn`, whose unlayered
+    // `background: 0 0` (nocturne.css) made bg-[var(--color-warning)] a no-op there;
+    // see the file header and the follow-up issue tracking a proper fix.
+    bannedPatterns: [/border-amber-500\/50/],
+    requiredPatterns: [{ pattern: /border-\[var\(--color-warning\)\]\/50/g, count: 1 }],
   },
   {
     file: 'components/AudienceField.tsx',
@@ -117,11 +113,6 @@ const MIGRATED_SITES: MigratedSite[] = [
     // description ("no text-safe --color-warning role").
     bannedPatterns: [/rounded-lg border border-amber-500\/30 bg-neutral-900\/90/],
     requiredPatterns: [{ pattern: /rounded-lg border border-\[var\(--color-warning\)\]\/30 bg-neutral-900\/90/g, count: 1 }],
-  },
-  {
-    file: 'features/admin/CampaignAuditPage.tsx',
-    bannedPatterns: [/border-amber-500\/30 bg-amber-500\/5/],
-    requiredPatterns: [{ pattern: /border-\[var\(--color-warning\)\]\/30 bg-\[var\(--color-warning\)\]\/5/g, count: 1 }],
   },
   {
     file: 'features/admin/AuditLogCard.tsx',

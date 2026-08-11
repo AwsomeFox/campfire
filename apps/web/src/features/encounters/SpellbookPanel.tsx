@@ -481,7 +481,7 @@ export function SpellbookPanel({
               </button>
               <button
                 type="button"
-                className="btn btn-primary text-xs min-h-[44px] cf-target-44 bg-[var(--color-warning)] hover:bg-amber-500 text-white"
+                className="btn btn-primary text-xs min-h-[44px] cf-target-44 bg-amber-600 hover:bg-amber-500 text-white"
                 data-testid="confirm-concentration-replace"
                 onClick={() => {
                   const target = concentrationWarningSpell;
