@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { EntityCard } from '../../components/EntityCard';
+import { cardExcerpt } from '../../lib/cardExcerpt';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -224,7 +225,7 @@ export default function NpcListPage() {
                   identical tiles. `body` is the player-visible description — `dmSecret`
                   is separately chipped above and hidden NPCs are not returned to
                   non-DMs at all — so this exposes nothing new. */}
-              {npc.body?.trim() && (
+              {cardExcerpt(npc.body) && (
                 /* `aria-hidden`, because EntityCard wraps the WHOLE card in one link. The
                    CSS clamp only limits painting, so without this the anchor's accessible
                    name became the name plus the entire body — up to 50k characters of
@@ -232,7 +233,7 @@ export default function NpcListPage() {
                    description of every NPC to reach the next one. The preview is a visual
                    scanning aid; the body itself is on the page this link leads to. */
                 <p className="cf-card-excerpt" aria-hidden="true">
-                  {npc.body}
+                  {cardExcerpt(npc.body)}
                 </p>
               )}
             </EntityCard>

@@ -562,10 +562,15 @@ export default function SessionsPage() {
                   measures rendered rows — under-rendered the range and mis-sized the
                   spacers, making a long history jump as it scrolled. Splitting the meta
                   and title lines added ~19px to that, so the estimate is corrected to the
-                  common row rather than nudged. */}
+                  common row rather than nudged.
+
+                  CORRECTED: 180 measured a BUG, not the design. The excerpt's
+                  `line-clamp-2` was inert (see the span below), so every recap rendered at
+                  full height. With the clamp working the rows are 120px for the common
+                  case, 99px for a one-line recap and 171px when the title wraps. */}
               <VirtualList
                 items={sessions}
-                estimateHeight={180}
+                estimateHeight={120}
                 maxHeight="min(70vh, 640px)"
                 className="flex flex-col"
               >
@@ -622,7 +627,12 @@ export default function SessionsPage() {
                             </span>
                           </span>
                           <span className="font-heading text-[16px] block mt-0.5">{title}</span>
-                          <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
+                          {/* No `block` here: it and `line-clamp-2` both set `display`, and
+                              `block` won — so the clamp was inert and every recap rendered
+                              at full height (measured 104px, ~6 lines, against the 34px two
+                              lines are meant to occupy). `line-clamp-2` supplies the
+                              `-webkit-box` display the clamp needs. */}
+                          <span className="text-muted text-[13px] mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
                         </span>
                         {unread > 0 && (
                           <span

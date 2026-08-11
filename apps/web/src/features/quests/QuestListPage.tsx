@@ -19,6 +19,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { cardExcerpt } from '../../lib/cardExcerpt';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
@@ -233,9 +234,13 @@ export default function QuestListPage() {
                   DM almost nothing about any of them, and every card needed opening to be
                   identified. `body` is the player-visible field (`dmSecret` is the DM-only
                   one), so this leaks nothing the title row did not already. */}
-              {q.body?.trim() && (
-                <p className="cf-card-excerpt" title={q.body}>
-                  {q.body}
+              {cardExcerpt(q.body) && (
+                /* Bounded BEFORE render, not just clamped in CSS. `Quest.body` allows 50k
+                   characters and this list is unpaginated, so passing the raw body would
+                   put megabytes of markdown in the DOM — and in `title`, a tooltip the
+                   size of the field — while CSS painted two lines of it. */
+                <p className="cf-card-excerpt" title={cardExcerpt(q.body)}>
+                  {cardExcerpt(q.body)}
                 </p>
               )}
               {q.status === 'active' && (
