@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
-import type { Location } from '@campfire/schema';
+import type { Campaign, Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
@@ -17,6 +17,7 @@ import { PageHeader, type PageHeaderSecondaryAction } from '../../components/Pag
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { RegionMap } from '../dashboard/RegionMap';
 
 function firstLine(body: string): string {
   const line = body.split('\n').find((l) => l.trim().length > 0);
@@ -64,6 +65,7 @@ export default function LocationListPage() {
   useRestoreListOriginScroll();
 
   const [locations, setLocations] = useState<Location[]>([]);
+  const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,7 +104,12 @@ export default function LocationListPage() {
     setLoading(true);
     setError(null);
     try {
-      setLocations(await api.get<Location[]>(`${API}/campaigns/${id}/locations`));
+      const [locs, camp] = await Promise.all([
+        api.get<Location[]>(`${API}/campaigns/${id}/locations`),
+        api.get<Campaign>(`${API}/campaigns/${id}`),
+      ]);
+      setLocations(locs);
+      setCampaign(camp);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load locations.");
     } finally {
@@ -230,7 +237,18 @@ export default function LocationListPage() {
             </div>
           </div>
         )}
+      </Card>
 
+      {campaign && (
+        <RegionMap
+          campaignId={id}
+          campaign={campaign}
+          locations={locations}
+          onChange={load}
+        />
+      )}
+
+      <Card className="space-y-4">
         {locations.length === 0 ? (
           <EmptyState icon="treasure-map" title="No locations yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any locations yet.'} />
         ) : (
