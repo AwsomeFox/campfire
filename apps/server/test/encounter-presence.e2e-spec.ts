@@ -179,6 +179,7 @@ describe('encounter presence (issue #2209, #816 slice 1)', () => {
         .send({ activity: 'viewing' });
       expect(declare.status).toBe(201);
       expect(declare.body).toEqual({
+        campaignId,
         encounterId,
         members: [{ userId: 'dev:dm-1', activity: 'viewing' }],
       });
@@ -243,7 +244,7 @@ describe('encounter presence (issue #2209, #816 slice 1)', () => {
 
       const leave = await request(server).delete(`/api/v1/encounters/${encounterId}/presence`).set(dm);
       expect(leave.status).toBe(200);
-      expect(leave.body).toEqual({ encounterId, members: [] });
+      expect(leave.body).toEqual({ campaignId, encounterId, members: [] });
 
       const event = await conn.waitFor(presenceWith(encounterId, count(0)));
       expect(event.members).toEqual([]);

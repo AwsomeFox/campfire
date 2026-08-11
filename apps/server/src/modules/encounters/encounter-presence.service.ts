@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
-import type { EncounterPresenceActivity, EncounterPresenceSnapshot } from '@campfire/schema';
+import type { EncounterPresenceActivity, EncounterPresenceEntry, EncounterPresenceSnapshot } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { encounters } from '../../db/schema';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -111,13 +111,15 @@ export class EncounterPresenceService {
     const { encounterId, userId } = input;
     const bucket = this.registry.get(encounterId);
     const record = bucket?.get(userId);
+    let campaignId = record?.campaignId ?? 0;
     if (record) {
+      campaignId = record.campaignId;
       bucket!.delete(userId);
       if (bucket!.size === 0) this.registry.delete(encounterId);
-      this.emitSnapshot(encounterId, record.campaignId);
+      this.emitSnapshot(encounterId, campaignId);
     }
-    // readSnapshot (not snapshot): the sweep at the top already reaped stale entries.
-    return this.readSnapshot(encounterId);
+    // readSnapshot with the campaignId captured before the bucket was emptied.
+    return { campaignId, encounterId, members: this.readMembers(encounterId) };
   }
 
   /**
@@ -167,12 +169,18 @@ export class EncounterPresenceService {
 
   private readSnapshot(encounterId: number): EncounterPresenceSnapshot {
     const bucket = this.registry.get(encounterId);
-    const members = bucket
+    const first = bucket?.values().next().value as PresenceRecord | undefined;
+    const campaignId = first?.campaignId ?? 0;
+    return { campaignId, encounterId, members: this.readMembers(encounterId) };
+  }
+
+  private readMembers(encounterId: number): EncounterPresenceEntry[] {
+    const bucket = this.registry.get(encounterId);
+    return bucket
       ? Array.from(bucket.values())
           .map((r) => ({ userId: r.userId, activity: r.activity }))
           .sort((a, b) => (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0))
       : [];
-    return { encounterId, members };
   }
 
   /**

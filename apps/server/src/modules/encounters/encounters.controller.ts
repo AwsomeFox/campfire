@@ -736,14 +736,18 @@ export class EncountersController {
     summary: 'Leave this encounter\u2019s live surface',
     description:
       'Requires campaign membership. Removes the caller from this encounter\u2019s presence set and broadcasts the ' +
-      'updated snapshot on the campaign SSE stream (issue #2209, #816 slice 1). Membership only \u2014 no hidden ' +
-      'gate, because a member only ever removes itself from an encounter it could declare on.',
+      'updated snapshot on the campaign SSE stream (issue #2209, #816 slice 1). Hidden encounters 404 for ' +
+      'non-DMs, same gate as declare, so a non-DM cannot probe an encounter id via a leave request.',
   })
   @ApiResponse({ status: 200, description: 'EncounterPresenceSnapshot after the leave.' })
   @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  @ApiResponse({ status: 404, description: 'Encounter not found, or hidden from this viewer.' })
   async leavePresence(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId);
+    const role = await this.access.requireMember(user, row.campaignId);
+    if (!isVisibleTo({ hidden: row.hidden }, role)) {
+      throw new NotFoundException();
+    }
     return this.presence.leave({ encounterId: id, userId: user.id });
   }
 

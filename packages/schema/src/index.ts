@@ -13311,6 +13311,7 @@ export type EncounterPresenceEntry = z.infer<typeof EncounterPresenceEntry>;
  * `encounter.presence` campaign event. Sorted by `userId` server-side for stable output.
  */
 export const EncounterPresenceSnapshot = z.object({
+  campaignId: Id,
   encounterId: Id,
   members: z.array(EncounterPresenceEntry),
 });
