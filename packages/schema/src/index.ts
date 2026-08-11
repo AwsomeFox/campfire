@@ -11469,8 +11469,8 @@ export const AiPortraitDimensions = z.object({
 });
 export type AiPortraitDimensions = z.infer<typeof AiPortraitDimensions>;
 
-/** The kind of entity a portrait will be attached to (issue #1321). */
-export const AiPortraitEntityType = z.enum(['character', 'npc']);
+/** The kind of entity a portrait/image will be attached to (issues #1321, #1325). */
+export const AiPortraitEntityType = z.enum(['character', 'npc', 'faction', 'location']);
 export type AiPortraitEntityType = z.infer<typeof AiPortraitEntityType>;
 
 /**

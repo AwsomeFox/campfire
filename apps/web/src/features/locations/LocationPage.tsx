@@ -35,6 +35,7 @@ import { PrintOnly } from '../../components/PrintOnly';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
+import { AiPortraitButton } from '../ai-portrait/AiPortraitWizard';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
@@ -542,15 +543,23 @@ export default function LocationPage() {
         <>
           <div className="flex items-start gap-2.5 flex-wrap">
             {canDmWrite ? (
-              <div className="w-32 h-20 shrink-0">
-                <ImageUpload
+              <div className="flex items-center gap-2 shrink-0">
+                <div className="w-32 h-20 shrink-0">
+                  <ImageUpload
+                    campaignId={cid}
+                    kind="portrait"
+                    shape="rect"
+                    previewUrl={location.portraitUrl ?? undefined}
+                    label="Landmark"
+                    onUploaded={savePortrait}
+                    onError={setActionError}
+                  />
+                </div>
+                <AiPortraitButton
                   campaignId={cid}
-                  kind="portrait"
-                  shape="rect"
-                  previewUrl={location.portraitUrl ?? undefined}
-                  label="Landmark"
-                  onUploaded={savePortrait}
-                  onError={setActionError}
+                  target={{ type: 'location', id: location.id }}
+                  initialPrompt={`Fantasy landmark landscape illustration of ${location.name}${location.kind ? `, ${location.kind}` : ''}. ${(location.body || '').split('\n')[0] || ''}`.trim()}
+                  onAttached={load}
                 />
               </div>
             ) : location.portraitUrl ? (
