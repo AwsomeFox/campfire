@@ -28,45 +28,124 @@ import { renderCssFixture } from '../lib/computedStyle';
  * `.btn-primary` applies anything). Rather than paper over that with an
  * `!important` escape or a new unlayered modifier class — both real design
  * decisions, not mechanical fixes — those four sites were REVERTED to raw
- * amber (see #2203's review) and filed as a follow-up issue for a proper
- * warning-semantic variant of `.cf-card`/`.cf-inset`/`.btn`.
+ * amber (see #2203's review) and filed as follow-up issue #2208 for a
+ * proper warning-semantic variant of `.cf-card`/`.cf-inset`/`.btn`.
  *
- * This suite now covers exactly the 12 sites that remain migrated, all
- * confirmed by this same measurement to actually paint `--color-warning`.
- * Its job going forward is regression protection: if a future edit moves
- * one of these 12 onto a `Card`/`cf-inset`/`.btn`-style wrapper (or any
- * other unlayered rule), this suite — not the source-scan unit spec — is
- * what will catch it.
+ * ## Why this asserts EQUALITY, not "not the fallback color" (review round 2)
+ *
+ * The first version of this suite asserted only `computed !== --color-divider`
+ * / `computed !== --cf-card` — the two known no-op fallback colors found
+ * above. Codex correctly flagged that as the SAME structural flaw one level
+ * up: excluding two known-bad values is not the same as confirming the right
+ * one. If a future Tailwind version stopped emitting
+ * `border-[var(--color-warning)]/35` (a config change, a build regression,
+ * anything), the element would fall back to the CSS default `currentColor`
+ * for border and `transparent` for background — NEITHER of which equals
+ * `--color-divider` or `--cf-card` — so the old assertion would still pass
+ * while zero sites actually painted warning. Verified this exact failure
+ * mode directly: rendering a site's markup with a nonexistent utility class
+ * in place of the real one resolves to `currentColor` (`rgb(233,233,237)`
+ * here), which the OLD `!== --color-divider` check does not catch but the
+ * new equality check below does.
+ *
+ * The fix computes the EXPECTED color independently of whether Tailwind's
+ * utility class is even present: `color-mix(in oklab, var(--color-warning)
+ * N%, transparent)`, built directly from the live `--color-warning` custom
+ * property (never hardcoded as a literal rgb/hex — if the token value ever
+ * changes, this recomputes against the new value automatically) and the
+ * browser's own `color-mix()`. This is exactly the CSS Tailwind v4 compiles
+ * `bg-[var(--color-warning)]/N` / `border-[...]/N` down to (verified by
+ * reading the compiled `dist` CSS directly) — but critically, this
+ * expression is evaluated independently, on an element that never carries
+ * the Tailwind utility class at all, so it does not depend on Tailwind
+ * having emitted anything. Real and expected are then compared for EXACT
+ * equality (canvas-normalized RGBA, zero tolerance): verified empirically
+ * across every opacity step used below (5/10/30/35/40/50%) that the
+ * independently-constructed expression and Tailwind's own compiled utility
+ * resolve to byte-identical RGBA — both go through the same browser
+ * `color-mix()` primitive with the same inputs, so there is no rounding
+ * drift to tolerate. A loose tolerance would risk admitting exactly the
+ * `currentColor`/`transparent` fallback this check exists to catch, so none
+ * is used.
  */
 
-/** Real markup for each migrated site — matches what the actual component renders. */
-const REAL_SITES: Record<string, string> = {
-  'AudienceField:61':
-    '<p data-site="AudienceField:61" class="text-xs text-amber-400/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2">x</p>',
-  'EntityRevealDialog:64':
-    '<p data-site="EntityRevealDialog:64" class="m-0 text-xs text-amber-300/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2">x</p>',
-  'HandoutsCard:295':
-    '<p data-site="HandoutsCard:295" class="m-0 text-xs text-amber-300/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2">x</p>',
-  'VisibleToPlayersBar:95':
-    '<div data-site="VisibleToPlayersBar:95" role="status" class="flex items-center gap-3 flex-wrap rounded border border-[var(--color-warning)]/35 bg-[var(--color-warning)]/10 px-3 py-2 text-sm text-amber-100">x</div>',
-  'VisibleToPlayersBar:113':
-    '<div data-site="VisibleToPlayersBar:113" role="status" class="flex items-center gap-3 flex-wrap rounded border border-[var(--color-warning)]/35 bg-[var(--color-warning)]/10 px-3 py-2 text-sm text-amber-100">x</div>',
-  'RunSessionPage:4496':
-    '<div data-site="RunSessionPage:4496" role="status" class="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm">x</div>',
-  'RunSessionPage:4520':
-    '<div data-site="RunSessionPage:4520" role="status" class="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap">x</div>',
-  'RunSessionPage:4551':
-    '<div data-site="RunSessionPage:4551" role="status" class="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap">x</div>',
-  'EncounterWhisperComposer:65':
-    '<form data-site="EncounterWhisperComposer:65" class="mt-2 rounded-lg border border-[var(--color-warning)]/30 bg-neutral-900/90 p-3 space-y-2 text-xs">x</form>',
-  'AuditLogCard:173':
-    '<div data-site="AuditLogCard:173" class="rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5 p-3 space-y-3">x</div>',
-  'ResetRequestsCard:117':
-    '<div data-site="ResetRequestsCard:117" class="border border-[var(--color-warning)]/30 rounded p-2.5 space-y-1">x</div>',
-  'SpellbookPanel:463':
-    '<div data-site="SpellbookPanel:463" class="bg-neutral-900 border border-[var(--color-warning)]/50 rounded-lg max-w-md w-full p-4 space-y-3 shadow-2xl">x</div>',
+interface MigratedSite {
+  /** Real markup for the site — matches what the actual component renders. */
+  html: string;
+  /** border-[var(--color-warning)]/N opacity, if this site migrated the border. */
+  borderPct?: number;
+  /** bg-[var(--color-warning)]/N opacity, if this site migrated the background. */
+  bgPct?: number;
+}
+
+const SITES: Record<string, MigratedSite> = {
+  'AudienceField:61': {
+    html: '<p data-site="AudienceField:61" class="text-xs text-amber-400/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2">x</p>',
+    borderPct: 30,
+    bgPct: 10,
+  },
+  'EntityRevealDialog:64': {
+    html: '<p data-site="EntityRevealDialog:64" class="m-0 text-xs text-amber-300/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2">x</p>',
+    borderPct: 30,
+    bgPct: 10,
+  },
+  'HandoutsCard:295': {
+    html: '<p data-site="HandoutsCard:295" class="m-0 text-xs text-amber-300/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2">x</p>',
+    borderPct: 30,
+    bgPct: 10,
+  },
+  'VisibleToPlayersBar:95': {
+    html: '<div data-site="VisibleToPlayersBar:95" role="status" class="flex items-center gap-3 flex-wrap rounded border border-[var(--color-warning)]/35 bg-[var(--color-warning)]/10 px-3 py-2 text-sm text-amber-100">x</div>',
+    borderPct: 35,
+    bgPct: 10,
+  },
+  'VisibleToPlayersBar:113': {
+    html: '<div data-site="VisibleToPlayersBar:113" role="status" class="flex items-center gap-3 flex-wrap rounded border border-[var(--color-warning)]/35 bg-[var(--color-warning)]/10 px-3 py-2 text-sm text-amber-100">x</div>',
+    borderPct: 35,
+    bgPct: 10,
+  },
+  'RunSessionPage:4496': {
+    html: '<div data-site="RunSessionPage:4496" role="status" class="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm">x</div>',
+    borderPct: 40,
+    bgPct: 10,
+  },
+  'RunSessionPage:4520': {
+    html: '<div data-site="RunSessionPage:4520" role="status" class="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap">x</div>',
+    borderPct: 40,
+    bgPct: 10,
+  },
+  'RunSessionPage:4551': {
+    html: '<div data-site="RunSessionPage:4551" role="status" class="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap">x</div>',
+    borderPct: 40,
+    bgPct: 10,
+  },
+  'EncounterWhisperComposer:65': {
+    html: '<form data-site="EncounterWhisperComposer:65" class="mt-2 rounded-lg border border-[var(--color-warning)]/30 bg-neutral-900/90 p-3 space-y-2 text-xs">x</form>',
+    borderPct: 30,
+    // No bgPct — this form's background is bg-neutral-900/90, never migrated.
+  },
+  'AuditLogCard:173': {
+    html: '<div data-site="AuditLogCard:173" class="rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5 p-3 space-y-3">x</div>',
+    borderPct: 30,
+    bgPct: 5,
+  },
+  'ResetRequestsCard:117': {
+    html: '<div data-site="ResetRequestsCard:117" class="border border-[var(--color-warning)]/30 rounded p-2.5 space-y-1">x</div>',
+    borderPct: 30,
+    // No bgPct — this div never had a background utility.
+  },
+  'SpellbookPanel:463': {
+    html: '<div data-site="SpellbookPanel:463" class="bg-neutral-900 border border-[var(--color-warning)]/50 rounded-lg max-w-md w-full p-4 space-y-3 shadow-2xl">x</div>',
+    borderPct: 50,
+    // No bgPct — this div's background is bg-neutral-900, never migrated.
+  },
 };
 
+/** Canvas-normalize a CSS color string to a stable, comparable RGBA tuple string. Both
+ *  "real" and "expected" values go through this, so the comparison is apples-to-apples
+ *  regardless of whether the browser's `getComputedStyle` reports the color as `rgb()`,
+ *  `rgba()`, `color(srgb ...)`, or `oklab(...)` — canvas fillStyle resolves all of them
+ *  to the same underlying pixel. */
 async function normalizedColor(page: import('@playwright/test').Page, cssColor: string): Promise<string> {
   return page.evaluate((c) => {
     const canvas = document.createElement('canvas');
@@ -79,43 +158,65 @@ async function normalizedColor(page: import('@playwright/test').Page, cssColor: 
   }, cssColor);
 }
 
+/** The expected color for an N% `--color-warning` utility, computed independently of
+ *  whether any Tailwind utility class is present — built only from the live
+ *  `--color-warning` custom property and the browser's own `color-mix()`. */
+async function expectedWarningColor(page: import('@playwright/test').Page, pct: number): Promise<string> {
+  const resolved = await page.evaluate((p) => {
+    const probe = document.createElement('div');
+    document.body.appendChild(probe);
+    probe.style.backgroundColor = `color-mix(in oklab, var(--color-warning) ${p}%, transparent)`;
+    const value = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return value;
+  }, pct);
+  return normalizedColor(page, resolved);
+}
+
 test.describe('warning-token migration: computed cascade (#2161)', () => {
-  test('every migrated site ACTUALLY paints --color-warning, not just references it in source', async ({ page }) => {
-    const allHtml = Object.values(REAL_SITES).join('\n');
+  test('every migrated site paints the EXACT --color-warning composite, not just "not the old fallback"', async ({
+    page,
+  }) => {
+    const allHtml = Object.values(SITES)
+      .map((s) => s.html)
+      .join('\n');
     await renderCssFixture(page, `<div style="background:#161826">${allHtml}</div>`);
 
-    // No-op fallback colors, resolved the same way the real elements are — no hardcoded
-    // hex literals to go stale if the palette changes. Any migrated site whose computed
-    // color still equals one of these has regressed onto an unlayered wrapper rule.
-    const tokens = await page.evaluate(() => {
-      const probe = document.createElement('div');
-      document.body.appendChild(probe);
-      const read = (v: string) => {
-        probe.style.backgroundColor = `var(${v})`;
-        return getComputedStyle(probe).backgroundColor;
-      };
-      const out = { divider: read('--color-divider'), cfCard: read('--cf-card') };
-      probe.remove();
-      return out;
-    });
-    const noOpBorder = await normalizedColor(page, tokens.divider);
-    const noOpBg = await normalizedColor(page, tokens.cfCard);
+    // Cache one expected value per distinct percentage instead of recomputing per site.
+    const distinctPcts = new Set<number>();
+    for (const site of Object.values(SITES)) {
+      if (site.borderPct !== undefined) distinctPcts.add(site.borderPct);
+      if (site.bgPct !== undefined) distinctPcts.add(site.bgPct);
+    }
+    const expectedByPct = new Map<number, string>();
+    for (const pct of distinctPcts) {
+      expectedByPct.set(pct, await expectedWarningColor(page, pct));
+    }
 
-    for (const site of Object.keys(REAL_SITES)) {
-      const el = page.locator(`[data-site="${site}"]`);
+    for (const [name, site] of Object.entries(SITES)) {
+      const el = page.locator(`[data-site="${name}"]`);
       const { border, bg } = await el.evaluate((node) => {
         const cs = getComputedStyle(node);
         return { border: cs.borderColor, bg: cs.backgroundColor };
       });
-      const normBorder = await normalizedColor(page, border);
-      const normBg = await normalizedColor(page, bg);
 
-      expect(normBorder, `${site}: border must not have fallen back to --color-divider`).not.toBe(noOpBorder);
-      if (site !== 'ResetRequestsCard:117' && site !== 'SpellbookPanel:463' && site !== 'EncounterWhisperComposer:65') {
-        // These three only migrated the border (never had a bg-[var(--color-warning)]
-        // utility — their background is a different, untouched value), so there is no
-        // bg fallback to check for them.
-        expect(normBg, `${site}: background must not have fallen back to --cf-card`).not.toBe(noOpBg);
+      if (site.borderPct !== undefined) {
+        const normBorder = await normalizedColor(page, border);
+        const expected = expectedByPct.get(site.borderPct)!;
+        expect(
+          normBorder,
+          `${name}: border must equal color-mix(--color-warning ${site.borderPct}%, transparent) exactly — ` +
+            'got a different value, meaning this site is not actually painting the warning token ' +
+            '(currentColor/transparent from a missing utility would also fail here, unlike a "not the old fallback" check)',
+        ).toBe(expected);
+      }
+      if (site.bgPct !== undefined) {
+        const normBg = await normalizedColor(page, bg);
+        const expected = expectedByPct.get(site.bgPct)!;
+        expect(
+          normBg,
+          `${name}: background must equal color-mix(--color-warning ${site.bgPct}%, transparent) exactly`,
+        ).toBe(expected);
       }
     }
   });
