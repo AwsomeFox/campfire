@@ -18,7 +18,7 @@ import { PageHeader } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
 import { itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
-import { useFormattingLocale } from '../../lib/format';
+import { formatNumber, useFormattingLocale } from '../../lib/format';
 import { AddItemForm, CompendiumItemPickerModal, ItemSection } from './inventoryShared';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
@@ -180,13 +180,34 @@ export default function InventoryPage() {
   // BEFORE grouping so a section with no matches disappears the same way it does when it
   // is genuinely empty (ItemSection already renders nothing for a non-party-stash section
   // with zero items).
+  const [ownerFilter, setOwnerFilter] = useState<'all' | 'party' | 'characters'>('all');
+  const [equippedFilter, setEquippedFilter] = useState<'all' | 'equipped' | 'unequipped'>('all');
+
+  // Issue #2157 & #2178: matched against name/notes and filtered by owner/equipped state.
   const searchTerm = search.trim().toLowerCase();
   const visibleItems = useMemo(() => {
-    if (!searchTerm) return items;
-    return items.filter(
-      (i) => i.name.toLowerCase().includes(searchTerm) || i.notes.toLowerCase().includes(searchTerm),
-    );
-  }, [items, searchTerm]);
+    let result = items;
+    if (searchTerm) {
+      result = result.filter(
+        (i) => i.name.toLowerCase().includes(searchTerm) || i.notes.toLowerCase().includes(searchTerm),
+      );
+    }
+    if (ownerFilter === 'party') {
+      result = result.filter((i) => i.ownerType === 'party');
+    } else if (ownerFilter === 'characters') {
+      result = result.filter((i) => i.ownerType === 'character');
+    }
+    if (equippedFilter === 'equipped') {
+      result = result.filter((i) => i.equipped === true);
+    } else if (equippedFilter === 'unequipped') {
+      result = result.filter((i) => i.equipped !== true);
+    }
+    return result;
+  }, [items, searchTerm, ownerFilter, equippedFilter]);
+
+  const totalWeightCarried = useMemo(() => {
+    return items.reduce((sum, item) => sum + (item.weight != null ? item.weight * item.qty : 0), 0);
+  }, [items]);
 
   const partyItems = visibleItems.filter((i) => i.ownerType === 'party');
   const characterGroups = useMemo(() => {
@@ -200,8 +221,8 @@ export default function InventoryPage() {
     if (orphans.length > 0) groups.push({ character: null, label: t('inventory.unassigned'), items: orphans });
     return groups;
   }, [visibleItems, party, t]);
-  const searchActive = searchTerm.length > 0;
-  const noSearchResults = searchActive && partyItems.length === 0 && characterGroups.length === 0;
+  const filtersActive = searchTerm.length > 0 || ownerFilter !== 'all' || equippedFilter !== 'all';
+  const noSearchResults = filtersActive && partyItems.length === 0 && characterGroups.length === 0;
 
   if (!Number.isFinite(id)) {
     return (
@@ -280,24 +301,130 @@ export default function InventoryPage() {
           ) : (
             <>
               {items.length > 0 && (
-                <TextInput
-                  type="search"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder={t('inventory.searchPlaceholder')}
-                  aria-label={t('inventory.searchAria')}
-                  data-testid="inventory-search"
-                />
+                <div className="space-y-3">
+                  <TextInput
+                    type="search"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder={t('inventory.searchPlaceholder')}
+                    aria-label={t('inventory.searchAria')}
+                    data-testid="inventory-search"
+                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* Owner Filter Chips */}
+                    <div className="flex items-center gap-1 bg-[var(--color-neutral-900)] p-1 rounded-md text-xs" data-testid="inventory-filter-owner">
+                      <button
+                        type="button"
+                        onClick={() => setOwnerFilter('all')}
+                        className={`px-2.5 py-1 rounded text-xs transition-colors ${
+                          ownerFilter === 'all'
+                            ? 'bg-[var(--color-accent)] text-black font-semibold'
+                            : 'text-secondary hover:text-white'
+                        }`}
+                        data-testid="filter-owner-all"
+                      >
+                        {t('inventory.filterOwner.all')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setOwnerFilter('party')}
+                        className={`px-2.5 py-1 rounded text-xs transition-colors ${
+                          ownerFilter === 'party'
+                            ? 'bg-[var(--color-accent)] text-black font-semibold'
+                            : 'text-secondary hover:text-white'
+                        }`}
+                        data-testid="filter-owner-party"
+                      >
+                        {t('inventory.filterOwner.party')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setOwnerFilter('characters')}
+                        className={`px-2.5 py-1 rounded text-xs transition-colors ${
+                          ownerFilter === 'characters'
+                            ? 'bg-[var(--color-accent)] text-black font-semibold'
+                            : 'text-secondary hover:text-white'
+                        }`}
+                        data-testid="filter-owner-characters"
+                      >
+                        {t('inventory.filterOwner.characters')}
+                      </button>
+                    </div>
+
+                    {/* Equipped Filter Chips */}
+                    <div className="flex items-center gap-1 bg-[var(--color-neutral-900)] p-1 rounded-md text-xs" data-testid="inventory-filter-equipped">
+                      <button
+                        type="button"
+                        onClick={() => setEquippedFilter('all')}
+                        className={`px-2.5 py-1 rounded text-xs transition-colors ${
+                          equippedFilter === 'all'
+                            ? 'bg-[var(--color-accent)] text-black font-semibold'
+                            : 'text-secondary hover:text-white'
+                        }`}
+                        data-testid="filter-equipped-all"
+                      >
+                        {t('inventory.filterEquipped.all')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEquippedFilter('equipped')}
+                        className={`px-2.5 py-1 rounded text-xs transition-colors ${
+                          equippedFilter === 'equipped'
+                            ? 'bg-[var(--color-accent)] text-black font-semibold'
+                            : 'text-secondary hover:text-white'
+                        }`}
+                        data-testid="filter-equipped-equipped"
+                      >
+                        {t('inventory.filterEquipped.equipped')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEquippedFilter('unequipped')}
+                        className={`px-2.5 py-1 rounded text-xs transition-colors ${
+                          equippedFilter === 'unequipped'
+                            ? 'bg-[var(--color-accent)] text-black font-semibold'
+                            : 'text-secondary hover:text-white'
+                        }`}
+                        data-testid="filter-equipped-unequipped"
+                      >
+                        {t('inventory.filterEquipped.unequipped')}
+                      </button>
+                    </div>
+
+                    {/* Clear filters button */}
+                    {filtersActive && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearch('');
+                          setOwnerFilter('all');
+                          setEquippedFilter('all');
+                        }}
+                        className="text-xs text-[var(--color-accent)] hover:underline px-1.5"
+                        data-testid="filter-clear"
+                      >
+                        {t('inventory.clearFilters')}
+                      </button>
+                    )}
+
+                    {/* Total Weight Carried Summary Badge */}
+                    {totalWeightCarried > 0 && (
+                      <div className="ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[var(--color-neutral-800)] text-xs text-slate-300" data-testid="inventory-total-weight">
+                        <GameIcon slug="backpack" size={UI_ICON_SIZE.xs} />
+                        <span>
+                          {t('inventory.totalWeightCarried', {
+                            weight: formatNumber(totalWeightCarried, { maximumFractionDigits: 2 }),
+                          })}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
               )}
               {noSearchResults && (
-                <Card className="text-sm text-secondary">{t('inventory.searchNoResults', { query: search.trim() })}</Card>
+                <Card className="text-sm text-secondary">{t('inventory.searchNoResults', { query: search.trim() || 'filters' })}</Card>
               )}
-              {/* Issue #2157: while a search is active and it matches nothing in the party
-                  stash, skip the section entirely rather than rendering ItemSection's normal
-                  "always show party stash, even empty" behavior — that empty state means "the
-                  party owns nothing", which would misreport a stash that has items the search
-                  just doesn't match. */}
-              {!(searchActive && partyItems.length === 0) && (
+              {!(filtersActive && partyItems.length === 0) && (
                 <ItemSection
                   key="party-stash"
                   title={t('inventory.partyStash')}

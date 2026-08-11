@@ -28,6 +28,18 @@
     "searchPlaceholder": "Search items…",
     "searchAria": "Search inventory items by name or notes",
     "searchNoResults": "No items match \"{{query}}\".",
+    "filterOwner": {
+      "all": "All owners",
+      "party": "Party stash",
+      "characters": "Characters"
+    },
+    "filterEquipped": {
+      "all": "All status",
+      "equipped": "Equipped",
+      "unequipped": "Unequipped"
+    },
+    "clearFilters": "Clear filters",
+    "totalWeightCarried": "Weight carried: {{weight}} lb",
     "chooseIcon": "Choose icon",
     "changeIcon": "Change icon",
     "autoIcon": "Auto",

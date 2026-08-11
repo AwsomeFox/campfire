@@ -28,6 +28,18 @@
     "searchPlaceholder": "بحث عن عناصر…",
     "searchAria": "البحث في عناصر المخزون بالاسم أو الملاحظات",
     "searchNoResults": "لا توجد عناصر مطابقة لـ \"{{query}}\".",
+    "filterOwner": {
+      "all": "كل المالكين",
+      "party": "مخزن الفريق",
+      "characters": "الشخصيات"
+    },
+    "filterEquipped": {
+      "all": "كل الحالات",
+      "equipped": "مجهز",
+      "unequipped": "غير مجهز"
+    },
+    "clearFilters": "مسح الفلاتر",
+    "totalWeightCarried": "الوزن المحمول: {{weight}} رطل",
     "chooseIcon": "Choose icon",
     "changeIcon": "Change icon",
     "autoIcon": "Auto",
