@@ -8,13 +8,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Character, Combatant, EncounterWithCombatants } from '@campfire/schema';
+import type { Character, Combatant, EncounterWithCombatants, DriverLastUndoableCommit } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { queryKeys, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { aiDmPauseRequest } from './aiDmPause';
-import { newClientRef, speakerPrefix } from './transcript';
-import { resolveUndoPostError } from './aiDmUndoLever';
+import { newClientRef, saveTranscript, speakerPrefix } from './transcript';
+import { nextUndoLeverState, resolveUndoPostError } from './aiDmUndoLever';
+import { isTranscriptRememberEnabled, setTranscriptRemember } from './transcriptPrivacy';
+import { usePendingHydrate } from './usePendingHydrate';
 import { StuckLadder } from './StuckLadder';
 import { AiPathGuide } from './AiSetupChecklist';
 import { ToolConfirmationsPanel } from './ToolConfirmationsPanel';
@@ -45,6 +47,8 @@ import { useDisclosure } from '../../components/useDisclosure';
 import { Btn, Card, Chip, EmptyState } from '../../components/ui';
 import { Field } from '../../components/Field';
 import { GameIcon } from '../../components/GameIcon';
+import { Toggle } from '../../components/Toggle';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 export const ENCOUNTER_DRIVER_PANEL_ID = 'encounter-ai-driver-panel';
@@ -63,11 +67,17 @@ export function EncounterAiDriverPanel({
   canCompose: boolean;
 }) {
   const { t } = useTranslation();
-  const { me } = useAuth();
+  const { me, ready: authReady, roleIn } = useAuth();
   const queryClient = useQueryClient();
   const liveActivity = useAiDmLiveActivity();
   const sessionQuery = useAiDmSession(campaignId);
   const session = sessionQuery.data;
+
+  // #573 — the shared identity latch. `viewerId` is null until `/me` resolves, and every
+  // transcript storage entry point is a no-op for a null viewer, so the privacy toggle has
+  // nothing to leak before identity is established. Mirrors AiTablePage's latch.
+  const pendingHydrate = usePendingHydrate({ ready: authReady, userId: me?.user.id ?? null });
+  const viewerId = pendingHydrate.viewerId;
 
   const { open, buttonProps, regionProps } = useDisclosure({
     id: ENCOUNTER_DRIVER_PANEL_ID,
@@ -89,6 +99,19 @@ export function EncounterAiDriverPanel({
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [undoBusy, setUndoBusy] = useState(false);
   const [undoError, setUndoError] = useState<string | null>(null);
+  // #1501 — the transient commit-undo lever. `undoSnackbar` holds the commit a fresh
+  // snackbar is offering; `seenUndoChainRef` stops a reload that rehydrates a commit from
+  // re-popping it. Mirrors AiTablePage so a DM supervising from the cockpit tab has the same
+  // one-click "X — Undo" affordance `/table` offers, on the same commit-undo path.
+  const [undoSnackbar, setUndoSnackbar] = useState<DriverLastUndoableCommit | null>(null);
+  const seenUndoChainRef = useRef<string | null>(null);
+  // `nextUndoLeverState` seeds `seenUndoChainRef` from the FIRST loaded session so a lever
+  // that pre-existed when the DM opened the dock doesn't pop a stale undo; only actions armed
+  // after mount pop. Sticky once set.
+  const undoLeverSeededRef = useRef(false);
+  // #573 — the explicit device grant for this viewer. Default false (the server is
+  // authoritative and refetched on every load), re-read when identity settles or changes.
+  const [rememberTranscript, setRememberTranscript] = useState(false);
   const [narrationStatus, setNarrationStatus] = useState('');
   const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
   const narrationOwnerRef = useRef('');
@@ -124,6 +147,10 @@ export function EncounterAiDriverPanel({
   });
 
   const myMembership = me?.memberships.find((m) => m.campaignId === campaignId);
+  // The durable transcript is role-projected by the server. Match the activity provider's
+  // ownership key so an immediate write when the privacy grant is enabled (below) lands under
+  // the same projection the provider persists on every change.
+  const effectiveRole = roleIn(campaignId);
   const myCharacter = charactersQuery.data?.find((c) => c.id === myMembership?.characterId);
   const memberName = me?.user.displayName || me?.user.username || t('table.you');
   const characterName = myCharacter?.name;
@@ -165,6 +192,47 @@ export function EncounterAiDriverPanel({
     setUndoError(null);
     return () => { composerOwnerRef.current = ''; };
   }, [campaignId, isDm, liveActivity.mode, me?.user.id, myMembership?.role]);
+
+  // #1501 — reset the commit-undo lever state whenever the campaign changes, so a stale
+  // snackbar or seed from a prior table/session cannot carry over. Declared before the pop
+  // effect so it runs first on a campaign switch, and the pop effect re-seeds afterwards.
+  // Mirrors AiTablePage's campaign-keyed lever reset. (The broader owner reset above already
+  // clears `undoBusy`/`undoError`; this one owns only the lever-specific state.)
+  useEffect(() => {
+    setUndoSnackbar(null);
+    undoLeverSeededRef.current = false;
+    seenUndoChainRef.current = null;
+  }, [campaignId]);
+
+  // #1501 — when the seat arms a NEW reversible action (after the first session load), surface
+  // the standard UndoSnackbar on this surface too, so a DM in the cockpit tab gets the same
+  // one-click "X — Undo" affordance `/table` offers. The seeding decision (including seeding
+  // the "seen" chain id from the first loaded session so a lever that pre-existed on mount
+  // doesn't pop a stale undo) lives in the pure `nextUndoLeverState` helper, shared with
+  // AiTablePage. `campaignId` is a dep so this re-runs after the owner reset above clears the
+  // seed on a campaign switch.
+  useEffect(() => {
+    const commit = session?.lastUndoableCommit ?? null;
+    const step = nextUndoLeverState({
+      sessionFetched: sessionQuery.isFetched,
+      seeded: undoLeverSeededRef.current,
+      commit,
+      seenChainId: seenUndoChainRef.current,
+    });
+    undoLeverSeededRef.current = step.seeded;
+    seenUndoChainRef.current = step.seenChainId;
+    if (step.pop) {
+      setUndoSnackbar(step.pop);
+    }
+  }, [campaignId, session?.lastUndoableCommit, sessionQuery.isFetched]);
+
+  // #573 — read the per-user device grant once identity settles, and re-read on an identity
+  // change: it is per-user, so the previous account's answer must never carry over. The grant
+  // is shared with `/table` (per-user-per-device, not per surface), so flipping it here governs
+  // both surfaces' caches identically.
+  useEffect(() => {
+    setRememberTranscript(isTranscriptRememberEnabled(viewerId));
+  }, [viewerId]);
 
   useEffect(() => {
     if (!liveActivity.transcriptFetched) {
@@ -322,16 +390,50 @@ export function EncounterAiDriverPanel({
     const owner = composerOwnerRef.current;
     try {
       await api.post(`${API}/campaigns/${campaignId}/ai-dm/undo`);
-      if (composerOwnerRef.current === owner) invalidateAiDm(queryClient, campaignId);
+      if (composerOwnerRef.current === owner) {
+        // Dismiss the transient snackbar on success; the server cleared the lever, and the
+        // session refetch drops `lastUndoableCommit` so the persistent header button follows.
+        setUndoSnackbar(null);
+        invalidateAiDm(queryClient, campaignId);
+      }
     } catch (err) {
       const outcome = resolveUndoPostError(
         err instanceof ApiError ? err.status : undefined,
         translateApiError(err, t) || t('table.undoAiFailed'),
       );
+      // A 404 (already reversed / superseded) dismisses the snackbar — the server is the
+      // authority, so the session is refetched too. Any other failure leaves it up.
+      if (composerOwnerRef.current === owner && outcome.dismissSnackbar) setUndoSnackbar(null);
       if (composerOwnerRef.current === owner && outcome.invalidateSession) invalidateAiDm(queryClient, campaignId);
       if (composerOwnerRef.current === owner && outcome.errorMessage) setUndoError(outcome.errorMessage);
     } finally {
       if (composerOwnerRef.current === owner) setUndoBusy(false);
+    }
+  }
+
+  /**
+   * Flip the device grant (#573), mirroring AiTablePage. The grant is per-user-per-device
+   * (not per surface), so it governs this dock's activity-scope cache exactly as it governs
+   * `/table`'s table-scope cache; both are gated by the same `isTranscriptRememberEnabled`
+   * check inside `saveTranscript`/`loadTranscript`. Turning it ON writes what is already on
+   * screen at once — under the same role projection the activity provider uses — so the
+   * control takes effect immediately rather than only from the next narration delta. Turning
+   * it OFF purges this viewer's cached transcripts inside `setTranscriptRemember`.
+   */
+  function onToggleRememberTranscript() {
+    if (viewerId === null) return;
+    const next = !rememberTranscript;
+    setTranscriptRemember(viewerId, next);
+    setRememberTranscript(next);
+    // Guard the immediate write with the same ownership check AiTablePage uses
+    // (transcriptOwnerRef === transcriptOwnerKey): only persist if the panel
+    // still owns this viewer/campaign/role/mode combo, so an identity or
+    // campaign switch can't land a stale transcript under a new key.
+    if (next && liveActivity.mode === 'driver' && effectiveRole !== null) {
+      const owner = `${me?.user.id ?? ''}:${campaignId}:driver:${isDm}:${myMembership?.role ?? ''}`;
+      if (composerOwnerRef.current === owner) {
+        saveTranscript(viewerId, campaignId, transcript, 'activity', effectiveRole);
+      }
     }
   }
 
@@ -597,6 +699,31 @@ export function EncounterAiDriverPanel({
             )}
           </Card>
 
+          {/*
+            #573 — the explicit device grant, mirroring `/table`. OFF by default: the server
+            owns the authoritative transcript (role-projected and membership-gated on the read
+            and the SSE broadcast, independently of this client) and refetches it on every load,
+            so keeping a copy in this browser buys a frame of earlier paint and costs a readable
+            record of who said what during the encounter. The grant is per-user-per-device, so it
+            governs this surface's activity-scope cache exactly as it governs `/table`'s
+            table-scope cache. Turning it back off purges what is already stored.
+          */}
+          <div className="flex items-start gap-2 px-1" data-testid="encounter-driver-remember-transcript">
+            <Toggle
+              checked={rememberTranscript}
+              disabled={viewerId === null}
+              onChange={onToggleRememberTranscript}
+              label={t('table.rememberTranscript')}
+              title={t('table.rememberTranscriptHelp')}
+              size={15}
+              className="mt-0.5"
+            />
+            <div className="min-w-0">
+              <span className="text-xs text-[var(--color-neutral-200)]">{t('table.rememberTranscript')}</span>
+              <p className="text-[11px] text-secondary">{t('table.rememberTranscriptHelp')}</p>
+            </div>
+          </div>
+
           {canCompose ? (
             <form onSubmit={onSubmit} className="flex flex-col gap-2" data-testid="encounter-ai-driver-composer">
               {isDm && (
@@ -658,6 +785,18 @@ export function EncounterAiDriverPanel({
           }, t),
         })}</p>)}
       </div>
+      {/* #1501 — the standard "X — Undo" affordance, offered to a DM the moment the AI commits
+          a reversible action, mirroring `/table` on the same commit-undo path. The persistent
+          header button above covers the case where this dismisses. Rendered outside the `open`
+          gate so a DM can undo immediately even with the dock collapsed. */}
+      {isDm && undoSnackbar && (
+        <UndoSnackbar
+          message={t('table.undoAiSnackbar', { action: undoSnackbar.actionName || t('table.undoAiAction') })}
+          onUndo={onUndoAiAction}
+          onExpire={() => setUndoSnackbar(null)}
+          successMessage={t('table.undoAiDone')}
+        />
+      )}
     </Card>
   );
 }
