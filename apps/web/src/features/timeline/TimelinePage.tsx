@@ -36,6 +36,7 @@ import { StaleWriteConflict, type ConflictField } from '../../components/StaleWr
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import {
   TIMELINE_BODY_HELP,
   TIMELINE_BODY_LABEL,
@@ -430,18 +431,25 @@ export default function TimelinePage() {
         <PageTitle>{t('nav.timeline')}</PageTitle>
         <div style={{ flex: 1 }} />
         {canDmWrite && !creating && (
-          <Btn
-            ref={newEventTriggerRef}
-            onClick={() => {
-              setNewDraft(emptyDraft(nextSortIndex));
-              setNewFieldErrors({});
-              setCreating(true);
-              setActionError(null);
-            }}
-            style={{ fontSize: 13 }}
-          >
-            + New event
-          </Btn>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <DraftWithAiButton
+              campaignId={cid}
+              target="timeline_event"
+              label="Draft with AI"
+            />
+            <Btn
+              ref={newEventTriggerRef}
+              onClick={() => {
+                setNewDraft(emptyDraft(nextSortIndex));
+                setNewFieldErrors({});
+                setCreating(true);
+                setActionError(null);
+              }}
+              style={{ fontSize: 13 }}
+            >
+              + New event
+            </Btn>
+          </div>
         )}
       </div>
 
@@ -637,8 +645,16 @@ export default function TimelinePage() {
                     fieldErrors={editFieldErrors}
                     onClearFieldError={(field) => setEditFieldErrors((fe) => ({ ...fe, [field]: undefined }))}
                   />
-                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center' }}>
                     <Btn onClick={() => saveEdit(e.id)} disabled={busy}>{eventConflict ? 'Save resolution' : 'Save'}</Btn>
+                    <DraftWithAiButton
+                      campaignId={cid}
+                      target="timeline_event"
+                      label="Edit with AI"
+                      entityId={e.id}
+                      currentContent={{ title: editDraft.title, prose: editDraft.body }}
+                      disabled={busy}
+                    />
                     <Btn
                       ghost
                       onClick={() => {

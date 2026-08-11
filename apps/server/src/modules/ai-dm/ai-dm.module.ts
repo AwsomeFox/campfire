@@ -7,6 +7,7 @@ import { ProposalRecordsModule } from '../proposals/proposal-records.module';
 import { AiPricingModule } from '../ai-pricing/ai-pricing.module';
 import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { StorylinesModule } from '../storylines/storylines.module';
+import { TimelineModule } from '../timeline/timeline.module';
 import { AiDmService } from './ai-dm.service';
 import { AiDmController } from './ai-dm.controller';
 import { CoDmService } from './co-dm.service';
@@ -30,6 +31,7 @@ import { AI_DM_PROVIDER, NoopAiDmProvider } from './ai-dm.provider';
     ProposalRecordsModule,
     SessionZeroModule,
     StorylinesModule,
+    TimelineModule,
     AiPricingModule,
   ],
   controllers: [AiDmController, CoDmController],

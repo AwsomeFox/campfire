@@ -24,6 +24,8 @@ import {
   ProposalResolve,
   HomebrewRuleEntryInput,
   HomebrewRuleEntryUpdate,
+  TimelineEventCreate,
+  TimelineEventUpdate,
 } from '@campfire/schema';
 import type { Proposal, ProposalAction, Role } from '@campfire/schema';
 import { fromJsonText } from '../../common/json';
@@ -38,6 +40,7 @@ import { SessionsService } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
+import { TimelineService } from '../timeline/timeline.service';
 import { FactionsService } from '../factions/factions.service';
 import {
   StorylineRewriteContextChangedError,
@@ -109,6 +112,7 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
   rule_entry: HomebrewRuleEntryInput,
+  timeline_event: TimelineEventCreate.strict(),
 };
 const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   quest: QuestUpdate.strict(),
@@ -122,6 +126,7 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
   rule_entry: HomebrewRuleEntryUpdate.strict(),
+  timeline_event: TimelineEventUpdate.strict(),
 };
 
 @Injectable()
@@ -139,6 +144,7 @@ export class ProposalsService {
     private readonly maps: MapsService,
     private readonly factions: FactionsService,
     @Inject(StorylinesService) private readonly storylines: ProposalStorylinesService,
+    private readonly timeline: TimelineService,
     private readonly rules?: RulesService,
   ) {}
 
@@ -317,6 +323,31 @@ export class ProposalsService {
           create: (campaignId: number, payload: Record<string, unknown>, user: RequestUser) => this.rules!.createCampaignHomebrew(campaignId, payload, user),
           update: (id: number, payload: Record<string, unknown>, user: RequestUser) => this.rules!.updateCampaignHomebrewFromProposal(id, payload, user),
           remove: () => Promise.reject(new BadRequestException('Homebrew archive proposals are not supported yet')),
+        };
+      case 'timeline_event':
+        return {
+          create: (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+            this.timeline.createEvent(
+              campaignId,
+              payload as Parameters<TimelineService['createEvent']>[1],
+              user,
+              role,
+            ),
+          update: (
+            id: number,
+            payload: Record<string, unknown>,
+            user: RequestUser,
+            role: Role,
+            opts?: Parameters<TimelineService['updateEvent']>[4],
+          ) =>
+            this.timeline.updateEvent(
+              id,
+              payload as Parameters<TimelineService['updateEvent']>[1],
+              user,
+              role,
+              opts,
+            ),
+          remove: (id: number, user: RequestUser, role: Role) => this.timeline.removeEvent(id, user, role),
         };
     }
   }
