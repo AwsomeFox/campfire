@@ -13269,6 +13269,61 @@ export const RollResult = z.object({
 });
 export type RollResult = z.infer<typeof RollResult>;
 
+// ---------- ephemeral encounter presence (issue #2209, #816 slice 1) ----------
+// Co-DM presence: which authenticated humans are currently on a running encounter's live
+// surface. This is the DATA FOUNDATION only — it rides the existing campaign-event SSE
+// stream as a `encounter.presence` frame; UI rendering is a subsequent slice.
+//
+// Presence is intentionally COARSE and EPHEMERAL:
+//  - it lives only in the server's in-memory registry (never persisted, never audited —
+//    it is transport-level state, like an SSE keepalive, not a domain write);
+//  - `activity` is a two-state hint (`viewing` | `editing`), not an advisory intent;
+//  - a frame carries a SNAPSHOT of who is present, not a delta, so a reconnecting or
+//    late-joining client reconciles by replacing its local set rather than replaying a
+//    missed event log (there is no persisted history to refetch).
+//
+// SECRECY: `userId` is String(users.id) — the same identity space as RequestUser.id and
+// the campaign member roster, so disclosing it on the wire reveals nothing a member could
+// not already read from the membership list. The encounter id itself is the sensitive
+// field: a HIDDEN encounter's presence is routed only to DMs (server-side audience
+// predicate at emit time, never a field on the frame), so a non-DM neither receives the
+// frame nor learns the hidden encounter exists.
+
+/** Coarse activity state for ephemeral encounter presence (issue #2209). */
+export const EncounterPresenceActivity = z.enum(['viewing', 'editing']);
+export type EncounterPresenceActivity = z.infer<typeof EncounterPresenceActivity>;
+
+/**
+ * One member currently present on an encounter's live surface (issue #2209).
+ * `userId` is String(users.id) — same identity space as RequestUser.id. The display name
+ * is resolved client-side from the membership roster (which every member already reads),
+ * so the wire stays id-only like the other thin campaign signals.
+ */
+export const EncounterPresenceEntry = z.object({
+  userId: z.string().max(120),
+  activity: EncounterPresenceActivity,
+});
+export type EncounterPresenceEntry = z.infer<typeof EncounterPresenceEntry>;
+
+/**
+ * Snapshot of who is present on an encounter (issue #2209). Returned by
+ * GET/POST/DELETE /encounters/:id/presence and carried as the `members` field of an
+ * `encounter.presence` campaign event. Sorted by `userId` server-side for stable output.
+ */
+export const EncounterPresenceSnapshot = z.object({
+  encounterId: Id,
+  members: z.array(EncounterPresenceEntry),
+});
+export type EncounterPresenceSnapshot = z.infer<typeof EncounterPresenceSnapshot>;
+
+/** POST body for declaring/refreshing encounter presence (issue #2209). */
+export const EncounterPresenceDeclare = z
+  .object({
+    activity: EncounterPresenceActivity,
+  })
+  .strict();
+export type EncounterPresenceDeclare = z.infer<typeof EncounterPresenceDeclare>;
+
 // ---------- real-time campaign events (SSE) ----------
 // Thin invalidation signals pushed over GET /campaigns/:id/events — they carry ids, not
 // entity payloads, so clients refetch through the normal (permission-checked) REST reads.
@@ -13339,6 +13394,12 @@ export const CampaignEventType = z.enum([
   'transcript.reset',
   'grounding',
   'player-display-scene',
+  // Issue #2209 (#816 slice 1): ephemeral Co-DM presence. Carries a SNAPSHOT of who is
+  // currently on an encounter's live surface (userId + coarse activity), not a refetch
+  // hint — presence is in-memory only, so there is no persisted row to refetch. A hidden
+  // encounter's presence is routed DM-only by an audience predicate at emit time, so the
+  // frame never reaches a non-DM and never carries the encounter's secrecy on its fields.
+  'encounter.presence',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -13626,6 +13687,19 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     provider: z.string(),
     model: z.string(),
     claimIds: z.array(Id),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #2209 (#816 slice 1): ephemeral Co-DM presence snapshot. `members` is the full
+    // current presence set for this encounter at emit time (join/leave/heartbeat-expire),
+    // so clients reconcile by replacing their local set rather than replaying deltas. See
+    // EncounterPresenceEntry: `userId` is the membership-roster identity space (no secret),
+    // and a hidden encounter's frames are routed DM-only by an audience predicate at emit
+    // time — this frame's fields carry no secrecy that depends on the reader's role.
+    type: z.literal('encounter.presence'),
+    campaignId: Id,
+    encounterId: Id,
+    members: z.array(EncounterPresenceEntry),
     at: IsoDate,
   }),
 ]);

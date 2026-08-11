@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, CombatantStatblock, CreatureCheckRollRequest, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantReorderRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapObjectCreate, MapObjectUpdate, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterEscalationUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantRemoveRequest, CombatantRemoveUndo, CombatantResourceAdjust, CombatantStatblock, CreatureCheckRollRequest, DeathSaveRollRequest, CombatantRollInitiativeRequest, CombatantReorderRequest, CombatantTurnStatePatch, EncounterEndTurn, EncounterNextTurn, RollRequest, ActionRollRequest, ManualRollRequest, MapObjectCreate, MapObjectUpdate, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionApplyRequest, ActionUndoToken, TokenBatchPreviewRequest, TokenBatchApply, TokenBatchUndo, SavedTokenFormation, QuickRollRequest, EncounterAftermathApplyXpInput, EncounterAftermathLootTransferInput, EncounterAftermathQuestUpdateInput, EncounterAftermathBeatUpdateInput, EncounterAftermathTimelineEventInput, AoeTemplateDeclare, AoeTemplateUpdate, EncounterPresenceDeclare } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 export class QuickRollRequestDto extends createZodDto(QuickRollRequest.strict()) {}
@@ -113,3 +113,7 @@ export class EncounterAftermathLootTransferInputDto extends createZodDto(Encount
 export class EncounterAftermathQuestUpdateInputDto extends createZodDto(EncounterAftermathQuestUpdateInput.strict()) {}
 export class EncounterAftermathBeatUpdateInputDto extends createZodDto(EncounterAftermathBeatUpdateInput.strict().default({})) {}
 export class EncounterAftermathTimelineEventInputDto extends createZodDto(EncounterAftermathTimelineEventInput.strict()) {}
+
+// Issue #2209 (#816 slice 1): ephemeral Co-DM presence declare/heartbeat body.
+// EncounterPresenceDeclare is already .strict(), so an unknown key 400s.
+export class EncounterPresenceDeclareDto extends createZodDto(EncounterPresenceDeclare) {}
