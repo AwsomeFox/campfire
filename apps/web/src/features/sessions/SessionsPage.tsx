@@ -555,9 +555,17 @@ export default function SessionsPage() {
                   : ''}
               </p>
               <div role="list" aria-label="Session recaps">
+              {/* Measured, not guessed: a row is ~182px with a single-line title and ~233px
+                  when the title wraps (1440px viewport, two-line recap excerpt). The 96
+                  here was less than half the real height, so `VirtualList` — which uses
+                  this for both its range maths and its fixed top/bottom spacers, and never
+                  measures rendered rows — under-rendered the range and mis-sized the
+                  spacers, making a long history jump as it scrolled. Splitting the meta
+                  and title lines added ~19px to that, so the estimate is corrected to the
+                  common row rather than nudged. */}
               <VirtualList
                 items={sessions}
-                estimateHeight={96}
+                estimateHeight={180}
                 maxHeight="min(70vh, 640px)"
                 className="flex flex-col"
               >

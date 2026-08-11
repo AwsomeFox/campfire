@@ -225,7 +225,13 @@ export default function NpcListPage() {
                   is separately chipped above and hidden NPCs are not returned to
                   non-DMs at all — so this exposes nothing new. */}
               {npc.body?.trim() && (
-                <p className="cf-card-excerpt" title={npc.body}>
+                /* `aria-hidden`, because EntityCard wraps the WHOLE card in one link. The
+                   CSS clamp only limits painting, so without this the anchor's accessible
+                   name became the name plus the entire body — up to 50k characters of
+                   markdown — and a screen-reader user would sit through the full
+                   description of every NPC to reach the next one. The preview is a visual
+                   scanning aid; the body itself is on the page this link leads to. */
+                <p className="cf-card-excerpt" aria-hidden="true">
                   {npc.body}
                 </p>
               )}
