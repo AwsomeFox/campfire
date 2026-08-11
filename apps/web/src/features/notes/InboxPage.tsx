@@ -697,7 +697,7 @@ function SweepResultCard({
   return (
     <Card density="default" className="space-y-2.5">
       {job.status === 'disabled' && (
-        <div className="cf-inset p-3 space-y-1.5 border-amber-600/40">
+        <div className="cf-inset p-3 space-y-1.5 border-[var(--color-warning)]/40">
           <p className="m-0 text-sm text-amber-200">{job.detail || t('notes.sweepNoProvider')}</p>
           <div className="flex items-center gap-3">
             <Link to={`/c/${campaignId}/settings#ai-dm-provider`} className="text-xs text-purple-400 hover:underline">

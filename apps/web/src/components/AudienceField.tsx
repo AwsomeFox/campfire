@@ -58,7 +58,7 @@ export function AudienceField({
         <p
           role="note"
           data-testid="audience-public-warning"
-          className="text-xs text-amber-400/90 border border-amber-500/30 bg-amber-500/10 rounded px-2.5 py-2"
+          className="text-xs text-amber-400/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2"
         >
           Players will see this {entityLabel} as soon as you create it — including in lists, search, and shared links.
           You can hide it again right after if that was a mistake.

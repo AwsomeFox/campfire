@@ -291,7 +291,7 @@ export default function CampaignAuditPage() {
         </Link>
       </div>
 
-      <Card className="space-y-1 border-amber-500/30 bg-amber-500/5">
+      <Card className="space-y-1 border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5">
         <p className="text-xs font-semibold text-amber-200 m-0">Audit retention disclosure</p>
         <p className="text-[11px] text-slate-300 m-0">
           {retention

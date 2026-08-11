@@ -480,7 +480,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       {!invitesEnabled && (
         <div
           data-testid="invites-suspended-banner"
-          className="cf-inset border-amber-600/40 rounded px-3 py-2.5 space-y-1.5"
+          className="cf-inset border-[var(--color-warning)]/40 rounded px-3 py-2.5 space-y-1.5"
         >
           <p className="text-[12px] text-amber-200 m-0">
             Public invites are suspended — outstanding join links return as invalid until you re-enable them.

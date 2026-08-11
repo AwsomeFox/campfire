@@ -4493,7 +4493,7 @@ export default function RunSessionPage() {
           aria-live="polite"
           data-testid="mutation-reconcile-banner"
           data-phase={reconcile.phase}
-          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
+          className="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm"
         >
           {reconcile.phase === 'checking'
             ? t('encounters.reconcile.checking')
@@ -4517,7 +4517,7 @@ export default function RunSessionPage() {
           role="status"
           aria-live="polite"
           data-testid="encounter-sync-override-prompt"
-          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap"
+          className="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap"
         >
           <span>{t('encounters.sync.overridePrompt')}</span>
           <Btn
@@ -4548,7 +4548,7 @@ export default function RunSessionPage() {
           role="status"
           aria-live="polite"
           data-testid="encounter-sync-own-override-prompt"
-          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap"
+          className="rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-sm flex items-center gap-2 flex-wrap"
         >
           <span>{t('encounters.sync.ownOverridePrompt')}</span>
           <Btn
