@@ -12,9 +12,12 @@
  *   - `.nav` / `.nav-brand` / `.nav a` (nocturne.css) — zero JSX composers. App
  *     chrome uses `.cf-nav-*` / `.settings-*-nav` / `.settings-nav`, never the
  *     bare `.nav` class. Removed.
- *   - `figcaption` (nocturne.css) — a bare element selector no app source
- *     emits; the design-system figure-caption styling it carried was unused.
- *     Removed (`figure { margin: 0; }` is retained as a generic UA reset).
+ *   - `figcaption` (nocturne.css) — a bare element selector no JSX source
+ *     emits, BUT DOMPurify's default allowlist passes it through from
+ *     user-supplied Markdown (Markdown.tsx), so it renders at runtime.
+ *     Retained (see the assertion below); only the consumerless class rules
+ *     above were removed. `figure { margin: 0; }` is also retained as a
+ *     generic UA reset.
  *
  * `.hr` was investigated and DELIBERATELY RETAINED (see the assertion below): it
  * is live at `Layout.tsx`'s sidebar divider (`<div className="hr my-1" />`), where
@@ -51,17 +54,15 @@ test('issue #2192: the consumer-less nocturne rules stay removed', () => {
     source,
     '.table must stay removed — it has no JSX consumer (issue #2192)',
   ).not.toMatch(/\.table(?![\w-])/);
-  // `.nav` — class selector (covers .nav, .nav-brand, .nav a, …), zero composers.
-  // App chrome uses .cf-nav-* / .settings-*-nav / .settings-nav, never the bare class.
+  // `.nav` — class selector family (.nav, .nav-brand, .nav a, …), zero composers.
+  // App chrome uses .cf-nav-* / .settings-*-nav / .settings-nav, never the bare
+  // class. The regex matches `.nav` followed by a selector-continuation char
+  // (space, `-`, `:`, `,`, `{`) or end-of-line, so it catches every removed
+  // variant (.nav, .nav-brand, .nav a) but not unrelated classes like .navigation.
   expect(
     source,
-    '.nav must stay removed — app chrome uses .cf-nav-*/.settings-*-nav, never .nav (issue #2192)',
-  ).not.toMatch(/\.nav(?![\w-])/);
-  // `figcaption` — bare element selector, no app source emits it.
-  expect(
-    source,
-    'figcaption must stay removed — no app source emits it (issue #2192)',
-  ).not.toMatch(/\bfigcaption\b/i);
+    '.nav family must stay removed — app chrome uses .cf-nav-*/.settings-*-nav, never .nav (issue #2192)',
+  ).not.toMatch(/\.nav(?:[-\s,:{]|$)/);
 });
 
 test('issue #2192: .hr is retained (live at Layout.tsx, not dead)', () => {
@@ -75,4 +76,18 @@ test('issue #2192: .hr is retained (live at Layout.tsx, not dead)', () => {
     source,
     '.hr must stay — it is live at Layout.tsx sidebar divider; #2192 only removes consumerless rules',
   ).toMatch(/\.hr(?![\w-])/);
+});
+
+test('issue #2192: figcaption is retained (rendered by sanitized user Markdown)', () => {
+  const source = stripComments(readFileSync(NOCTURNE_CSS, 'utf8'));
+
+  // `figcaption` is a bare element selector — no JSX emits it — BUT
+  // DOMPurify.sanitize(marked.parse(...)) in Markdown.tsx passes <figcaption>
+  // through from user-supplied Markdown (quest bodies, notes, etc.), so it
+  // renders at runtime. Removing the styling would silently strip caption
+  // formatting from rendered Markdown. Do NOT remove `figcaption`.
+  expect(
+    source,
+    'figcaption must stay — it is rendered by sanitized user Markdown (DOMPurify allows it); removing it strips caption styling',
+  ).toMatch(/figcaption\s*\{/i);
 });

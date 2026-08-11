@@ -146,6 +146,14 @@ p { margin: 0 0 var(--space-3); }
 a { color: var(--color-accent); text-underline-offset: 3px; }
 img { display: block; max-width: 100%; }
 figure { margin: 0; }
+/* Retained: DOMPurify's default allowlist passes <figcaption> through from
+   user-supplied Markdown (Markdown.tsx), so these render at runtime even
+   though no JSX source emits them. Removing the styling would silently
+   strip caption formatting from rendered quest/notes Markdown. */
+figcaption {
+  font-size: var(--type-meta); margin-top: var(--space-1);
+  color: var(--color-text-secondary);
+}
 .text-muted { color: var(--color-text-secondary); }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
