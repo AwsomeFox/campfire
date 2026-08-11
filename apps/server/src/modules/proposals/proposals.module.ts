@@ -12,6 +12,7 @@ import { MapsModule } from '../maps/maps.module';
 import { FactionsModule } from '../factions/factions.module';
 import { StorylinesModule } from '../storylines/storylines.module';
 import { RulesModule } from '../rules/rules.module';
+import { TimelineModule } from '../timeline/timeline.module';
 import { ProposalRecordsModule } from './proposal-records.module';
 import { ProposalsService } from './proposals.service';
 import { CampaignProposalsController, ProposalsController } from './proposals.controller';
@@ -32,6 +33,7 @@ import { CampaignProposalsController, ProposalsController } from './proposals.co
     FactionsModule,
     StorylinesModule,
     RulesModule,
+    TimelineModule,
   ],
   controllers: [CampaignProposalsController, ProposalsController],
   providers: [ProposalsService],

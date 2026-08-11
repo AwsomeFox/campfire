@@ -23,6 +23,8 @@ import {
   StoryBeatProposalCreate,
   StoryBeatUpdate,
   StoryArcUpdate,
+  TimelineEventCreate,
+  TimelineEventUpdate,
   ruleSystemAdapter,
 } from '@campfire/schema';
 import type { AiExternalContentPolicy, AiGenerationProvenance, CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, HomebrewMechanicsProfile, NarrationLanguage, Proposal, Role, RuleSystemAdapter } from '@campfire/schema';
@@ -42,6 +44,7 @@ import { isWithheldFinishReason, describeWithheldTurn } from '../ai-driver/drive
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { provenanceEndpointBaseUrl, resolveAiProvenanceEgress } from '../../common/ai-provenance-endpoint';
 import { StorylinesService } from '../storylines/storylines.service';
+import { TimelineService, toEventDomain } from '../timeline/timeline.service';
 
 type CoDmDraftRequestInput = z.infer<typeof CoDmDraftRequest>;
 
@@ -62,10 +65,11 @@ const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
   recap: 'session', // a session recap is filed as a session
   encounter: 'encounter',
   map: 'map',
+  timeline_event: 'timeline_event',
 };
 
 /** Targets that support drafting N items at once; the rest ignore `count`. */
-const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
+const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction', 'timeline_event']);
 
 /**
  * Co-DM authoring (issue #313) — the AI drafts content for the DM's approval queue.
@@ -103,6 +107,7 @@ export class CoDmService {
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
     private readonly providerConfig: AiProviderConfigService,
     private readonly storylines: StorylinesService,
+    private readonly timelineService: TimelineService,
   ) {}
 
   /** 403 unless the server-wide experimental flag is on — the same choke point as the AI DM seat. */
@@ -133,8 +138,8 @@ export class CoDmService {
     if (input.target === 'arc' && !editing) {
       throw new BadRequestException('Story arcs can be rewritten with entityId; creating arcs with co-DM drafting is not supported');
     }
-    if (editing && input.target !== 'arc' && input.target !== 'beat') {
-      throw new BadRequestException('entityId is supported only when rewriting an existing story arc or beat');
+    if (editing && input.target !== 'arc' && input.target !== 'beat' && input.target !== 'timeline_event') {
+      throw new BadRequestException('entityId is supported only when rewriting an existing story arc, beat, or timeline event');
     }
     if (editing && (input.arcId != null || input.count != null)) {
       throw new BadRequestException('arcId and count are not used when rewriting an existing storyline entity');
@@ -153,7 +158,9 @@ export class CoDmService {
       );
     }
     const edit = editing
-      ? await this.storylines.getRewriteContext(campaignId, input.target as 'arc' | 'beat', input.entityId!)
+      ? (input.target === 'timeline_event'
+          ? await this.getTimelineRewriteContext(campaignId, input.entityId!)
+          : await this.storylines.getRewriteContext(campaignId, input.target as 'arc' | 'beat', input.entityId!))
       : null;
     const providerPrompt = edit
       ? JSON.stringify({ rewriteInstructions: input.prompt, currentStoryline: edit.providerContext })
@@ -573,7 +580,8 @@ export class CoDmService {
       case 'arc':
       case 'beat':
       case 'quest':
-      case 'faction': {
+      case 'faction':
+      case 'timeline_event': {
         if (parsed === null) {
           throw new UnprocessableEntityException(
             `The AI did not return a JSON ${target} draft. Configure a real provider (the default no-op scaffold cannot author content) or retry.`,
@@ -649,6 +657,27 @@ export class CoDmService {
             ...(typeof raw.standing === 'string' ? { standing: raw.standing } : {}),
             ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
           }) as Record<string, unknown>;
+        case 'timeline_event':
+          if (opts?.editing) {
+            return TimelineEventUpdate.parse({
+              ...(typeof raw.title === 'string' ? { title: raw.title } : {}),
+              ...(typeof raw.inWorldDate === 'string' ? { inWorldDate: raw.inWorldDate } : {}),
+              ...(typeof raw.era === 'string' ? { era: raw.era } : {}),
+              ...(typeof raw.sortIndex === 'number' || typeof raw.sortIndex === 'string' ? { sortIndex: Number(raw.sortIndex) } : {}),
+              ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
+              ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+              ...(typeof raw.hidden === 'boolean' ? { hidden: raw.hidden } : {}),
+            }) as Record<string, unknown>;
+          }
+          return TimelineEventCreate.parse({
+            title: typeof raw.title === 'string' && raw.title.trim() ? raw.title : (typeof raw.name === 'string' && raw.name.trim() ? raw.name : 'Untitled event'),
+            ...(typeof raw.inWorldDate === 'string' ? { inWorldDate: raw.inWorldDate } : {}),
+            ...(typeof raw.era === 'string' ? { era: raw.era } : {}),
+            ...(typeof raw.sortIndex === 'number' || typeof raw.sortIndex === 'string' ? { sortIndex: Number(raw.sortIndex) } : {}),
+            ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+            ...(typeof raw.hidden === 'boolean' ? { hidden: raw.hidden } : {}),
+          }) as Record<string, unknown>;
         case 'recap':
           return SessionCreate.parse(raw) as Record<string, unknown>;
         case 'encounter': {
@@ -683,6 +712,32 @@ export class CoDmService {
       );
     }
   }
+
+  private async getTimelineRewriteContext(campaignId: number, eventId: number) {
+    const row = await this.timelineService.getEventRowOrThrow(eventId);
+    if (row.campaignId !== campaignId) {
+      throw new BadRequestException(`Timeline event ${eventId} does not belong to this campaign`);
+    }
+    const domain = toEventDomain(row);
+    const providerContext = {
+      target: 'timeline_event' as const,
+      event: {
+        id: domain.id,
+        title: domain.title,
+        inWorldDate: domain.inWorldDate,
+        era: domain.era,
+        sortIndex: domain.sortIndex,
+        body: domain.body,
+        dmSecret: domain.dmSecret,
+      },
+    };
+    const contextHash = crypto.createHash('sha256').update(JSON.stringify(providerContext)).digest('hex');
+    return {
+      providerContext,
+      contextHash,
+      baseSnapshot: { ...domain },
+    };
+  }
 }
 
 /** Per-target JSON hint the model is asked to fill (informational; the server re-validates). */
@@ -696,6 +751,8 @@ const DRAFT_JSON_SHAPE = (adapter: RuleSystemAdapter): Record<CoDmDraftTarget, s
     '{"title": string (required), "body"?: string (markdown), "reward"?: string, "status"?: "available"|"active"|"completed"|"failed", "dmSecret"?: string}',
   faction:
     '{"name": string (required), "body"?: string (markdown), "kind"?: string, "goals"?: string, "standing"?: "hostile"|"unfriendly"|"neutral"|"friendly"|"allied", "dmSecret"?: string}',
+  timeline_event:
+    '{"title": string (required), "inWorldDate"?: string, "era"?: string, "sortIndex"?: number, "body"?: string (markdown), "dmSecret"?: string}',
   recap: '{"title"?: string, "recap": string (markdown summary of the session)}',
   encounter: adapter.supportsEncounterDifficulty
     ? '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}'

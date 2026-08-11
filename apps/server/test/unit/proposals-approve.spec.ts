@@ -93,6 +93,7 @@ describe('ProposalsService.approve (issue #681)', () => {
       {} as never,
       {} as never,
       storylines,
+      {} as never,
     );
 
     return { service, records, quests, storylines, audit, existing };
