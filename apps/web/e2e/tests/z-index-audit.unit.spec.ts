@@ -115,7 +115,11 @@ const AUDITED_RAW_LITERALS: Array<Declaration & { note: string }> = [
   { selector: '.cf-vtt-fab', value: '14', note: 'VTT cockpit local nesting order (issue #2163 body) — the floating roll button.' },
   { selector: '.cf-vtt-tray', value: '13', note: 'VTT cockpit local nesting order (issue #2163 body) — the dice tray.' },
   { selector: '.cf-vtt-map .cf-vtt-rail', value: '10', note: 'VTT cockpit local nesting order (issue #2163 body) — the map tool rail.' },
-  { selector: '.cf-vtt-map .cf-vtt-map-tray', value: '8', note: 'VTT cockpit local nesting order (issue #2163 body) — the floating token tray.' },
+  {
+    selector: '.cf-vtt-map .cf-vtt-map-tray',
+    value: '8',
+    note: 'VTT cockpit local nesting order (issue #2163 body) — this z-index:8 rule is actually a combined selector, `.cf-vtt-map .cf-vtt-map-aside, .cf-vtt-map .cf-vtt-map-tray { … }`; it governs BOTH the grid/fog aside panel and the floating token tray, not just the tray (review finding, PR #2202). Recorded under the tray\'s name only because allZIndexDeclarations keys off the last selector line of a rule — the aside shares this exact declaration and needs no entry of its own.',
+  },
   { selector: ".cf-vtt-map [data-testid='map-viewport-toolbar']", value: '9', note: 'VTT cockpit local nesting order (issue #2163 body) — the viewport toolbar.' },
 ];
 
@@ -164,9 +168,17 @@ test.describe('z-index bypass audit (issue #2163)', () => {
     // block; this pins the other half of what makes it a stacking context (a non-auto
     // z-index), which is the mechanism every "local literal nested in .cf-vtt" note above
     // depends on.
+    //
+    // Reuses allZIndexDeclarations's regex-based rule parser rather than an indexOf/slice
+    // window (review finding, PR #2202): that parser tolerates formatting the way brittle
+    // substring bounds do not (e.g. `.cf-vtt\n{`), and a genuinely missing `.cf-vtt` z-index
+    // fails with "expected true" against a concrete declaration list, not a silent -1 slice.
     const css = readFileSync(INDEX_CSS, 'utf8');
-    const block = css.slice(css.indexOf('.cf-vtt {'), css.indexOf('.cf-vtt-header {'));
-    expect(block).toMatch(/z-index:\s*var\(--cf-layer-immersive\);/);
+    const declarations = allZIndexDeclarations(css);
+    expect(declarations, JSON.stringify(declarations)).toContainEqual({
+      selector: '.cf-vtt',
+      value: 'var(--cf-layer-immersive)',
+    });
   });
 
   test('.cf-gated-hint and .cf-gated-hint--escaped both consume the immersive token (issue #2163 review fix)', () => {
