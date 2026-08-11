@@ -318,6 +318,14 @@ export default function DashboardPage() {
           when the seat isn't in Driver mode. */}
       <AiDmDashboardActivity campaignId={id} isDm={role === 'dm'} />
 
+      {/* What CHANGED comes before what the app would like you to set up.
+          The one-shot checklist, the AI-DM pitch, the install hint and the offline-pack
+          notice used to stack above this, so a returning DM opening their campaign met
+          roughly 430px of onboarding and system chrome before the first line of their own
+          content. All four are dismissible and none is urgent; the catch-up list is the
+          reason the page was opened. Ordering only — nothing is hidden or removed. */}
+      <CatchUpPanel key={id} campaignId={id} />
+
       <CampaignOnboardingCard campaignId={id} summary={summary} isDm={role === 'dm'} />
 
       {/* Onboarding nudge (#343) — DM-only, dismissible, shown only while the seat is off. */}
@@ -325,8 +333,6 @@ export default function DashboardPage() {
 
       <InstallHintBanner />
       <OfflinePackBanner campaignId={id} />
-
-      <CatchUpPanel key={id} campaignId={id} />
 
       {/*
         Three-pane command deck from the design template

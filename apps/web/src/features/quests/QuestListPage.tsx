@@ -228,6 +228,16 @@ export default function QuestListPage() {
                   </span>
                 )}
               </div>
+              {/* A one-glance sense of WHAT the quest is. The card previously showed the
+                  title, its badges and its objective counter — so a list of quests told a
+                  DM almost nothing about any of them, and every card needed opening to be
+                  identified. `body` is the player-visible field (`dmSecret` is the DM-only
+                  one), so this leaks nothing the title row did not already. */}
+              {q.body?.trim() && (
+                <p className="cf-card-excerpt" title={q.body}>
+                  {q.body}
+                </p>
+              )}
               {q.status === 'active' && (
                 <div className="quest-card-progress">
                   <div className="quest-progress-summary">

@@ -169,10 +169,17 @@ export function StatusHeader({
             reads distinctly from the adjacent live "Round N" state, and the TermHelp trigger
             distinguishes it from encounter difficulty, HP danger, and Session Zero safety.
             Shown to every role — not DM-gated — since the chip itself is visible to all. */}
-        <span className="tag tag-accent" style={{ whiteSpace: 'nowrap' }}>
-          Campaign danger · {DANGER_LABEL[campaign.dangerLevel]}
+        {/* Chip and its `?` are ONE unit. Left as bare siblings in this wrapping row they
+            floated between unrelated chips at the row's own 6px gap, so which control a
+            `?` explained was positional guesswork — and on a wrap it could end up beside a
+            chip it has nothing to do with. `cf-term-help-pair` binds them and lets the row
+            gap separate groups instead of members. */}
+        <span className="cf-term-help-pair">
+          <span className="tag tag-accent" style={{ whiteSpace: 'nowrap' }}>
+            Campaign danger · {DANGER_LABEL[campaign.dangerLevel]}
+          </span>
+          <TermHelp termId="dangerLevel" />
         </span>
-        <TermHelp termId="dangerLevel" />
         {/* Mode-aware chrome (#343): tells everyone an AI participates before it speaks. */}
         <AiModeBadge campaignId={campaignId} />
         <span className="tag tag-outline" style={{ whiteSpace: 'nowrap' }}>
@@ -192,14 +199,16 @@ export function StatusHeader({
             {/* No aria-label / title here: the visible word "Cast" is the
                 accessible name, and the adjacent TermHelp carries the
                 explanation without a hover-only tooltip (issue #518). */}
-            <Link
-              to={`/c/${campaignId}/screen`}
-              className="btn btn-ghost"
-              style={{ fontSize: 12, textDecoration: 'none' }}
-            >
-              <GameIcon slug="tv" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Cast
-            </Link>
-            <TermHelp termId="cast" />
+            <span className="cf-term-help-pair">
+              <Link
+                to={`/c/${campaignId}/screen`}
+                className="btn btn-ghost"
+                style={{ fontSize: 12, textDecoration: 'none' }}
+              >
+                <GameIcon slug="tv" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />Cast
+              </Link>
+              <TermHelp termId="cast" />
+            </span>
             {canDmWrite && (
             <Btn ghost style={{ fontSize: 12 }} title="DM only" onClick={startEdit}>
               ✎ Edit

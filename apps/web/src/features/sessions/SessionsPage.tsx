@@ -598,13 +598,22 @@ export default function SessionsPage() {
                           }}
                         />
                         <span className="flex-1 min-w-0">
-                          <span className="flex gap-2.5 items-baseline flex-wrap">
+                          {/* Number and date share a line of their OWN, above the title.
+                              They used to sit on one wrapping row with it, and the date
+                              rode `ml-auto`: a title long enough to wrap pushed the date
+                              to the next line, where `ml-auto` parked it right — so the
+                              date appeared top-right on short rows and mid-list on long
+                              ones, and the list lost its rhythm exactly where it was
+                              hardest to scan. Fixed metadata line, then the title. */}
+                          <span className="flex gap-2.5 items-baseline">
                             <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
                               Session {s.number}
                             </span>
-                            <span className="font-heading text-[16px]">{title}</span>
-                            <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
+                            <span className="text-muted text-[11.5px] ml-auto whitespace-nowrap">
+                              {formatDate(s.playedAt)}
+                            </span>
                           </span>
+                          <span className="font-heading text-[16px] block mt-0.5">{title}</span>
                           <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
                         </span>
                         {unread > 0 && (
@@ -1584,7 +1593,13 @@ function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: 
   return (
     <Card className="space-y-3" data-testid="recap-share-panel">
       <div className="flex items-center gap-2 flex-wrap">
-        <h3 className="font-bold text-white text-sm m-0">Public recap sharing</h3>
+        {/* `card-title`, not `text-sm`. nocturne.css is imported UNLAYERED, so its
+            `h3 { font-size: 1.5625rem }` beats any layered Tailwind size utility: the
+            `text-sm` that used to be here was silently inert and this rendered at 25px,
+            shouting over the `Who played` / `Recap history` / `Discussion` labels beside
+            it, which are spans and therefore got the size they asked for. `.card-title`
+            is a class, so it wins — see the CASCADE TRAP note in nocturne.css. */}
+        <h3 className="card-title text-white m-0">Public recap sharing</h3>
         {!loading && shares.length > 0 && <span className="tag tag-accent">{shares.length} active</span>}
       </div>
       <p className="text-[11.5px] text-slate-300 m-0">

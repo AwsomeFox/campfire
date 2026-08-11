@@ -33,8 +33,12 @@ test.describe('Character print view owner control hiding (#1761)', () => {
     // with nothing to attack with — so the wrapper sits one level deeper than it used to.
     expect(code).toContain('<div className="cf-print-hide">\n          <RollModeChooser');
 
-    // Save & skill proficiency toggle buttons
-    expect(code).toContain('className="cf-target-44 absolute top-0.5 right-0.5 cf-print-hide"');
+    // Save & skill proficiency toggle buttons. Matched on the print/target classes rather
+    // than the full literal: this pinned `right-0.5`, so moving the save toggle to the
+    // leading edge — to stop the same control sitting right on saves and left on skills —
+    // failed a #1761 assertion that is about PRINT HIDING, not placement. The position is
+    // free to change; carrying `cf-print-hide` is the invariant.
+    expect(code).toMatch(/className="cf-target-44 absolute top-0\.5 (?:start|left|right)-0\.5 cf-print-hide"/);
     expect(code).toContain('className="cf-target-44 shrink-0 text-center cf-print-hide"');
 
     // Actions card + Add and action edit/delete controls
