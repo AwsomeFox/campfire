@@ -21,7 +21,6 @@
     "sessionNumber": "الجلسة {{number}}",
     "scheduleAt": "مجدول {{time}}",
     "announceSummary": "{{count}} تحديثات في الحملة منذ آخر زيارة لك.",
-    "today": "آخر زيارة لك",
-    "timeAgo": "منذ {{time}}"
+    "today": "آخر زيارة لك"
   }
 }

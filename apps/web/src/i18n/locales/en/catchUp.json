@@ -21,7 +21,6 @@
     "sessionNumber": "Session {{number}}",
     "scheduleAt": "Scheduled {{time}}",
     "announceSummary": "{{count}} campaign updates since you were last here.",
-    "today": "your last visit",
-    "timeAgo": "{{time}} ago"
+    "today": "your last visit"
   }
 }
