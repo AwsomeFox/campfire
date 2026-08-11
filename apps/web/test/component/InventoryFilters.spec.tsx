@@ -137,8 +137,15 @@ describe('InventoryPage filter chips & weight summary (#2178)', () => {
     expect(screen.getByText('Longsword')).toBeTruthy();
     expect(screen.getByText('Shield')).toBeTruthy();
 
+    const allBtn = screen.getByTestId('filter-owner-all');
+    const partyBtn = screen.getByTestId('filter-owner-party');
+    expect(allBtn.getAttribute('aria-pressed')).toBe('true');
+    expect(partyBtn.getAttribute('aria-pressed')).toBe('false');
+
     // Click "Party stash" owner filter chip
-    fireEvent.click(screen.getByTestId('filter-owner-party'));
+    fireEvent.click(partyBtn);
+    expect(partyBtn.getAttribute('aria-pressed')).toBe('true');
+    expect(allBtn.getAttribute('aria-pressed')).toBe('false');
     expect(screen.getByText('Party Rations')).toBeTruthy();
     expect(screen.queryByText('Longsword')).toBeNull();
     expect(screen.queryByText('Shield')).toBeNull();
@@ -151,6 +158,7 @@ describe('InventoryPage filter chips & weight summary (#2178)', () => {
 
     // Reset to "All" owner filter
     fireEvent.click(screen.getByTestId('filter-owner-all'));
+    expect(allBtn.getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByText('Party Rations')).toBeTruthy();
     expect(screen.getByText('Longsword')).toBeTruthy();
   });

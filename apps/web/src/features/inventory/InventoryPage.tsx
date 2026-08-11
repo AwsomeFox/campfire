@@ -316,6 +316,7 @@ export default function InventoryPage() {
                       <button
                         type="button"
                         onClick={() => setOwnerFilter('all')}
+                        aria-pressed={ownerFilter === 'all'}
                         className={`px-2.5 py-1 rounded text-xs transition-colors ${
                           ownerFilter === 'all'
                             ? 'bg-[var(--color-accent)] text-black font-semibold'
@@ -328,6 +329,7 @@ export default function InventoryPage() {
                       <button
                         type="button"
                         onClick={() => setOwnerFilter('party')}
+                        aria-pressed={ownerFilter === 'party'}
                         className={`px-2.5 py-1 rounded text-xs transition-colors ${
                           ownerFilter === 'party'
                             ? 'bg-[var(--color-accent)] text-black font-semibold'
@@ -340,6 +342,7 @@ export default function InventoryPage() {
                       <button
                         type="button"
                         onClick={() => setOwnerFilter('characters')}
+                        aria-pressed={ownerFilter === 'characters'}
                         className={`px-2.5 py-1 rounded text-xs transition-colors ${
                           ownerFilter === 'characters'
                             ? 'bg-[var(--color-accent)] text-black font-semibold'
@@ -356,6 +359,7 @@ export default function InventoryPage() {
                       <button
                         type="button"
                         onClick={() => setEquippedFilter('all')}
+                        aria-pressed={equippedFilter === 'all'}
                         className={`px-2.5 py-1 rounded text-xs transition-colors ${
                           equippedFilter === 'all'
                             ? 'bg-[var(--color-accent)] text-black font-semibold'
@@ -368,6 +372,7 @@ export default function InventoryPage() {
                       <button
                         type="button"
                         onClick={() => setEquippedFilter('equipped')}
+                        aria-pressed={equippedFilter === 'equipped'}
                         className={`px-2.5 py-1 rounded text-xs transition-colors ${
                           equippedFilter === 'equipped'
                             ? 'bg-[var(--color-accent)] text-black font-semibold'
@@ -380,6 +385,7 @@ export default function InventoryPage() {
                       <button
                         type="button"
                         onClick={() => setEquippedFilter('unequipped')}
+                        aria-pressed={equippedFilter === 'unequipped'}
                         className={`px-2.5 py-1 rounded text-xs transition-colors ${
                           equippedFilter === 'unequipped'
                             ? 'bg-[var(--color-accent)] text-black font-semibold'
