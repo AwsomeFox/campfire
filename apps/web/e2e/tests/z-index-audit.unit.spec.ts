@@ -7,18 +7,37 @@
  * elements in the SAME stacking context; an element nested inside something that already
  * establishes its own stacking context (`position` + non-auto `z-index`, `transform`,
  * `opacity < 1`, …) has its z-index scoped to that ancestor and can never leak out to
- * compete with a sibling of the ancestor, no matter how large the number is. Re-measured on
- * the current tree (not the `c44baf05a` snapshot the issue cites), this file has 25
- * `z-index` declarations:
+ * compete with a sibling of the ancestor, no matter how large the number is.
  *
- *   - 9 already consume a `--cf-layer-*` token (or `calc()` over one) — never audited here.
+ * PR #2202 review (Codex): the first version of this audit whitelisted `.cf-gated-hint`
+ * (base, non-escaped) as local on the strength of an incomplete render-site enumeration — it
+ * traced `GatedControl` only through the encounter cockpit and `DeathSaveTracker`, and missed
+ * that `DiceTray`'s advantage/disadvantage toggle also uses `GatedControl`, and that
+ * `SharedDiceLog` mounts `DiceTray` on the plain Dashboard (`DiceWidget`) and the character
+ * sheet — neither wrapped in `.cf-vtt` or any other stacking-context-establishing ancestor.
+ * There the hint sits directly in `.cf-authed-shell`, the SAME local context Layout's sticky
+ * mobile header (Tailwind `z-30`) does, and the hint's old literal `30` was an exact TIE with
+ * it — decided only by DOM order (the hint always renders later), so it really could paint
+ * over chrome by coincidence. That was a genuine bypass, now fixed in index.css by reusing
+ * the existing `--cf-layer-immersive` token (already used by `.cf-gated-hint--escaped` for
+ * the identical "must clear ordinary page chrome" reason) on the base rule too — see
+ * `z-index-audit-gated-hint-stacking.spec.ts` for the live proof, which does NOT use
+ * `elementFromPoint` (the hint is `pointer-events: none`, so hit-testing would silently skip
+ * it) and instead measures that the hint and header share one stacking-context ancestor
+ * before comparing their z-index numbers.
+ *
+ * Re-measured on the current tree (not the `c44baf05a` snapshot the issue cites, nor the
+ * pre-fix count from this file's own first version), index.css has 25 `z-index`
+ * declarations:
+ *
+ *   - 10 already consume a `--cf-layer-*` token (or `calc()` over one) — never audited here.
  *   - 2 are resets (`0`, `auto`) that are not stacking-tier decisions.
- *   - 14 are raw literals, enumerated and classified below. Every one of them turned out to
- *     be genuinely LOCAL once its containing stacking context was traced — INCLUDING the two
- *     sites #2163 itself flagged as "plausible real drift"
- *     (`.cf-death-save-spectator-toast`, `.cf-gated-hint`). See each one's note below and,
- *     for the toast, the live measurement in `z-index-audit-toast-stacking.spec.ts` that
- *     proves the containment rather than just reading it off the source.
+ *   - 13 are raw literals, enumerated and classified below. Every one of the remaining 13
+ *     turned out to be genuinely LOCAL once its containing stacking context was traced —
+ *     including `.cf-death-save-spectator-toast`, the other site #2163 flagged as "plausible
+ *     real drift" (see its note below and the live measurement in
+ *     `z-index-audit-toast-stacking.spec.ts`, which proves the containment rather than just
+ *     reading it off the source).
  *
  * This is the "guard test scoped to whatever the audit concludes" #2163 asked for. It is
  * deliberately narrower than "no raw z-index outside the documented scale" — that blanket
@@ -57,8 +76,12 @@ function allZIndexDeclarations(css: string): Declaration[] {
 const TOKEN_RE = /var\(--cf-layer-/;
 
 /**
- * The 14 raw (non-token, non-reset) z-index literals as re-measured on the current tree,
+ * The 13 raw (non-token, non-reset) z-index literals as re-measured on the current tree,
  * each with why it is genuinely local rather than a scale bypass. Order matches source order.
+ *
+ * `.cf-gated-hint` is deliberately NOT here — it was in the first version of this list
+ * (whitelisted as local) and that was wrong; see the module doc comment. It now consumes
+ * --cf-layer-immersive and is covered by the ".cf-gated-hint--escaped" test below instead.
  */
 const AUDITED_RAW_LITERALS: Array<Declaration & { note: string }> = [
   {
@@ -75,11 +98,6 @@ const AUDITED_RAW_LITERALS: Array<Declaration & { note: string }> = [
     selector: '.cf-death-save-spectator-toast',
     value: '40',
     note: 'Renders only as a child passed to EncounterVttShell (RunSessionPage’s sole root, see encounter-cockpit-layout.unit.spec.ts), i.e. inside .cf-vtt, which is itself position:fixed with an explicit z-index (var(--cf-layer-immersive), 41) — a stacking context. The toast’s local "40" is compared only against its .cf-vtt siblings, never against --cf-layer-tabbar’s "40": the whole .cf-vtt subtree already paints atomically above the tab bar (41 > 40). The numeric coincidence with the tabbar tier is a documentation smell, not a functional bypass — verified live in z-index-audit-toast-stacking.spec.ts.',
-  },
-  {
-    selector: '.cf-gated-hint',
-    value: '30',
-    note: 'GatedControl is used only inside the encounter cockpit (nested in .cf-vtt) and DeathSaveTracker on the character sheet (nested directly in .cf-authed-shell). In both places it never exceeds the "chrome" ceiling it happens to number-match (Tailwind z-30) — it stays at or below every documented tier. The one case that truly needs to outrank the immersive surface — .cf-gated-hint--escaped, portaled to <body> once it leaves a clipping ancestor — already migrates onto calc(var(--cf-layer-immersive, 41) + 1).',
   },
   {
     selector: '.cf-hp-feedback',
@@ -108,7 +126,7 @@ const AUDITED_RESETS: Declaration[] = [
 ];
 
 test.describe('z-index bypass audit (issue #2163)', () => {
-  test('every raw z-index literal in index.css is one of the 14 audited local-context sites', () => {
+  test('every raw z-index literal in index.css is one of the 13 audited local-context sites', () => {
     const css = readFileSync(INDEX_CSS, 'utf8');
     const declarations = allZIndexDeclarations(css);
 
@@ -119,7 +137,7 @@ test.describe('z-index bypass audit (issue #2163)', () => {
     // Re-measured counts (see the module doc comment) — a change here means the inventory
     // itself moved and needs re-auditing, not that this test's numbers should just follow.
     expect(declarations, 'total z-index declarations in index.css').toHaveLength(25);
-    expect(tokenized, 'declarations already consuming a --cf-layer-* token').toHaveLength(9);
+    expect(tokenized, 'declarations already consuming a --cf-layer-* token').toHaveLength(10);
     expect(resets, 'z-index:0 / z-index:auto resets').toHaveLength(2);
     expect(raw, 'raw literal z-index declarations').toHaveLength(AUDITED_RAW_LITERALS.length);
 
@@ -151,16 +169,23 @@ test.describe('z-index bypass audit (issue #2163)', () => {
     expect(block).toMatch(/z-index:\s*var\(--cf-layer-immersive\);/);
   });
 
-  test('.cf-gated-hint--escaped migrates onto the immersive token once it leaves its trigger’s context', () => {
+  test('.cf-gated-hint and .cf-gated-hint--escaped both consume the immersive token (issue #2163 review fix)', () => {
     const gatedControl = readFileSync(
       resolve(__dirname, '../../src/components/GatedControl.tsx'),
       'utf8',
     );
-    // The base (non-escaped) hint's "30" never needs to beat --cf-layer-immersive (41) — it
-    // is only the escaped, body-portaled copy that does, and that copy already tokenizes.
     expect(gatedControl).toMatch(/createPortal\(hintNode, document\.body\)/);
 
     const css = readFileSync(INDEX_CSS, 'utf8');
+    // The base rule: was the literal 30 (a tie with the chrome tier's Tailwind z-30 wherever
+    // GatedControl renders outside .cf-vtt — see z-index-audit-gated-hint-stacking.spec.ts
+    // for why that was a real bypass, not a theoretical one) — now the same token formula the
+    // escaped variant already used.
+    expect(css).toMatch(
+      /\.cf-gated-hint\s*\{[^}]*z-index:\s*calc\(var\(--cf-layer-immersive,\s*41\)\s*\+\s*1\);/,
+    );
+    // The escaped variant: unchanged, still needs its own tier once it leaves the trigger's
+    // context entirely (portaled to <body>, competing with top-level contexts directly).
     expect(css).toMatch(
       /\.cf-gated-hint--escaped\s*\{\s*z-index:\s*calc\(var\(--cf-layer-immersive,\s*41\)\s*\+\s*1\);/,
     );
