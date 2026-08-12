@@ -35,12 +35,11 @@ import type {
 import { api, API } from '../../lib/api';
 
 export interface UseEncounterPresenceOptions {
-  campaignId: number;
   encounterId: number;
   /**
    * Only eligible viewers declare. Callers should pass `isDm && encounter.status ===
-   * 'running'` (AC #2212.2). When false the hook declares/heartbeats nothing and leaves
-   * any prior declaration, so it is safe to mount unconditionally.
+   * 'running'` (AC #2212.2). When false the hook sends a keepalive DELETE for any
+   * prior declaration and clears local state, so it is safe to mount unconditionally.
    */
   enabled: boolean;
   /**
@@ -85,13 +84,23 @@ export function useEncounterPresence({
   // (e.g. a transient network blip, or the encounter being ended/trashed concurrently)
   // leaves the previous roster in place; the next heartbeat, reconnect re-declare, or SSE
   // frame re-syncs.
+  // Track the current encounterId inside the declare closure so a response from
+  // an obsolete encounter (navigated A -> B while A's POST was in flight) is
+  // discarded rather than overwriting B's roster. The ref is updated on every
+  // render and read after the await resolves.
+  const activeEncounterRef = useRef(encounterId);
+  activeEncounterRef.current = encounterId;
+
   const declare = useCallback(
     async (act: EncounterPresenceActivity): Promise<void> => {
+      const declaredFor = encounterId;
       try {
         const snap = await api.post<EncounterPresenceSnapshot>(
           `${API}/encounters/${encounterId}/presence`,
           { activity: act },
         );
+        // Discard if the user navigated to a different encounter while this POST was pending.
+        if (activeEncounterRef.current !== declaredFor) return;
         setMembers(snap.members);
       } catch {
         /* best-effort — heartbeat / reconnect / SSE re-sync */

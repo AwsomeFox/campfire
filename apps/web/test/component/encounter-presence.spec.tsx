@@ -160,8 +160,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     postMock.mockResolvedValue(snapshot([entry('1', 'viewing'), entry('2', 'editing')]));
     const { result } = renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled: true,
         activity: 'viewing',
         heartbeatMs: 60_000,
@@ -175,8 +174,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     postMock.mockResolvedValue(snapshot([]));
     renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled: false,
         activity: 'viewing',
         heartbeatMs: 60_000,
@@ -190,8 +188,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     let activity: 'viewing' | 'editing' = 'viewing';
     const { rerender } = renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled: true,
         activity,
         heartbeatMs: 60_000,
@@ -209,8 +206,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     postMock.mockResolvedValue(snapshot([entry('1', 'viewing')]));
     const { result } = renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled: true,
         activity: 'viewing',
         heartbeatMs: 60_000,
@@ -233,8 +229,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     postMock.mockResolvedValue(snapshot([entry('1', 'viewing')]));
     const { result } = renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled: true,
         activity: 'viewing',
         heartbeatMs: 60_000,
@@ -251,8 +246,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     postMock.mockResolvedValue(snapshot([]));
     const { result } = renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled: false,
         activity: 'viewing',
         heartbeatMs: 60_000,
@@ -268,8 +262,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     postMock.mockResolvedValue(snapshot([entry('1', 'viewing')]));
     renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled: true,
         activity: 'viewing',
         heartbeatMs: 20,
@@ -286,8 +279,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     postMock.mockResolvedValue(snapshot([entry('1', 'viewing')]));
     const { unmount } = renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled: true,
         activity: 'viewing',
         heartbeatMs: 60_000,
@@ -304,8 +296,7 @@ describe('useEncounterPresence (issue #2212)', () => {
     let enabled = true;
     const { rerender } = renderHook(() =>
       useEncounterPresence({
-        campaignId: 7,
-        encounterId: ENCOUNTER_ID,
+                encounterId: ENCOUNTER_ID,
         enabled,
         activity: 'viewing',
         heartbeatMs: 60_000,

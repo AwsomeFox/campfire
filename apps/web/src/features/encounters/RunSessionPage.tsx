@@ -3991,7 +3991,6 @@ export default function RunSessionPage() {
   // `viewing` otherwise. The hook owns the roster; the ref bridge hands its reconciler /
   // re-declarer to the SSE handlers wired further up.
   const presence = useEncounterPresence({
-    campaignId: cid,
     encounterId: eid,
     enabled: isDm && encounter?.status === 'running' && Number.isFinite(eid),
     activity: headerBusy ? 'editing' : 'viewing',

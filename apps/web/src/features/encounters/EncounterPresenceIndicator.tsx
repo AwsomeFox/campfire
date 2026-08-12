@@ -31,7 +31,10 @@ export function EncounterPresenceIndicator({
   names,
 }: EncounterPresenceIndicatorProps): JSX.Element | null {
   const { t } = useTranslation();
-  const self = selfUserId == null ? '' : String(selfUserId);
+  // When selfUserId is null/undefined (e.g. while `me` is loading), filter by a
+  // sentinel that matches nothing rather than an empty string that could match
+  // a real userId, so the caller never briefly sees themselves (AC #2212.5).
+  const self = selfUserId == null ? '\u0000SELF_NOT_LOADED' : String(selfUserId);
   const others = members.filter((member) => member.userId !== self);
   if (others.length === 0) return null;
 
