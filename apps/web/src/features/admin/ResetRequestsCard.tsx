@@ -114,7 +114,7 @@ export function ResetRequestsCard() {
                 </div>
               </div>
               {approval && resetUrl && (
-                <div className="border border-amber-500/30 rounded p-2.5 space-y-1">
+                <div className="border border-[var(--color-warning)]/30 rounded p-2.5 space-y-1">
                   <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
                     One-time reset link — shown once, give it to {approval.request.username} now
                   </p>

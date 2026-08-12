@@ -62,7 +62,7 @@ export function EncounterWhisperComposer({
   return (
     <form
       onSubmit={handleSubmit}
-      className="mt-2 rounded-lg border border-amber-500/30 bg-neutral-900/90 p-3 space-y-2 text-xs"
+      className="mt-2 rounded-lg border border-[var(--color-warning)]/30 bg-neutral-900/90 p-3 space-y-2 text-xs"
       data-testid="encounter-whisper-composer"
     >
       <div className="flex items-center justify-between gap-2 text-amber-300 font-semibold">

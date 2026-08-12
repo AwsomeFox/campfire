@@ -460,7 +460,7 @@ export function SpellbookPanel({
       {/* Warning Modal when replacing active concentration */}
       {concentrationWarningSpell && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" data-testid="concentration-warning-modal" role="dialog" aria-modal="true">
-          <div className="bg-neutral-900 border border-amber-500/50 rounded-lg max-w-md w-full p-4 space-y-3 shadow-2xl">
+          <div className="bg-neutral-900 border border-[var(--color-warning)]/50 rounded-lg max-w-md w-full p-4 space-y-3 shadow-2xl">
             <h4 className="text-base font-bold text-amber-400 m-0 flex items-center gap-2">
               <span>🔮 Concentration Warning</span>
             </h4>
