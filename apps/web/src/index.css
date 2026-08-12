@@ -1552,7 +1552,18 @@ h1, h2, h3, h4, h5, h6 {
   position: absolute;
   bottom: 100%;
   left: 0;
-  z-index: 30;
+  /* Issue #2163 review: this used to be the literal 30 — the "chrome" tier's own Tailwind
+     z-30 value, un-tokenized because chrome has no --cf-layer-* token. GatedControl is not
+     only used inside the encounter cockpit: DiceTray's advantage/disadvantage gate (and
+     DeathSaveTracker) also render on the plain Dashboard and character sheet, where nothing
+     isolates this hint into its own stacking context — it sits directly in
+     .cf-authed-shell, the SAME context Layout's sticky mobile header does. At a literal tie
+     the later DOM element wins regardless of intent, and this hint is always later than the
+     header, so it could paint over chrome purely by DOM-order luck rather than by the
+     documented scale. Reusing --cf-layer-immersive (already used by the escaped variant
+     below for the identical "must clear ordinary page chrome" reason) makes that
+     deterministic instead of accidental, with no new token. */
+  z-index: calc(var(--cf-layer-immersive, 41) + 1);
   margin-bottom: 6px;
   max-width: 220px;
   padding: 6px 10px;
@@ -1565,9 +1576,11 @@ h1, h2, h3, h4, h5, h6 {
   pointer-events: none;
 }
 /* Portaled out of a clipping ancestor (see GatedControl): it has left the trigger's
-   stacking context, so it needs a tier above an immersive surface — but still below
-   dialogs, which legitimately cover the control the hint belongs to. Must come AFTER the
-   base rule: same specificity, so source order is what decides. */
+   stacking context entirely, landing as a direct child of <body> where it competes with
+   top-level contexts (tabbar, immersive) rather than a local one — but still below
+   dialogs, which legitimately cover the control the hint belongs to. Same value as the
+   base rule above now (both need to clear ordinary chrome); kept as its own selector so
+   the two cases stay independently documented and greppable. */
 .cf-gated-hint--escaped {
   z-index: calc(var(--cf-layer-immersive, 41) + 1);
 }
@@ -3369,7 +3382,21 @@ html.cf-vtt-chrome-overflow body {
   overscroll-behavior: auto;
 }
 html.cf-vtt-chrome-overflow .cf-vtt {
-  position: static;
+  /* `relative`, not `static` (issue #2163 review, third P2): `z-index` only establishes a
+     stacking context on a POSITIONED element (or a flex/grid item) — on `static` it is
+     inert outright, not merely weakened. `.cf-vtt` is a normal (non-grid-item) child of
+     `<main>` here, so `static` would silently strip its own stacking context, and every
+     raw z-index this audit classified as "local, contained inside .cf-vtt" — the death-save
+     spectator toast in particular, which independently keeps `position: fixed` regardless
+     of this rule — would bubble up and compete directly with Layout chrome instead, decided
+     by DOM order rather than the documented scale. `relative` with no offset (`top: auto`
+     below is the "no offset" value, not a positioning override) is byte-for-byte identical
+     to `static` for layout/flow purposes — same box, same document position, same "takes
+     its height in flow" behavior the comment above this rule describes — while restoring
+     the stacking context. See z-index-audit-overflow-mode.spec.ts for the live proof.
+     Verify against a fresh reading of this rule if it changes again: static-vs-relative
+     here is a total behavior switch, not a stylistic choice. */
+  position: relative;
   top: auto;
   height: max(320px, calc(100dvh - var(--cf-immersive-chrome-inset, 0px)));
 }
@@ -3377,7 +3404,7 @@ html.cf-vtt-chrome-overflow .cf-vtt {
    chrome above it must never grow taller than the screen — a player with several pending
    check requests would otherwise have the lower cards, and the cockpit itself, pushed
    somewhere nothing can reach.
-   
+
    The caps are a shared BUDGET, not two independent limits, and the budget is MEASURED
    rather than assumed. Fixed `vh` pairs failed twice: as independent limits they were
    additive and could push the prompts past the cockpit's clamp, and even summed they
