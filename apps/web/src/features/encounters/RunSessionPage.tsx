@@ -26,7 +26,7 @@ import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { PrintControl } from '../../components/PrintControl';
 import { PrintOnly } from '../../components/PrintOnly';
 import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
-import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapObjectCreate, MapObjectUpdate, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
+import type { ActionSpec, ActionUndoToken, AoeTemplate, CampaignMember, CastSessionCreated, Character, Combatant, CombatantRemoveResult, DiceRoll, DifficultyBand, EncounterDifficulty, EncounterEvent, EncounterPresenceEntry, EncounterWithCombatants, TurnWorkspace as TurnWorkspaceData, FogState, GenerateMapParams, GeneratedMapResult, HpResyncDirection, HpSyncConflict, MapObjectCreate, MapObjectUpdate, MapPing, RulePack, TokenSize, UsableAction } from '@campfire/schema';
 import { actionEconomyForAdapter, ARCHMAGE_ADAPTER_ID, STARFINDER_ADAPTER_ID, buildDifficultyExplanation, fogStatesEqual, hasCriticalHitsForAdapter, hasInitiativeRollForAdapter, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { rulesetCapabilitiesForSelection } from '../../lib/rules';
@@ -90,6 +90,8 @@ import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { EncounterAiDriverPanel } from '../ai-dm/EncounterAiDriverPanel';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
+import { useEncounterPresence } from './useEncounterPresence';
+import { EncounterPresenceIndicator } from './EncounterPresenceIndicator';
 import { GameIcon } from '../../components/GameIcon';
 import { TermHelp } from '../../components/TermHelp';
 import { useWakeLock } from '../screen/useWakeLock';
@@ -1925,6 +1927,14 @@ export default function RunSessionPage() {
     setSyncRevision(null);
   }, [eid]);
 
+  // Issue #2212 (#816 slice 2): Co-DM presence. The roster lives in `useEncounterPresence`
+  // (called below, once `headerBusy` is in scope for the activity hint), but the SSE
+  // handlers wired in `useCampaignEvents` below need to reach it. A ref bridge closes the
+  // order gap the same way `useCampaignEvents` itself mirrors its own `handlersRef`: the
+  // ref is assigned during render (before any SSE frame can arrive), so the handlers read
+  // the live functions without entering the `useCallback` deps.
+  const presenceApplyRef = useRef<((members: EncounterPresenceEntry[]) => void) | null>(null);
+  const presenceRedeclareRef = useRef<(() => void) | null>(null);
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
   // take a turn, adjust HP, …) see it pushed instantly. Rather than a manual reload, an
   // event just invalidates the encounter's reads and Query refetches. On a remote delete,
@@ -1976,6 +1986,15 @@ export default function RunSessionPage() {
         // check-request feed so the targeted player's prompt appears / the DM's panel updates.
         if (event.type === 'check.requested' || event.type === 'check.resolved') {
           invalidateCampaignCheckRequests(queryClient, cid);
+          return;
+        }
+        // Issue #2212 (#816 slice 2): a Co-DM joined/left/heartbeat-expired on this
+        // encounter. The frame is a FULL snapshot (see EncounterPresenceSnapshot), so the
+        // roster is replaced rather than patched — a late or reconnecting client reconciles
+        // by swapping its local set. Handle it before the encounter-type filter below (which
+        // only admits the encounter.* change signals), and ignore frames for other encounters.
+        if (event.type === 'encounter.presence') {
+          if (event.encounterId === eid) presenceApplyRef.current?.(event.members);
           return;
         }
         if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping' && event.type !== 'encounter.turn_changed') return;
@@ -2123,6 +2142,10 @@ export default function RunSessionPage() {
       // frame outright — re-arm the REST turn-beat baseline resync (see
       // `awaitingTurnBeatResyncRef`'s own comment) so the catch-up encounter read above
       // re-derives it.
+      // Issue #2212: an outage that crossed the 45s presence TTL let the server reap this
+      // DM's entry — re-declare so reconnect restores presence rather than waiting up to a
+      // heartbeat. No-op when presence is not enabled.
+      presenceRedeclareRef.current?.();
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership, refreshCampaigns]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
@@ -2134,6 +2157,8 @@ export default function RunSessionPage() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
       invalidateTableSafety(queryClient, cid);
       void refreshCampaigns();
+      // Issue #2212: same presence-restore rationale as `onReconnect` above.
+      presenceRedeclareRef.current?.();
     }, [queryClient, eid, cid, invalidateCampaignCharactersForOwnership, refreshCampaigns]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
@@ -3961,6 +3986,17 @@ export default function RunSessionPage() {
   // is unavailable, which is the "reconcile before another action is allowed" rule.
   const headerBusy =
     runControl.isPending || nextTurnMut.isPending || hpMutationCount > 0 || bulkHpApplyPending || undoTurnMut.isPending || deleteEncounterMut.isPending || escalationControl.isPending || reconcileBlocks;
+  // Issue #2212 (#816 slice 2): Co-DM presence. Only a DM on a running encounter declares
+  // (AC #2212.2); the coarse activity is `editing` while a cockpit write is in flight and
+  // `viewing` otherwise. The hook owns the roster; the ref bridge hands its reconciler /
+  // re-declarer to the SSE handlers wired further up.
+  const presence = useEncounterPresence({
+    encounterId: eid,
+    enabled: isDm && encounter?.status === 'running' && Number.isFinite(eid),
+    activity: headerBusy ? 'editing' : 'viewing',
+  });
+  presenceApplyRef.current = presence.applySnapshot;
+  presenceRedeclareRef.current = presence.redeclare;
   const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
 
   useKeyboardGuardedAction(
@@ -4663,6 +4699,16 @@ export default function RunSessionPage() {
           {/* AI-DM presence chip (#344) — the Driver's live session chat is available
               on this running encounter. */}
           {liveActivity.mode === 'driver' && <AiDmPresenceTag turnActive={liveActivity.turnActive} />}
+          {/* Co-DM presence (#2212, #816 slice 2) — the other human collaborators
+              currently on this encounter, from the `encounter.presence` SSE roster. The
+              current user is filtered out inside the indicator. Hidden when nobody else
+              is here. Secrecy is server-enforced (a non-DM on a hidden encounter never
+              receives the frames), so this renders purely from the roster it is given. */}
+          <EncounterPresenceIndicator
+            members={presence.members}
+            selfUserId={myUserId}
+            names={aoeDeclarerNames}
+          />
           <button
             type="button"
             className="btn btn-ghost"
