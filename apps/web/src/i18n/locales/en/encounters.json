@@ -571,6 +571,12 @@
       "roll": "Roll any dice — the result lands on every screen at the table",
       "noMapTitle": "No battle map yet",
       "noMapHint": "The DM has not shared a map for this encounter. The turn order and your character are in the panel."
+    },
+    "presence": {
+      "viewing": "viewing",
+      "editing": "editing",
+      "personLabel": "{{name}} · {{activity}}",
+      "groupTitle": "Other collaborators on this encounter"
     }
   }
 }
