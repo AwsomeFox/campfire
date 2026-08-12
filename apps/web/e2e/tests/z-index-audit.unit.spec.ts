@@ -52,11 +52,27 @@
  * competed directly with Layout chrome, decided by DOM order — the exact bug class P2 #1
  * found in `.cf-gated-hint`, reachable through a narrower door. Fixed in index.css:
  * `position: relative` (no offset — identical layout/flow to `static`, but restores the
- * stacking context) instead of `position: static`. See
- * `z-index-audit-overflow-mode.spec.ts` for the live proof: it actually trips the hatch
- * (not merely asserts the CSS class exists) and reruns the same real-toast-injection +
- * elementFromPoint proof the ordinary-mode toast spec uses, confirming containment holds in
- * this mode too.
+ * stacking context) instead of `position: static`. Pinned below.
+ *
+ * NOT independently verified by a live paint-order test, and that gap is deliberate, not an
+ * oversight: a `z-index-audit-overflow-mode.spec.ts` was written and pushed through three CI
+ * rounds, each failing on a different false premise about the fixture's OWN geometry rather
+ * than the CSS under test — a viewport-coverage assumption that only held in ordinary mode, a
+ * Playwright locator substring collision, and finally a structural one: `<main>`'s own
+ * `pb-20` bottom padding (kept there so ordinary page content clears the fixed tab bar) means
+ * `.cf-vtt`'s reachable bottom edge sits ~24px above the tab bar's top even at the maximum
+ * possible scroll position — no scroll amount can close that gap, so the toast-vs-tab-bar
+ * comparison the ordinary-mode spec uses cannot be reconstructed this way in overflow mode at
+ * all. Three failures in an environment this session cannot run a browser in locally (each
+ * CI round costs a full cycle to learn one fact about the fixture, not the code) was judged
+ * not worth a fourth attempt at a different comparison geometry. The spec was removed rather
+ * than merged unfixed or endlessly iterated on; overflow-mode containment is verified here by
+ * the CSS-level reasoning above plus the pin below, which is real coverage (it fails on a
+ * revert to `position: static`) but is not a live "who actually paints on top" proof the way
+ * the ordinary-mode toast and gated-hint specs are. Closing that gap needs either a working
+ * local browser to iterate against, or a different comparison target than the tab bar (the
+ * sticky top header, not padding-guarded the same way, is the likeliest candidate) — left for
+ * whoever picks this up with the tooling to iterate on it.
  *
  * This is the "guard test scoped to whatever the audit concludes" #2163 asked for. It is
  * deliberately narrower than "no raw z-index outside the documented scale" — that blanket
@@ -229,9 +245,12 @@ test.describe('z-index bypass audit (issue #2163)', () => {
     // window — see the ".cf-vtt is a real stacking context" test above for why that
     // mattered on review) rather than hand-rolling a second brittle bounds check, then
     // positively requires `position: relative` rather than only forbidding `static` — a
-    // rule with positioning removed entirely would wrongly pass a forbid-only check. See
-    // z-index-audit-overflow-mode.spec.ts for the live proof that this actually restores
-    // containment once the hatch is tripped for real.
+    // rule with positioning removed entirely would wrongly pass a forbid-only check.
+    //
+    // This is the durable half of overflow-mode coverage; there is deliberately no live
+    // paint-order proof alongside it — see the module doc comment above for why a live
+    // spec was attempted, failed CI three times on its own fixture geometry rather than
+    // this claim, and was removed rather than merged unfixed.
     const css = readFileSync(INDEX_CSS, 'utf8');
     const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
     let overflowVttBody: string | null = null;
