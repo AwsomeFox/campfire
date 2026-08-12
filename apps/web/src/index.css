@@ -3382,7 +3382,21 @@ html.cf-vtt-chrome-overflow body {
   overscroll-behavior: auto;
 }
 html.cf-vtt-chrome-overflow .cf-vtt {
-  position: static;
+  /* `relative`, not `static` (issue #2163 review, third P2): `z-index` only establishes a
+     stacking context on a POSITIONED element (or a flex/grid item) — on `static` it is
+     inert outright, not merely weakened. `.cf-vtt` is a normal (non-grid-item) child of
+     `<main>` here, so `static` would silently strip its own stacking context, and every
+     raw z-index this audit classified as "local, contained inside .cf-vtt" — the death-save
+     spectator toast in particular, which independently keeps `position: fixed` regardless
+     of this rule — would bubble up and compete directly with Layout chrome instead, decided
+     by DOM order rather than the documented scale. `relative` with no offset (`top: auto`
+     below is the "no offset" value, not a positioning override) is byte-for-byte identical
+     to `static` for layout/flow purposes — same box, same document position, same "takes
+     its height in flow" behavior the comment above this rule describes — while restoring
+     the stacking context. See z-index-audit-overflow-mode.spec.ts for the live proof.
+     Verify against a fresh reading of this rule if it changes again: static-vs-relative
+     here is a total behavior switch, not a stylistic choice. */
+  position: relative;
   top: auto;
   height: max(320px, calc(100dvh - var(--cf-immersive-chrome-inset, 0px)));
 }
@@ -3390,7 +3404,7 @@ html.cf-vtt-chrome-overflow .cf-vtt {
    chrome above it must never grow taller than the screen — a player with several pending
    check requests would otherwise have the lower cards, and the cockpit itself, pushed
    somewhere nothing can reach.
-   
+
    The caps are a shared BUDGET, not two independent limits, and the budget is MEASURED
    rather than assumed. Fixed `vh` pairs failed twice: as independent limits they were
    additive and could push the prompts past the cockpit's clamp, and even summed they

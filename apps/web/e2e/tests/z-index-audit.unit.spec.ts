@@ -39,6 +39,25 @@
  *     `z-index-audit-toast-stacking.spec.ts`, which proves the containment rather than just
  *     reading it off the source).
  *
+ * PR #2202 review, third P2 (Codex): the "local, contained inside .cf-vtt" premise behind
+ * every note above assumed `.cf-vtt` is ALWAYS a stacking context. It is not: the cockpit's
+ * short-viewport escape hatch (`html.cf-vtt-chrome-overflow .cf-vtt`, tripped when Layout's
+ * own chrome needs more room than the cockpit can cede — see
+ * encounter-cockpit-campaign-chrome.spec.ts) used to set `position: static` to return
+ * `.cf-vtt` to normal document flow. `z-index` only takes effect on a positioned element (or
+ * a flex/grid item) — on `static` it is inert outright, not weakened — so in that one mode
+ * `.cf-vtt` silently stopped being a stacking context, and everything this file classifies
+ * as locally contained (the death-save toast in particular, which independently keeps
+ * `position: fixed` regardless of `.cf-vtt`'s own position) would have bubbled up and
+ * competed directly with Layout chrome, decided by DOM order — the exact bug class P2 #1
+ * found in `.cf-gated-hint`, reachable through a narrower door. Fixed in index.css:
+ * `position: relative` (no offset — identical layout/flow to `static`, but restores the
+ * stacking context) instead of `position: static`. See
+ * `z-index-audit-overflow-mode.spec.ts` for the live proof: it actually trips the hatch
+ * (not merely asserts the CSS class exists) and reruns the same real-toast-injection +
+ * elementFromPoint proof the ordinary-mode toast spec uses, confirming containment holds in
+ * this mode too.
+ *
  * This is the "guard test scoped to whatever the audit concludes" #2163 asked for. It is
  * deliberately narrower than "no raw z-index outside the documented scale" — that blanket
  * rule would incorrectly flag the VTT cockpit's own legitimate local nesting order (issue's
@@ -201,5 +220,31 @@ test.describe('z-index bypass audit (issue #2163)', () => {
     expect(css).toMatch(
       /\.cf-gated-hint--escaped\s*\{\s*z-index:\s*calc\(var\(--cf-layer-immersive,\s*41\)\s*\+\s*1\);/,
     );
+  });
+
+  test('.cf-vtt stays a stacking context in the short-viewport overflow escape hatch (issue #2163 review, third P2)', () => {
+    // z-index only takes effect on a positioned element (or a flex/grid item) — on
+    // position:static it is inert outright. Finds the rule the same way
+    // allZIndexDeclarations does (a generic selector{body} parse, not an indexOf/slice
+    // window — see the ".cf-vtt is a real stacking context" test above for why that
+    // mattered on review) rather than hand-rolling a second brittle bounds check, then
+    // positively requires `position: relative` rather than only forbidding `static` — a
+    // rule with positioning removed entirely would wrongly pass a forbid-only check. See
+    // z-index-audit-overflow-mode.spec.ts for the live proof that this actually restores
+    // containment once the hatch is tripped for real.
+    const css = readFileSync(INDEX_CSS, 'utf8');
+    const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+    let overflowVttBody: string | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = ruleRe.exec(css))) {
+      const selector = m[1].trim().split('\n').pop()!.trim();
+      if (selector === 'html.cf-vtt-chrome-overflow .cf-vtt') {
+        overflowVttBody = m[2];
+        break;
+      }
+    }
+    expect(overflowVttBody, 'expected an html.cf-vtt-chrome-overflow .cf-vtt rule in index.css').not.toBeNull();
+    expect(overflowVttBody).not.toMatch(/position:\s*static;/);
+    expect(overflowVttBody).toMatch(/position:\s*relative;/);
   });
 });
