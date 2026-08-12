@@ -17,6 +17,7 @@ import { CampaignsModule } from '../campaigns/campaigns.module';
 import { EncountersService } from './encounters.service';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
+import { EncounterPresenceService } from './encounter-presence.service';
 import { CampaignEncountersController, CampaignRollController, EncountersController } from './encounters.controller';
 
 @Module({
@@ -39,7 +40,7 @@ import { CampaignEncountersController, CampaignRollController, EncountersControl
     forwardRef(() => CampaignsModule),
   ],
   controllers: [CampaignEncountersController, CampaignRollController, EncountersController],
-  providers: [EncountersService, EncounterMapService, ActionResolverService],
+  providers: [EncountersService, EncounterMapService, ActionResolverService, EncounterPresenceService],
   // EncounterMapService is exported so the public cast capability (issue #547) can
   // serve the SAME fog-rendered, viewer-role map bytes without going through the
   // membership-authenticated /encounters/:id/map route.

@@ -125,6 +125,9 @@
       "bannerOverrideOwnReconnecting": "Reconnecting — you can still update your own combatant until live again.",
       "bannerOverrideOwnStale": "Live updates interrupted — you can still update your own combatant until resynced."
     },
+    "viewer": {
+      "readOnlyBanner": "You're viewing as a Viewer — read-only. Dice rolls, HP, and combatant edits are limited to the DM and players."
+    },
     "feedback": {
       "down": "DOWN",
       "revive": "UP",
@@ -265,6 +268,7 @@
         "labelPlaceholder": "Label (e.g. Trapped chest)",
         "xField": "X %",
         "yField": "Y %",
+        "sizeField": "Size %",
         "dmOnly": "DM only",
         "add": "Add",
         "placing": "Placing…",
@@ -272,7 +276,15 @@
         "placeError": "Couldn't place the object.",
         "updateError": "Couldn't update the object.",
         "removed": "Removed {{label}}",
-        "removeError": "Couldn't remove the object."
+        "removeError": "Couldn't remove the object.",
+        "placeOnMap": "Place on map",
+        "cancelPlace": "Cancel",
+        "armedHint": "Click on the map to place {{label}}. Esc to cancel.",
+        "dragHint": "drag to move, click to select",
+        "resizeHandle": "Resize",
+        "placedOnMap": "Placed {{label}} on the map",
+        "movedAnnounce": "{{label}} moved to {{x}}% across, {{y}}% down",
+        "placeCancelled": "Map object placement cancelled"
       },
       "setup": "Map setup",
       "fog": {
@@ -559,6 +571,12 @@
       "roll": "Roll any dice — the result lands on every screen at the table",
       "noMapTitle": "No battle map yet",
       "noMapHint": "The DM has not shared a map for this encounter. The turn order and your character are in the panel."
+    },
+    "presence": {
+      "viewing": "viewing",
+      "editing": "editing",
+      "personLabel": "{{name}} · {{activity}}",
+      "groupTitle": "Other collaborators on this encounter"
     }
   }
 }

@@ -170,7 +170,7 @@ export function AuditLogCard() {
       </div>
       {error && <p className="text-xs text-rose-400">{error}</p>}
       {retention ? (
-        <div className="rounded border border-amber-500/30 bg-amber-500/5 p-3 space-y-3">
+        <div className="rounded border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5 p-3 space-y-3">
           <div>
             <p className="text-xs font-bold text-amber-200 m-0">Audit retention policy</p>
             <p className="text-[11px] text-slate-300 m-0">

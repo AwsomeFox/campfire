@@ -292,7 +292,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                 <strong className="text-slate-100">{pendingReveal.filename}</strong>
               </p>
               <MapPurposePreview purpose="handout" surfacePurpose="handout" mode="reveal" />
-              <p className="m-0 text-xs text-amber-300/90 border border-amber-500/30 bg-amber-500/10 rounded px-2.5 py-2">
+              <p className="m-0 text-xs text-amber-300/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2">
                 Revealing a handout exposes the raw image or PDF to players. Encounter fog,
                 hidden tokens, AoE filtering, and Cast player-safe projection do not protect
                 this file.

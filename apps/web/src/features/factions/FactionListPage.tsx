@@ -108,76 +108,73 @@ export default function FactionListPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <Card className="space-y-4">
-        <PageHeader
-          variant="card"
-          icon={<GameIcon slug="black-flag" size={UI_ICON_SIZE.md} />}
-          title={t('nav.factions')}
-          primaryAction={
-            canDmWrite && !creating ? (
-              <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
-                + New faction
-              </Btn>
-            ) : undefined
-          }
-        />
+      <PageHeader
+        icon={<GameIcon slug="black-flag" size={UI_ICON_SIZE.md} />}
+        title={t('nav.factions')}
+        primaryAction={
+          canDmWrite && !creating ? (
+            <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+              + New faction
+            </Btn>
+          ) : undefined
+        }
+      />
 
-        {canDmWrite && creating && (
-          <div className="cf-inset p-3.5 space-y-2">
-            {createError && <ErrorNote message={createError} />}
-            <TextInput aria-label="Faction name" placeholder="Name (e.g. Thieves' Guild)" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
-            <TextInput aria-label="Faction kind" placeholder="Kind (e.g. guild, cult, government)" value={newKind} onChange={(e) => setNewKind(e.target.value)} maxLength={60} />
-            <AudienceField value={audience} onChange={setAudience} entityLabel="faction" name="faction-audience" />
-            <div className="flex items-center justify-end gap-2">
-              <Btn density="xs"
-                ghost
-                className="text-xs"
-                onClick={() => {
-                  setCreating(false);
-                  setNewName('');
-                  setNewKind('');
-                  setAudience('dm');
-                  setCreateError(null);
-                }}
-              >
-                Cancel
-              </Btn>
-              <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createFaction}>
-                {saving ? 'Creating…' : 'Create'}
-              </Btn>
-            </div>
+      {canDmWrite && creating && (
+        <div className="cf-inset p-3.5 space-y-2">
+          {createError && <ErrorNote message={createError} />}
+          <TextInput aria-label="Faction name" placeholder="Name (e.g. Thieves' Guild)" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
+          <TextInput aria-label="Faction kind" placeholder="Kind (e.g. guild, cult, government)" value={newKind} onChange={(e) => setNewKind(e.target.value)} maxLength={60} />
+          <AudienceField value={audience} onChange={setAudience} entityLabel="faction" name="faction-audience" />
+          <div className="flex items-center justify-end gap-2">
+            <Btn density="xs"
+              ghost
+              className="text-xs"
+              onClick={() => {
+                setCreating(false);
+                setNewName('');
+                setNewKind('');
+                setAudience('dm');
+                setCreateError(null);
+              }}
+            >
+              Cancel
+            </Btn>
+            <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createFaction}>
+              {saving ? 'Creating…' : 'Create'}
+            </Btn>
           </div>
-        )}
+        </div>
+      )}
 
-        {factions.length === 0 ? (
-          <EmptyState icon="black-flag" title="No factions yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any factions yet.'} />
-        ) : (
-          <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
-            {factions.map((faction) => (
-              <EntityCard
-                key={faction.id}
-                to={`/c/${id}/factions/${faction.id}`}
-                className="cf-card-hover"
-                title={faction.name}
-                aria-label={`Faction: ${faction.name}`}
-                nameClassName="font-bold text-slate-200 text-sm truncate cf-name-reveal"
-                /* className="font-bold text-slate-200 text-sm truncate cf-name-reveal" */
-                subtitle={faction.kind}
-                portraitUrl={faction.portraitUrl}
-                badges={
-                  <>
-                    <Chip variant={standingVariant(faction.standing)}>
-                      {formatStandingChip(faction.standing, faction.reputation, t)}
-                    </Chip>
-                    {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
-                    {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
-                  </>
-                }
-              />
-            ))}
-          </div>
-        )}
-      </Card>
+      {factions.length === 0 ? (
+        <EmptyState icon="black-flag" title="No factions yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any factions yet.'} />
+      ) : (
+        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
+          {factions.map((faction) => (
+            <EntityCard
+              key={faction.id}
+              to={`/c/${id}/factions/${faction.id}`}
+              className="cf-card-hover"
+              title={faction.name}
+              aria-label={`Faction: ${faction.name}`}
+              nameClassName="font-bold text-slate-200 text-sm truncate cf-name-reveal"
+              /* className="font-bold text-slate-200 text-sm truncate cf-name-reveal" */
+              subtitle={faction.kind}
+              portraitUrl={faction.portraitUrl}
+              badges={
+                <>
+                  <Chip variant={standingVariant(faction.standing)}>
+                    {formatStandingChip(faction.standing, faction.reputation, t)}
+                  </Chip>
+                  {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={UI_ICON_SIZE.xs} /> Hidden</span></Chip>}
+                  {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
+                </>
+              }
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

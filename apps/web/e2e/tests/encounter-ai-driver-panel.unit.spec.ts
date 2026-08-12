@@ -123,3 +123,43 @@ test.describe('encounter AI driver panel surfaces tool confirmations (issue #149
     expect(panel).toMatch(/\.\.\.encounter\.combatants/);
   });
 });
+
+test.describe('encounter AI driver panel parity with /table (issue #2193)', () => {
+  // #2193 — the driver cockpit tab must offer the SAME two capabilities /table does, reusing the
+  // existing implementations rather than reimplementing them: the UndoSnackbar commit-undo lever
+  // (the one-click reversal of an AI-driven world change the moment it lands) and the transcript
+  // privacy toggle (the per-user device grant). A DM who never leaves the cockpit tab must not
+  // silently lose either. These guards pin the wiring to the shared helpers so neither capability
+  // can quietly regress, and so a future "consolidate the two surfaces" change cannot delete the
+  // shared seam without turning this red.
+  test('EncounterAiDriverPanel wires the UndoSnackbar commit-undo lever on the same path as /table', () => {
+    const panel = readFileSync(PANEL, 'utf8');
+    // The same shared lever helper AiTablePage uses — not a reimplementation.
+    expect(panel).toMatch(/nextUndoLeverState/);
+    // The snackbar is gated on a freshly-armed commit, rendered for a DM, and wired to the same
+    // /ai-dm/undo POST path (onUndoAiAction) the persistent header button uses.
+    expect(panel).toMatch(/DriverLastUndoableCommit/);
+    expect(panel).toMatch(/isDm && undoSnackbar && \(/);
+    expect(panel).toMatch(/<UndoSnackbar[\s\S]*onUndo=\{onUndoAiAction\}/);
+    expect(panel).toMatch(/onExpire=\{\(\) => setUndoSnackbar\(null\)\}/);
+    // Dismiss on success and on a 404 (already reversed) — the authority is the server.
+    expect(panel).toMatch(/outcome\.dismissSnackbar\) setUndoSnackbar\(null\)/);
+  });
+
+  test('EncounterAiDriverPanel wires the transcript privacy toggle on the same device grant as /table', () => {
+    const panel = readFileSync(PANEL, 'utf8');
+    // The grant is per-user-per-device and shared with /table: read and written through the same
+    // helpers, so flipping it here governs both surfaces' caches identically.
+    expect(panel).toMatch(/isTranscriptRememberEnabled/);
+    expect(panel).toMatch(/setTranscriptRemember\(viewerId, next\)/);
+    // The toggle is rendered (disabled only before /me resolves, not by role), mirroring /table.
+    expect(panel).toMatch(/checked=\{rememberTranscript\}/);
+    expect(panel).toMatch(/disabled=\{viewerId === null\}/);
+    expect(panel).toMatch(/onChange=\{onToggleRememberTranscript\}/);
+    // Turning it ON writes what is on screen at once, under the activity scope + role projection
+    // the shared provider persists on every change — not a separate table-scope write.
+    expect(panel).toMatch(/saveTranscript\(viewerId, campaignId, transcript, 'activity', effectiveRole\)/);
+    // The viewer identity comes from the same latch /table uses, so nothing hydrates before /me.
+    expect(panel).toMatch(/usePendingHydrate\(\{ ready: authReady, userId: me\?\.user\.id \?\? null \}\)/);
+  });
+});

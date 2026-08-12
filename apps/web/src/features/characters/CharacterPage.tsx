@@ -76,6 +76,7 @@ import {
   inferActionSpecFromText,
   isResolvableSpec,
   hasDeathSavesForAdapter,
+  resolveStatStrip,
 } from '@campfire/schema';
 import { DeathSaveTracker } from '../encounters/combat/DeathSaves';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
@@ -349,8 +350,6 @@ export default function CharacterPage() {
     : classField.visible
       ? `${classField.label} not set · `
       : '';
-  const defenseLabel = adapter.presentation?.defense.short ?? adapter.presentation?.defense.full ?? 'AC';
-  const defenseTitle = adapter.presentation?.defense.full ?? 'Defense';
   const showSavingThrowEditor = adapter.characterSheet?.supportsSavingThrowEditor ?? true;
   const showSkillEditor = adapter.characterSheet?.supportsSkillEditor ?? true;
   const showSpellSlotEditor = adapter.characterSheet?.supportsSpellSlotEditor ?? true;
@@ -533,8 +532,6 @@ export default function CharacterPage() {
           onError={setActionError}
           roller={roller}
           leveledConditionTrack={leveledConditionTrack}
-          defenseLabel={defenseLabel}
-          defenseTitle={defenseTitle}
         />
 
         <div className="min-w-0 space-y-4">
@@ -1569,8 +1566,6 @@ function CharacterVitalsRail({
   onError,
   roller,
   leveledConditionTrack,
-  defenseLabel,
-  defenseTitle,
 }: {
   character: Character;
   adapter: RuleSystemAdapter;
@@ -1589,8 +1584,6 @@ function CharacterVitalsRail({
   onError: (msg: string | null) => void;
   roller: Roller;
   leveledConditionTrack: LeveledConditionTrack | null | undefined;
-  defenseLabel: string;
-  defenseTitle: string;
 }) {
   // See `showsInitiativeTile`: the catalog decides whether the roll may HAPPEN, this decides
   // whether the tile appears at all — an absent entry would otherwise render "Initiative —".
@@ -1692,8 +1685,6 @@ function CharacterVitalsRail({
         initiative={showInitiative ? initiative : null}
         showInitiative={showInitiative}
         canRoll={canEdit}
-        defenseLabel={defenseLabel}
-        defenseTitle={defenseTitle}
       />
 
       <section
@@ -1728,18 +1719,14 @@ function CharacterVitalsRail({
 }
 
 /**
- * The template's 2×2 vitals tiles. Initiative is a catalog check like any other, so it
- * rolls from here through the same server-resolved path Skills/Saves use; the rest are
- * read-only readouts of sheet fields (edited in "Edit sheet"). Starfinder's EAC/KAC pair
- * replaces the single defense tile when set.
- *
- * The template's fourth tile is 5e's proficiency bonus, and this shows LEVEL instead. A
- * single level-derived proficiency number is a 5e concept: PF2e's proficiency is level
- * plus a per-rank bonus, and Starforged/Open Legend have none at all, so a tile driven by
- * `profBonus` would state a plausible wrong number on every non-5e sheet. No adapter
- * exposes a global proficiency value to read instead, and none is invented here — the
- * per-check bonus is already visible, honestly and per system, in each catalog check's
- * own breakdown (see `formatCheckBreakdown` in the Skills and Saving throws cards).
+ * The template's 2×2 vitals tiles — now adapter-declared (issue #2159). The SHAPE (which tiles,
+ * in what order) comes from `statStripForAdapter`: 5e declares PB / Speed / Initiative / AC, and
+ * every other system inherits the neutral AC / Initiative / Speed / Level block — never a
+ * hardcoded 5e row, because a single level-derived proficiency number IS a 5e concept (PF2e's is
+ * level plus a per-rank bonus; Starforged / Open Legend have none). The VALUES are sourced by
+ * `resolveStatStrip` from the catalog and the character's own fields; initiative stays a catalog
+ * check like any other, so it rolls from here through the same server-resolved path Skills/Saves
+ * use. Starfinder's EAC/KAC pair still replaces the single defense tile when set.
  */
 function VitalsBlock({
   character,
@@ -1748,8 +1735,6 @@ function VitalsBlock({
   initiative,
   showInitiative,
   canRoll,
-  defenseLabel,
-  defenseTitle,
 }: {
   character: Character;
   adapter: RuleSystemAdapter;
@@ -1759,10 +1744,13 @@ function VitalsBlock({
   showInitiative: boolean;
   /** Whether this viewer may roll at all — see AbilityScoresCard's `canRoll`. */
   canRoll: boolean;
-  defenseLabel: string;
-  defenseTitle: string;
 }) {
-  const splitDefense = character.eac != null || character.kac != null;
+  // The strip is adapter-declared (issue #2159); values are sourced from the catalog and the
+  // character's own fields. `initiative` is the catalog check (already null when the character
+  // has no initiative source — see CharacterVitalsRail), passed in so this stays a pure render.
+  const cells = useMemo(() => resolveStatStrip(adapter, character, initiative), [adapter, character, initiative]);
+  // A group-initiative system shows no per-character initiative tile (see `showsInitiativeTile`).
+  const visible = showInitiative ? cells : cells.filter((c) => c.kind !== 'initiative');
   const tile = 'cf-inset text-center py-2 px-1.5';
   const tileLabel = 'text-[length:var(--type-label)] tracking-wide text-secondary';
   const tileValue = 'text-[17px] font-heading mt-0.5';
@@ -1770,56 +1758,42 @@ function VitalsBlock({
     <Card className="space-y-2.5" data-testid="character-vitals">
       <span className="card-kicker mb-0">Vitals</span>
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
-        {splitDefense ? (
-          <>
-            <div className={tile}>
-              <p className={tileLabel}>EAC</p>
-              <p className={tileValue}>{character.eac ?? '—'}</p>
-            </div>
-            <div className={tile}>
-              <p className={tileLabel}>KAC</p>
-              <p className={tileValue}>{character.kac ?? '—'}</p>
-            </div>
-          </>
-        ) : (
-          <div className={tile} title={defenseTitle}>
-            <p className={tileLabel}>{defenseLabel}</p>
-            <p className={tileValue}>{character.ac ?? '—'}</p>
-          </div>
-        )}
-        {initiative && canRoll ? (
-          <div className={tile}>
-            <RollContextMenu
-              allowAdvantage={initiative.supportsAdvantage}
-              allowCrit={false}
-              className="w-full h-full block"
-              onRoll={(m) => {
-                const resolved = toCheckRollMode(initiative.supportsAdvantage ? m : 'normal');
-                void roller.rollCheck(character.id, initiative.id, resolved, undefined, checkRollExpr(initiative, resolved));
-              }}
-              disabled={roller.rolling}
-              style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
-              title={`Roll initiative (${signed(initiative.modifier)}) [${formatCheckBreakdown(initiative)}]`}
-              aria-label={`Roll initiative (${signed(initiative.modifier)})`}
+        {visible.map((cell, index) => {
+          if (cell.kind === 'initiative' && cell.rollCheck && canRoll) {
+            const check = cell.rollCheck;
+            return (
+              <div className={tile} key={`${cell.kind}-${index}`} data-testid="character-vitals-initiative">
+                <RollContextMenu
+                  allowAdvantage={check.supportsAdvantage}
+                  allowCrit={false}
+                  className="w-full h-full block"
+                  onRoll={(m) => {
+                    const resolved = toCheckRollMode(check.supportsAdvantage ? m : 'normal');
+                    void roller.rollCheck(character.id, check.id, resolved, undefined, checkRollExpr(check, resolved));
+                  }}
+                  disabled={roller.rolling}
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', color: 'inherit', cursor: roller.rolling ? 'default' : 'pointer' }}
+                  title={`Roll initiative (${signed(check.modifier)}) [${formatCheckBreakdown(check)}]`}
+                  aria-label={`Roll initiative (${signed(check.modifier)})`}
+                >
+                  <p className={tileLabel}>{cell.label}</p>
+                  <p className={tileValue}>{cell.value}</p>
+                </RollContextMenu>
+              </div>
+            );
+          }
+          return (
+            <div
+              className={tile}
+              key={`${cell.kind}-${index}`}
+              data-testid={`character-vitals-${cell.label.toLowerCase()}`}
+              {...(cell.title ? { title: cell.title } : {})}
             >
-              <p className={tileLabel}>Initiative</p>
-              <p className={tileValue}>{signed(initiative.modifier)}</p>
-            </RollContextMenu>
-          </div>
-        ) : showInitiative ? (
-          <div className={tile}>
-            <p className={tileLabel}>Initiative</p>
-            <p className={tileValue}>{initiative ? signed(initiative.modifier) : '—'}</p>
-          </div>
-        ) : null}
-        <div className={tile}>
-          <p className={tileLabel}>Speed</p>
-          <p className={tileValue}>{character.speed ?? '—'}</p>
-        </div>
-        <div className={tile}>
-          <p className={tileLabel}>Level</p>
-          <p className={tileValue}>{character.level}</p>
-        </div>
+              <p className={tileLabel}>{cell.label}</p>
+              <p className={tileValue}>{cell.value}</p>
+            </div>
+          );
+        })}
       </div>
       <p className="text-[11px] text-secondary cf-print-hide">
         {adapter.presentation?.defense.full ?? 'Defense'} and speed are set in Edit sheet.
@@ -2077,6 +2051,11 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                   <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
                 </div>
               )}
+              {/* Proficiency toggle LEADS its item, matching the skills list below, where the
+                  ○/●/★ sits before the skill name. It used to sit top-right here and left
+                  there — the same control mirrored between two adjacent cards, so the eye
+                  had to relearn the pattern moving from saves to skills. `start-*` rather
+                  than `left-*` so it follows the writing direction in the ar locale. */}
               {canEdit ? (
                 <>
                   <button
@@ -2085,21 +2064,21 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                     disabled={busy}
                     aria-pressed={proficient}
                     aria-label={saveProficiencyLabel(k, proficient)}
-                    className="cf-target-44 absolute top-0.5 right-0.5 cf-print-hide"
+                    className="cf-target-44 absolute top-0.5 start-0.5 cf-print-hide"
                     style={{ background: 'transparent', border: 0, padding: 0, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                     title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
                   >
                     <span aria-hidden="true">{proficient ? '●' : '○'}</span>
                   </button>
                   {proficient && (
-                    <span className="cf-print-only absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
+                    <span className="cf-print-only absolute top-1 start-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
                       ●
                     </span>
                   )}
                 </>
               ) : (
                 proficient && (
-                  <span className="absolute top-1 right-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
+                  <span className="absolute top-1 start-1" aria-hidden style={{ fontSize: 10, color: 'var(--color-accent-300)' }}>
                     ●
                   </span>
                 )

@@ -32,3 +32,4 @@ data/
 /apps/web/index.d.ts
 /apps/web/.ds-i18n.ts
 /.design-sync/preview-surface.d.ts
+.git-commit-msg.txt

@@ -7,9 +7,10 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { DERIVATIVE_VARIANT_NAMES, isDerivativeVariantName } from '../attachments/image-derivatives';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, CreatureCheckRollDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantReorderDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapObjectCreateDto, MapObjectUpdateDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterEscalationUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantRemoveRequestDto, CombatantRemoveUndoDto, CombatantResourceAdjustDto, CreatureCheckRollDto, DeathSaveRollDto, CombatantRollInitiativeDto, CombatantReorderDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, EncounterNextTurnDto, RollRequestDto, ActionRollRequestDto, ManualRollRequestDto, MapObjectCreateDto, MapObjectUpdateDto, MapPingDto, AoeTemplateDeclareDto, AoeTemplateUpdateDto, ActionResolveRequestDto, ActionApplyRequestDto, ActionUndoTokenDto, TokenBatchPreviewDto, TokenBatchApplyDto, TokenBatchUndoDto, SavedTokenFormationDto, QuickRollRequestDto, EncounterAftermathApplyXpInputDto, EncounterAftermathLootTransferInputDto, EncounterAftermathQuestUpdateInputDto, EncounterAftermathBeatUpdateInputDto, EncounterAftermathTimelineEventInputDto, EncounterPresenceDeclareDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
+import { EncounterPresenceService } from './encounter-presence.service';
 import type { Request, Response } from 'express';
 import { parseFogState } from '../../common/fog';
 import { isVisibleTo } from '../../common/redact';
@@ -250,6 +251,7 @@ export class EncountersController {
     private readonly access: CampaignAccessService,
     private readonly encounterMaps: EncounterMapService,
     private readonly actions: ActionResolverService,
+    private readonly presence: EncounterPresenceService,
   ) {}
 
   @Get(':id')
@@ -675,6 +677,78 @@ export class EncountersController {
     }
     const result = await this.encounters.listEvents(id, role);
     return result;
+  }
+
+  @Get(':id/presence')
+  @ApiOperation({
+    summary: 'List who is currently present on this encounter',
+    description:
+      'Requires campaign membership. Returns the ephemeral Co-DM presence snapshot (issue #2209, #816 slice 1): ' +
+      'which authenticated members have declared themselves on this encounter\u2019s live surface, with a coarse ' +
+      'viewing/editing activity. Hidden encounters 404 for non-DMs, identical to GET /encounters/:id. ' +
+      'Presence is in-memory only; a server restart clears it and clients re-declare on reconnect.',
+  })
+  @ApiResponse({ status: 200, description: 'EncounterPresenceSnapshot.' })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  @ApiResponse({ status: 404, description: 'Encounter not found, or hidden from this viewer.' })
+  async getPresence(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    if (!isVisibleTo({ hidden: row.hidden }, role)) {
+      throw new NotFoundException();
+    }
+    return this.presence.snapshot(id);
+  }
+
+  @Post(':id/presence')
+  @ApiOperation({
+    summary: 'Declare / refresh presence on this encounter',
+    description:
+      'Requires campaign membership. Declares the caller present on this encounter\u2019s live surface with a coarse ' +
+      'activity (viewing | editing) and refreshes the heartbeat (issue #2209, #816 slice 1). A first declare or an ' +
+      'activity change broadcasts an encounter.presence snapshot on the campaign SSE stream; a same-activity ' +
+      'heartbeat only refreshes the lease. Hidden encounters 404 for non-DMs. The response is the resulting snapshot.',
+  })
+  @ApiResponse({ status: 201, description: 'EncounterPresenceSnapshot after the declare.' })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  @ApiResponse({ status: 404, description: 'Encounter not found, or hidden from this viewer.' })
+  async declarePresence(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterPresenceDeclareDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    if (!isVisibleTo({ hidden: row.hidden }, role)) {
+      throw new NotFoundException();
+    }
+    return this.presence.declare({
+      encounterId: id,
+      campaignId: row.campaignId,
+      userId: user.id,
+      activity: body.activity,
+    });
+  }
+
+  @Delete(':id/presence')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Leave this encounter\u2019s live surface',
+    description:
+      'Requires campaign membership. Removes the caller from this encounter\u2019s presence set and broadcasts the ' +
+      'updated snapshot on the campaign SSE stream (issue #2209, #816 slice 1). Hidden encounters 404 for ' +
+      'non-DMs, same gate as declare, so a non-DM cannot probe an encounter id via a leave request.',
+  })
+  @ApiResponse({ status: 200, description: 'EncounterPresenceSnapshot after the leave.' })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  @ApiResponse({ status: 404, description: 'Encounter not found, or hidden from this viewer.' })
+  async leavePresence(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    if (!isVisibleTo({ hidden: row.hidden }, role)) {
+      throw new NotFoundException();
+    }
+    return this.presence.leave({ encounterId: id, userId: user.id });
   }
 
   @Delete(':id')

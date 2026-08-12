@@ -114,4 +114,21 @@ describe('AI portrait generation (e2e, issue #1321)', () => {
       .send({ prompt: 'a hero', count: 1 });
     expect(res.status).toBe(403);
   });
+
+  it('supports faction and location entity targets in readiness', async () => {
+    const server = ctx.app.getHttpServer();
+    const factionRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-portraits/readiness`)
+      .set(dm)
+      .send({ prompt: 'heraldic emblem for the Iron Guild', entityType: 'faction', entityId: 1 });
+    expect(factionRes.status).toBe(201);
+    expect(factionRes.body.method).toBe('external-instructions');
+
+    const locationRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-portraits/readiness`)
+      .set(dm)
+      .send({ prompt: 'fantasy landscape of Whispering Woods', entityType: 'location', entityId: 1 });
+    expect(locationRes.status).toBe(201);
+    expect(locationRes.body.method).toBe('external-instructions');
+  });
 });

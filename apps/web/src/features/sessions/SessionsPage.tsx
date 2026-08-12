@@ -555,9 +555,22 @@ export default function SessionsPage() {
                   : ''}
               </p>
               <div role="list" aria-label="Session recaps">
+              {/* Measured, not guessed: a row is ~182px with a single-line title and ~233px
+                  when the title wraps (1440px viewport, two-line recap excerpt). The 96
+                  here was less than half the real height, so `VirtualList` — which uses
+                  this for both its range maths and its fixed top/bottom spacers, and never
+                  measures rendered rows — under-rendered the range and mis-sized the
+                  spacers, making a long history jump as it scrolled. Splitting the meta
+                  and title lines added ~19px to that, so the estimate is corrected to the
+                  common row rather than nudged.
+
+                  CORRECTED: 180 measured a BUG, not the design. The excerpt's
+                  `line-clamp-2` was inert (see the span below), so every recap rendered at
+                  full height. With the clamp working the rows are 120px for the common
+                  case, 99px for a one-line recap and 171px when the title wraps. */}
               <VirtualList
                 items={sessions}
-                estimateHeight={96}
+                estimateHeight={120}
                 maxHeight="min(70vh, 640px)"
                 className="flex flex-col"
               >
@@ -598,14 +611,28 @@ export default function SessionsPage() {
                           }}
                         />
                         <span className="flex-1 min-w-0">
-                          <span className="flex gap-2.5 items-baseline flex-wrap">
+                          {/* Number and date share a line of their OWN, above the title.
+                              They used to sit on one wrapping row with it, and the date
+                              rode `ml-auto`: a title long enough to wrap pushed the date
+                              to the next line, where `ml-auto` parked it right — so the
+                              date appeared top-right on short rows and mid-list on long
+                              ones, and the list lost its rhythm exactly where it was
+                              hardest to scan. Fixed metadata line, then the title. */}
+                          <span className="flex gap-2.5 items-baseline">
                             <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
                               Session {s.number}
                             </span>
-                            <span className="font-heading text-[16px]">{title}</span>
-                            <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
+                            <span className="text-muted text-[11.5px] ml-auto whitespace-nowrap">
+                              {formatDate(s.playedAt)}
+                            </span>
                           </span>
-                          <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
+                          <span className="font-heading text-[16px] block mt-0.5">{title}</span>
+                          {/* No `block` here: it and `line-clamp-2` both set `display`, and
+                              `block` won — so the clamp was inert and every recap rendered
+                              at full height (measured 104px, ~6 lines, against the 34px two
+                              lines are meant to occupy). `line-clamp-2` supplies the
+                              `-webkit-box` display the clamp needs. */}
+                          <span className="text-muted text-[13px] mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
                         </span>
                         {unread > 0 && (
                           <span
@@ -1584,7 +1611,13 @@ function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: 
   return (
     <Card className="space-y-3" data-testid="recap-share-panel">
       <div className="flex items-center gap-2 flex-wrap">
-        <h3 className="font-bold text-white text-sm m-0">Public recap sharing</h3>
+        {/* `card-title`, not `text-sm`. nocturne.css is imported UNLAYERED, so its
+            `h3 { font-size: 1.5625rem }` beats any layered Tailwind size utility: the
+            `text-sm` that used to be here was silently inert and this rendered at 25px,
+            shouting over the `Who played` / `Recap history` / `Discussion` labels beside
+            it, which are spans and therefore got the size they asked for. `.card-title`
+            is a class, so it wins — see the CASCADE TRAP note in nocturne.css. */}
+        <h3 className="card-title text-white m-0">Public recap sharing</h3>
         {!loading && shares.length > 0 && <span className="tag tag-accent">{shares.length} active</span>}
       </div>
       <p className="text-[11.5px] text-slate-300 m-0">

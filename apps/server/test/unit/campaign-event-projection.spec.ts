@@ -57,6 +57,7 @@ const SAMPLES = [
   { type: 'session.reset', campaignId: 1, voteExpired: false, approvalsRevoked: 2, confirmationsDiscarded: 0, at },
   { type: 'transcript.reset', campaignId: 1, at },
   { type: 'grounding', campaignId: 1, status: 'clean', supportedCount: 1, unsupportedCount: 0, provider: 'mock', model: 'm', claimIds: [1], at },
+  { type: 'encounter.presence', campaignId: 1, encounterId: 7, members: [{ userId: 'dev:dm-1', activity: 'editing' }], at },
 ] satisfies CampaignEvent[];
 
 const NON_DM_ROLES: Role[] = ['player', 'viewer'];

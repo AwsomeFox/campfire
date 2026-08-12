@@ -107,6 +107,79 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     expect(recap.body.proposals[0].payload.recap).toContain('crossed the moor');
   });
 
+  it('drafts a timeline event as a pending proposal and approving it creates the timeline event', async () => {
+    h.script({
+      text: JSON.stringify({
+        title: 'Fall of Netheril',
+        inWorldDate: 'Year -339 DR',
+        era: 'Ancient Era',
+        body: 'Floating cities crash during Karsus’s Folly.',
+      }),
+    });
+    const res = await draft({ target: 'timeline_event', prompt: 'an ancient catastrophe' });
+    expect(res.status).toBe(201);
+    expect(res.body.target).toBe('timeline_event');
+    expect(res.body.entityType).toBe('timeline_event');
+    expect(res.body.proposalIds).toHaveLength(1);
+
+    const proposal = res.body.proposals[0];
+    expect(proposal.status).toBe('pending');
+    expect(proposal.action).toBe('create');
+    expect(proposal.payload.title).toBe('Fall of Netheril');
+    expect(proposal.payload.inWorldDate).toBe('Year -339 DR');
+
+    const approve = await request(h.server).post(`/api/v1/proposals/${proposal.id}/approve`).set(dm).send({});
+    expect(approve.status).toBe(201);
+    expect(approve.body.status).toBe('approved');
+    expect(approve.body.entityId).toBeGreaterThan(0);
+
+    const event = await request(h.server).get(`/api/v1/timeline/${approve.body.entityId}`).set(dm);
+    expect(event.status).toBe(200);
+    expect(event.body.title).toBe('Fall of Netheril');
+    expect(event.body.era).toBe('Ancient Era');
+  });
+
+  it('rewrites an existing timeline event with entityId and files an update proposal', async () => {
+    // Create an event manually first
+    const created = await request(h.server).post(`/api/v1/campaigns/${campaignId}/timeline`).set(dm).send({
+      title: 'Battle of Red Valley',
+      inWorldDate: '1490 DR',
+      body: 'Minor skirmish.',
+    });
+    expect(created.status).toBe(201);
+    const eventId = created.body.id;
+
+    h.script({
+      text: JSON.stringify({
+        title: 'The Great Battle of Red Valley',
+        body: 'Decisive victory for the alliance forces.',
+      }),
+    });
+    const res = await draft({
+      target: 'timeline_event',
+      prompt: 'make the battle epic and detail the outcome',
+      entityId: eventId,
+      includeCampaignSecrets: true,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.target).toBe('timeline_event');
+    expect(res.body.entityType).toBe('timeline_event');
+
+    const proposal = res.body.proposals[0];
+    expect(proposal.status).toBe('pending');
+    expect(proposal.action).toBe('update');
+    expect(proposal.entityId).toBe(eventId);
+    expect(proposal.payload.title).toBe('The Great Battle of Red Valley');
+
+    const approve = await request(h.server).post(`/api/v1/proposals/${proposal.id}/approve`).set(dm).send({});
+    expect(approve.status).toBe(201);
+    expect(approve.body.status).toBe('approved');
+
+    const updated = await request(h.server).get(`/api/v1/timeline/${eventId}`).set(dm);
+    expect(updated.body.title).toBe('The Great Battle of Red Valley');
+    expect(updated.body.body).toContain('Decisive victory');
+  });
+
   it('approving a drafted story beat creates it under the target arc', async () => {
     const arc = await request(h.server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Main arc' });
     expect(arc.status).toBe(201);

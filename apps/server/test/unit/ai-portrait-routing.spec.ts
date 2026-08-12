@@ -11,6 +11,8 @@ import type { RequestUser } from '../../src/common/user.types';
 import type { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import type { CharactersService } from '../../src/modules/characters/characters.service';
 import type { NpcsService } from '../../src/modules/npcs/npcs.service';
+import type { FactionsService } from '../../src/modules/factions/factions.service';
+import type { LocationsService } from '../../src/modules/locations/locations.service';
 import type { AuditService } from '../../src/modules/audit/audit.service';
 import type { AiProviderConfigService } from '../../src/modules/ai-provider-config/ai-provider-config.service';
 
@@ -88,6 +90,14 @@ function makeService(config: AiProviderConfig | null) {
       return {} as never;
     },
   };
+  const factions: Pick<FactionsService, 'getRowOrThrow' | 'update'> = {
+    getRowOrThrow: async (id: number) => ({ id, campaignId: 1, hidden: 0 }) as never,
+    update: async () => ({} as never),
+  };
+  const locations: Pick<LocationsService, 'getRowOrThrow' | 'update'> = {
+    getRowOrThrow: async (id: number) => ({ id, campaignId: 1, status: 'explored' }) as never,
+    update: async () => ({} as never),
+  };
   const audit: Pick<AuditService, 'log'> = { log: async () => undefined };
   // Typed against Pick<AiProviderConfigService, ...> (AGENTS.md L96-L98) so a missing/renamed
   // dependency method fails to compile. Production now calls both resolveEffectiveConfig and
@@ -101,6 +111,8 @@ function makeService(config: AiProviderConfig | null) {
     attachments as unknown as AttachmentsService,
     characters as unknown as CharactersService,
     npcs as unknown as NpcsService,
+    factions as unknown as FactionsService,
+    locations as unknown as LocationsService,
     audit as unknown as AuditService,
   );
   return { service, created, removed, hiddenSet, characterUpdates, npcUpdates };
@@ -247,6 +259,8 @@ describe('AiPortraitService routing (#1321)', () => {
       attachments as unknown as AttachmentsService,
       characters as unknown as CharactersService,
       npcs as unknown as NpcsService,
+      {} as unknown as FactionsService,
+      {} as unknown as LocationsService,
       audit as unknown as AuditService,
     );
     // No imageModel override — config.model is used and must be rejected by the allowlist.
@@ -373,6 +387,8 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
       attachments as unknown as AttachmentsService,
       characters as unknown as CharactersService,
       npcs as unknown as NpcsService,
+      {} as unknown as FactionsService,
+      {} as unknown as LocationsService,
       audit as unknown as AuditService,
     );
     const job = await service.createJob(1, { prompt: 'a hidden villain', count: 1 } as never, USER, 'dm');
@@ -465,6 +481,8 @@ describe('AiPortraitService attach (#1321 — orphan-safe persistence + entity l
       attachments as unknown as AttachmentsService,
       characters as unknown as CharactersService,
       npcs as unknown as NpcsService,
+      {} as unknown as FactionsService,
+      {} as unknown as LocationsService,
       audit as unknown as AuditService,
     );
     const job = await service.createJob(1, { prompt: 'a hero', count: 1 } as never, USER, 'dm');

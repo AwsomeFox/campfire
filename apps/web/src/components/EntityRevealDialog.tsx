@@ -61,7 +61,7 @@ export function EntityRevealDialog({
               </ul>
             </div>
           )}
-          <p className="m-0 text-xs text-amber-300/90 border border-amber-500/30 bg-amber-500/10 rounded px-2.5 py-2">
+          <p className="m-0 text-xs text-amber-300/90 border border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 rounded px-2.5 py-2">
             {t('secrecy.revealIrreversible')}
           </p>
         </div>

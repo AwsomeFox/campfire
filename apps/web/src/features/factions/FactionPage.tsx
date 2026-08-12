@@ -25,6 +25,7 @@ import { buildFactionRevealPreview } from '../../components/entityRevealPreview'
 import { GameIcon } from '../../components/GameIcon';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
+import { AiPortraitButton } from '../ai-portrait/AiPortraitWizard';
 import {
   DmPrivacyGroup,
   FACTION_EDITOR_ID_PREFIX,
@@ -304,15 +305,23 @@ export default function FactionPage() {
         <>
           <div className="flex items-center gap-3 flex-wrap">
             {canDmWrite ? (
-              <ImageUpload
-                campaignId={cid}
-                kind="portrait"
-                shape="circle"
-                previewUrl={faction.portraitUrl ?? undefined}
-                label="Emblem"
-                onUploaded={savePortrait}
-                onError={setActionError}
-              />
+              <div className="flex items-center gap-2">
+                <ImageUpload
+                  campaignId={cid}
+                  kind="portrait"
+                  shape="circle"
+                  previewUrl={faction.portraitUrl ?? undefined}
+                  label="Emblem"
+                  onUploaded={savePortrait}
+                  onError={setActionError}
+                />
+                <AiPortraitButton
+                  campaignId={cid}
+                  target={{ type: 'faction', id: faction.id }}
+                  initialPrompt={`Heraldic emblem or banner for ${faction.name}${faction.kind ? `, ${faction.kind}` : ''}. ${faction.goals || faction.body || ''}`.trim()}
+                  onAttached={load}
+                />
+              </div>
             ) : faction.portraitUrl ? (
               <img
                 src={faction.portraitUrl}

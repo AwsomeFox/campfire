@@ -129,6 +129,25 @@ export function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (v.type === 'player-display-scene') {
     return typeof v.scene === 'string';
   }
+  // Issue #2212 (#816 slice 2): ephemeral Co-DM presence snapshot. A full roster
+  // REPLACE, not a delta — a late/reconnecting client reconciles by swapping its local
+  // set for `members` (see EncounterPresenceSnapshot). `userId` is the membership-roster
+  // identity space (no secret) and a hidden encounter's frames are routed DM-only at emit
+  // time, so this guard is a pure structural check; it carries no secrecy of its own.
+  if (v.type === 'encounter.presence') {
+    return (
+      typeof v.encounterId === 'number'
+      && Array.isArray(v.members)
+      && v.members.every(
+        (m) =>
+          m !== null
+          && typeof m === 'object'
+          && typeof (m as { userId?: unknown }).userId === 'string'
+          && ((m as { activity?: unknown }).activity === 'viewing'
+            || (m as { activity?: unknown }).activity === 'editing'),
+      )
+    );
+  }
   // AI-DM stream events (Issue #880)
   const AI_DM_TYPES = new Set([
     'turn.start', 'narration.delta', 'narration.message', 'narration.withheld',

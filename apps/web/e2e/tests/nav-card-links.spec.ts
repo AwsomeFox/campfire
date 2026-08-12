@@ -80,7 +80,7 @@ test.describe('navigation cards are native anchors', () => {
     const { campaignId, navigation } = seed();
     await page.goto(`/c/${campaignId}/locations`);
     const href = `/c/${campaignId}/locations/${navigation.locationId}`;
-    const card = page.locator(`a[href="${href}"]`).first();
+    const card = page.locator(`a.cf-card[href="${href}"]`).first();
     await assertNativeAnchor(page, card, href);
     await card.click();
     await expect(page).toHaveURL(new RegExp(`${href}$`));

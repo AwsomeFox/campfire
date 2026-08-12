@@ -25,6 +25,21 @@
     "quantity": "Quantity",
     "quantityHelp": "Whole number from {{min}} to {{max}}, step {{step}}.",
     "notesPlaceholder": "Notes",
+    "searchPlaceholder": "Search items…",
+    "searchAria": "Search inventory items by name or notes",
+    "searchNoResults": "No items match \"{{query}}\".",
+    "filterOwner": {
+      "all": "All owners",
+      "party": "Party stash",
+      "characters": "Characters"
+    },
+    "filterEquipped": {
+      "all": "All status",
+      "equipped": "Equipped",
+      "unequipped": "Unequipped"
+    },
+    "clearFilters": "Clear filters",
+    "totalWeightCarried": "Weight carried: {{weight}} lb",
     "chooseIcon": "Choose icon",
     "changeIcon": "Change icon",
     "autoIcon": "Auto",
@@ -80,6 +95,15 @@
       "notes": {
         "label": "Notes",
         "help": "Optional short description or usage notes."
+      },
+      "weight": {
+        "label": "Weight (lb)",
+        "help": "Optional. Per-unit weight in pounds — used for the section's weight total.",
+        "shortLabel": "Weight",
+        "ariaEdit": "Edit weight for {{name}}",
+        "display": "{{weight}} lb",
+        "sectionTotal": "· {{weight}} lb total",
+        "rangeError": "Weight must be between 0 and 10,000 lb."
       }
     },
     "equip": {

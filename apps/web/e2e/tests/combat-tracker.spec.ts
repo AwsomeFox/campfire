@@ -36,6 +36,9 @@ test.describe('combat tracker — DM view', () => {
   test('renders exact initiative, HP math, running state and DM controls', async ({ page }) => {
     await openEncounter(page);
 
+    // Issue #2160: the Viewer-only "read only" banner never renders for the DM.
+    await expect(page.getByTestId('viewer-read-only-banner')).toHaveCount(0);
+
     // Fight is running (seeded via /start) — status + round render.
     await expect(page.getByText('Running', { exact: false }).first()).toBeVisible();
     // The current-turn workspace (issue #413) also shows "Round N", so scope to the first.
@@ -202,6 +205,15 @@ test.describe('combat tracker — non-DM views', () => {
 
       test('monster HP is redacted to a band and no DM controls show', async ({ page }) => {
         await openEncounter(page);
+
+        // Issue #2160: the explicit read-only banner is Viewer-only — a player still has
+        // real (if narrower) write authority over their own combatant and must not see it.
+        if (role === 'viewer') {
+          await expect(page.getByTestId('viewer-read-only-banner')).toBeVisible();
+        } else {
+          await expect(page.getByTestId('viewer-read-only-banner')).toHaveCount(0);
+        }
+
         // A player lands on the Turn tab while combat runs; the roster is Party.
         await openCockpitTab(page, 'party');
 

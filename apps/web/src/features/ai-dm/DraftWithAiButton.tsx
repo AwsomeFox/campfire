@@ -28,7 +28,7 @@ import { useDraftWithAiAvailable } from './useDraftWithAiAvailable';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
 /** Targets that support drafting N items at once (mirrors CoDmService's MULTI_TARGETS). */
-const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
+const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction', 'timeline_event']);
 
 const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
   npc: 'NPC',
@@ -40,6 +40,7 @@ const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
   map: 'map',
   quest: 'quest',
   faction: 'faction',
+  timeline_event: 'timeline event',
 };
 
 const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
@@ -52,6 +53,7 @@ const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
   map: 'maps',
   quest: 'quests',
   faction: 'factions',
+  timeline_event: 'timeline events',
 };
 
 const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
@@ -64,6 +66,7 @@ const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
   map: 'Draft a map with AI',
   quest: 'Draft a quest with AI',
   faction: 'Draft a faction with AI',
+  timeline_event: 'Draft a timeline event with AI',
 };
 
 const TARGET_EXAMPLE: Record<CoDmDraftTarget, string> = {
@@ -76,6 +79,7 @@ const TARGET_EXAMPLE: Record<CoDmDraftTarget, string> = {
   map: "a small smugglers' cave with a tidal chamber",
   quest: "retrieve the stolen relic from the bandits' hideout before the full moon",
   faction: 'a merchant guild that secretly controls the city council through debts',
+  timeline_event: 'a major battle in 1492 DR where the ancient alliance was broken',
 };
 
 /**

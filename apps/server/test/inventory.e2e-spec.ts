@@ -89,6 +89,52 @@ describe('inventory & treasury (e2e)', () => {
       expect(clearRes.body.iconSlug).toBe('');
     });
 
+    it('weight round-trips: defaults to 0, creatable, patchable, audited (issue #2157)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      // Default when omitted.
+      const defaultRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Unweighed trinket' });
+      expect(defaultRes.status).toBe(201);
+      expect(defaultRes.body.weight).toBe(0);
+
+      // Set at creation — decimal pounds.
+      const createRes = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Chainmail', weight: 55.5 });
+      expect(createRes.status).toBe(201);
+      expect(createRes.body.weight).toBe(55.5);
+      const itemId = createRes.body.id;
+
+      // Survives read paths (get + list).
+      const getRes = await request(server).get(`/api/v1/inventory/${itemId}`).set(player);
+      expect(getRes.body.weight).toBe(55.5);
+      const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(viewer);
+      expect(listRes.body.find((i: { id: number }) => i.id === itemId).weight).toBe(55.5);
+
+      // Patch to a new value.
+      const patchRes = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ weight: 10 });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.weight).toBe(10);
+
+      // Rejected out of range.
+      const negativeRes = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ weight: -1 });
+      expect(negativeRes.status).toBe(400);
+      const tooHeavyRes = await request(server).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ weight: 10_001 });
+      expect(tooHeavyRes.status).toBe(400);
+
+      // Audited as a normal field change (issue #2157: `weight` joins the audit field list).
+      const auditRes = await request(server).get(`/api/v1/campaigns/${campaignId}/audit?entityType=inventory_item`).set(dm);
+      expect(auditRes.status).toBe(200);
+      const entry = (auditRes.body as { entityId: number; payload?: { changes?: { field: string }[] } }[]).find(
+        (e) => e.entityId === itemId && e.payload?.changes?.some((c) => c.field === 'weight'),
+      );
+      expect(entry).toBeDefined();
+    });
+
     it('viewer cannot create/update/delete items', async () => {
       const server = ctx.app.getHttpServer();
 

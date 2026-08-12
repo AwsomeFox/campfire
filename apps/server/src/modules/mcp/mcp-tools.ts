@@ -4981,9 +4981,9 @@ export class McpToolsService {
       server,
       user,
       'attach_generated_portrait',
-      'player: persist a chosen AI-generated candidate as a `kind="portrait"` attachment (issue #1321) and set it as the ' +
-        'target entity\'s portraitUrl. `entityType` ("character"|"npc") + `entityId` name the target. Linking reuses the ' +
-        'domain service\'s own authority: a player may attach only to a character they OWN (dm-or-owner), and NPC portrait ' +
+      'player: persist a chosen AI-generated candidate as a `kind="portrait"` attachment (issues #1321, #1325) and set it as the ' +
+        'target entity\'s portraitUrl. `entityType` ("character"|"npc"|"faction"|"location") + `entityId` name the target. Linking reuses the ' +
+        'domain service\'s own authority: a player may attach only to a character they OWN (dm-or-owner), and NPC/faction/location ' +
         'writes are DM-only — so this call 403s unless the caller owns the target character or is the DM. Prompt, ' +
         'provider/model, seed/params, dimensions, provenance, moderation, and cost are stamped into the attachment audit ' +
         'record. Returns { attachment, entity, provenance }.',
@@ -5649,7 +5649,7 @@ export class McpToolsService {
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft or rewrite: npc | location | arc | beat | quest | faction | recap | encounter | map'),
+        target: CoDmDraftTarget.describe('What to draft or rewrite: npc | location | arc | beat | quest | faction | timeline_event | recap | encounter | map'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
         count: z
           .number()
@@ -5657,12 +5657,12 @@ export class McpToolsService {
           .min(1)
           .max(10)
           .optional()
-          .describe('How many to draft (npc/location/beat/quest/faction only; ignored for recap/encounter/map)'),
+          .describe('How many to draft (npc/location/beat/quest/faction/timeline_event only; ignored for recap/encounter/map)'),
         narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)'),
         arcId: Id.optional().describe('When target is beat, pin drafted beat(s) to this story arc id'),
-        entityId: Id.optional().describe('When target is arc or beat, rewrite this existing entity and file an update proposal'),
+        entityId: Id.optional().describe('When target is arc, beat, or timeline_event, rewrite this existing entity and file an update proposal'),
         includeCampaignSecrets: z.boolean().default(false).describe(
-          'Storyline rewrites only: explicitly allow DM-only arc/beat context to be sent when the configured provider is external',
+          'Storyline/timeline rewrites only: explicitly allow DM-only arc/beat/timeline context to be sent when the configured provider is external',
         ),
       },
       async ({ campaignId, target, prompt, count, narrationLanguage, arcId, entityId, includeCampaignSecrets }) => {
@@ -5717,7 +5717,7 @@ export class McpToolsService {
       server,
       user,
       'update_inventory_item',
-      'player: update an inventory item\'s name/notes/icon, or MOVE it by changing ownerType/characterId. Character ' +
+      'player: update an inventory item\'s name/notes/icon/weight, or MOVE it by changing ownerType/characterId. Character ' +
         'items are writable only by the dm or the owning player; a move requires write access at both source and ' +
         'destination. Quantity (issue #782): prefer qtyDelta + idempotencyKey for atomic +/-; an absolute qty ' +
         'requires expectedUpdatedAt (CAS) and 409s on conflict. A qtyDelta that would take quantity negative 400s ' +

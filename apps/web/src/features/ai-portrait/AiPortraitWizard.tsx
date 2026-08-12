@@ -20,7 +20,7 @@ import { UIIcon } from '../../components/UIIcon';
 import { useDialog } from '../../components/useDialog';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
 
-export type PortraitEntityTarget = { type: 'character' | 'npc'; id: number };
+export type PortraitEntityTarget = { type: 'character' | 'npc' | 'faction' | 'location'; id: number };
 
 /**
  * Entry button; opens the wizard modal. Visible only when the caller passes a target (and the host
@@ -30,10 +30,12 @@ export type PortraitEntityTarget = { type: 'character' | 'npc'; id: number };
 export function AiPortraitButton({
   campaignId,
   target,
+  initialPrompt,
   onAttached,
 }: {
   campaignId: number;
   target: PortraitEntityTarget;
+  initialPrompt?: string;
   onAttached?: (attachmentId: number) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -50,13 +52,14 @@ export function AiPortraitButton({
         aria-expanded={open}
         aria-controls={dialogId}
       >
-        <GameIcon slug="sparkles" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />AI portrait
+        <GameIcon slug="sparkles" size={UI_ICON_SIZE.xs} className="inline align-text-bottom mr-1" />AI image
       </button>
       {open && (
         <AiPortraitModal
           id={dialogId}
           campaignId={campaignId}
           target={target}
+          initialPrompt={initialPrompt}
           onAttached={onAttached}
           onClose={() => setOpen(false)}
         />

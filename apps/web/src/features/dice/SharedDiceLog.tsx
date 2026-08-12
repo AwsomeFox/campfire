@@ -31,7 +31,15 @@ import {
   formatDiceRollAnnouncementBatch,
   type DiceRollAnnouncementCursor,
 } from './diceLogAccessibility';
-import { diceRollDisplayActor, diceRollKindLabelKey, diceRollKindTagClass, diceRollSummaryLine, showRolledDice } from './diceRollDisplay';
+import {
+  diceRollDisplayActor,
+  diceRollGroupRole,
+  diceRollKindAccentVar,
+  diceRollKindLabelKey,
+  diceRollKindTagClass,
+  diceRollSummaryLine,
+  showRolledDice,
+} from './diceRollDisplay';
 import {
   EMPTY_PHYSICAL_ROLL_FORM,
   isManualDiceRoll,
@@ -501,7 +509,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                 : t('dice.emptyFull')}
           </p>
         ) : (
-          rolls.map((r) => {
+          rolls.map((r, i) => {
             const manual = isManualDiceRoll(r);
             const flavor = manual ? null : d20Flavor(r);
             const fresh = r.id === justRolledId && !manual;
@@ -509,11 +517,37 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
             const summary = diceRollSummaryLine(r, t('dice.physicalExpr'));
             const kindTagClass = diceRollKindTagClass(r.kind);
             const kindLabelKey = diceRollKindLabelKey(r.kind);
+            // Issue #2183: literal per-kind grouping — bands a *run* of consecutive
+            // same-kind rows with a shared accent, without reordering the
+            // chronological list. See `diceRollGroupRole`'s doc comment for why.
+            const groupRole = diceRollGroupRole(rolls, i);
+            const groupAccent = groupRole === 'solo' ? null : diceRollKindAccentVar(r.kind);
             return (
             <div
               key={r.id}
               title={formatDateTime(r.createdAt)}
-              style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: compact ? 28 : 32 }}
+              data-dice-roll-kind={r.kind ?? 'unclassified'}
+              data-dice-roll-group={groupRole}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                minHeight: compact ? 28 : 32,
+                // Issue #2195 review: a background tint here sat behind the roll
+                // total, which is ALSO accent-coloured (`var(--color-accent)` etc,
+                // the same token family) — tint-behind-same-colour-text is close to
+                // worst case for contrast by construction, and axe caught it (two
+                // consecutive 'roll' totals in the dashboard command-deck spec fell
+                // below AA). The left border alone carries the grouping signal, sits
+                // to the side of every row's text rather than behind it, so it
+                // cannot affect contrast at all — no tint, nothing to retune per kind.
+                ...(groupAccent
+                  ? {
+                      borderLeft: `3px solid ${groupAccent}`,
+                      paddingLeft: 6,
+                    }
+                  : null),
+              }}
             >
               <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, display: 'flex', gap: 8, alignItems: 'baseline', overflow: 'hidden' }}>
                 <span className="text-muted" style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

@@ -4724,6 +4724,74 @@ export interface CharacterSheetTopology {
   readonly supportsSpellSlotEditor: boolean;
   /** Honest copy shown when the sheet falls back to generic notes/actions/resources. */
   readonly genericModeDescription?: string;
+  /**
+   * The adapter-declared stat strip — which tiles the sheet's vitals block shows, and in what
+   * order (issue #2159). Omitted by systems that do not declare one; {@link statStripForAdapter}
+   * falls back to {@link NEUTRAL_STAT_STRIP}.
+   *
+   * The reference VTT's strip is PB / Speed / Initiative / AC, but that SHAPE is 5e's: PF2e has
+   * no single proficiency bonus (it is level plus a per-rank term), and Starforged / Open Legend
+   * have none at all, so a hardcoded four-stat row would state a plausible wrong number on every
+   * non-5e sheet. Each adapter declares its own tiles; the values themselves are resolved by
+   * {@link resolveStatStrip} from the catalog and the character's own fields, never baked in here.
+   */
+  readonly statStrip?: readonly StatStripCell[];
+}
+
+/**
+ * The kind of value a stat-strip tile shows (issue #2159). Each kind names a single
+ * adapter-agnostic source the sheet resolves from the catalog or the character's own fields —
+ * never a system-specific number baked into the strip declaration — so a non-5e system cannot
+ * inherit 5e's proficiency bonus by accident.
+ */
+export type StatStripValueKind = 'armorClass' | 'initiative' | 'speed' | 'proficiencyBonus' | 'level';
+
+/**
+ * One adapter-declared stat-strip tile (issue #2159). A tile is just a {@link StatStripValueKind}
+ * in display order; the tile's label and value are resolved by {@link resolveStatStrip} (the
+ * defense tile's label comes from the adapter's own statblock presentation, so Open Legend's
+ * "Guard" is not overwritten by a baked-in "AC").
+ */
+export interface StatStripCell {
+  readonly kind: StatStripValueKind;
+}
+
+/**
+ * The strip every adapter WITHOUT a declared {@link CharacterSheetTopology.statStrip} shows
+ * (issue #2159) — the honest read-only block the sheet already rendered: the adapter's defense,
+ * initiative (when the system rolls one), speed, and level. Level stands in for 5e's
+ * proficiency bonus precisely because a single level-derived proficiency number IS a 5e concept
+ * (PF2e's is level plus a per-rank bonus; Starforged / Open Legend have none), so a "proficiency"
+ * tile here would state a plausible wrong number on every non-5e sheet. Only an adapter with an
+ * honest single global proficiency — 5e — declares a `proficiencyBonus` tile of its own.
+ */
+export const NEUTRAL_STAT_STRIP: readonly StatStripCell[] = [
+  { kind: 'armorClass' },
+  { kind: 'initiative' },
+  { kind: 'speed' },
+  { kind: 'level' },
+];
+
+/**
+ * D&D 5e's stat strip (issue #2159): the reference VTT's PB / Speed / Initiative / AC row. 5e is
+ * the one adapter with an honest single global proficiency bonus ({@link dnd5eProficiencyBonus}),
+ * so it is the one that declares a `proficiencyBonus` tile.
+ */
+export const DND5E_STAT_STRIP: readonly StatStripCell[] = [
+  { kind: 'proficiencyBonus' },
+  { kind: 'speed' },
+  { kind: 'initiative' },
+  { kind: 'armorClass' },
+];
+
+/**
+ * The stat strip an adapter's character sheet shows (issue #2159): the adapter's own
+ * {@link CharacterSheetTopology.statStrip} when it declares one, otherwise {@link NEUTRAL_STAT_STRIP}.
+ */
+export function statStripForAdapter(
+  adapter: Pick<RuleSystemAdapter, 'characterSheet'>,
+): readonly StatStripCell[] {
+  return adapter.characterSheet?.statStrip ?? NEUTRAL_STAT_STRIP;
 }
 
 export const STANDARD_D20_ABILITY_FIELDS: readonly CharacterSheetAbilityField[] = [
@@ -5292,6 +5360,10 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     supportsSavingThrowEditor: true,
     supportsSkillEditor: true,
     supportsSpellSlotEditor: true,
+    // Issue #2159 — 5e is the one adapter with an honest single global proficiency bonus, so it
+    // is the one that declares the reference VTT's PB / Speed / Initiative / AC strip. Every
+    // other system inherits NEUTRAL_STAT_STRIP (AC / Initiative / Speed / Level), never this row.
+    statStrip: DND5E_STAT_STRIP,
   },
   hasDeathSaves: true,
   // #1943 — 5e's group-check convention ("half or more of the party succeeds") is a documented
@@ -6351,6 +6423,98 @@ export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: Ch
   // says does not exist.
   if (hasInitiativeRollForAdapter(adapter)) return catalog;
   return catalog.filter((c) => c.category !== 'initiative');
+}
+
+/**
+ * One resolved stat-strip tile (issue #2159): the label and value the sheet renders, produced by
+ * {@link resolveStatStrip}. The defense tile carries the adapter's own label ("AC", "Guard", …);
+ * an initiative tile carries the catalog check to roll when one exists.
+ */
+export interface ResolvedStatStripCell {
+  readonly kind: StatStripValueKind;
+  readonly label: string;
+  /** Display value already formatted for the tile ("—", "+3", "30", "16"). */
+  readonly value: string;
+  /** Optional hover title (the defense tile's full label). */
+  readonly title?: string;
+  /** Present only on initiative tiles: the catalog check to roll, when one exists. */
+  readonly rollCheck?: RollCheckDefinition;
+}
+
+/**
+ * Resolve an adapter's declared stat strip into renderable tiles (issue #2159). The SHAPE comes
+ * from {@link statStripForAdapter} (adapter-declared); the VALUES come from the catalog and the
+ * character's own fields — never a hardcoded number:
+ *
+ * - `armorClass` — `Character.ac`, OR Starfinder's `eac`/`kac` pair when set (two tiles), with
+ *   the label taken from the adapter's statblock presentation so "Guard" / "Defense" survive.
+ * - `initiative` — the modifier of the catalog's initiative check (`buildCheckCatalog`), passed
+ *   in already computed so this stays pure; `null` when the character has no initiative source.
+ * - `speed` — `Character.speed`.
+ * - `proficiencyBonus` — the adapter's `checkProficiencyBonus(level)`. Only an adapter with an
+ *   honest single global proficiency (5e) declares this tile AND implements that hook, so this
+ *   reads 5e's real curve and never an invented number.
+ * - `level` — `Character.level`.
+ *
+ * The caller decides whether an initiative tile is SHOWN (a group-initiative system hides it)
+ * and whether it ROLLS (`canRoll`) — this resolver only sources the values.
+ */
+export function resolveStatStrip(
+  adapter: Pick<RuleSystemAdapter, 'characterSheet' | 'presentation' | 'checkProficiencyBonus'>,
+  character: {
+    readonly ac: number | null;
+    readonly eac: number | null;
+    readonly kac: number | null;
+    readonly speed: number | null;
+    readonly level: number;
+  },
+  initiativeCheck: RollCheckDefinition | null,
+): ResolvedStatStripCell[] {
+  const defenseLabel = adapter.presentation?.defense.short ?? adapter.presentation?.defense.full ?? 'AC';
+  const defenseTitle = adapter.presentation?.defense.full ?? 'Defense';
+  const out: ResolvedStatStripCell[] = [];
+  for (const cell of statStripForAdapter(adapter)) {
+    switch (cell.kind) {
+      case 'armorClass':
+        // Starfinder's EAC/KAC pair replaces the single defense tile when either is set — the
+        // same per-character split the legacy vitals block made, now two resolved tiles.
+        if (character.eac != null || character.kac != null) {
+          out.push({ kind: 'armorClass', label: 'EAC', value: character.eac == null ? '—' : String(character.eac) });
+          out.push({ kind: 'armorClass', label: 'KAC', value: character.kac == null ? '—' : String(character.kac) });
+        } else {
+          out.push({
+            kind: 'armorClass',
+            label: defenseLabel,
+            value: character.ac == null ? '—' : String(character.ac),
+            title: defenseTitle,
+          });
+        }
+        break;
+      case 'initiative':
+        out.push({
+          kind: 'initiative',
+          label: 'Initiative',
+          value: initiativeCheck == null ? '—' : signedModifier(initiativeCheck.modifier),
+          ...(initiativeCheck ? { rollCheck: initiativeCheck } : {}),
+        });
+        break;
+      case 'speed':
+        out.push({ kind: 'speed', label: 'Speed', value: character.speed == null ? '—' : String(character.speed) });
+        break;
+      case 'proficiencyBonus': {
+        // Only an adapter with an honest single global proficiency (5e) declares this cell, and
+        // only such an adapter implements `checkProficiencyBonus` — so this reads 5e's real PB
+        // curve, never an invented number. A system without one never declares the cell.
+        const pb = adapter.checkProficiencyBonus ? adapter.checkProficiencyBonus(character.level) : null;
+        out.push({ kind: 'proficiencyBonus', label: 'PB', value: pb == null ? '—' : signedModifier(pb) });
+        break;
+      }
+      case 'level':
+        out.push({ kind: 'level', label: 'Level', value: String(character.level) });
+        break;
+    }
+  }
+  return out;
 }
 
 /**
@@ -9828,7 +9992,7 @@ export function aiDmReadinessProgress(
 // (#304/#306); the proposal payload carries their (seeded) params and approval
 // runs the generator. Every draft is metered against the seat budget and the
 // proposer is attributed to the AI seat + model, not a raw token name.
-export const CoDmDraftTarget = z.enum(['npc', 'location', 'arc', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'arc', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction', 'timeline_event']);
 export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
 
 // POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.
@@ -10656,6 +10820,9 @@ export const MapPing = z.object({
 });
 export type MapPing = z.infer<typeof MapPing>;
 
+/** Default rendered diameter (percent of map width) for a newly placed map object (issue #2175). */
+export const DEFAULT_MAP_OBJECT_SIZE = 5;
+
 /**
  * A persistent icon or set piece placed on a battle map (issue #1308) — a chest, trap,
  * door, hazard, or quest marker that is not tied to a combatant. Same percent-of-map
@@ -10669,11 +10836,12 @@ export type MapPing = z.infer<typeof MapPing>;
  * DM-only object must not reach a non-DM response at all, coordinates included; see that
  * function's own doc for why this is a wholesale drop, not a coordinate null-out.
  *
- * Deliberately no `sizePct`/resize field this pass: the issue's acceptance criteria list
- * place/move/label/delete, not resize, and a fixed render size keeps this slice's surface
- * area matched to what's actually required. Also deliberately no fog interaction — unlike
- * `AoeTemplate`, an object's visibility is the static `dmOnly` flag alone, not cross-checked
- * against revealed fog regions; folding fog in is a natural follow-up once this lands.
+ * `size` is the rendered icon diameter as a percent of the map's rendered WIDTH (issue #2175) —
+ * the same isotropic unit the grid/calibration math uses (`mapRenderedBounds`), so a DM resize
+ * drag and every viewport stay in lockstep. Bounded [1, 100]; default 5 reads as roughly one
+ * cell on a typical 5%-cell grid. Deliberately no fog interaction — unlike `AoeTemplate`, an
+ * object's visibility is the static `dmOnly` flag alone, not cross-checked against revealed
+ * fog regions; folding fog in is a natural follow-up once this lands.
  */
 export const MapObject = z.object({
   id: z.string().min(1).max(40),
@@ -10681,6 +10849,7 @@ export const MapObject = z.object({
   iconSlug: z.string().min(1).max(80),
   x: z.number().min(0).max(100),
   y: z.number().min(0).max(100),
+  size: z.number().min(1).max(100).default(DEFAULT_MAP_OBJECT_SIZE),
   dmOnly: z.boolean().default(false),
 });
 export type MapObject = z.infer<typeof MapObject>;
@@ -10695,6 +10864,7 @@ export const MapObjectUpdate = z.object({
   iconSlug: z.string().min(1).max(80).optional(),
   x: z.number().min(0).max(100).optional(),
   y: z.number().min(0).max(100).optional(),
+  size: z.number().min(1).max(100).optional(),
   dmOnly: z.boolean().optional(),
 }).strict();
 export type MapObjectUpdate = z.infer<typeof MapObjectUpdate>;
@@ -11299,8 +11469,8 @@ export const AiPortraitDimensions = z.object({
 });
 export type AiPortraitDimensions = z.infer<typeof AiPortraitDimensions>;
 
-/** The kind of entity a portrait will be attached to (issue #1321). */
-export const AiPortraitEntityType = z.enum(['character', 'npc']);
+/** The kind of entity a portrait/image will be attached to (issues #1321, #1325). */
+export const AiPortraitEntityType = z.enum(['character', 'npc', 'faction', 'location']);
 export type AiPortraitEntityType = z.infer<typeof AiPortraitEntityType>;
 
 /**
@@ -12809,6 +12979,20 @@ export const InventoryItem = z.object({
    * be forged into "the server generated this" or vice versa.
    */
   equippedActionSource: EquippedActionSource.nullable().default(null),
+  /**
+   * Issue #2157: item weight in pounds (lb) — the unit 5e and most other supported rule
+   * systems' source material already prints gear weight in. PF2e is the notable exception:
+   * its own native encumbrance unit is "Bulk", an abstract count rather than a physical
+   * weight, so a pounds value here is not what a PF2e table's own rules would compute from.
+   * Several other registered adapters (Ironsworn/Starforged, Open Legend, 13th Age) have no
+   * encumbrance concept at all. Shipping a plain pounds field anyway lets every table that
+   * DOES track physical weight use it today and costs nothing to a table whose system
+   * doesn't; a Bulk-aware or per-system unit conversion is a larger, adapter-level feature
+   * left for a follow-up rather than guessed at here. Manually entered only — see
+   * `InventoryService.acquireFromCompendium` for why compendium acquisition does not
+   * populate it in this slice.
+   */
+  weight: z.number().min(0).max(10_000).default(0),
   ...timestamps,
   // Soft-delete tombstone (issue #551). NULL on live items; ISO timestamp + actor
   // id when the item is in the campaign trash. Not user-writable via create/update.
@@ -13085,6 +13269,62 @@ export const RollResult = z.object({
 });
 export type RollResult = z.infer<typeof RollResult>;
 
+// ---------- ephemeral encounter presence (issue #2209, #816 slice 1) ----------
+// Co-DM presence: which authenticated humans are currently on a running encounter's live
+// surface. This is the DATA FOUNDATION only — it rides the existing campaign-event SSE
+// stream as a `encounter.presence` frame; UI rendering is a subsequent slice.
+//
+// Presence is intentionally COARSE and EPHEMERAL:
+//  - it lives only in the server's in-memory registry (never persisted, never audited —
+//    it is transport-level state, like an SSE keepalive, not a domain write);
+//  - `activity` is a two-state hint (`viewing` | `editing`), not an advisory intent;
+//  - a frame carries a SNAPSHOT of who is present, not a delta, so a reconnecting or
+//    late-joining client reconciles by replacing its local set rather than replaying a
+//    missed event log (there is no persisted history to refetch).
+//
+// SECRECY: `userId` is String(users.id) — the same identity space as RequestUser.id and
+// the campaign member roster, so disclosing it on the wire reveals nothing a member could
+// not already read from the membership list. The encounter id itself is the sensitive
+// field: a HIDDEN encounter's presence is routed only to DMs (server-side audience
+// predicate at emit time, never a field on the frame), so a non-DM neither receives the
+// frame nor learns the hidden encounter exists.
+
+/** Coarse activity state for ephemeral encounter presence (issue #2209). */
+export const EncounterPresenceActivity = z.enum(['viewing', 'editing']);
+export type EncounterPresenceActivity = z.infer<typeof EncounterPresenceActivity>;
+
+/**
+ * One member currently present on an encounter's live surface (issue #2209).
+ * `userId` is String(users.id) — same identity space as RequestUser.id. The display name
+ * is resolved client-side from the membership roster (which every member already reads),
+ * so the wire stays id-only like the other thin campaign signals.
+ */
+export const EncounterPresenceEntry = z.object({
+  userId: z.string().max(120),
+  activity: EncounterPresenceActivity,
+});
+export type EncounterPresenceEntry = z.infer<typeof EncounterPresenceEntry>;
+
+/**
+ * Snapshot of who is present on an encounter (issue #2209). Returned by
+ * GET/POST/DELETE /encounters/:id/presence and carried as the `members` field of an
+ * `encounter.presence` campaign event. Sorted by `userId` server-side for stable output.
+ */
+export const EncounterPresenceSnapshot = z.object({
+  campaignId: Id,
+  encounterId: Id,
+  members: z.array(EncounterPresenceEntry),
+});
+export type EncounterPresenceSnapshot = z.infer<typeof EncounterPresenceSnapshot>;
+
+/** POST body for declaring/refreshing encounter presence (issue #2209). */
+export const EncounterPresenceDeclare = z
+  .object({
+    activity: EncounterPresenceActivity,
+  })
+  .strict();
+export type EncounterPresenceDeclare = z.infer<typeof EncounterPresenceDeclare>;
+
 // ---------- real-time campaign events (SSE) ----------
 // Thin invalidation signals pushed over GET /campaigns/:id/events — they carry ids, not
 // entity payloads, so clients refetch through the normal (permission-checked) REST reads.
@@ -13155,6 +13395,12 @@ export const CampaignEventType = z.enum([
   'transcript.reset',
   'grounding',
   'player-display-scene',
+  // Issue #2209 (#816 slice 1): ephemeral Co-DM presence. Carries a SNAPSHOT of who is
+  // currently on an encounter's live surface (userId + coarse activity), not a refetch
+  // hint — presence is in-memory only, so there is no persisted row to refetch. A hidden
+  // encounter's presence is routed DM-only by an audience predicate at emit time, so the
+  // frame never reaches a non-DM and never carries the encounter's secrecy on its fields.
+  'encounter.presence',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -13442,6 +13688,19 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     provider: z.string(),
     model: z.string(),
     claimIds: z.array(Id),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #2209 (#816 slice 1): ephemeral Co-DM presence snapshot. `members` is the full
+    // current presence set for this encounter at emit time (join/leave/heartbeat-expire),
+    // so clients reconcile by replacing their local set rather than replaying deltas. See
+    // EncounterPresenceEntry: `userId` is the membership-roster identity space (no secret),
+    // and a hidden encounter's frames are routed DM-only by an audience predicate at emit
+    // time — this frame's fields carry no secrecy that depends on the reader's role.
+    type: z.literal('encounter.presence'),
+    campaignId: Id,
+    encounterId: Id,
+    members: z.array(EncounterPresenceEntry),
     at: IsoDate,
   }),
 ]);

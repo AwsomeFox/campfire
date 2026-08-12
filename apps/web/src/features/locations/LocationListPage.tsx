@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
-import type { Location } from '@campfire/schema';
+import type { Campaign, Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
@@ -17,6 +17,7 @@ import { PageHeader, type PageHeaderSecondaryAction } from '../../components/Pag
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
 import { UI_ICON_SIZE } from '../../lib/uiIcons';
+import { RegionMap } from '../dashboard/RegionMap';
 
 function firstLine(body: string): string {
   const line = body.split('\n').find((l) => l.trim().length > 0);
@@ -64,6 +65,7 @@ export default function LocationListPage() {
   useRestoreListOriginScroll();
 
   const [locations, setLocations] = useState<Location[]>([]);
+  const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,7 +104,12 @@ export default function LocationListPage() {
     setLoading(true);
     setError(null);
     try {
-      setLocations(await api.get<Location[]>(`${API}/campaigns/${id}/locations`));
+      const [locs, camp] = await Promise.all([
+        api.get<Location[]>(`${API}/campaigns/${id}/locations`),
+        api.get<Campaign>(`${API}/campaigns/${id}`),
+      ]);
+      setLocations(locs);
+      setCampaign(camp);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load locations.");
     } finally {
@@ -175,62 +182,74 @@ export default function LocationListPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <Card className="space-y-4">
-        <PageHeader
-          variant="card"
-          icon={<GameIcon slug="world" size={UI_ICON_SIZE.md} />}
-          title={t('nav.world')}
-          subtitle={t('locations.locationsSub')}
-          secondaryActions={secondaryActions}
-          primaryAction={
-            canDmWrite && !creating ? (
-              <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
-                + New location
-              </Btn>
-            ) : undefined
-          }
-        />
-        {draftDialog}
+      {/* No outer Card. This page used to nest its whole grid inside one, with the header
+          in `variant="card"` to match — cards inside a card, a shell none of the other list
+          pages (Quests, Sessions, Encounters, Inventory, Party, Library) use. The `card`
+          PageHeader variant is retained for headers that genuinely do sit inside a card. */}
+      <PageHeader
+        icon={<GameIcon slug="world" size={UI_ICON_SIZE.md} />}
+        title={t('nav.world')}
+        subtitle={t('locations.locationsSub')}
+        secondaryActions={secondaryActions}
+        primaryAction={
+          canDmWrite && !creating ? (
+            <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+              + New location
+            </Btn>
+          ) : undefined
+        }
+      />
+      {draftDialog}
 
-        {canDmWrite && creating && (
-          <div className="cf-inset p-3.5 space-y-2">
-            {createError && <ErrorNote message={createError} />}
-            <TextInput aria-label="Location name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
-            <TextInput aria-label="Location kind" placeholder="Kind (e.g. town, dungeon, region)" value={newKind} onChange={(e) => setNewKind(e.target.value)} />
-            <select
-              aria-label="Parent location"
-              className="cf-input text-sm"
-              value={newParentId}
-              onChange={(e) => setNewParentId(e.target.value)}
+      {canDmWrite && creating && (
+        <div className="cf-inset p-3.5 space-y-2">
+          {createError && <ErrorNote message={createError} />}
+          <TextInput aria-label="Location name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
+          <TextInput aria-label="Location kind" placeholder="Kind (e.g. town, dungeon, region)" value={newKind} onChange={(e) => setNewKind(e.target.value)} />
+          <select
+            aria-label="Parent location"
+            className="cf-input text-sm"
+            value={newParentId}
+            onChange={(e) => setNewParentId(e.target.value)}
+          >
+            <option value="">No parent (top level)</option>
+            {locations.map((loc) => (
+              <option key={loc.id} value={loc.id}>
+                Inside: {loc.name}
+              </option>
+            ))}
+          </select>
+          <div className="flex items-center justify-end gap-2">
+            <Btn density="xs"
+              ghost
+              className="text-xs"
+              onClick={() => {
+                closeCreating();
+                setNewName('');
+                setNewKind('');
+                setNewParentId('');
+                setCreateError(null);
+              }}
             >
-              <option value="">No parent (top level)</option>
-              {locations.map((loc) => (
-                <option key={loc.id} value={loc.id}>
-                  Inside: {loc.name}
-                </option>
-              ))}
-            </select>
-            <div className="flex items-center justify-end gap-2">
-              <Btn density="xs"
-                ghost
-                className="text-xs"
-                onClick={() => {
-                  closeCreating();
-                  setNewName('');
-                  setNewKind('');
-                  setNewParentId('');
-                  setCreateError(null);
-                }}
-              >
-                Cancel
-              </Btn>
-              <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createLocation}>
-                {saving ? 'Creating…' : 'Create'}
-              </Btn>
-            </div>
+              Cancel
+            </Btn>
+            <Btn density="xs" className="text-xs" disabled={saving || !newName.trim()} onClick={createLocation}>
+              {saving ? 'Creating…' : 'Create'}
+            </Btn>
           </div>
-        )}
+        </div>
+      )}
 
+      {campaign && (
+        <RegionMap
+          campaignId={id}
+          campaign={campaign}
+          locations={locations}
+          onChange={load}
+        />
+      )}
+
+      <Card className="space-y-4">
         {locations.length === 0 ? (
           <EmptyState icon="treasure-map" title="No locations yet" hint={isDm ? 'Add the first one above.' : 'The DM has not added any locations yet.'} />
         ) : (

@@ -34,6 +34,15 @@ export const CAMPAIGN_BROADCAST_SAFE_FRAMES: Record<BroadcastSafeFrameType, stri
   'safety.hold': 'Active state only, contains no actor or user identity.',
   'dice.rolled': "Thin id-only signal, routed by RollsService to the row's audience before this projection; refetches the permission-checked feed.",
   'campaign.updated': 'Thin invalidation signal, refetches the permission-checked campaign projection.',
+  // Issue #2209: presence snapshot. Role-dependent secrecy is enforced UPSTREAM of this
+  // projection, at emit time: EncounterPresenceService emits via emitForAudience with a
+  // predicate that routes a HIDDEN encounter's frames to DMs only, so a non-DM never
+  // receives the frame (and never learns the hidden encounter exists). The fields that
+  // reach a permitted reader — encounterId + userId + coarse activity — carry no value
+  // whose visibility depends on role: userId is the membership-roster identity space (a
+  // member's id is already visible to every other member), and activity is a two-state
+  // hint with no entity payload. This projection therefore forwards it verbatim.
+  'encounter.presence': 'Presence snapshot routed by an audience predicate at emit time (DM-only for hidden encounters); fields are membership-roster userIds + coarse activity, no role-dependent payload.',
 
   // AI-DM stream types
   'turn.start': 'Carries only the campaign id and a timestamp; the table needs to know a turn began.',
