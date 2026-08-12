@@ -148,8 +148,47 @@ test.describe('z-index audit — cockpit stacking context survives the overflow 
       // the toast's local z-index:40 would tie .cf-tabbar's 40 and lose the DOM-order
       // tiebreak (the tab bar renders later than <main>), so this is a real discriminating
       // test, not a tautology.
+      //
+      // UNLIKE the ordinary-mode case, this needs an explicit scroll first: with the
+      // hatch up, .cf-vtt is position:relative — an ordinary in-flow, scrollable block,
+      // not position:fixed;inset:0 covering the whole viewport regardless of scroll. At
+      // the initial scroll position the chrome that tripped the hatch (by construction,
+      // tall enough to fill the entire budget) fills the visible viewport on its own, so
+      // .cf-vtt starts below the fold and does NOT yet overlap the tab bar's fixed
+      // screen band — CI caught exactly this: the first version of this test assumed
+      // .cf-vtt already covered that point, the same false-premise shape the ordinary
+      // toast spec's first version had. .cf-vtt is the last major block in <main>'s flow,
+      // so scrolling to the very bottom of the document guarantees its box reaches the
+      // viewport's bottom band, where the tab bar sits — verified explicitly below rather
+      // than assumed, because that is the lesson this bug is teaching a second time.
       const tabbar = page.locator('.cf-tabbar');
       await expect(tabbar).toBeVisible();
+
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+
+      const overlap = await page.evaluate(() => {
+        const vtt = document.querySelector('.cf-vtt');
+        const tabbarEl = document.querySelector('.cf-tabbar');
+        if (!(vtt instanceof HTMLElement) || !(tabbarEl instanceof HTMLElement)) {
+          return { ok: false as const, reason: 'missing .cf-vtt or .cf-tabbar' };
+        }
+        const v = vtt.getBoundingClientRect();
+        const t = tabbarEl.getBoundingClientRect();
+        return {
+          ok: true as const,
+          // .cf-vtt's box must actually span the tab bar's fixed screen band — the
+          // precondition that makes the elementFromPoint comparison below meaningful.
+          overlaps: v.top <= t.top && v.bottom >= t.bottom,
+          vttRect: { top: v.top, bottom: v.bottom },
+          tabbarRect: { top: t.top, bottom: t.bottom },
+        };
+      });
+      expect(overlap.ok, overlap.ok ? undefined : overlap.reason).toBe(true);
+      if (!overlap.ok) return;
+      expect(
+        overlap.overlaps,
+        `after scrolling to the document bottom, .cf-vtt (${JSON.stringify(overlap.vttRect)}) must span the tab bar's screen band (${JSON.stringify(overlap.tabbarRect)}) or this comparison proves nothing`,
+      ).toBe(true);
 
       const result = await page.evaluate(() => {
         const describe = (el: Element | null) => ({
