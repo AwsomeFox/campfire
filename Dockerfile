@@ -11,7 +11,11 @@
 # prebuilt binary matches the image's libc/arch. Those tools are only ever installed in
 # the `deps`/`prod-deps` build stages — the final `runtime` stage stays slim.
 
-ARG NODE_IMAGE=node:24-slim
+# Pinned to a patch release rather than the floating `node:24-slim` so a release
+# build can never reuse an older base. 24.22.1 is the first 24.x with the fix for
+# CVE-2026-111497 ("Node2Shell", RCE via Node's bundled Brotli decoder); bump this
+# pin when a later Node security release lands.
+ARG NODE_IMAGE=node:24.22.1-slim
 ARG APP_VERSION=0.0.0-dev
 ARG APP_COMMIT=
 
